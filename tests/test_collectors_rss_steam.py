@@ -10,10 +10,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from newsbot.collectors.base import RawItem, run_collectors
+from newsbot.collectors.base import RawItem, build_collectors, run_collectors
 from newsbot.collectors.rss import RssCollector
 from newsbot.collectors.steam import SteamCollector
-from newsbot.config import RssSource, SteamSource
+from newsbot.config import (
+    AppConfig,
+    BlueskySource,
+    DigestCfg,
+    RssSource,
+    Secrets,
+    SteamSource,
+    Topic,
+    WebSearchSource,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "feeds"
 
@@ -229,6 +238,132 @@ async def test_rss_collector_bozo_feed_with_no_entries_raises():
             await RssCollector(source, sleep=_noop_sleep).collect(http)
 
 
+async def test_rss_collector_empty_feed_returns_no_items_without_raising():
+    body = (FIXTURES / "rss20_empty.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Empty Feed", url="https://example.com/empty.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/empty.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert items == []
+
+
+async def test_rss_collector_malformed_but_recoverable_xml_still_yields_entries():
+    # feedparser sets bozo=1 for a raw unescaped "&" but still parses the entry --
+    # this must not be treated the same as a feed that gave us nothing at all.
+    body = (FIXTURES / "rss20_malformed_recoverable.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Sloppy Feed", url="https://example.com/sloppy.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/sloppy.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert len(items) == 1
+    assert items[0].title == "Bugs & Fixes in the new patch"
+
+
+async def test_rss_collector_decodes_entities_and_truncates_long_html_description():
+    body = (FIXTURES / "rss20_messy_content.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Messy Feed", url="https://example.com/messy.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/messy.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+    assert len(items) == 1
+    item = items[0]
+    # Entities in the title are decoded by feedparser itself.
+    assert item.title == "Patch notes & the <b>big</b> balance pass"
+    # The excerpt is run through clean_text: BBCode brackets and HTML tags gone,
+    # entities decoded, and truncated with an ellipsis well under the raw length.
+    assert "[b]" not in item.excerpt
+    assert "<p>" not in item.excerpt
+    assert '"infinite ammo"' in item.excerpt
+    assert item.excerpt.endswith("…")
+    assert len(item.excerpt) <= 500
+
+
+async def test_rss_collector_unparseable_pubdate_gives_none_not_a_crash():
+    body = (FIXTURES / "rss20_messy_content.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Messy Feed", url="https://example.com/messy.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/messy.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert items[0].published_at is None
+
+
+# --- run_collectors: 429 exhaustion counts as a failure, not a skip ---
+
+
+async def test_rss_collector_429_exhaustion_becomes_error_via_run_collectors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="Too Many Requests")
+
+    source = RssSource(
+        type="rss",
+        name="r/Palworld",
+        url="https://www.reddit.com/r/Palworld/top/.rss?t=day",
+        topics=["palworld"],
+        trust="community",
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        results = await run_collectors(
+            [RssCollector(source, sleep=_noop_sleep)], http, sleep=_noop_sleep
+        )
+
+    assert results[0].error is not None
+    assert results[0].skipped is None
+    assert results[0].items == []
+
+
+async def test_run_collectors_exception_in_one_reddit_collector_does_not_sink_its_group_mate():
+    calls = []
+
+    class BoomCollector:
+        name = "boom"
+        source_type = "rss"
+        rate_limit_key = "reddit"
+
+        async def collect(self, http):
+            calls.append(self.name)
+            raise RuntimeError("feed parser choked")
+
+    class OkCollector:
+        name = "ok"
+        source_type = "rss"
+        rate_limit_key = "reddit"
+
+        async def collect(self, http):
+            calls.append(self.name)
+            return [
+                RawItem(
+                    url="https://example.com/a",
+                    title="a",
+                    excerpt="a",
+                    source_name="ok",
+                    trust="community",
+                    published_at=None,
+                )
+            ]
+
+    transport = httpx.MockTransport(lambda r: httpx.Response(200))
+    async with httpx.AsyncClient(transport=transport) as http:
+        results = await run_collectors(
+            [BoomCollector(), OkCollector()], http, rate_limit_gap_s=0.0, sleep=_noop_sleep
+        )
+
+    by_name = {r.source_name: r for r in results}
+    assert calls == ["boom", "ok"]  # ran serially, in order, within the shared group
+    assert "feed parser choked" in by_name["boom"].error
+    assert by_name["ok"].error is None
+    assert by_name["ok"].items
+
+
 # --- Steam ---
 
 
@@ -373,3 +508,85 @@ async def test_run_collectors_quota_exceeded_becomes_skipped_not_error():
 
     assert results[0].skipped == "quota"
     assert results[0].error is None
+
+
+# --- build_collectors: wiring every source type from a full config ---
+
+
+def _full_config() -> AppConfig:
+    return AppConfig(
+        guild_id=1,
+        digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
+        topics=[Topic(key="palworld", name="Palworld")],
+        sources=[
+            RssSource(
+                type="rss", name="PC Gamer", url="https://www.pcgamer.com/rss/", trust="press"
+            ),
+            SteamSource(type="steam_news", name="Palworld Steam", app_id=1623730, trust="official"),
+            BlueskySource(
+                type="bluesky_search", query="Palworld", topics=["palworld"], trust="community"
+            ),
+            WebSearchSource(type="web_search", trust="press"),
+        ],
+    )
+
+
+def test_build_collectors_wires_every_source_type_from_a_full_config():
+    cfg = _full_config()
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="anthropic-key",
+        brave_api_key="brave-key",
+        bluesky_handle="bot.bsky.social",
+        bluesky_app_password="app-password",  # noqa: S106 -- test fixture, not a real secret
+    )
+
+    collectors = build_collectors(cfg, secrets)
+
+    source_types = [c.source_type for c in collectors]
+    assert source_types == ["rss", "steam_news", "bluesky_search", "web_search"]
+    assert isinstance(collectors[0], RssCollector)
+    assert isinstance(collectors[1], SteamCollector)
+    from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
+    from newsbot.collectors.web_search import WebSearchCollector
+
+    assert isinstance(collectors[2], BlueskyCollector)
+    assert isinstance(collectors[2]._session, BlueskySession)  # auth is wired through
+    assert isinstance(collectors[3], WebSearchCollector)
+
+
+def test_build_collectors_skips_web_search_without_brave_key():
+    cfg = _full_config()
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="anthropic-key",
+        brave_api_key=None,
+        bluesky_handle=None,
+        bluesky_app_password=None,
+    )
+
+    collectors = build_collectors(cfg, secrets)
+
+    assert "web_search" not in [c.source_type for c in collectors]
+    assert len(collectors) == 3
+
+
+def test_build_collectors_bluesky_has_no_session_without_bluesky_secrets():
+    cfg = AppConfig(
+        guild_id=1,
+        digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
+        topics=[Topic(key="palworld", name="Palworld")],
+        sources=[BlueskySource(type="bluesky_search", query="Palworld", trust="community")],
+    )
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="anthropic-key",
+        brave_api_key=None,
+        bluesky_handle=None,
+        bluesky_app_password=None,
+    )
+
+    collectors = build_collectors(cfg, secrets)
+
+    assert len(collectors) == 1
+    assert collectors[0]._session is None

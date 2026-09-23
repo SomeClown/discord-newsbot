@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Messy Content Feed</title>
+    <link>https://example.com/</link>
+    <description>A feed exercising HTML entities, BBCode leftovers, a bad date, and a very long description.</description>
+    <item>
+      <title>Patch notes &amp; the &lt;b&gt;big&lt;/b&gt; balance pass</title>
+      <link>https://example.com/patch-notes</link>
+      <guid>https://example.com/patch-notes</guid>
+      <description>&lt;p&gt;[b]Huge[/b] changes this week: nerfed the &amp;quot;infinite ammo&amp;quot; exploit. Ye7z2Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo. Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt.&lt;/p&gt;</description>
+      <pubDate>garbage not a date</pubDate>
+    </item>
+  </channel>
+</rss>

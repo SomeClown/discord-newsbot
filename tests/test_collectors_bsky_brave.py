@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from newsbot.collectors.base import QuotaExceeded, run_collectors
-from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
+from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession, _parse_created_at
 from newsbot.collectors.web_search import WebSearchCollector
 from newsbot.config import BlueskySource, Topic, WebSearchSource
 
@@ -74,6 +74,83 @@ async def test_bluesky_collector_403_becomes_skipped_via_run_collectors():
     assert results[0].skipped == "auth"
     assert results[0].error is None
     assert results[0].items == []
+
+
+async def test_bluesky_collector_malformed_json_becomes_error_not_a_crash():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"{not valid json")
+
+    source = BlueskySource(
+        type="bluesky_search", query="Palworld", topics=["palworld"], trust="community"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        results = await run_collectors(
+            [BlueskyCollector(source, session=None)], http, sleep=_noop_sleep
+        )
+
+    assert results[0].skipped is None
+    assert results[0].error is not None
+    assert results[0].items == []
+
+
+async def test_bluesky_collector_skips_posts_missing_handle_rkey_or_body():
+    body = json.dumps(
+        {
+            "posts": [
+                # Fine.
+                {
+                    "uri": "at://did:plc:x/app.bsky.feed.post/rkey1",
+                    "author": {"handle": "ok.bsky.social"},
+                    "record": {"text": "A real post", "createdAt": "2026-09-22T18:30:00.000Z"},
+                },
+                # No handle.
+                {
+                    "uri": "at://did:plc:x/app.bsky.feed.post/rkey2",
+                    "author": {},
+                    "record": {"text": "orphaned post"},
+                },
+                # No body text.
+                {
+                    "uri": "at://did:plc:x/app.bsky.feed.post/rkey3",
+                    "author": {"handle": "empty.bsky.social"},
+                    "record": {"text": ""},
+                },
+                # No uri at all, so no rkey.
+                {
+                    "uri": "",
+                    "author": {"handle": "norkey.bsky.social"},
+                    "record": {"text": "no post key"},
+                },
+            ]
+        }
+    ).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    source = BlueskySource(
+        type="bluesky_search", query="Palworld", topics=["palworld"], trust="community"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await BlueskyCollector(source, session=None).collect(http)
+
+    assert len(items) == 1
+    assert items[0].url == "https://bsky.app/profile/ok.bsky.social/post/rkey1"
+
+
+def test_parse_created_at_treats_naive_timestamp_as_utc():
+    assert _parse_created_at("2026-09-22T18:30:00").tzinfo is not None
+
+
+def test_parse_created_at_unparseable_string_returns_none():
+    assert _parse_created_at("not a real timestamp") is None
+
+
+def test_parse_created_at_missing_value_returns_none():
+    assert _parse_created_at(None) is None
+    assert _parse_created_at("") is None
 
 
 async def test_bluesky_collector_401_is_also_skipped():
@@ -220,3 +297,59 @@ async def test_web_search_collector_429_becomes_skipped_via_run_collectors():
 
     assert results[0].skipped == "quota"
     assert results[0].error is None
+
+
+async def test_web_search_collector_402_also_raises_quota_exceeded():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(402)
+
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(QuotaExceeded):
+            await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(http)
+
+
+async def test_web_search_collector_queries_per_topic_larger_than_templates_uses_all_templates():
+    # Only two templates exist by default; asking for 5 per topic can't invent three more.
+    body = json.dumps({"results": []}).encode()
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["q"])
+        return httpx.Response(200, content=body)
+
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    source = WebSearchSource(type="web_search", queries_per_topic=5, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(http)
+
+    assert len(calls) == 2  # len(source.query_templates), not queries_per_topic
+
+
+async def test_web_search_collector_skips_results_missing_url_or_title():
+    body = json.dumps(
+        {
+            "results": [
+                {"url": "https://example.com/a", "title": "Has both", "description": "d"},
+                {"url": "https://example.com/b", "description": "no title here"},
+                {"title": "no url here", "description": "d"},
+            ]
+        }
+    ).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(
+            http
+        )
+
+    assert len(items) == 1
+    assert items[0].url == "https://example.com/a"

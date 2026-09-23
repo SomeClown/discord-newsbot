@@ -58,6 +58,31 @@ def test_d4_does_not_match_d40():
     assert result.get("diablo4", []) == []
 
 
+def test_bl4_does_not_match_bl45():
+    result = filter_items([_item(title="Check out this BL45 mod")], TOPICS, max_per_topic=10)
+    assert result.get("borderlands4", []) == []
+
+
+def test_bl4_matches_with_surrounding_punctuation():
+    result = filter_items([_item(title="Big news: (BL4) delayed?")], TOPICS, max_per_topic=10)
+    assert len(result["borderlands4"]) == 1
+    assert result["borderlands4"][0].uncertain is False
+
+
+def test_name_matches_possessive_apostrophe_s():
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    item = _item(title="Palworld's big update lands today")
+    result = filter_items([item], topics, max_per_topic=10)
+    assert len(result["palworld"]) == 1
+    assert result["palworld"][0].uncertain is False
+
+
+def test_name_match_is_case_insensitive():
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    result = filter_items([_item(title="PALWORLD update ships today")], topics, max_per_topic=10)
+    assert len(result["palworld"]) == 1
+
+
 def test_2k_style_entity_matches_2k_games_not_substring_word():
     topics = [Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=["2K"])]
     result = filter_items([_item(title="2K Games announces new slate")], topics, max_per_topic=10)
@@ -113,6 +138,14 @@ def test_topics_field_restricts_matching_to_named_topics_only():
     assert result.get("diablo4", []) == []
 
 
+def test_empty_topics_tuple_falls_back_to_keyword_matching_over_all_topics():
+    # An empty tuple is falsy, same as None, so this isn't "dedicated to nothing".
+    item = _item(title="Palworld's big news today", topics=())
+    result = filter_items([item], TOPICS, max_per_topic=10)
+    assert len(result["palworld"]) == 1
+    assert result["palworld"][0].uncertain is False
+
+
 # --- cap ordering ---
 
 
@@ -160,6 +193,32 @@ def test_max_per_topic_caps_the_list_length():
     items = [_item(title=f"Palworld update {i}", published_at=_at(i % 23)) for i in range(5)]
     result = filter_items(items, TOPICS, max_per_topic=2)
     assert len(result["palworld"]) == 2
+
+
+def test_max_per_topic_boundary_exactly_at_limit_keeps_all():
+    items = [_item(title=f"Palworld update {i}", published_at=_at(i)) for i in range(3)]
+    result = filter_items(items, TOPICS, max_per_topic=3)
+    assert len(result["palworld"]) == 3
+
+
+def test_max_per_topic_boundary_one_over_limit_drops_exactly_one():
+    items = [_item(title=f"Palworld update {i}", published_at=_at(i)) for i in range(4)]
+    result = filter_items(items, TOPICS, max_per_topic=3)
+    assert len(result["palworld"]) == 3
+
+
+def test_cap_ordering_combines_match_trust_and_recency_together():
+    items = [
+        # Uncertain, official, newest -- still loses to any confident match.
+        _item(title="Blizzard quarterly earnings", trust="official", published_at=_at(23)),
+        # Confident, community, oldest -- beats the uncertain item on match rank alone.
+        _item(title="Diablo IV hotfix rolls out", trust="community", published_at=_at(0)),
+        # Confident, official, middle -- wins on trust over the community item above.
+        _item(title="Diablo IV: official patch notes", trust="official", published_at=_at(12)),
+    ]
+    result = filter_items(items, TOPICS, max_per_topic=2)
+    titles = [ti.item.title for ti in result["diablo4"]]
+    assert titles == ["Diablo IV: official patch notes", "Diablo IV hotfix rolls out"]
 
 
 # --- build_matchers ---

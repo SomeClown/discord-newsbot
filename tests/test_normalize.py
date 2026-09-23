@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from newsbot.collectors.base import RawItem
 from newsbot.pipeline.normalize import canonicalize, normalize
 
@@ -93,6 +95,94 @@ def test_canonicalize_is_idempotent():
     assert once == twice
 
 
+def test_canonicalize_strips_gclid_and_mc_params_together():
+    assert (
+        canonicalize("https://example.com/a?gclid=g&mc_cid=c&mc_eid=e&keep=1")
+        == "https://example.com/a?keep=1"
+    )
+
+
+def test_canonicalize_tracking_param_match_is_case_insensitive():
+    # A source that shouts UTM_SOURCE in all caps shouldn't slip past the filter.
+    assert (
+        canonicalize("https://example.com/a?UTM_SOURCE=feed&FBCLID=abc&y=1")
+        == "https://example.com/a?y=1"
+    )
+
+
+def test_canonicalize_rejects_ftp_scheme():
+    assert canonicalize("ftp://example.com/file.txt") is None
+
+
+def test_canonicalize_rejects_empty_string():
+    assert canonicalize("") is None
+
+
+def test_canonicalize_rejects_whitespace_only():
+    assert canonicalize("   ") is None
+
+
+def test_canonicalize_rejects_scheme_relative_url():
+    assert canonicalize("//example.com/a") is None
+
+
+def test_canonicalize_rejects_empty_host():
+    assert canonicalize("https:///path") is None
+
+
+def test_canonicalize_keeps_userinfo_in_netloc():
+    assert canonicalize("https://user:pass@example.com/a") == "https://user:pass@example.com/a"
+
+
+def test_canonicalize_handles_extremely_long_url():
+    long_path = "a" * 3000
+    result = canonicalize(f"https://example.com/{long_path}?utm_source=feed&x=1")
+    assert result == f"https://example.com/{long_path}?x=1"
+
+
+def test_canonicalize_reddit_share_link_strips_share_tracking():
+    result = canonicalize(
+        "https://old.reddit.com/r/Palworld/comments/abc123/title/?utm_source=share&utm_name=iossmf"
+    )
+    assert result == "https://old.reddit.com/r/Palworld/comments/abc123/title"
+
+
+def test_canonicalize_youtube_short_link_strips_si_param():
+    assert canonicalize("https://youtu.be/abc123?si=xyz") == "https://youtu.be/abc123"
+
+
+def test_canonicalize_steam_app_url_strips_snr_keeps_path():
+    result = canonicalize(
+        "https://store.steampowered.com/app/1623730/Palworld/?snr=1_ab&utm_source=x"
+    )
+    assert result == "https://store.steampowered.com/app/1623730/Palworld?snr=1_ab"
+
+
+def test_canonicalize_idn_host_is_lowercased_as_given():
+    # urlsplit hands back the Unicode host as-is; canonicalize lowercases it
+    # but doesn't fold it to (or from) its punycode form. A feed that mixes
+    # Unicode and punycode spellings of the same host will dedupe-miss --
+    # not promised anywhere, just documenting the current shape.
+    assert canonicalize("https://Exämple.com/a") == "https://exämple.com/a"
+
+
+def test_canonicalize_punycode_host_is_lowercased():
+    assert canonicalize("https://XN--EXMPLE-CUA.com/a") == "https://xn--exmple-cua.com/a"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: canonicalize() only wraps urlsplit(url) in try/except ValueError; "
+        "parts.port is a lazily-validated property accessed later (line 64), so an "
+        "out-of-range port (e.g. :99999) raises an uncaught ValueError instead of "
+        "returning None like every other malformed-URL case."
+    ),
+)
+def test_canonicalize_out_of_range_port_returns_none_instead_of_raising():
+    assert canonicalize("http://example.com:99999/a") is None
+
+
 # --- normalize ---
 
 
@@ -173,3 +263,33 @@ def test_normalize_known_urls_receives_canonical_candidates():
     items = [_item("https://example.com/a/?utm_source=feed")]
     normalize(items, known_urls=known_urls, now=NOW, lookback=timedelta(hours=24))
     assert seen["urls"] == {"https://example.com/a"}
+
+
+def test_normalize_empty_item_list_returns_empty_list():
+    result = normalize([], known_urls=lambda urls: set(), now=NOW, lookback=timedelta(hours=24))
+    assert result == []
+
+
+def test_normalize_known_urls_not_called_with_empty_set_when_all_items_dropped():
+    # Every candidate URL is non-http, so nothing survives to ask the store about.
+    seen = {}
+
+    def known_urls(urls):
+        seen["urls"] = urls
+        return set()
+
+    items = [_item("javascript:alert(1)"), _item("data:text/html,x")]
+    result = normalize(items, known_urls=known_urls, now=NOW, lookback=timedelta(hours=24))
+    assert result == []
+    assert seen["urls"] == set()
+
+
+def test_normalize_in_batch_dedupe_official_beats_press_beats_community():
+    items = [
+        _item("https://example.com/a", trust="community", title="worst"),
+        _item("https://example.com/a", trust="press", title="middle"),
+        _item("https://example.com/a", trust="official", title="best"),
+    ]
+    result = normalize(items, known_urls=lambda urls: set(), now=NOW, lookback=timedelta(hours=24))
+    assert len(result) == 1
+    assert result[0].title == "best"

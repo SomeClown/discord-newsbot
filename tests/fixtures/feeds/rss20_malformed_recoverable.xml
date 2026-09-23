@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Sloppy Feed</title>
+<item><title>Bugs & Fixes in the new patch</title><link>https://example.com/bugs-and-fixes</link>
+<description>Raw & unescaped ampersand, the kind that makes an XML parser wince.</description>
+<pubDate>Tue, 22 Sep 2026 14:30:00 GMT</pubDate></item>
+</channel></rss>
