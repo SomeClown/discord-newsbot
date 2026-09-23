@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>reddit: the front page of r/Palworld</title>
+  <link href="https://www.reddit.com/r/Palworld/top/.rss?t=day" rel="self"/>
+  <entry>
+    <title>PSA: back up your save before the new patch</title>
+    <link href="https://www.reddit.com/r/Palworld/comments/abc123/psa_back_up_your_save/"/>
+    <id>t3_abc123</id>
+    <updated>2026-09-23T08:00:00+00:00</updated>
+    <published>2026-09-23T08:00:00+00:00</published>
+    <content type="html">Learned this the hard way. Back up before you patch.</content>
+  </entry>
+  <entry>
+    <title>My base after 200 hours (screenshots)</title>
+    <link href="https://www.reddit.com/r/Palworld/comments/def456/my_base_after_200_hours/"/>
+    <id>t3_def456</id>
+    <updated>2026-09-23T06:00:00+00:00</updated>
+    <published>2026-09-23T06:00:00+00:00</published>
+    <content type="html">Screenshots inside, took forever to build.</content>
+  </entry>
+</feed>

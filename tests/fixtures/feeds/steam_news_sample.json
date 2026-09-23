@@ -1,0 +1,34 @@
+{
+  "appnews": {
+    "appid": 1623730,
+    "newsitems": [
+      {
+        "gid": "123456789",
+        "title": "Patch v0.6.2 Notes",
+        "url": "https://store.steampowered.com/news/app/1623730/view/123456789",
+        "is_external_url": true,
+        "author": "Pocketpair",
+        "contents": "[b]Patch v0.6.2[/b] fixes several crash issues and adds new [i]Pals[/i]. See below for the full list.",
+        "feedlabel": "Community Announcements",
+        "date": 1758000000,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1623730
+      },
+      {
+        "gid": "987654321",
+        "title": "A Note From the Developers",
+        "url": "https://store.steampowered.com/news/app/1623730/view/987654321",
+        "is_external_url": true,
+        "author": "Pocketpair",
+        "contents": "Thank you all for 25 million sales. Here's what's next.",
+        "feedlabel": "Community Announcements",
+        "date": 1757000000,
+        "feedname": "steam_community_announcements",
+        "feed_type": 1,
+        "appid": 1623730
+      }
+    ],
+    "count": 2
+  }
+}

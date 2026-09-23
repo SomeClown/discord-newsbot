@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+  <title>Diablo</title>
+  <link rel="self" href="https://www.youtube.com/feeds/videos.xml?channel_id=UCxn8csYeZg6awRnZS-aqg0g"/>
+  <entry>
+    <id>yt:video:abc123</id>
+    <yt:videoId>abc123</yt:videoId>
+    <title>Diablo IV Season 12 Official Trailer</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=abc123"/>
+    <published>2026-09-18T16:00:00+00:00</published>
+    <updated>2026-09-18T16:05:00+00:00</updated>
+    <media:group xmlns:media="http://search.yahoo.com/mrss/">
+      <media:description>Get ready. Season 12 arrives soon.</media:description>
+    </media:group>
+    <content type="html">Get ready. Season 12 arrives soon.</content>
+  </entry>
+  <entry>
+    <id>yt:video:def456</id>
+    <yt:videoId>def456</yt:videoId>
+    <title>Diablo IV DevCast: Patch 2.4 Deep Dive</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=def456"/>
+    <published>2026-09-10T18:00:00+00:00</published>
+    <content type="html">The team walks through everything coming in patch 2.4.</content>
+  </entry>
+</feed>

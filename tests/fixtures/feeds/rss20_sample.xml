@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>PC Gamer</title>
+    <link>https://www.pcgamer.com/</link>
+    <description>PC Gamer news feed (trimmed sample)</description>
+    <item>
+      <title>Palworld's next update adds a new island, patch notes inside</title>
+      <link>https://www.pcgamer.com/games/palworld/palworld-next-update?utm_source=feed&amp;utm_medium=rss</link>
+      <guid>https://www.pcgamer.com/games/palworld/palworld-next-update</guid>
+      <description>&lt;p&gt;Pocketpair has confirmed the &lt;b&gt;next Palworld update&lt;/b&gt; adds a new island to explore.&lt;/p&gt;</description>
+      <pubDate>Tue, 22 Sep 2026 14:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Everything announced in today's Borderlands 4 showcase</title>
+      <link>https://www.pcgamer.com/games/borderlands/bl4-showcase</link>
+      <guid>https://www.pcgamer.com/games/borderlands/bl4-showcase</guid>
+      <description>&lt;p&gt;Gearbox ran through a full slate of Borderlands 4 news today.&lt;/p&gt;</description>
+      <pubDate>Mon, 21 Sep 2026 09:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Community roundup: the best fan builds this week</title>
+      <link>https://www.pcgamer.com/games/diablo-4/community-roundup</link>
+      <guid>https://www.pcgamer.com/games/diablo-4/community-roundup</guid>
+      <description>&lt;p&gt;No publish date on this one on purpose, for the test.&lt;/p&gt;</description>
+    </item>
+  </channel>
+</rss>
