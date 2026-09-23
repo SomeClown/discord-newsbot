@@ -1,0 +1,43 @@
+guild_id: 123456789012345678
+admin_channel_id: 123456789012345679
+admin_permission: manage_guild
+
+digest:
+  channel_id: 123456789012345680
+  time: "09:00"
+  timezone: "America/Los_Angeles"
+  lookback_hours: 24
+  max_items_per_topic: 60
+
+topics:
+  - key: borderlands4
+    name: "Borderlands 4"
+    aliases: ["BL4", "Borderlands"]
+    entities: ["Gearbox", "2K", "Take-Two"]
+  - key: palworld
+    name: "Palworld"
+    aliases: []
+    entities: ["Pocketpair"]
+  - key: diablo4
+    name: "Diablo IV"
+    aliases: ["Diablo 4", "D4"]
+    entities: ["Blizzard", "Activision Blizzard", "Microsoft Gaming"]
+
+sources:
+  - type: rss
+    name: "Blizzard News"
+    url: "https://news.blizzard.com/en-us/diablo4/rss"
+    topics: [diablo4]
+    trust: official
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+  - type: bluesky_search
+    query: "Palworld"
+    topics: [palworld]
+    trust: community
+  - type: web_search
+    queries_per_topic: 2
+    trust: press
