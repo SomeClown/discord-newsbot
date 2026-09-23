@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 from newsbot.bot.format import esc, render_digest
 from newsbot.config import Topic
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
@@ -94,16 +92,6 @@ def test_esc_neutralizes_heading_and_blockquote_markers():
 # --- known gap: channel mentions are not escaped ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "esc() (newsbot/bot/format.py) relies solely on "
-        "discord.utils.escape_mentions, which its own docstring says "
-        "explicitly does not cover channel mentions. A scraped title "
-        "containing a literal <#channel_id> survives esc() untouched and "
-        "renders as a live, clickable channel link in the posted embed."
-    ),
-)
 def test_esc_neutralizes_channel_mentions():
     result = esc("check <#123456789012345678> for details")
     assert "<#123456789012345678>" not in result

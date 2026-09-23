@@ -19,6 +19,7 @@ should not get to lie about where you're clicking.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -40,6 +41,7 @@ _MAX_FIELD_VALUE = 1024
 _LABEL_ORDER = {"official": 0, "reported": 1, "rumor": 2}
 _LABEL_MARKER = {"official": "🟢 OFFICIAL", "reported": "🟡 REPORTED", "rumor": "🔴 RUMOR"}
 _UPDATE_MARKER = "🔁 UPDATE"
+_LINKY_MENTION_RE = re.compile(r"<(?=[#/])")
 
 # A fixed, arbitrary 6-color palette (Discord's own brand blurple plus five
 # others that read fine against dark and light themes). Which topic gets
@@ -55,7 +57,13 @@ def esc(s: str) -> str:
     a working @everyone in someone's client before the send-time guard
     would have caught it anyway.
     """
-    return discord.utils.escape_mentions(discord.utils.escape_markdown(s))
+    escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(s))
+    # escape_mentions() covers users, roles and @everyone but, per its own
+    # docstring, not channels (<#id>) or slash-command links (</name:id>).
+    # A zero-width space after the "<" defuses both without visibly changing
+    # the text. test-engineer caught this one; I'd assumed "mentions" meant
+    # all of them, which is the kind of assumption that ages badly.
+    return _LINKY_MENTION_RE.sub("<\u200b", escaped)
 
 
 def _topic_color(topic_key: str) -> int:
