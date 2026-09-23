@@ -1,0 +1,32 @@
+{
+  "posts": [
+    {
+      "uri": "at://did:plc:examplehandle1/app.bsky.feed.post/3l6abcdefg",
+      "cid": "bafyreiexample1",
+      "author": {
+        "did": "did:plc:examplehandle1",
+        "handle": "palworldfan.bsky.social",
+        "displayName": "Palworld Fan"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "text": "Palworld's new update just dropped and it fixes the desync bug everyone's been complaining about.",
+        "createdAt": "2026-09-22T18:30:00.000Z"
+      }
+    },
+    {
+      "uri": "at://did:plc:examplehandle2/app.bsky.feed.post/3l6hijklmn",
+      "cid": "bafyreiexample2",
+      "author": {
+        "did": "did:plc:examplehandle2",
+        "handle": "gamesreporter.bsky.social",
+        "displayName": "Games Reporter"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "text": "Hearing from a source close to Pocketpair that the next Palworld content drop is bigger than expected.",
+        "createdAt": "2026-09-21T09:15:00.000Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+"""Brave News search collector, for the single `web_search` source.
+
+Unlike the other collector types, one configured source here expands into
+several requests: `queries_per_topic` templates, formatted per topic, so
+three topics and two templates means six searches. Brave's free tier is
+good for about one request a second, so those six run one after another
+with a pause between them, not concurrently -- there's no `httpx` retry
+for "the whole run got 429'd because we fired six requests at once".
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+
+import httpx
+
+from newsbot import text
+from newsbot.collectors.base import QuotaExceeded, RawItem
+from newsbot.config import Topic, WebSearchSource
+
+_NEWS_URL = "https://api.search.brave.com/res/v1/news/search"
+_QUERY_GAP_S = 1.1
+
+
+def _parse_page_age(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+class WebSearchCollector:
+    source_type = "web_search"
+    rate_limit_key = None
+
+    def __init__(
+        self,
+        source: WebSearchSource,
+        topics: list[Topic],
+        api_key: str,
+        *,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
+        self._source = source
+        self._topics = topics
+        self._api_key = api_key
+        self._sleep = sleep or asyncio.sleep
+        self.name = source.name
+
+    async def collect(self, http: httpx.AsyncClient) -> list[RawItem]:
+        templates = self._source.query_templates[: self._source.queries_per_topic]
+        items: list[RawItem] = []
+        first = True
+        for topic in self._topics:
+            for template in templates:
+                if not first:
+                    await self._sleep(_QUERY_GAP_S)
+                first = False
+                query = template.format(name=topic.name)
+                items.extend(await self._search(http, query, topic.key))
+        return items
+
+    async def _search(self, http: httpx.AsyncClient, query: str, topic_key: str) -> list[RawItem]:
+        response = await http.get(
+            _NEWS_URL,
+            params={"q": query, "freshness": "pd", "count": 20},
+            headers={"X-Subscription-Token": self._api_key},
+        )
+        if response.status_code in (429, 402):
+            raise QuotaExceeded("quota")
+        response.raise_for_status()
+
+        data = response.json()
+        results = []
+        for result in data.get("results", []):
+            url = result.get("url")
+            title = result.get("title")
+            if not (url and title):
+                continue
+            results.append(
+                RawItem(
+                    url=url,
+                    title=title,
+                    excerpt=text.clean_text(result.get("description", "")),
+                    source_name=self._source.name,
+                    trust=self._source.trust,
+                    published_at=_parse_page_age(result.get("page_age")),
+                    topics=(topic_key,),
+                )
+            )
+        return results
