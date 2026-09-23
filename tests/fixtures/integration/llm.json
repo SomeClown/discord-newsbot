@@ -1,0 +1,22 @@
+{
+  "borderlands4": [
+    {
+      "headline": "Patch 1.2 fixes crashes and rebalances loot",
+      "summary": "Gearbox pushed patch 1.2, addressing crashes and adjusting loot drop rates based on community feedback.",
+      "label": "official",
+      "item_urls": ["https://example.com/bl4/patch-1"],
+      "relevant": true,
+      "update_of_headline": null
+    }
+  ],
+  "palworld": [
+    {
+      "headline": "Palworld 0.6.2 fixes crash bugs",
+      "summary": "A small patch addressing several reported crashes went out on Steam.",
+      "label": "official",
+      "item_urls": ["https://example.com/palworld/patch"],
+      "relevant": true,
+      "update_of_headline": null
+    }
+  ]
+}

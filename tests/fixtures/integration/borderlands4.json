@@ -1,0 +1,20 @@
+[
+  {
+    "url": "https://example.com/bl4/patch-1",
+    "title": "Borderlands 4 Patch 1.2 Notes",
+    "excerpt": "Fixes several crashes and rebalances loot drop rates based on community feedback.",
+    "source_name": "Gearbox Blog",
+    "trust": "official",
+    "published_at": "2026-09-23T08:00:00+00:00",
+    "topics": ["borderlands4"]
+  },
+  {
+    "url": "https://example.com/bl4/community-thread",
+    "title": "Fan farming build megathread",
+    "excerpt": "Community members compare build strategies for the new raid boss.",
+    "source_name": "r/Borderlands",
+    "trust": "community",
+    "published_at": "2026-09-23T02:00:00+00:00",
+    "topics": ["borderlands4"]
+  }
+]
