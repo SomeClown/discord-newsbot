@@ -38,3 +38,10 @@ select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+  # discord.py calls re.sub with a positional `count` arg, which is fine on
+  # the Python versions it was written against and merely deprecated on
+  # 3.14. Not our code, not our bug to fix; scoped tight so an unrelated
+  # DeprecationWarning we should actually see doesn't get swallowed with it.
+  "ignore:'count' is passed as positional argument:DeprecationWarning:discord\\.utils",
+]
