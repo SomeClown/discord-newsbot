@@ -2,6 +2,8 @@
 
 Status: v1 design, approved in brainstorming 2026-09-23. This is the living design doc; update it when the design changes.
 
+> **Amendments (2026-09-23):** the owner accepted all ten spec deviations (SPEC-DEV 1–10) in section 4 of `docs/plans/2026-09-23-v1-implementation.md`. Where this document and that list disagree, the list wins until step 21 folds them in here. Digest time confirmed as 09:00 America/Los_Angeles.
+
 ## 1. Purpose
 
 A Discord bot for a ~50-member community server built around **Borderlands 4**, **Palworld**, and **Diablo IV**. Once a day it gathers news, announcements, rumors, and social posts about those games, their developers, and their publishers. It posts an AI-summarized digest and lets members query recent news on demand.
@@ -163,7 +165,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 - If an embed would go past Discord's limits (4096-character description, 6000 characters per message), the least important stories are cut and a "+N more, use /news" line is added.
 
 ### Member commands
-- `/news game:<topics + All> days:<1-30, default 7> label:<optional> public:<bool, default false>`
+- `/news recent game:<topics + All> days:<1-30, default 7> label:<optional> public:<bool, default false>`
 - `/news search query:<text> days:<1-30, default 30> public:<bool, default false>`. This searches story headlines and summaries using SQLite FTS5.
 - Results are shown only to the requester unless `public:true`. Paging uses Previous/Next buttons, and only the person who ran the command can page.
 
