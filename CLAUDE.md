@@ -8,7 +8,10 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 - **Current plan:** `docs/plans/2026-09-23-v1-implementation.md`. The owner
   accepted every SPEC-DEV default in plan section 4 on 2026-09-23 (command
   shape: `/news recent` + `/news search`; digest at 09:00 America/Los_Angeles).
-- **Gate:** `uv run ruff check . && uv run ruff format --check . && uv run pytest -q`
+- **Tooling:** Python 3.14, plain `venv` + `pip` (no uv; the owner knows pip and that's the point).
+  Setup: `python3.14 -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt && pip install -e . --no-deps`.
+  `requirements.txt` is the lock file; regenerate it with `scripts/lock.sh`, never by hand.
+- **Gate:** `ruff check . && ruff format --check . && pytest -q` (venv active)
 - Any prompt change needs an owner-reviewed `/newsbot preview` before merging.
 
 ## Documentation voice (read this before writing a docstring)

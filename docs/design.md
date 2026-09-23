@@ -50,7 +50,7 @@ newsbot/
   alerts.py        admin-channel notifications
 ```
 
-**Stack:** Python 3.12, discord.py, APScheduler, httpx, feedparser, pydantic, the anthropic SDK, and stdlib `sqlite3`. Dependencies are managed with `uv`.
+**Stack:** Python 3.14, discord.py, APScheduler, httpx, feedparser, pydantic, the anthropic SDK, and stdlib `sqlite3`. Dependencies are managed with plain `venv` + `pip`: ranges in `pyproject.toml`, fully pinned `requirements.txt` as the lock file.
 
 ## 3. Configuration
 
@@ -176,7 +176,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 
 ## 7. Deployment
 
-- Multi-stage `Dockerfile` on `python:3.12-slim`, running as a non-root user
+- Multi-stage `Dockerfile` on `python:3.14-slim`, running as a non-root user
 - `docker-compose.yml`: one service, `restart: unless-stopped`, `./config.yaml:/app/config.yaml:ro`, `./data:/data`, `env_file: .env`, and log rotation (json-file, max-size 10m, max-file 3)
 - Healthcheck: the process writes a heartbeat file every 60s when the gateway is connected and the scheduler is running. The healthcheck fails if the file is more than 3 minutes old.
 - GitHub Actions runs `ruff` and `pytest` on every push. On `main`, once tests pass, it builds and pushes the image to GHCR. The Droplet deploys with `docker compose pull && docker compose up -d`.

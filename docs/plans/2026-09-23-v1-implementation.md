@@ -6,7 +6,7 @@ Source of truth: `/Users/someclown/dev/discord-newsbot/docs/design.md`. Where th
 
 ## 1. Goal and approach
 
-The finished v1 is a single-container Python 3.12 process. One `discord.py` client posts a daily AI-summarized digest for Borderlands 4, Palworld and Diablo IV. It also answers `/news` and search slash commands against a SQLite store (WAL mode, FTS5 full-text search), and gives admins `/newsbot status | run-now | preview`. It deploys to the owner's Droplet from GHCR through `docker compose`.
+The finished v1 is a single-container Python 3.14 process. One `discord.py` client posts a daily AI-summarized digest for Borderlands 4, Palworld and Diablo IV. It also answers `/news` and search slash commands against a SQLite store (WAL mode, FTS5 full-text search), and gives admins `/newsbot status | run-now | preview`. It deploys to the owner's Droplet from GHCR through `docker compose`.
 
 The build goes from the inside out, in pure layers first: config, store, collectors, normalize, filter, summarize (with a stub Claude client), format. A headless orchestrator comes next. The CLI `python -m newsbot.pipeline.run --dry-run` exercises the whole pipeline with no Discord at all. The bot is a thin adapter on top of that.
 
@@ -23,8 +23,9 @@ The key decision is a `Publisher` protocol. The pipeline hands a rendered digest
 ## 2. Steps
 
 Conventions for every step:
+- **Tooling (owner decision 2026-09-23): Python 3.14, plain `venv` + `pip`, no uv.** Every command below assumes `source .venv/bin/activate` has been run.
 - Commit after each step.
-- `test-engineer` runs after each `implement` step. It adds edge-case tests beyond the TDD tests the implementer wrote first, then runs the full gate: `uv run ruff check . && uv run ruff format --check . && uv run pytest -q`.
+- `test-engineer` runs after each `implement` step. It adds edge-case tests beyond the TDD tests the implementer wrote first, then runs the full gate: `ruff check . && ruff format --check . && pytest -q`.
 - **All timestamps are stored as ISO-8601 UTC text.** `run_date` is the *local* date in `digest.timezone`.
 - Code that depends on time takes an injected `now: Callable[[], datetime]`.
 
@@ -34,20 +35,20 @@ Conventions for every step:
 ### Step 1: Project scaffold (`implement`)
 - **Goal:** empty but runnable package; lint and test gate green.
 - **Files:**
-  - `pyproject.toml`: project `newsbot`, `requires-python = ">=3.12,<3.13"`.
-    - Deps: `discord.py`, `apscheduler>=3.10,<4`, `httpx`, `feedparser`, `pydantic>=2`, `anthropic`, `pyyaml`, `tzdata`.
-    - Dev group: `pytest`, `pytest-asyncio`, `ruff`.
+  - `pyproject.toml`: project `newsbot`, `requires-python = ">=3.14,<3.15"`. Lists the direct runtime deps with compatible ranges (`discord.py`, `apscheduler>=3.10,<4`, `httpx`, `feedparser`, `pydantic>=2`, `anthropic`, `pyyaml`, `tzdata`) and tool config only. Installed editable with `pip install -e .`.
+  - `requirements.txt`: **every** runtime package (direct and transitive) pinned with `==`, produced by `scripts/lock.sh` (creates a throwaway venv, `pip install .`, `pip freeze --exclude-editable`). This is the lock file; Docker and CI install from it.
+  - `requirements-dev.txt`: `-r requirements.txt` plus pinned `pytest`, `pytest-asyncio`, `ruff`.
+  - `scripts/lock.sh`: regenerates `requirements.txt`, commented in the voice guide's style so the owner can run it without remembering why it exists.
     - `[tool.ruff]`: line-length 100, rules `E,F,I,UP,B,S,ASYNC`.
     - `[tool.pytest.ini_options]`: `asyncio_mode = "auto"`, `testpaths = ["tests"]`.
-  - `uv.lock` (generated).
-  - `.python-version` containing `3.12`.
+  - `.python-version` containing `3.14` (informational).
   - `.gitignore`: `.env*` except `.env.example`, `config.yaml`, `config.dev.yaml`, `data/`, `.venv/`, `__pycache__/`.
   - `.env.example`: `DISCORD_TOKEN=`, `ANTHROPIC_API_KEY=`, `BRAVE_API_KEY=`, plus `BLUESKY_HANDLE=` and `BLUESKY_APP_PASSWORD=` (see SPEC-DEV 7), `NEWSBOT_CONFIG=/app/config.yaml`, `NEWSBOT_DB=/data/newsbot.db`.
   - Package skeleton, all `__init__.py`: `newsbot/`, `newsbot/collectors/`, `newsbot/pipeline/`, `newsbot/store/`, `newsbot/store/migrations/`, `newsbot/bot/`.
   - `newsbot/logging_setup.py` with `configure_logging(level: str = "INFO") -> None`. It uses a stdlib `logging.Formatter` subclass that emits one JSON object per line (ts, level, logger, msg, plus `extra` fields).
   - `tests/test_smoke.py`.
 - **Tests:** smoke import of the package; the JSON formatter outputs parseable JSON and includes `extra` keys.
-- **Verify:** `uv sync && uv run ruff check . && uv run pytest -q`
+- **Verify:** `python3.14 -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt && pip install -e . --no-deps && ruff check . && pytest -q`. Also confirm every dependency installs cleanly on 3.14 (the one real risk of choosing 3.14; report any that don't).
 
 ### Step 2: Config (`implement`)
 - **Goal:** load and validate `config.yaml` and the environment. An invalid config exits non-zero with a readable message.
@@ -84,7 +85,7 @@ Conventions for every step:
   - Each validator rejects bad input: bad tz, bad time, unknown topic ref, duplicate names, bad permission.
   - Secrets never appear in `repr(Secrets)`.
   - The discriminated union routes each source type.
-- **Verify:** `uv run pytest tests/test_config.py -q`
+- **Verify:** `pytest tests/test_config.py -q`
 
 ### Step 3: Store, connection and migrations (`implement`)
 - **Goal:** SQLite with WAL, foreign keys and the migration runner, plus FTS5 verified at startup.
@@ -110,7 +111,7 @@ Conventions for every step:
   - WAL mode and foreign keys are on.
   - The FTS triggers keep search in sync on insert and delete.
   - `assert_fts5` passes locally.
-- **Verify:** `uv run pytest tests/test_db.py -q && uv run python -c "import sqlite3;c=sqlite3.connect(':memory:');c.execute('create virtual table t using fts5(a)');print('fts5 ok')"`
+- **Verify:** `pytest tests/test_db.py -q && python -c "import sqlite3;c=sqlite3.connect(':memory:');c.execute('create virtual table t using fts5(a)');print('fts5 ok')"`
 
 ### Step 4: Store repo, write path and guards (`implement`)
 - **Goal:** every query the pipeline needs, with no SQL anywhere else.
@@ -138,7 +139,7 @@ Conventions for every step:
   - `consecutive_failures` increments and then resets on success.
   - Retention cascades to `story_items`, `item_topics` and FTS, and nulls `is_update_of`.
   - `existing_urls` works with batches over 999 (the SQLite variable limit, so chunk).
-- **Verify:** `uv run pytest tests/test_repo_write.py -q`
+- **Verify:** `pytest tests/test_repo_write.py -q`
 
 ### Step 5: Store repo, read path for commands and status (`implement`)
 - **Files:** `newsbot/store/repo.py` (extend), `tests/test_repo_read.py`
@@ -157,7 +158,7 @@ Conventions for every step:
   - Raw user input like `foo" OR bar*`, `NEAR(`, or an empty string never raises `sqlite3.OperationalError`. Empty input returns nothing.
   - Search ranks by `bm25` and then recency.
   - Month token sums are correct across a month boundary.
-- **Verify:** `uv run pytest tests/test_repo_read.py -q`
+- **Verify:** `pytest tests/test_repo_read.py -q`
 
 ### Step 6: Collector base, RSS and Steam (`implement`)
 - **Files:**
@@ -199,7 +200,7 @@ Conventions for every step:
   - A 500 or timeout turns into `CollectorResult.error` without raising.
   - One slow collector doesn't block the others.
   - `clean_text` handles nested HTML, BBCode, entities and truncation.
-- **Verify:** `uv run pytest tests/test_collectors_rss_steam.py tests/test_text.py -q`
+- **Verify:** `pytest tests/test_collectors_rss_steam.py tests/test_text.py -q`
 
 ### Step 7: Bluesky and web-search collectors (`implement`)
 - **Files:** `newsbot/collectors/bluesky.py`, `newsbot/collectors/web_search.py`, fixtures `tests/fixtures/bluesky_search.json` and `tests/fixtures/brave_news.json`, `tests/test_collectors_bsky_brave.py`
@@ -219,7 +220,7 @@ Conventions for every step:
   - A 429 gives `skipped="quota"` and does not raise.
   - Query expansion count equals topics times `queries_per_topic`.
   - The pacing sleep is injected so tests run fast.
-- **Verify:** `uv run pytest tests/test_collectors_bsky_brave.py -q`
+- **Verify:** `pytest tests/test_collectors_bsky_brave.py -q`
 
 ### Step 8: Normalize and filter (`implement`)
 - **Files:** `newsbot/pipeline/normalize.py`, `newsbot/pipeline/filter.py`, `tests/test_normalize.py`, `tests/test_filter.py`
@@ -253,7 +254,7 @@ Conventions for every step:
   - Dedicated-source items with no keyword match are kept.
   - The cap keeps official items over newer community ones.
   - The lookback boundary.
-- **Verify:** `uv run pytest tests/test_normalize.py tests/test_filter.py -q`
+- **Verify:** `pytest tests/test_normalize.py tests/test_filter.py -q`
 
 ### Step 9: Summarize, with a stubbed Claude client (`implement`)
 - **Files:** `newsbot/pipeline/summarize.py`, `newsbot/pipeline/prompts.py`, `tests/test_summarize.py`
@@ -300,7 +301,7 @@ Conventions for every step:
   - Three failures give a fallback.
   - An `APIError` triggers a retry.
   - An injection string inside an excerpt reaches the model only inside the items block.
-- **Verify:** `uv run pytest tests/test_summarize.py -q`
+- **Verify:** `pytest tests/test_summarize.py -q`
 
 ### Step 10: Format (`implement`)
 - **Files:** `newsbot/bot/format.py`, `tests/test_format.py`. `discord.Embed` is plain data, so no gateway is needed.
@@ -334,7 +335,7 @@ Conventions for every step:
   - The fallback rendering.
   - `@everyone` and `**bold**` in a headline are escaped.
   - Coverage note in the header.
-- **Verify:** `uv run pytest tests/test_format.py -q`
+- **Verify:** `pytest tests/test_format.py -q`
 
 ### Step 11: Pipeline orchestration and headless CLI (`implement`)
 - **Files:** `newsbot/pipeline/run.py`, `newsbot/pipeline/publisher.py`, `tests/test_pipeline_integration.py`, fixtures `tests/fixtures/integration/` (fixture feeds and canned LLM JSON)
@@ -377,8 +378,8 @@ Conventions for every step:
   - Preview writes nothing: compare row counts before and after.
   - A fallback topic gives `partial`.
 - **Verify:**
-  - `uv run pytest -q`
-  - `uv run python -m newsbot.pipeline.run --dry-run --config tests/fixtures/config_valid.yaml --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json`
+  - `pytest -q`
+  - `python -m newsbot.pipeline.run --dry-run --config tests/fixtures/config_valid.yaml --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json`
 
 ### Step 12: Seed source research and `config.example.yaml` (`investigate` with web access; may start any time after step 2)
 - **Goal:** a `config.example.yaml` that validates, holding real sources for the 3 topics, plus a short notes file.
@@ -391,14 +392,14 @@ Conventions for every step:
   - Press: a gaming news RSS or two with wide coverage (PC Gamer, Eurogamer, GamesRadar, IGN, Rock Paper Shotgun), with no `topics` so they're keyword-matched. Official sources get `topics: [<one key>]`, which makes them dedicated.
   - One Bluesky search per topic.
   - One `web_search` block.
-- **Verify:** `uv run python -c "from newsbot.config import load_config; load_config('config.example.yaml')"`, then a live `--dry-run` with `--stub-llm` confirms each source returns ≥1 item or has a documented reason it doesn't.
+- **Verify:** `python -c "from newsbot.config import load_config; load_config('config.example.yaml')"`, then a live `--dry-run` with `--stub-llm` confirms each source returns ≥1 item or has a documented reason it doesn't.
 - **OWNER CHECKPOINT B: the owner reviews and approves the source list.** Launch is blocked until this is done.
 
 ### Step 13: Live headless run (M1 exit)
 - **OWNER CHECKPOINT C:** the owner creates the Anthropic API key and the Brave Search API key (and Bluesky app password if SPEC-DEV 7 is accepted), and puts them in `.env.dev`.
 - **What to do** (`implement` runs it; the owner reads the output):
   1. Copy `config.example.yaml` to `config.dev.yaml` with placeholder Discord IDs.
-  2. Run `uv run --env-file .env.dev python -m newsbot.pipeline.run --dry-run --config config.dev.yaml --db ./data/dev.db`.
+  2. Run `set -a && . ./.env.dev && set +a && python -m newsbot.pipeline.run --dry-run --config config.dev.yaml --db ./data/dev.db`.
   3. Tune the prompt and the source list.
 - **OWNER CHECKPOINT D (first pass):** the owner judges summary quality, labels, and merged duplicates in the printed digest.
 - **Verify:**
@@ -439,8 +440,8 @@ Conventions for every step:
   - `run_date` comes from the local date, not UTC. Near midnight UTC the two differ.
   - Healthcheck staleness logic.
 - **Verify:**
-  - `uv run pytest tests/test_client_scheduling.py -q`
-  - Manually: `uv run --env-file .env.dev python -m newsbot` with `NEWSBOT_CONFIG=config.dev.yaml` connects, logs "synced N commands to guild", and the heartbeat file updates every 60 s.
+  - `pytest tests/test_client_scheduling.py -q`
+  - Manually: `set -a && . ./.env.dev && set +a && python -m newsbot` with `NEWSBOT_CONFIG=config.dev.yaml` connects, logs "synced N commands to guild", and the heartbeat file updates every 60 s.
 
 ### Step 15: Member commands (`implement`)
 - **Files:** `newsbot/bot/commands.py`, `newsbot/bot/views.py`, `tests/test_commands_logic.py`
@@ -453,7 +454,7 @@ Conventions for every step:
   - `PagerView(discord.ui.View)` has a timeout of 600 s, Prev and Next buttons, and `interaction_check` returning `interaction.user.id == owner_id`. Anyone else gets an ephemeral "Only the requester can page." Buttons disable at the ends.
   - Page size: 6 stories.
 - **Tests:** keep the logic pure. `resolve_query_args(...) -> (topic_keys, since, label)`, paging math, and the pager's owner check through a fake interaction object.
-- **Verify:** `uv run pytest tests/test_commands_logic.py -q`, then manually in the test guild once step 16 is done.
+- **Verify:** `pytest tests/test_commands_logic.py -q`, then manually in the test guild once step 16 is done.
 
 ### Step 16: Admin commands and scheduled jobs (`implement`)
 - **Files:** `newsbot/bot/commands.py` (the `/newsbot` group), `newsbot/bot/views.py` (a `ConfirmView`), `newsbot/bot/client.py` (job callbacks), `tests/test_admin_logic.py`
@@ -471,7 +472,7 @@ Conventions for every step:
   - The retention job calls `purge_older_than(now - 90d)`.
   - Both catch everything at the boundary and send an alert.
 - **Tests:** permission check logic with fake permissions; the confirm flow's decision function; spend computation.
-- **Verify:** `uv run pytest -q`, then the step 17 manual checklist.
+- **Verify:** `pytest -q`, then the step 17 manual checklist.
 
 ### Step 17: Test-guild acceptance (M2 exit)
 **OWNER CHECKPOINT D (final) + E-verify.** Run the bot locally with `.env.dev` and `config.dev.yaml`. The owner and the implementer walk through this list together:
@@ -489,8 +490,8 @@ Conventions for every step:
 ### Step 18: Docker and compose (`devops`)
 - **Files:** `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `docker-compose.dev.yml` (optional local override using `.env.dev` and `config.dev.yaml`)
 - **Dockerfile:**
-  - Builder stage: `python:3.12-slim`, with `COPY --from=ghcr.io/astral-sh/uv:<pinned> /uv /bin/uv`, then `uv sync --frozen --no-dev --no-install-project`, then copy the source and run `uv sync --frozen --no-dev`.
-  - Runtime stage: `python:3.12-slim`. Copy `/app/.venv` and the source. `useradd -u 10001 newsbot`, `mkdir /data && chown 10001 /data`, then `USER newsbot`.
+  - Builder stage: `python:3.14-slim`. `python -m venv /app/.venv`, copy `requirements.txt` and `pip install --no-cache-dir -r requirements.txt` (cached layer), then copy the source and `pip install --no-deps .`.
+  - Runtime stage: `python:3.14-slim`. Copy `/app/.venv` and the source. `useradd -u 10001 newsbot`, `mkdir /data && chown 10001 /data`, then `USER newsbot`.
   - `ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1`.
   - **A build-time check `RUN python -c "import sqlite3;sqlite3.connect(':memory:').execute('create virtual table t using fts5(a)')"`**, so the build fails if the image's sqlite lacks FTS5.
   - `HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=3 CMD python -m newsbot.healthcheck`.
@@ -506,7 +507,7 @@ Conventions for every step:
 - **OWNER CHECKPOINT F:** the owner creates the GitHub repo and pushes. Then the owner decides whether the GHCR package is private (the Droplet then needs `docker login ghcr.io` with a PAT scoped `read:packages`) or public.
 - **Files:** `.github/workflows/ci.yml`
   - Trigger on push and PR.
-  - A job using `astral-sh/setup-uv`: `uv sync --frozen`, `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q`.
+  - A job using `actions/setup-python` (3.14, pip cache keyed on the requirements files): `pip install -r requirements-dev.txt && pip install -e . --no-deps`, `ruff check .`, `ruff format --check .`, `pytest -q`.
   - A build job on `main` only, `needs: test`, with `permissions: packages: write`. It uses `docker/login-action` with `GITHUB_TOKEN`, then `docker/build-push-action`, tagging `latest` and `sha-<short>` so rollback is possible.
 - **Verify:** a push to a branch shows a green test job. A merge to main pushes the image, and `docker pull ghcr.io/<owner>/discord-newsbot:sha-xxxx` works.
 
@@ -593,7 +594,7 @@ Also added beyond the spec: the `official` label is enforced in code (downgraded
   - sqlite calls go through `asyncio.to_thread`, so gateway heartbeats aren't blocked.
   - `on_ready` fires on every reconnect, so the catch-up logic uses a once-flag.
   - One `asyncio.Lock` serializes all pipeline runs.
-- **FTS5 in `python:3.12-slim`.** The official image links Debian's libsqlite3, which has FTS5 enabled, and uv's standalone Python on macOS also has it. The plan doesn't rely on that: a build-time `RUN` check plus the startup `assert_fts5()` make a missing FTS5 fail loudly.
+- **FTS5 in `python:3.14-slim`.** The official image links Debian's libsqlite3, which has FTS5 enabled, and the owner's Homebrew Python 3.14 on macOS also has it. The plan doesn't rely on that: a build-time `RUN` check plus the startup `assert_fts5()` make a missing FTS5 fail loudly.
 - **Timezone and DST.** `CronTrigger(..., timezone=ZoneInfo(tz))` handles DST for 09:00. The `tzdata` pip package guarantees zone data in the slim image. `run_date` is the local date. A time between 02:00 and 03:00 would be skipped or doubled on DST days; config validation warns if `time` falls there.
 - **Brave free tier.** The limits in the brief (about 1 query per second, a monthly cap) have changed before, and Brave's plan and pricing structure has been revised. I can't confirm the current free allowance from the code. The planned use is 3 topics × 2 queries = 6 a day, about 180 a month, so any free tier should cover it; queries are paced at 1.1 s. At signup, the owner confirms that the **News Search** endpoint is included in the chosen plan; if it isn't, switch to `/res/v1/web/search` with `freshness=pd`. Also check Brave's terms on storing results; the plan stores only the URL, title and a snippet of up to 500 characters.
 - **Reddit from a DigitalOcean IP.** Reddit often returns 403 or 429 to datacenter IPs and generic user agents. Mitigations are a descriptive User-Agent and `/new/.rss`. A block shows up in source health after 3 failures. If it persists in prod, the owner decides whether to drop Reddit or accept the gap. There is no workaround inside v1 scope, since the Reddit API is out of scope.
