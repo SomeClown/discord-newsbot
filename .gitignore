@@ -1,0 +1,10 @@
+.env*
+!.env.example
+config.yaml
+config.dev.yaml
+data/
+.venv/
+__pycache__/
+*.pyc
+build/
+*.egg-info/

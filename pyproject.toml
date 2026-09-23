@@ -1,0 +1,40 @@
+[project]
+name = "newsbot"
+version = "0.1.0"
+description = "Daily AI-summarized Discord news digest for a small gaming server."
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "discord.py>=2.4,<3",
+  "apscheduler>=3.10,<4",
+  "httpx>=0.27,<1",
+  "feedparser>=6.0,<7",
+  "pydantic>=2,<3",
+  "anthropic>=0.40,<1",
+  "pyyaml>=6,<7",
+  "tzdata>=2024.1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["newsbot*"]
+
+[tool.setuptools.package-data]
+newsbot = ["store/migrations/*.sql"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's whole idiom is `assert`; banning it in tests would just mean
+# writing our own assert wrapper, which is a worse version of pytest.
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
