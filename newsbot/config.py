@@ -1,12 +1,13 @@
 """Load and validate config.yaml and the environment.
 
 Everything the bot needs to run correctly lives in two places: `config.yaml`
-(topics, sources, timing -- the stuff an owner tweaks without touching code)
-and the environment (tokens -- the stuff that should never end up in a
+(topics, sources, timing: the stuff an owner tweaks without touching code)
+and the environment (tokens: the stuff that should never end up in a
 committed file or a log line). This module is the only place that reads
 either one. If the config is wrong, we'd rather the process refuse to start
 with a message that says exactly what's wrong than limp along half-configured
-and drop stories from a topic nobody noticed was misspelled.
+and drop stories from a topic nobody noticed was misspelled (ask me how I
+know).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ _MAX_TOPICS = 25  # Discord's slash-command choice limit.
 class ConfigError(Exception):
     """Raised when config.yaml or the environment fails validation.
 
-    The message lists every failure found, not just the first one -- nobody
+    The message lists every failure found, not just the first one; nobody
     wants to fix a typo, restart, and discover the *next* typo one at a time.
     """
 
@@ -145,8 +146,8 @@ def load_config(path: str | Path) -> AppConfig:
     errors: list[str] = []
 
     # admin_permission must name a real discord.Permissions flag, checked
-    # against the class itself -- importing discord for this is free, we
-    # already depend on it for everything else.
+    # against the class itself (importing discord for this is free; we
+    # already depend on it for everything else).
     if not hasattr(discord.Permissions, cfg.admin_permission):
         errors.append(
             f"admin_permission {cfg.admin_permission!r} is not a discord.Permissions flag"
@@ -168,7 +169,7 @@ def load_config(path: str | Path) -> AppConfig:
     known_keys = seen_keys
 
     # Fill in Bluesky default names before the uniqueness check, since
-    # source_health.source_name is the primary key -- two sources silently
+    # source_health.source_name is the primary key: two sources silently
     # sharing a name would silently share health tracking too.
     resolved_sources = []
     for source in cfg.sources:

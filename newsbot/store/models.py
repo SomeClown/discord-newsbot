@@ -39,7 +39,7 @@ class StoredItem:
     """An item on its way into (or already in) the `items` table.
 
     `topics` maps a topic key to whether the match was `uncertain` (an
-    entity-only hit, not a name or alias) -- see `pipeline/filter.py`.
+    entity-only hit, not a name or alias; see `pipeline/filter.py`).
     """
 
     url: str

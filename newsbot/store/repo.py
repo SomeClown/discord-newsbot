@@ -10,8 +10,9 @@ The write path centers on a claim-then-publish-then-save guard
 *before* anything slow happens (summarizing, posting to Discord), and
 `save_run` writes items, stories and the final status together in one
 transaction, after publishing succeeds. If posting fails, nothing gets
-saved -- a retry just recollects, which beats the alternative of a digest
-that's half-posted and half-recorded.
+saved; a retry just recollects, which beats the alternative of a digest
+that's half-posted and half-recorded (I've seen that movie, and it's not
+a good one).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 
 from newsbot.store.models import (
@@ -42,8 +43,14 @@ _SQLITE_VARIABLE_CHUNK = 900
 _ONE_DAY = timedelta(hours=24)
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+def _resolve_now(now: Callable[[], datetime] | None) -> str:
+    """Turn an optional injected clock into an ISO timestamp string.
+
+    `now` defaults to the real UTC wall clock; tests pass a fixed one so
+    "what time did this claim happen" doesn't depend on how fast CI is
+    today.
+    """
+    return (now or (lambda: datetime.now(UTC)))().isoformat()
 
 
 def existing_urls(conn: sqlite3.Connection, urls: Iterable[str]) -> set[str]:
@@ -101,19 +108,25 @@ def get_digest(conn: sqlite3.Connection, run_date: date) -> DigestRow | None:
     )
 
 
-def claim_digest(conn: sqlite3.Connection, run_date: date, *, force: bool) -> int | None:
+def claim_digest(
+    conn: sqlite3.Connection,
+    run_date: date,
+    *,
+    force: bool,
+    now: Callable[[], datetime] | None = None,
+) -> int | None:
     """Reserve `run_date` for a run, or say no.
 
     Returns the digest id (status set to `pending`) if the claim succeeds,
     or `None` if it's blocked:
       - a `pending` row already exists (something else is running, or
-        crashed mid-run -- either way we don't want to overlap it)
+        crashed mid-run; either way, we don't want to overlap it)
       - an `ok`/`partial` row exists and `force` wasn't passed
     A `failed` row always allows a reclaim (that day never actually posted).
     `force=True` against `ok`/`partial` updates the existing row in place,
     keeping its id, rather than inserting a second row for the same date.
     """
-    now = _now_iso()
+    now_iso = _resolve_now(now)
     with conn:
         row = conn.execute(
             "SELECT id, status FROM digests WHERE run_date = ?", (run_date.isoformat(),)
@@ -122,7 +135,7 @@ def claim_digest(conn: sqlite3.Connection, run_date: date, *, force: bool) -> in
             cur = conn.execute(
                 "INSERT INTO digests (run_date, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?)",
-                (run_date.isoformat(), "pending", now, now),
+                (run_date.isoformat(), "pending", now_iso, now_iso),
             )
             return cur.lastrowid
 
@@ -133,7 +146,7 @@ def claim_digest(conn: sqlite3.Connection, run_date: date, *, force: bool) -> in
             return None
         conn.execute(
             "UPDATE digests SET status = 'pending', updated_at = ? WHERE id = ?",
-            (now, digest_id),
+            (now_iso, digest_id),
         )
         return digest_id
 
@@ -147,15 +160,16 @@ def save_run(
     message_ids: list[int],
     notes: str | None,
     usage: Usage,
+    now: Callable[[], datetime] | None = None,
 ) -> None:
     """Save one run's items, stories and final digest status, atomically.
 
     Everything happens inside a single transaction. If any statement fails
-    -- a bad status value, a constraint violation, whatever -- the whole
-    thing rolls back, so a half-saved run never sits in the database
-    looking like a real one.
+    (a bad status value, a constraint violation, whatever), the whole thing
+    rolls back, so a half-saved run never sits in the database looking like
+    a real one.
     """
-    now = _now_iso()
+    now_iso = _resolve_now(now)
     with conn:
         url_to_id: dict[str, int] = {}
         for item in items:
@@ -170,7 +184,7 @@ def save_run(
                     item.source_name,
                     item.trust,
                     item.published_at.isoformat() if item.published_at else None,
-                    now,
+                    now_iso,
                 ),
             )
             item_id = conn.execute("SELECT id FROM items WHERE url = ?", (item.url,)).fetchone()[0]
@@ -200,7 +214,7 @@ def save_run(
                     story.label,
                     story.update_of_story_id,
                     digest_id,
-                    now,
+                    now_iso,
                 ),
             )
             story_id = cur.lastrowid
@@ -219,26 +233,30 @@ def save_run(
                 notes,
                 usage.input_tokens,
                 usage.output_tokens,
-                now,
+                now_iso,
                 digest_id,
             ),
         )
 
 
 def mark_digest_failed(
-    conn: sqlite3.Connection, digest_id: int, notes: str, message_ids: list[int]
+    conn: sqlite3.Connection,
+    digest_id: int,
+    notes: str,
+    message_ids: list[int],
+    now: Callable[[], datetime] | None = None,
 ) -> None:
     """Record that a run's publish step failed.
 
     Items and stories aren't touched here: `save_run` never ran for this
     attempt, so there's nothing to undo. A retry just recollects.
     """
-    now = _now_iso()
+    now_iso = _resolve_now(now)
     with conn:
         conn.execute(
             "UPDATE digests SET status = 'failed', error_notes = ?, posted_message_ids = ?, "
             "updated_at = ? WHERE id = ?",
-            (notes, json.dumps(message_ids), now, digest_id),
+            (notes, json.dumps(message_ids), now_iso, digest_id),
         )
 
 

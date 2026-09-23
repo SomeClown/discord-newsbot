@@ -2,9 +2,9 @@
 
 Nothing fancy: SQLite in WAL mode, one migration file so far, and a version
 tracked in `PRAGMA user_version` because SQLite already gives us that for
-free and a bespoke `schema_migrations` table would just be reinventing it
-worse. Every connection is short-lived -- open, do the unit of work, close
--- called from async code through `asyncio.to_thread`, which sidesteps
+free (a bespoke `schema_migrations` table would just be reinventing it,
+worse). Every connection is short-lived: open, do the unit of work, close,
+called from async code through `asyncio.to_thread`, which sidesteps
 `sqlite3`'s single-thread-per-connection rule without needing a connection
 pool for a database this small.
 """
@@ -68,9 +68,9 @@ def assert_fts5(conn: sqlite3.Connection) -> None:
     """Confirm the SQLite build backing `conn` actually has FTS5 compiled in.
 
     Debian's libsqlite3 and Homebrew's both ship it, but "usually available"
-    isn't the same as "guaranteed", and finding out at query time -- after
-    the daily job has already collected and summarized everything -- would
-    be a spectacularly annoying way to learn otherwise. We'd rather fail at
+    isn't the same as "guaranteed", and finding out at query time (after the
+    daily job has already collected and summarized everything) would be a
+    spectacularly annoying way to learn otherwise. We'd rather fail at
     startup with a clear message.
     """
     try:
