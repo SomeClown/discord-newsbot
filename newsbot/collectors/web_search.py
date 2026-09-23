@@ -53,17 +53,27 @@ class WebSearchCollector:
         self.name = source.name
 
     async def collect(self, http: httpx.AsyncClient) -> list[RawItem]:
-        templates = self._source.query_templates[: self._source.queries_per_topic]
         items: list[RawItem] = []
         first = True
         for topic in self._topics:
-            for template in templates:
+            queries = self._queries_for(topic)
+            for query in queries:
                 if not first:
                     await self._sleep(_QUERY_GAP_S)
                 first = False
-                query = template.format(name=topic.name)
                 items.extend(await self._search(http, query, topic.key))
         return items
+
+    def _queries_for(self, topic: Topic) -> list[str]:
+        # A topic with its own search_queries (BL4's press coverage never
+        # says "Borderlands 4 news" the way the default template guesses)
+        # skips the templates entirely, still capped at queries_per_topic.
+        # Everyone else falls back to the shared templates, formatted per
+        # topic name, same as before this existed.
+        if topic.search_queries:
+            return topic.search_queries[: self._source.queries_per_topic]
+        templates = self._source.query_templates[: self._source.queries_per_topic]
+        return [template.format(name=topic.name) for template in templates]
 
     async def _search(self, http: httpx.AsyncClient, query: str, topic_key: str) -> list[RawItem]:
         response = await http.get(

@@ -9,12 +9,14 @@ from newsbot.config import (
     ConfigError,
     RssSource,
     SteamSource,
+    Topic,
     WebSearchSource,
     load_config,
     load_secrets,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
 
 
 def test_valid_fixture_loads(monkeypatch):
@@ -225,6 +227,46 @@ sources:
     cfg = _load_with(tmp_path, text)
     # web_search source is dropped when BRAVE_API_KEY isn't set.
     assert all(s.type != "web_search" for s in cfg.sources)
+
+
+def test_example_config_loads(monkeypatch):
+    # config.example.yaml is what the owner copies to config.yaml on day one;
+    # if this doesn't load, the README's setup instructions are lying.
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(EXAMPLE)
+    assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
+
+
+def test_topic_search_queries_default_empty():
+    topic = Topic(key="palworld", name="Palworld")
+    assert topic.search_queries == []
+
+
+def test_topic_search_queries_accepts_list():
+    topic = Topic(key="borderlands4", name="Borderlands 4", search_queries=["Borderlands 4 news"])
+    assert topic.search_queries == ["Borderlands 4 news"]
+
+
+def test_topic_search_queries_rejects_blank_entries(tmp_path):
+    text = """
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+topics:
+  - key: palworld
+    name: "Palworld"
+    search_queries: ["Palworld news", "   "]
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
 
 
 def test_load_secrets_reads_env():

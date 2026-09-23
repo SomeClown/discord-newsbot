@@ -44,6 +44,17 @@ class Topic(BaseModel):
     name: str
     aliases: list[str] = []
     entities: list[str] = []
+    # Per-topic overrides for the web_search collector. Empty means "use the
+    # source's global query_templates"; the two schemas coexist because most
+    # topics are happy with "{name} news" and one weird topic never is.
+    search_queries: list[str] = []
+
+    @field_validator("search_queries")
+    @classmethod
+    def _validate_search_queries(cls, v: list[str]) -> list[str]:
+        if any(not q.strip() for q in v):
+            raise ValueError("search_queries entries must be non-empty strings")
+        return v
 
 
 class DigestCfg(BaseModel):

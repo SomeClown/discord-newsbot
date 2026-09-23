@@ -133,3 +133,11 @@ sources:
 3. **Bluesky**: create an app password? Without one, the three search sources are always skipped. The official accounts work regardless, through RSS.
 4. **Reddit**: keep 3 subreddits with serialized fetching, and accept a possible block from DigitalOcean?
 5. **Web search**: add per-topic `search_queries` (a schema change), or live with the global templates?
+
+### Decided 2026-09-23
+
+1. **Aliases and entities**: trimmed as recommended, and then some. Borderlands 4 keeps `BL4` and `Borderlands4`, drops bare `Borderlands`; entities are developer-only (`Gearbox`). Diablo IV drops `D4`, keeps `Diablo 4` plus the expansion names, and adds `Diablo V`/`Diablo 5` (see #2); entities are developer-only (`Blizzard`). Palworld's entities are `Pocketpair`. No `2K`, `Take-Two`, `Activision Blizzard` or `Microsoft Gaming` anywhere.
+2. **Diablo V**: counts under `diablo4` for now, via new aliases `Diablo V` and `Diablo 5` (on top of the coverage that already arrives through the dedicated tracker/YouTube/Bluesky feeds). A separate `diablo5` topic is a config edit away whenever it has enough of its own news to be worth splitting out.
+3. **Bluesky**: no app password yet. The three `bluesky_search` sources stay in `config.example.yaml`, commented to explain they're skipped until `BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD` are both set; the official-account RSS feeds don't need a password and are in regardless.
+4. **Reddit**: keeping all three subreddits, on `/top/.rss?t=day` per finding 4, with a comment that Reddit may block datacenter IPs and that source health will show it if so.
+5. **Web search**: added the `search_queries` schema change. `config.example.yaml` sets it for all three topics; Borderlands 4 and Diablo IV use the phrasing this doc recommended above, Palworld stays plain.

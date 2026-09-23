@@ -1,0 +1,227 @@
+# Example config.yaml, seeded from the source research in
+# docs/sources-research.md (verified 2026-09-23) and the owner decisions at
+# the bottom of that file. Copy this to config.yaml, swap the placeholder
+# Discord IDs for real ones, and you have a bot that starts up and actually
+# has something to say. The source list won't stay perfect forever -- press
+# feeds die, subreddits get rate-limited, Blizzard will probably ship an
+# actual RSS feed the week after I stop checking for one -- but it's a real
+# starting point, not a stub.
+#
+# Every ID below that says "placeholder" is fake and must be replaced; the
+# bot will happily start up pointed at a channel that doesn't exist and then
+# fail confusingly later, which is a worse failure mode than a config error.
+
+guild_id: 000000000000000000          # placeholder -- your server's ID
+admin_channel_id: 000000000000000000  # placeholder -- optional; alerts go here
+admin_permission: manage_guild
+
+digest:
+  channel_id: 000000000000000000      # placeholder -- where the daily digest posts
+  time: "09:00"
+  timezone: "America/Los_Angeles"
+  lookback_hours: 24
+  max_items_per_topic: 60
+
+topics:
+  - key: borderlands4
+    name: "Borderlands 4"
+    # Bare "Borderlands" was tempting and wrong: it also matches BL1-3, Tiny
+    # Tina, the 2024 movie, and (I am not making this up) an academic
+    # "Association for Borderlands Studies". "BL4" and "Borderlands4" don't
+    # have that problem, so those are the whole alias list.
+    aliases: ["BL4", "Borderlands4"]
+    entities: ["Gearbox"]             # 2K/Take-Two dropped: they mostly bring NBA and GTA noise
+    search_queries:
+      - "Borderlands 4 news"
+      - "Borderlands 4 update OR DLC OR patch"
+  - key: palworld
+    name: "Palworld"
+    aliases: []                       # the name is distinctive enough that it needs no help
+    entities: ["Pocketpair"]
+    search_queries:
+      - "Palworld news"
+      - "Palworld update OR patch OR DLC"
+  - key: diablo4
+    name: "Diablo IV"
+    # "D4" got dropped for the same reason "Borderlands" did: it's a chess
+    # opening, a TTRPG die, and a Nikon camera before it's ever this game.
+    # "Diablo V"/"Diablo 5" are in here on purpose, not by accident: Diablo V
+    # was announced at BlizzCon 2026, and until it's a real product with its
+    # own news volume, its coverage rides along on the Diablo IV topic. Give
+    # it a topic of its own later by moving these two lines -- that's the
+    # whole migration.
+    aliases: ["Diablo 4", "Lord of Hatred", "Vessel of Hatred", "Diablo V", "Diablo 5"]
+    entities: ["Blizzard"]            # Activision Blizzard/Microsoft Gaming dropped: corporate-press noise
+    search_queries:
+      - "\"Diablo 4\" OR \"Diablo IV\""
+      - "Diablo 4 season OR patch OR hotfix"
+
+sources:
+  # --- Official: Steam announcements (the collector adds
+  # feeds=steam_community_announcements itself; without that filter these
+  # apps' feeds fill up with SteamDB "top sellers" posts and a Russian press
+  # aggregator, which is not what anyone signed up for) ---
+  - type: steam_news
+    name: "Borderlands 4 Steam"
+    app_id: 1285190
+    topics: [borderlands4]
+    trust: official
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+  - type: steam_news
+    name: "Diablo IV Steam"
+    app_id: 2344520
+    topics: [diablo4]
+    trust: official
+
+  # --- Official: RSS ---
+  # news.blizzard.com has no RSS feed anywhere (checked /rss, /feed, and the
+  # page's autodiscovery -- nothing). The Diablo IV forums' Blizzard Tracker
+  # group feed is the next best thing: it mirrors every official post,
+  # including the news.blizzard.com articles, hotfix notes and PSAs, via
+  # Discourse's per-group RSS. It's a little noisier than a real news feed
+  # (a CM's reply in a random thread shows up under that thread's title, and
+  # a busy hotfix thread can appear two or three times), but clustering
+  # handles the duplicates and it's strictly better than Steam, where
+  # Diablo IV's official posts land about once a month.
+  - type: rss
+    name: "Diablo IV Blizzard Tracker"
+    url: "https://us.forums.blizzard.com/en/d4/groups/blizzard-tracker/posts.rss"
+    topics: [diablo4]
+    trust: official
+  # gearboxsoftware.com/feed still resolves but hasn't posted since 2021;
+  # borderlands.2k.com has no feed at all. The 2K Newsroom is the closest
+  # thing to an official Borderlands press feed, at the cost of also
+  # covering NBA, WWE and Civ -- it's unscoped on purpose, so the keyword
+  # matcher decides what's relevant.
+  - type: rss
+    name: "2K Newsroom"
+    url: "https://newsroom.2k.com/feed/rss"
+    trust: official
+  - type: rss
+    name: "Borderlands YouTube"
+    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCHY2-UtRFv1WKf4o7cpEp3w"
+    topics: [borderlands4]
+    trust: official
+  - type: rss
+    name: "Gearbox YouTube"
+    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCSRO0JNUYTCjsk7VmMdNYKw"
+    trust: official
+  - type: rss
+    name: "Pocketpair YouTube"
+    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCz6cOlpF6os7JkAKnpMNriw"
+    topics: [palworld]
+    trust: official
+  - type: rss
+    name: "Diablo YouTube"
+    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCxn8csYeZg6awRnZS-aqg0g"
+    topics: [diablo4]
+    trust: official
+  # The official Bluesky accounts work fine over plain RSS, no app password
+  # needed -- that's only required for *searching* Bluesky (see the
+  # bluesky_search sources below). These are cheap to keep even when quiet:
+  # Palworld's account hasn't posted since June, and that's fine, it'll just
+  # show "0 items" on the source health report instead of causing a fuss.
+  - type: rss
+    name: "Borderlands Bluesky"
+    url: "https://bsky.app/profile/did:plc:sxmjis6jypsib2k7rk6pjoau/rss"
+    topics: [borderlands4]
+    trust: official
+  - type: rss
+    name: "Palworld Bluesky"
+    url: "https://bsky.app/profile/did:plc:g3nrnn7t2tvoekp5flrexiby/rss"
+    topics: [palworld]
+    trust: official
+  - type: rss
+    name: "Diablo Bluesky"
+    url: "https://bsky.app/profile/did:plc:wxfwmaqg4kgiwzxcygdt2myj/rss"
+    topics: [diablo4]
+    trust: official
+
+  # --- Community: subreddits ---
+  # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest posts,
+  # and on a subreddit that gets bug reports and help threads all day, a
+  # once-a-day run would see whatever happened to post in the last hour
+  # rather than what people actually cared about. /top with t=day gets the
+  # day's 25 highest-voted posts instead.
+  # Reddit rate-limits hard, even from a residential IP -- five feeds fired
+  # at once got one 200 and four 429s, and 45 seconds of spacing cleared it
+  # up. The collector's `run_collectors` fires sources concurrently, so
+  # these three need serialized fetching or a per-host pause. It also might
+  # just block the production box's IP outright; I only tested from home.
+  # If that happens, the source health report will show it, not a crash.
+  - type: rss
+    name: "r/Borderlands4"
+    url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day"
+    topics: [borderlands4]
+    trust: community
+  - type: rss
+    name: "r/Palworld"
+    url: "https://www.reddit.com/r/Palworld/top/.rss?t=day"
+    topics: [palworld]
+    trust: community
+  - type: rss
+    name: "r/diablo4"
+    url: "https://www.reddit.com/r/diablo4/top/.rss?t=day"
+    topics: [diablo4]
+    trust: community
+
+  # --- Press: wide-coverage feeds, no `topics`, so the keyword matcher
+  # decides what belongs where ---
+  - type: rss
+    name: "PC Gamer"
+    url: "https://www.pcgamer.com/rss/"
+    trust: press
+  - type: rss
+    name: "Eurogamer"
+    url: "https://www.eurogamer.net/feed"
+    trust: press
+  - type: rss
+    name: "GamesRadar+"
+    url: "https://www.gamesradar.com/rss/"
+    trust: press
+  - type: rss
+    name: "IGN"
+    url: "https://www.ign.com/rss/articles/feed"
+    trust: press
+  - type: rss
+    name: "PCGamesN"
+    url: "https://www.pcgamesn.com/mainrss.xml"
+    trust: press
+
+  # --- Community: Bluesky search ---
+  # These are here so the config is ready the day you're willing to make a
+  # Bluesky app password; until BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are
+  # both set, every one of these three gets skipped, not attempted. That's
+  # not a guess: an unauthenticated search against Bluesky's public API
+  # returns a 403 whose body is HTML from BunnyCDN, not even a proper JSON
+  # error. The official-account RSS feeds above don't need auth and keep
+  # working regardless, so skipping these only costs you the wider
+  # "anyone talking about it" search, not the official accounts themselves.
+  - type: bluesky_search
+    query: "\"Borderlands 4\""
+    topics: [borderlands4]
+    trust: community
+  - type: bluesky_search
+    query: "Palworld"
+    topics: [palworld]
+    trust: community
+  - type: bluesky_search
+    query: "\"Diablo 4\""
+    topics: [diablo4]
+    trust: community
+
+  # --- Press: Brave News search, catches outlets not in the RSS list above ---
+  # Each topic sets its own search_queries (see above), because the default
+  # template guesses "{name} news" -- which for Diablo IV becomes literally
+  # "Diablo IV news" -- and most of the press writes "Diablo 4". A topic
+  # without search_queries falls back to query_templates below; right now
+  # every topic here has its own, so the templates are just the safety net
+  # for whatever topic gets added next without an owner reviewing its
+  # queries first.
+  - type: web_search
+    queries_per_topic: 2
+    trust: press

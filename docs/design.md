@@ -71,16 +71,17 @@ digest:
 topics:
   - key: borderlands4
     name: "Borderlands 4"
-    aliases: ["BL4", "Borderlands"]
-    entities: ["Gearbox", "2K", "Take-Two"]
+    aliases: ["BL4", "Borderlands4"]
+    entities: ["Gearbox"]
+    search_queries: ["Borderlands 4 news", "Borderlands 4 update OR DLC OR patch"]
   - key: palworld
     name: "Palworld"
     aliases: []
     entities: ["Pocketpair"]
   - key: diablo4
     name: "Diablo IV"
-    aliases: ["Diablo 4", "D4"]
-    entities: ["Blizzard", "Activision Blizzard", "Microsoft Gaming"]
+    aliases: ["Diablo 4", "Lord of Hatred", "Vessel of Hatred"]
+    entities: ["Blizzard"]
 
 sources:
   - type: rss            # blogs, news sites, subreddit .rss, YouTube channel feeds

@@ -329,6 +329,58 @@ async def test_web_search_collector_queries_per_topic_larger_than_templates_uses
     assert len(calls) == 2  # len(source.query_templates), not queries_per_topic
 
 
+async def test_web_search_collector_uses_topic_search_queries_when_present():
+    body = json.dumps({"results": []}).encode()
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["q"])
+        return httpx.Response(200, content=body)
+
+    topics = [
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            search_queries=["Borderlands 4 news", "Borderlands 4 update OR DLC OR patch"],
+        ),
+        Topic(key="palworld", name="Palworld"),  # no search_queries: falls back to templates
+    ]
+    source = WebSearchSource(type="web_search", queries_per_topic=2, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(http)
+
+    assert calls == [
+        "Borderlands 4 news",
+        "Borderlands 4 update OR DLC OR patch",
+        "Palworld news",
+        "Palworld update OR patch OR leak",
+    ]
+
+
+async def test_web_search_collector_topic_search_queries_still_capped_by_queries_per_topic():
+    body = json.dumps({"results": []}).encode()
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["q"])
+        return httpx.Response(200, content=body)
+
+    topics = [
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            search_queries=["query one", "query two", "query three"],
+        )
+    ]
+    source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(http)
+
+    assert calls == ["query one"]
+
+
 async def test_web_search_collector_skips_results_missing_url_or_title():
     body = json.dumps(
         {
