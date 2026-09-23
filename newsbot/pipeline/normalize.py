@@ -55,13 +55,20 @@ def canonicalize(url: str) -> str | None:
     scheme = parts.scheme.lower()
     if scheme not in _DEFAULT_PORTS:
         # Rejects javascript:, data: and anything else that isn't a page
-        # a member can click -- these should never reach a Discord embed.
+        # a member can click; these should never reach a Discord embed.
         return None
     if not parts.hostname:
         return None
 
     host = parts.hostname.lower()
-    netloc = host if parts.port in (None, _DEFAULT_PORTS[scheme]) else f"{host}:{parts.port}"
+    try:
+        # `.port` is validated lazily, so "example.com:99999" sails through
+        # urlsplit() and only explodes here. Found by test-engineer, not by me,
+        # which is roughly how it always goes.
+        port = parts.port
+    except ValueError:
+        return None
+    netloc = host if port in (None, _DEFAULT_PORTS[scheme]) else f"{host}:{port}"
     if "@" in parts.netloc:
         userinfo = parts.netloc.rsplit("@", 1)[0]
         netloc = f"{userinfo}@{netloc}"

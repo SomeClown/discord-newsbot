@@ -2,8 +2,6 @@
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from newsbot.collectors.base import RawItem
 from newsbot.pipeline.normalize import canonicalize, normalize
 
@@ -170,15 +168,6 @@ def test_canonicalize_punycode_host_is_lowercased():
     assert canonicalize("https://XN--EXMPLE-CUA.com/a") == "https://xn--exmple-cua.com/a"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: canonicalize() only wraps urlsplit(url) in try/except ValueError; "
-        "parts.port is a lazily-validated property accessed later (line 64), so an "
-        "out-of-range port (e.g. :99999) raises an uncaught ValueError instead of "
-        "returning None like every other malformed-URL case."
-    ),
-)
 def test_canonicalize_out_of_range_port_returns_none_instead_of_raising():
     assert canonicalize("http://example.com:99999/a") is None
 
