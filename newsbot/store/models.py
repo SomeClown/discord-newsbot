@@ -69,3 +69,38 @@ class Usage:
 
     input_tokens: int
     output_tokens: int
+
+
+@dataclass(frozen=True)
+class StoryView:
+    """A story as shown to a member through `/news recent` or `/news search`."""
+
+    id: int
+    topic_key: str
+    headline: str
+    summary: str
+    label: Label
+    created_at: datetime
+    urls: list[str]
+    is_update_of: int | None
+
+
+@dataclass(frozen=True)
+class SourceHealthRow:
+    source_name: str
+    last_success_at: datetime | None
+    last_error_at: datetime | None
+    last_error: str | None
+    consecutive_failures: int
+
+
+@dataclass(frozen=True)
+class StatusSnapshot:
+    """Everything `/newsbot status` needs, gathered in one query pass."""
+
+    last_digest: DigestRow | None
+    source_health: list[SourceHealthRow]
+    items_last_24h: int
+    stories_last_24h: int
+    month_input_tokens: int
+    month_output_tokens: int

@@ -17,17 +17,29 @@ that's half-posted and half-recorded.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
-from newsbot.store.models import DigestRow, PriorStory, StoredItem, StoryToSave, Usage
+from newsbot.store.models import (
+    DigestRow,
+    PriorStory,
+    SourceHealthRow,
+    StatusSnapshot,
+    StoredItem,
+    StoryToSave,
+    StoryView,
+    Usage,
+)
 
 # SQLite caps a single statement at 999 (or 32766 on newer builds, but we
 # don't get to pick) bound parameters. Chunking here means callers never
 # have to think about the limit or hit it in production with a big batch
 # of collected URLs.
 _SQLITE_VARIABLE_CHUNK = 900
+
+_ONE_DAY = timedelta(hours=24)
 
 
 def _now_iso() -> str:
@@ -283,3 +295,195 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
             "DELETE FROM stories WHERE created_at < ?", (cutoff_iso,)
         ).rowcount
     return items_deleted, stories_deleted
+
+
+# --- Read path: /news commands and /newsbot status ---
+#
+# Everything below only reads. It's split out here more for the reader's
+# sake than the database's: the write path above has to reason about
+# atomicity and the claim guard, and none of that applies here.
+
+_FTS_TOKEN_RE = re.compile(r"\S+")
+
+
+def _story_urls(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[str]]:
+    """Map story id to its item URLs, in the order they were linked."""
+    urls_by_story: dict[int, list[str]] = {story_id: [] for story_id in story_ids}
+    for i in range(0, len(story_ids), _SQLITE_VARIABLE_CHUNK):
+        chunk = story_ids[i : i + _SQLITE_VARIABLE_CHUNK]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a run of literal "?"s sized to the chunk, not
+        # interpolated user data; the actual values are bound below.
+        select = "SELECT story_items.story_id, items.url FROM story_items "
+        join = "JOIN items ON items.id = story_items.item_id "
+        where = f"WHERE story_items.story_id IN ({placeholders}) "  # noqa: S608
+        order = "ORDER BY story_items.story_id, items.id"
+        for row in conn.execute(select + join + where + order, chunk):
+            urls_by_story[row["story_id"]].append(row["url"])
+    return urls_by_story
+
+
+def _rows_to_story_views(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[StoryView]:
+    urls_by_story = _story_urls(conn, [row["id"] for row in rows])
+    return [
+        StoryView(
+            id=row["id"],
+            topic_key=row["topic_key"],
+            headline=row["headline"],
+            summary=row["summary"],
+            label=row["label"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            urls=urls_by_story.get(row["id"], []),
+            is_update_of=row["is_update_of"],
+        )
+        for row in rows
+    ]
+
+
+def query_stories(
+    conn: sqlite3.Connection,
+    topic_keys: list[str],
+    since: datetime,
+    label: str | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[StoryView], int]:
+    """Stories for `/news recent`, newest first. An empty `topic_keys` means "All"."""
+    where = ["created_at >= ?"]
+    params: list[object] = [since.isoformat()]
+    if topic_keys:
+        placeholders = ",".join("?" for _ in topic_keys)
+        where.append(f"topic_key IN ({placeholders})")  # noqa: S608
+        params.extend(topic_keys)
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    where_sql = " AND ".join(where)
+
+    # where_sql is built only from fixed clause fragments above (never from
+    # topic_keys' or label's *values*), so this is parameterized in spirit
+    # even though the WHERE clause itself is assembled with an f-string.
+    count_sql = f"SELECT COUNT(*) FROM stories WHERE {where_sql}"  # noqa: S608
+    total = conn.execute(count_sql, params).fetchone()[0]
+
+    select_cols = "SELECT id, topic_key, headline, summary, label, created_at, is_update_of "
+    select_tail = f"FROM stories WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"  # noqa: S608
+    rows = conn.execute(select_cols + select_tail, [*params, limit, offset]).fetchall()
+
+    return _rows_to_story_views(conn, rows), total
+
+
+def fts_escape(user_query: str) -> str:
+    """Turn free-text user input into a query FTS5 will always accept.
+
+    FTS5's query syntax has its own operators (`AND`, `NEAR`, `*`, `"`...),
+    and a member typing `patch OR notes` doesn't mean "run an OR query",
+    they mean those three words. We split on whitespace and wrap every
+    token in double quotes (escaping any literal quote by doubling it,
+    the same way SQL string literals do), so every token becomes a plain
+    phrase match and none of FTS5's operators can sneak in.
+    """
+    tokens = _FTS_TOKEN_RE.findall(user_query)
+    return " ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+
+
+def search_stories(
+    conn: sqlite3.Connection, query: str, since: datetime, limit: int, offset: int
+) -> tuple[list[StoryView], int]:
+    """Full-text search over story headlines and summaries, for `/news search`.
+
+    Ranked by `bm25` (FTS5's relevance score, where lower is better) and
+    then recency. An empty or all-whitespace query returns nothing rather
+    than matching everything, since "search for nothing" isn't a query a
+    member meant to run.
+    """
+    escaped = fts_escape(query)
+    if not escaped:
+        return [], 0
+
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM stories_fts "
+            "JOIN stories ON stories.id = stories_fts.rowid "
+            "WHERE stories_fts MATCH ? AND stories.created_at >= ?",
+            (escaped, since.isoformat()),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT stories.id, stories.topic_key, stories.headline, stories.summary, "
+            "stories.label, stories.created_at, stories.is_update_of "
+            "FROM stories_fts "
+            "JOIN stories ON stories.id = stories_fts.rowid "
+            "WHERE stories_fts MATCH ? AND stories.created_at >= ? "
+            "ORDER BY bm25(stories_fts), stories.created_at DESC "
+            "LIMIT ? OFFSET ?",
+            (escaped, since.isoformat(), limit, offset),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # fts_escape should make every query syntactically valid, but this
+        # is cheap insurance against the one FTS5 quirk we didn't think of.
+        return [], 0
+
+    return _rows_to_story_views(conn, rows), total
+
+
+def status_snapshot(
+    conn: sqlite3.Connection, now: datetime, month_start: datetime
+) -> StatusSnapshot:
+    """Everything `/newsbot status` shows, gathered in one place."""
+    digest_row = conn.execute(
+        "SELECT id, run_date, status, posted_message_ids, error_notes "
+        "FROM digests ORDER BY run_date DESC LIMIT 1"
+    ).fetchone()
+    last_digest = None
+    if digest_row is not None:
+        last_digest = DigestRow(
+            id=digest_row["id"],
+            run_date=date.fromisoformat(digest_row["run_date"]),
+            status=digest_row["status"],
+            posted_message_ids=json.loads(digest_row["posted_message_ids"]),
+            error_notes=digest_row["error_notes"],
+        )
+
+    health_rows = conn.execute(
+        "SELECT source_name, last_success_at, last_error_at, last_error, consecutive_failures "
+        "FROM source_health ORDER BY source_name"
+    ).fetchall()
+    source_health = [
+        SourceHealthRow(
+            source_name=row["source_name"],
+            last_success_at=(
+                datetime.fromisoformat(row["last_success_at"]) if row["last_success_at"] else None
+            ),
+            last_error_at=(
+                datetime.fromisoformat(row["last_error_at"]) if row["last_error_at"] else None
+            ),
+            last_error=row["last_error"],
+            consecutive_failures=row["consecutive_failures"],
+        )
+        for row in health_rows
+    ]
+
+    since_24h = (now - _ONE_DAY).isoformat()
+    items_last_24h = conn.execute(
+        "SELECT COUNT(*) FROM items WHERE collected_at >= ?", (since_24h,)
+    ).fetchone()[0]
+    stories_last_24h = conn.execute(
+        "SELECT COUNT(*) FROM stories WHERE created_at >= ?", (since_24h,)
+    ).fetchone()[0]
+
+    month_row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
+        "FROM digests WHERE created_at >= ? AND created_at <= ?",
+        (month_start.isoformat(), now.isoformat()),
+    ).fetchone()
+
+    return StatusSnapshot(
+        last_digest=last_digest,
+        source_health=source_health,
+        items_last_24h=items_last_24h,
+        stories_last_24h=stories_last_24h,
+        month_input_tokens=month_row[0],
+        month_output_tokens=month_row[1],
+    )
