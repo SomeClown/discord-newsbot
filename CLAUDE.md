@@ -13,7 +13,8 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
   `requirements.txt` is the lock file; regenerate it with `scripts/lock.sh`, never by hand.
 - **Gate:** `ruff check . && ruff format --check . && pytest -q` (venv active)
 - Any prompt change needs an owner-reviewed `/newsbot preview` before merging.
-- **Status (2026-09-23):** M1 steps 1–12 done (350 tests green; `config.example.yaml` holds the approved source list). Paused at step 13, the first live run, while the owner sets up billing for the Anthropic and Brave keys (`.env.dev`). Open items for `qa`: URLs with userinfo (`host@other`), and whether Discord counts embed limits in UTF-16 units.
+- **Status (2026-09-24):** M1 complete. First live preview reviewed and approved by the owner (Checkpoint D, first pass). Next: M2 (steps 14–17, the Discord bot). Open items for `qa`: URLs with userinfo (`host@other`), and whether Discord counts embed limits in UTF-16 units.
+- **Content policy (owner, 2026-09-24):** guides and walkthroughs, deals and sales, and Shift/redeem codes are all wanted in the digest. Don't tune the prompt to drop them.
 
 ## Documentation voice (read this before writing a docstring)
 
