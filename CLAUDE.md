@@ -13,7 +13,7 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
   `requirements.txt` is the lock file; regenerate it with `scripts/lock.sh`, never by hand.
 - **Gate:** `ruff check . && ruff format --check . && pytest -q` (venv active)
 - Any prompt change needs an owner-reviewed `/newsbot preview` before merging.
-- **Status (2026-09-24):** M1 complete. First live preview reviewed and approved by the owner (Checkpoint D, first pass). Next: M2 (steps 14–17, the Discord bot). Open items for `qa`: URLs with userinfo (`host@other`), and whether Discord counts embed limits in UTF-16 units.
+- **Status (2026-09-24):** M1 complete. M2 steps 14–16 done (437 tests green). Next: step 17, the owner walkthrough in a private test guild, waiting on the owner's dev bot token (`.env.dev`) and guild/channel IDs (`config.dev.yaml`). Step 17 must also confirm: a real Administrator can run `/newsbot`; `tree.sync` succeeds; DiscordPublisher posts header + thread + embeds; pager and confirm buttons work end to end; a whitespace-only `/news search` behaves sensibly. Open items for `qa`: URLs with userinfo (`host@other`), and whether Discord counts embed limits in UTF-16 units.
 - **Content policy (owner, 2026-09-24):** guides and walkthroughs, deals and sales, and Shift/redeem codes are all wanted in the digest. Don't tune the prompt to drop them.
 
 ## Documentation voice (read this before writing a docstring)
