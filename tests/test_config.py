@@ -305,3 +305,10 @@ def test_secrets_never_leak_in_repr():
     assert "super-secret-token" not in text
     assert "super-secret-key" not in text
     assert "super-secret-brave" not in text
+
+
+def test_bluesky_handle_leading_at_is_stripped():
+    from newsbot.config import load_secrets
+
+    env = {"ANTHROPIC_API_KEY": "x", "BLUESKY_HANDLE": "@someone.bsky.social"}
+    assert load_secrets(env, require_discord=False).bluesky_handle == "someone.bsky.social"

@@ -237,6 +237,8 @@ def load_secrets(env: Mapping[str, str] = os.environ, *, require_discord: bool =
         discord_token=discord_token,
         anthropic_api_key=anthropic_key,
         brave_api_key=env.get("BRAVE_API_KEY") or None,
-        bluesky_handle=env.get("BLUESKY_HANDLE") or None,
+        # People copy their handle from the profile page, "@" and all. Bluesky's
+        # login wants it bare, and says so with an unhelpful 400.
+        bluesky_handle=(env.get("BLUESKY_HANDLE") or "").strip().lstrip("@") or None,
         bluesky_app_password=env.get("BLUESKY_APP_PASSWORD") or None,
     )

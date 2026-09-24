@@ -38,7 +38,7 @@ def test_canonicalize_strips_known_tracking_params():
 def test_canonicalize_preserves_youtube_v_param():
     assert (
         canonicalize("https://www.youtube.com/watch?v=abc123")
-        == "https://www.youtube.com/watch?v=abc123"
+        == "https://youtube.com/watch?v=abc123"
     )
 
 
@@ -282,3 +282,9 @@ def test_normalize_in_batch_dedupe_official_beats_press_beats_community():
     result = normalize(items, known_urls=lambda urls: set(), now=NOW, lookback=timedelta(hours=24))
     assert len(result) == 1
     assert result[0].title == "best"
+
+
+def test_canonicalize_strips_leading_www():
+    assert canonicalize("https://www.pcgamesn.com/diablo-4/x") == canonicalize(
+        "https://pcgamesn.com/diablo-4/x"
+    )

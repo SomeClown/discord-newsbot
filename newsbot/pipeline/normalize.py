@@ -61,6 +61,10 @@ def canonicalize(url: str) -> str | None:
         return None
 
     host = parts.hostname.lower()
+    # "www.pcgamesn.com" and "pcgamesn.com" are the same article wearing a
+    # different hat; the first live run posted both, side by side, like a
+    # typo with confidence.
+    host = host.removeprefix("www.")
     try:
         # `.port` is validated lazily, so "example.com:99999" sails through
         # urlsplit() and only explodes here. Found by test-engineer, not by me,
