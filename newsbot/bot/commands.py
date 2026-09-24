@@ -91,7 +91,11 @@ def has_admin_permission(permissions: discord.Permissions, admin_permission: str
     interaction itself rather than anything we could accidentally trust
     from the client.
     """
-    return getattr(permissions, admin_permission, False)
+    # Discord usually resolves Administrator into every bit before the
+    # interaction reaches us, but "usually" is carrying a lot of weight in
+    # that sentence. Locking the server owner out of their own bot's admin
+    # commands would be a memorable bug; checking one extra flag is cheap.
+    return bool(permissions.administrator or getattr(permissions, admin_permission, False))
 
 
 def estimate_spend_usd(input_tokens: int, output_tokens: int) -> float:

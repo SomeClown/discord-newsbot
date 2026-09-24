@@ -68,18 +68,12 @@ def test_has_admin_permission_empty_permissions_in_dm_context_is_false():
     assert has_admin_permission(discord.Permissions.none(), "manage_guild") is False
 
 
-def test_has_admin_permission_administrator_flag_alone_does_not_imply_other_flags():
-    # discord.Permissions.administrator is just one more bit in the
-    # bitmask here, not a bypass -- Permissions doesn't compute "implies
-    # every other permission" the way Discord's own client-side display
-    # does. In production, interaction.permissions is the fully resolved
-    # value Discord's API already sends (which does reflect an
-    # administrator's effective permissions), so this documents this
-    # function's behavior against the raw object, not a claim about what
-    # real admins see. Worth a second look if `/newsbot` ever denies an
-    # actual server administrator (see CLAUDE.md open items).
+def test_has_admin_permission_administrator_flag_alone_grants_access():
+    # Administrator is treated as a bypass explicitly, rather than trusting
+    # Discord to have folded it into every other bit before the interaction
+    # arrives.
     perms = discord.Permissions(administrator=True)
-    assert has_admin_permission(perms, "manage_guild") is False
+    assert has_admin_permission(perms, "manage_guild") is True
 
 
 def test_has_admin_permission_configured_permission_name_variants():
