@@ -174,11 +174,17 @@ class NewsBot(discord.Client):
         self._ready_once = False
 
     async def setup_hook(self) -> None:
+        # Imported here, not at module scope: commands.py imports NewsBot
+        # (for type hints on the factories' `bot` argument), and importing
+        # it back at module scope would make a circular import out of what
+        # is otherwise a plain layering.
+        from newsbot.bot.commands import make_news_group
+
         self.http_client = httpx.AsyncClient(headers={"User-Agent": _USER_AGENT})
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())
 
-        # Command groups are registered here by bot/commands.py's factories,
-        # added in steps 15 and 16.
+        self.tree.add_command(make_news_group(self.cfg, self.db_path))
+        # The /newsbot admin group is registered here too, added in step 16.
 
         guild = discord.Object(id=self.cfg.guild_id)
         self.tree.copy_global_to(guild=guild)
