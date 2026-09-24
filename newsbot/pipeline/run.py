@@ -119,10 +119,28 @@ class PipelineOutcome:
 _run_lock = asyncio.Lock()
 
 
-def _local_run_date(now: datetime, timezone: str) -> date:
+def local_run_date(now: datetime, timezone: str) -> date:
+    """The local calendar date `now` falls on in `timezone`.
+
+    Not UTC's date -- the digest is keyed by the *local* day, because the
+    owner reads it in the morning, not at midnight UTC. Near midnight UTC
+    the two dates genuinely differ (a run at 02:00 UTC is still "yesterday"
+    at 09:00 America/Los_Angeles), which is exactly the case worth a test.
+    """
     from zoneinfo import ZoneInfo
 
     return now.astimezone(ZoneInfo(timezone)).date()
+
+
+def is_run_in_progress() -> bool:
+    """True if `_run_lock` is currently held by another run.
+
+    Exists so the bot layer (`/newsbot run-now`) can give a quick "a run
+    is already going" reply instead of blocking on the lock for however
+    long a pipeline run takes -- nobody wants a slash command to sit there
+    looking hung for two minutes.
+    """
+    return _run_lock.locked()
 
 
 def _normalize_sync(
@@ -288,7 +306,7 @@ async def run_daily(
 
 
 async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
-    run_date = _local_run_date(deps.now(), deps.cfg.digest.timezone)
+    run_date = local_run_date(deps.now(), deps.cfg.digest.timezone)
     try:
         rendered, _items, _stories, status, notes, usage, _results = await build_digest(
             deps, run_date
@@ -304,7 +322,7 @@ async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
 async def _run_post(
     deps: Deps, publisher: Publisher, *, force: bool, sleep: Callable[[float], Awaitable[None]]
 ) -> PipelineOutcome:
-    run_date = _local_run_date(deps.now(), deps.cfg.digest.timezone)
+    run_date = local_run_date(deps.now(), deps.cfg.digest.timezone)
 
     digest_id = await asyncio.to_thread(_claim_sync, deps.db_path, run_date, force, deps.now)
     if digest_id is None:
@@ -617,6 +635,8 @@ __all__ = [
     "StubLLM",
     "build_digest",
     "build_fixture_collectors",
+    "is_run_in_progress",
+    "local_run_date",
     "main",
     "run_daily",
 ]
