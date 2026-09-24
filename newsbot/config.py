@@ -28,7 +28,9 @@ Trust = Literal["official", "press", "community"]
 
 _TOPIC_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-_MAX_TOPICS = 25  # Discord's slash-command choice limit.
+# Discord allows 25 choices per slash-command option, and /news recent spends
+# one of them on "All". Hence 24, not the round number I first wrote.
+_MAX_TOPICS = 24
 
 
 class ConfigError(Exception):
@@ -168,7 +170,10 @@ def load_config(path: str | Path) -> AppConfig:
     # identifier so they're safe to use as SQLite values and slash-command
     # choice values alike.
     if len(cfg.topics) > _MAX_TOPICS:
-        errors.append(f"{len(cfg.topics)} topics exceeds the Discord choice limit of {_MAX_TOPICS}")
+        errors.append(
+            f"{len(cfg.topics)} topics exceeds the limit of {_MAX_TOPICS} "
+            '(Discord allows 25 choices; one is "All")'
+        )
     seen_keys: set[str] = set()
     for topic in cfg.topics:
         if not _TOPIC_KEY_RE.match(topic.key):

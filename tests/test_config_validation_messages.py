@@ -80,7 +80,7 @@ sources:
     with pytest.raises(ConfigError) as exc_info:
         _load_with(tmp_path, text)
     message = str(exc_info.value)
-    assert "26 topics exceeds the Discord choice limit of 25" in message
+    assert "26 topics exceeds the limit of 24" in message
 
 
 def test_pydantic_level_error_message_names_the_field_path(tmp_path):
