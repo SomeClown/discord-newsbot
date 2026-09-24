@@ -1,19 +1,27 @@
-"""The slash commands: `/news recent` and `/news search`.
+"""The slash commands: `/news recent`, `/news search`, and the `/newsbot` admin group.
 
-Both are built by a factory function (`make_news_group`) rather than
-declared as a module-level class, because the game choices on
-`/news recent` come from `cfg.topics` -- they can't exist before the
-config has loaded. `setup_hook` calls the factory once, after the config
-is in hand, and hands the result to the command tree.
+Both groups are built by factory functions (`make_news_group`,
+`make_admin_group`) rather than declared as module-level classes, because
+neither one can exist before the config has loaded: the game choices on
+`/news recent` come from `cfg.topics`, and the admin group's
+`default_permissions` comes from `cfg.admin_permission`. `setup_hook`
+calls both factories once, after the config is in hand, and hands the
+result to the command tree.
 
-Every handler calls `interaction.response.defer()` inside the
-Discord-mandated 3 seconds, then does the slow database read after.
+Every handler that touches the database or the pipeline calls
+`interaction.response.defer()` (or sends its first response) inside the
+Discord-mandated 3 seconds, then does the slow part after. And every admin
+handler re-checks the caller's permissions itself (SPEC section 9): Discord
+hides `/newsbot` from non-admins in its UI via `default_permissions`, but
+UI hiding isn't authorization, and a stale client or a forged interaction
+doesn't get to find that out the hard way.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -22,12 +30,17 @@ import discord
 from discord import app_commands
 from discord.app_commands import Choice
 
-from newsbot.bot.format import render_story_page
-from newsbot.bot.views import PagerView
+from newsbot.bot.client import DiscordPublisher, NewsBot, NullPublisher
+from newsbot.bot.format import render_status, render_story_page
+from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, Topic
+from newsbot.pipeline.run import RunMode, is_run_in_progress, local_run_date, run_daily
+from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
 from newsbot.store.db import connect
-from newsbot.store.models import StoryView
-from newsbot.store.repo import query_stories, search_stories
+from newsbot.store.models import DigestRow, StatusSnapshot, StoryView
+from newsbot.store.repo import get_digest, query_stories, search_stories, status_snapshot
+
+logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 6
 _GAME_ALL = "all"
@@ -56,6 +69,44 @@ def resolve_query_args(
     return topic_keys, since, label
 
 
+def needs_confirmation(existing: DigestRow | None) -> bool:
+    """True if `/newsbot run-now` should ask before running again.
+
+    Only `ok`/`partial` (today already posted) needs confirming. `failed`
+    means today never actually made it to Discord, so a plain re-run is
+    fine; no row at all means there's nothing to confirm over. A `pending`
+    row is a different, crash-recovery situation that `run-now`'s caller
+    handles before this function ever gets consulted.
+    """
+    return existing is not None and existing.status in ("ok", "partial")
+
+
+def has_admin_permission(permissions: discord.Permissions, admin_permission: str) -> bool:
+    """The server-side half of the admin check.
+
+    Discord's `default_permissions` on the command group only controls
+    what the client *shows*; it isn't enforced against every possible way
+    an interaction can reach the bot. This is what actually gates the
+    handler, checked against the permissions Discord attaches to the
+    interaction itself rather than anything we could accidentally trust
+    from the client.
+    """
+    return getattr(permissions, admin_permission, False)
+
+
+def estimate_spend_usd(input_tokens: int, output_tokens: int) -> float:
+    """Rough running Claude spend from token counts, at Haiku 4.5 list pricing.
+
+    "Rough" is doing some work in that sentence: this is list price times
+    tokens, not an invoice. Good enough to notice "why is this $40" long
+    before the actual bill would tell you.
+    """
+    return (
+        input_tokens * PRICE_IN_PER_MTOK / 1_000_000
+        + output_tokens * PRICE_OUT_PER_MTOK / 1_000_000
+    )
+
+
 def _page_count(total: int) -> int:
     return max((total + _PAGE_SIZE - 1) // _PAGE_SIZE, 1)
 
@@ -80,6 +131,16 @@ def _search_stories_sync(
 ) -> tuple[list[StoryView], int]:
     with closing(connect(db_path)) as conn:
         return search_stories(conn, query, since, limit, offset)
+
+
+def _get_digest_sync(db_path: str, run_date) -> DigestRow | None:
+    with closing(connect(db_path)) as conn:
+        return get_digest(conn, run_date)
+
+
+def _status_snapshot_sync(db_path: str, now: datetime, month_start: datetime) -> StatusSnapshot:
+    with closing(connect(db_path)) as conn:
+        return status_snapshot(conn, now, month_start)
 
 
 # --- Paging glue shared by /news recent and /news search ---
@@ -179,4 +240,110 @@ def make_news_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
     return group
 
 
-__all__ = ["make_news_group", "resolve_query_args"]
+# --- /newsbot ---
+
+
+def _admin_denial_message() -> str:
+    return "You don't have permission to run this."
+
+
+async def _check_admin(interaction: discord.Interaction, admin_permission: str) -> bool:
+    """Deny and log if `interaction.user` lacks `admin_permission`; return whether to proceed."""
+    if has_admin_permission(interaction.permissions, admin_permission):
+        return True
+    logger.warning(
+        "admin command denied",
+        extra={
+            "user_id": interaction.user.id,
+            "command": interaction.command.qualified_name if interaction.command else None,
+        },
+    )
+    await interaction.response.send_message(_admin_denial_message(), ephemeral=True)
+    return False
+
+
+def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
+    """Build the `/newsbot status | run-now | preview` group.
+
+    `default_permissions` only drives what Discord's own client shows;
+    every handler below re-checks with `_check_admin` regardless (SPEC
+    section 9). `bot` gives the handlers `build_deps()` for a fresh
+    `Deps`, and is itself the `discord.Client` `DiscordPublisher` sends
+    through.
+    """
+    permissions = discord.Permissions(**{cfg.admin_permission: True})
+    group = app_commands.Group(
+        name="newsbot",
+        description="Admin: status, manual runs and previews.",
+        default_permissions=permissions,
+    )
+
+    @group.command(name="status", description="Last digest, source health, and estimated spend.")
+    async def status(interaction: discord.Interaction) -> None:
+        if not await _check_admin(interaction, cfg.admin_permission):
+            return
+        await interaction.response.defer(ephemeral=True)
+        now = datetime.now(UTC)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        snap = await asyncio.to_thread(_status_snapshot_sync, bot.db_path, now, month_start)
+        spend = estimate_spend_usd(snap.month_input_tokens, snap.month_output_tokens)
+        await interaction.followup.send(embed=render_status(snap, spend), ephemeral=True)
+
+    @group.command(name="run-now", description="Run the pipeline and post the digest now.")
+    async def run_now(interaction: discord.Interaction) -> None:
+        if not await _check_admin(interaction, cfg.admin_permission):
+            return
+        if is_run_in_progress():
+            await interaction.response.send_message("A run is in progress.", ephemeral=True)
+            return
+
+        run_date = local_run_date(datetime.now(UTC), cfg.digest.timezone)
+        existing = await asyncio.to_thread(_get_digest_sync, bot.db_path, run_date)
+
+        force = False
+        if needs_confirmation(existing):
+            view = ConfirmView(interaction.user.id)
+            await interaction.response.send_message(
+                "Today's digest already posted. Post again?", view=view, ephemeral=True
+            )
+            await view.wait()
+            if not view.value:
+                await interaction.edit_original_response(content="Cancelled.", view=None)
+                return
+            force = True
+            await interaction.edit_original_response(content="Running...", view=None)
+        else:
+            await interaction.response.defer(ephemeral=True)
+
+        deps = bot.build_deps()
+        publisher = DiscordPublisher(bot, cfg.digest.channel_id, run_date)
+        outcome = await run_daily(deps, publisher, mode=RunMode.POST, force=force)
+        await interaction.followup.send(f"Run finished: {outcome.status}", ephemeral=True)
+
+    @group.command(name="preview", description="Run the pipeline; show the digest only to you.")
+    async def preview(interaction: discord.Interaction) -> None:
+        if not await _check_admin(interaction, cfg.admin_permission):
+            return
+        await interaction.response.defer(ephemeral=True)
+        deps = bot.build_deps()
+        outcome = await run_daily(deps, NullPublisher(), mode=RunMode.PREVIEW)
+        if outcome.rendered is None:
+            await interaction.followup.send(
+                f"Preview failed: {'; '.join(outcome.notes)}", ephemeral=True
+            )
+            return
+        await interaction.followup.send(outcome.rendered.header, ephemeral=True)
+        for message in outcome.rendered.embed_messages:
+            await interaction.followup.send(embeds=message, ephemeral=True)
+
+    return group
+
+
+__all__ = [
+    "estimate_spend_usd",
+    "has_admin_permission",
+    "make_admin_group",
+    "make_news_group",
+    "needs_confirmation",
+    "resolve_query_args",
+]

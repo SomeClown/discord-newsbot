@@ -178,13 +178,13 @@ class NewsBot(discord.Client):
         # (for type hints on the factories' `bot` argument), and importing
         # it back at module scope would make a circular import out of what
         # is otherwise a plain layering.
-        from newsbot.bot.commands import make_news_group
+        from newsbot.bot.commands import make_admin_group, make_news_group
 
         self.http_client = httpx.AsyncClient(headers={"User-Agent": _USER_AGENT})
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())
 
         self.tree.add_command(make_news_group(self.cfg, self.db_path))
-        # The /newsbot admin group is registered here too, added in step 16.
+        self.tree.add_command(make_admin_group(self.cfg, self))
 
         guild = discord.Object(id=self.cfg.guild_id)
         self.tree.copy_global_to(guild=guild)

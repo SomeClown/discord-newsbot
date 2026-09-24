@@ -1,9 +1,9 @@
-"""Buttons: the results pager on `/news`.
+"""Buttons: the results pager on `/news`, and the confirm dialog on `/newsbot run-now`.
 
-The pager's one real worry is that a button click is its own interaction,
-and Discord will happily let anyone in the channel click a button someone
+Both views share one worry: a button click is its own interaction, and
+Discord will happily let anyone in the channel click a button someone
 else's ephemeral message put in front of them. `is_command_owner` is the
-one-line check the view builds on, pulled out on its own so it can be
+one-line check both views build on, pulled out on its own so it can be
 tested without a fake `discord.Interaction` -- it's just "does this id
 match that id", and testing it as anything fancier would be testing
 discord.py, not us.
@@ -79,4 +79,42 @@ class PagerView(discord.ui.View):
         await self._turn_page(interaction, 1)
 
 
-__all__ = ["PagerView", "is_command_owner"]
+class ConfirmView(discord.ui.View):
+    """A yes/no dialog. `/newsbot run-now` uses it to double-check a re-post.
+
+    `value` starts `None` (nobody's answered yet), then becomes `True` or
+    `False` once a button's clicked; the caller does `await view.wait()`
+    and then reads `value`. `None` after `wait()` returns means the
+    600s -- sorry, this one's 60s, a confirmation nobody's answering in a
+    minute isn't getting answered -- timeout hit instead.
+    """
+
+    def __init__(self, owner_id: int, *, timeout: float = 60) -> None:
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.value: bool | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not is_command_owner(interaction.user.id, self.owner_id):
+            await interaction.response.send_message(_OWNER_ONLY_MESSAGE, ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Post again", style=discord.ButtonStyle.danger)
+    async def confirm_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.value = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.value = False
+        await interaction.response.defer()
+        self.stop()
+
+
+__all__ = ["ConfirmView", "PagerView", "is_command_owner"]
