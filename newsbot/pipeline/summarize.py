@@ -128,10 +128,15 @@ class AnthropicLLM:
             response = await self._client.messages.parse(
                 model=self._model,
                 max_tokens=_MAX_TOKENS,
-                temperature=_TEMPERATURE,
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 output_format=StoriesOut,
+                # `temperature` isn't a `messages.parse()` kwarg anymore (SDK
+                # 1.x dropped sampling params from the method signatures
+                # entirely, not just for the newer models that reject them
+                # outright) -- `extra_body` is the escape hatch for a model,
+                # like Haiku 4.5, that still honors it.
+                extra_body={"temperature": _TEMPERATURE},
             )
         except anthropic.RateLimitError as exc:
             raise LLMError(f"rate limited: {exc}") from exc

@@ -16,7 +16,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import anthropic
-import httpx
+import httpx2
 import pytest
 from pydantic import ValidationError
 
@@ -80,12 +80,17 @@ def _llm() -> AnthropicLLM:
     return AnthropicLLM("sk-test-not-a-real-key")
 
 
-def _request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+def _request() -> httpx2.Request:
+    # SDK 1.x's exception classes wrap httpx2 Request/Response objects now,
+    # not the plain `httpx` this project still uses for its own collectors.
+    # Reaching for plain `httpx` here would build an exception that doesn't
+    # match what the real SDK ever raises -- the exact mix-up the SDK
+    # upgrade guide warns about.
+    return httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 
-def _response(status_code: int) -> httpx.Response:
-    return httpx.Response(status_code, request=_request())
+def _response(status_code: int) -> httpx2.Response:
+    return httpx2.Response(status_code, request=_request())
 
 
 def _parsed_message(

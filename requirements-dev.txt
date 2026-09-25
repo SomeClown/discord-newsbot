@@ -3,3 +3,10 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 ruff==0.16.8
+
+# httpx2 already arrives transitively via anthropic (it's the SDK's HTTP
+# layer as of 1.x), but tests/test_summarize_retry_accounting.py imports it
+# directly to build the Request/Response objects the SDK's exception
+# classes wrap -- declaring it here is just so that import doesn't look
+# like an unpinned surprise to the next person reading this file.
+httpx2==2.13.1

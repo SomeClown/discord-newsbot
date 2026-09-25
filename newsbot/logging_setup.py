@@ -65,6 +65,10 @@ def configure_logging(level: str = "INFO") -> None:
     # included in some cases. WARNING is plenty for a bot this small, and
     # it keeps auth headers out of the logs by construction.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # anthropic 1.x brought its own HTTP library, which brought its own
+    # logger, which I didn't know about until it started narrating every
+    # Claude call in the test guild. Same treatment as its older sibling.
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
     logging.getLogger("discord").setLevel(logging.WARNING)
     # apscheduler logs its heartbeat job at INFO every 60s (see
     # bot/client.py's _heartbeat_job) -- left alone, that's a log line a
