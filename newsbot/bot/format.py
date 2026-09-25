@@ -29,6 +29,8 @@ from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
+from newsbot.shift.decide import CodeCandidate
+from newsbot.shift.match import is_code
 from newsbot.store.models import StatusSnapshot, StoryView
 
 _DESCRIPTION_LIMIT = 4096
@@ -38,6 +40,13 @@ _MAX_EMBEDS_PER_MESSAGE = 10
 _HEADER_LIMIT = 2000
 _MAX_LINKS_SHOWN = 3
 _MAX_FIELD_VALUE = 1024
+# Discord's plain-message content cap (as opposed to an embed's much bigger
+# limits above) -- code alerts are plain messages, not embeds, since a code
+# is meant to be select-and-copy-able, and an embed's description puts a
+# faint background behind text that makes triple-clicking to select it a
+# worse experience than it needs to be.
+_ALERT_CONTENT_LIMIT = 2000
+_CONTINUATION_HEADER = "**(continued)**"
 
 _LABEL_ORDER = {"official": 0, "reported": 1, "rumor": 2}
 _LABEL_MARKER = {"official": "🟢 OFFICIAL", "reported": "🟡 REPORTED", "rumor": "🔴 RUMOR"}
@@ -411,6 +420,95 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     return embed
 
 
+@dataclass
+class RenderedAlert:
+    """One Discord message's worth of a SHiFT code alert batch.
+
+    `codes` is that message's own slice of the codes it announces -- when a
+    batch splits across several messages (see `render_code_alerts`),
+    `shift/sweep.py` needs to know which codes to mark `posted` against
+    which message id, and a code that landed in message 2 shouldn't get
+    stamped with message 1's id just because it was easier to track one
+    running total.
+    """
+
+    content: str
+    codes: list[str]
+    ping: bool
+
+
+def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
+    suffix = "s" if plural else ""
+    if all(c.golden for c in candidates):
+        return f"New Golden Key code{suffix}"
+    return f"New SHiFT code{suffix}"
+
+
+def _alert_block(candidate: CodeCandidate, *, golden_prefix: bool) -> str:
+    # Checked, not just trusted: this is the one place a code goes out to
+    # Discord, and a code that somehow isn't shaped like a code (a bug
+    # upstream, not a real scenario) is worth a loud failure here rather
+    # than a quietly wrong alert. A plain `assert` strips out under `-O`;
+    # this doesn't get to.
+    if not is_code(candidate.code):
+        raise ValueError(f"not a SHiFT code: {candidate.code!r}")
+    prefix = "Golden Key: " if golden_prefix and candidate.golden else ""
+    safe_url = _safe_link(candidate.item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    return f"```\n{candidate.code}\n```\n{prefix}{esc(candidate.source_name)}{link}"
+
+
+def render_code_alerts(
+    candidates: list[CodeCandidate], *, ping: bool, test: bool = False
+) -> list[RenderedAlert]:
+    """Render a batch of new SHiFT codes into one or more alert messages.
+
+    One ping covers the whole batch (A4): only the first message's header
+    carries `@everyone` (and only if `ping` is true to begin with); every
+    continuation starts with `_CONTINUATION_HEADER` instead and never
+    pings, no matter how many messages the batch spills into. Mixed
+    golden/non-golden batches (A3) keep the plain "New SHiFT code(s)"
+    title but prefix each golden entry with "Golden Key:" so it doesn't
+    read as an ordinary code.
+    """
+    if not candidates:
+        return []
+
+    mixed = any(c.golden for c in candidates) and not all(c.golden for c in candidates)
+    title = _alert_title(candidates, plural=len(candidates) > 1)
+    test_prefix = "[TEST] " if test else ""
+    first_header = ("@everyone " if ping else "") + f"**{test_prefix}{title}**"
+
+    entries = [(c.code, _alert_block(c, golden_prefix=mixed)) for c in candidates]
+
+    # Greedily pack entries into batches under Discord's 2000-char message
+    # cap, counting each batch's own header (the first batch's is longer,
+    # thanks to "@everyone " and the title) plus a "\n\n" joiner per entry.
+    batches: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_len = 0
+    for code, block in entries:
+        header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+        block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
+        if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append((code, block))
+        current_len += block_len
+    if current:
+        batches.append(current)
+
+    rendered = []
+    for i, batch in enumerate(batches):
+        header = first_header if i == 0 else _CONTINUATION_HEADER
+        content = "\n\n".join([header, *(block for _, block in batch)])
+        rendered.append(
+            RenderedAlert(content=content, codes=[code for code, _ in batch], ping=ping and i == 0)
+        )
+    return rendered
+
+
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
@@ -432,8 +530,10 @@ def to_text(r: RenderedDigest) -> str:
 
 
 __all__ = [
+    "RenderedAlert",
     "RenderedDigest",
     "esc",
+    "render_code_alerts",
     "render_digest",
     "render_status",
     "render_story_page",
