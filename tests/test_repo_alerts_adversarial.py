@@ -47,18 +47,17 @@ def test_claim_codes_empty_list_writes_no_rows(conn):
     assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0
 
 
-def test_claim_codes_empty_list_still_spends_a_ping_when_pinged_true(conn):
-    # Pinning current behavior, not endorsing it: claim_codes doesn't
-    # guard against "pinged=True with nothing to claim" -- it just does
-    # what it's told, spending a ping with no code recorded to show for
-    # it. shift/decide.py's contract (ping = bool(to_post) and ...) is
-    # supposed to make this combination impossible in practice, but
-    # nothing at this layer enforces that; a caller bug upstream could
-    # burn the daily ping budget on an empty batch. Worth an assertion
-    # in the caller (process_items) if one isn't already there.
+def test_claim_codes_empty_list_does_not_spend_a_ping_even_when_pinged_true(conn):
+    # No longer pinning the old behavior: an empty `codes` now returns
+    # before touching `alert_state` at all (plan step 8's process_items
+    # is supposed to make "pinged=True with nothing to claim" impossible
+    # in the first place, via `ping = bool(to_post) and ...`, but this
+    # layer guards it too rather than trusting every future caller to get
+    # that right).
     repo.claim_codes(conn, [], pinged=True, local_day="2026-09-25", now=_now)
     state = repo.get_alert_state(conn)
-    assert state.ping_count == 1
+    assert state.ping_count == 0
+    assert state.ping_day is None
     assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0
 
 
