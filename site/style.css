@@ -1,0 +1,45 @@
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d1d1b;
+  --muted: #6b6a66;
+  --link: #3a5ccc;
+  --code-bg: #efede8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171a;
+    --fg: #e8e6e1;
+    --muted: #9a988f;
+    --link: #8aa4ff;
+    --code-bg: #26262b;
+  }
+}
+
+html { background: var(--bg); color: var(--fg); }
+
+body {
+  margin: 0;
+  font: 17px/1.6 ui-serif, Georgia, "Times New Roman", serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2.5rem 1rem 4rem;
+}
+
+h1 { font-size: 2rem; line-height: 1.2; margin: 0.5rem 0 0.25rem; }
+h2 { font-size: 1.2rem; margin: 2rem 0 0.5rem; }
+
+a { color: var(--link); }
+
+code {
+  font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+
+.nav, .meta, .sig { color: var(--muted); font-size: 0.9rem; }
+.sig { margin-top: 2.5rem; font-style: italic; }

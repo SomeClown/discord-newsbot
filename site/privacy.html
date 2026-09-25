@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy · discord-newsbot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<p class="nav"><a href="index.html">discord-newsbot</a> · <a href="terms.html">Terms of Service</a></p>
+
+<h1>Privacy Policy</h1>
+<p class="meta">Effective September 25, 2026</p>
+
+<p>This page exists because Discord asks bots to have one, and I'm nothing if not compliant with forms. The honest summary: this bot reads the gaming news so you don't have to, and it is remarkably uninterested in you.</p>
+
+<h2>What it collects about you</h2>
+<p>Almost nothing, and not for lack of opportunity. The bot doesn't have Discord's "Message Content" permission, so it can't read your messages. It doesn't look at the member list, your status, or what you're playing.</p>
+<p>The one exception: if you try an admin-only <code>/newsbot</code> command without the permissions for it, the bot writes your Discord user ID into its log, next to the command you tried. That's so I can tell a curious member from a bug. It's never posted anywhere, and the log rotates itself out after roughly 30 MB of other, equally riveting entries.</p>
+<p>When you run <code>/news recent</code> or <code>/news search</code>, the bot answers you and forgets you. It doesn't keep a record of who searched for what. (Your search for "Palworld lawsuit" is between you and your conscience.)</p>
+
+<h2>What it does collect</h2>
+<p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, a few subreddits, Bluesky, and a web search. It keeps those items and their AI-written summaries for 90 days, then deletes them. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice. The database gets backed up nightly; backups are kept for a week.</p>
+
+<h2>Who else sees what</h2>
+<ul>
+<li><strong>Anthropic</strong> receives the public news text so Claude can summarize it. No information about you is included, because the bot doesn't have any.</li>
+<li><strong>Brave Search</strong> receives a handful of search phrases a day, like "Borderlands 4 news."</li>
+<li><strong>Discord</strong> handles everything the bot posts and every command you run, under <a href="https://discord.com/privacy">Discord's own privacy policy</a>.</li>
+<li><strong>DigitalOcean</strong> hosts the server it all runs on.</li>
+</ul>
+<p>Nothing is sold, shared for advertising, or used to build a profile of anyone. I couldn't monetize this if I tried, and believe me, I've got the unfinished side projects to prove it.</p>
+
+<h2>Your choices</h2>
+<p>Don't want the bot anywhere near you? Mute its channel, ignore its commands, or ask a server admin to remove it. If you'd like that one possible log line with your ID deleted, open an issue at the link below and I'll delete it by hand, feeling slightly silly the whole time.</p>
+
+<h2>Kids</h2>
+<p>The bot isn't aimed at anyone under 13, which is also Discord's minimum age.</p>
+
+<h2>Changes and contact</h2>
+<p>If this changes, the new version goes on this page with a new date at the top. The code is public, so you can check my homework: <a href="https://github.com/SomeClown/discord-newsbot">github.com/SomeClown/discord-newsbot</a>. Questions or requests go to <a href="https://github.com/SomeClown/discord-newsbot/issues">its issue tracker</a>.</p>
+
+<p class="sig">— Teren Bryson, sole proprietor of one (1) news bot</p>
+</main>
+</body>
+</html>
