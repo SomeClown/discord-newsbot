@@ -347,6 +347,44 @@ def test_example_config_loads(monkeypatch):
     assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
 
 
+def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):
+    # The entire `alerts:` block in config.example.yaml is commented out
+    # (plan step 11: shown, not enabled, since it names a real
+    # @everyone-capable feature) -- loading the example file as-is should
+    # produce exactly AlertsCfg()'s untouched defaults, not whatever the
+    # commented-out values happen to say.
+    from newsbot.config import AlertsCfg
+
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(EXAMPLE)
+    assert cfg.alerts == AlertsCfg()
+    assert cfg.alerts.enabled is False
+
+
+def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(monkeypatch):
+    # The example file's comment block (interval_minutes: 60,
+    # max_item_age_hours: 48, max_pings_per_day: 3, allow_test_command:
+    # false) is meant to describe AlertsCfg's real defaults for an owner
+    # who's about to uncomment it -- if config.py's defaults ever drift
+    # from that comment, this catches the documentation going stale
+    # rather than an owner finding out by uncommenting a wrong number.
+    from newsbot.config import AlertsCfg
+
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    example_text = EXAMPLE.read_text()
+    alerts_comment_lines = [
+        line
+        for line in example_text.splitlines()
+        if line.strip().startswith("#") and "alerts" not in line.lower()
+    ]
+    commented_block = "\n".join(alerts_comment_lines)
+    defaults = AlertsCfg()
+    assert f"interval_minutes: {defaults.interval_minutes}" in commented_block
+    assert f"max_item_age_hours: {defaults.max_item_age_hours}" in commented_block
+    assert f"max_pings_per_day: {defaults.max_pings_per_day}" in commented_block
+    assert f"allow_test_command: {str(defaults.allow_test_command).lower()}" in commented_block
+
+
 def test_topic_search_queries_default_empty():
     topic = Topic(key="palworld", name="Palworld")
     assert topic.search_queries == []

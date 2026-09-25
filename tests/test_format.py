@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from newsbot.bot.format import esc, render_digest, render_status, to_text
+import pytest
+
+from newsbot.bot.format import discord_len, esc, render_digest, render_status, to_text
 from newsbot.collectors.base import RawItem
 from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
@@ -524,3 +526,57 @@ def test_render_status_alerts_field_escapes_hostile_sweep_summary():
     value = _alerts_field(embed).value
     assert "@everyone" not in value
     assert "**pwned**" not in value
+
+
+def test_render_status_alerts_field_hostile_summary_stays_under_utf16_length():
+    # Same case as the escape test above, checked for length instead of
+    # content: escape_markdown/escape_mentions can only ever grow a
+    # string (backslashes and zero-width spaces get inserted, nothing is
+    # removed), so an already-long hostile summary could still overflow
+    # some limit even once it's safely inert.
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="@everyone " * 50 + "**pwned**" * 50,
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert discord_len(value) < 6000  # at minimum, under Discord's whole-message cap
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG (newsbot/bot/format.py _alerts_field_value / render_status): "
+        "the 'SHiFT alerts' field value is never run through "
+        "_truncate_utf16(..., _MAX_FIELD_VALUE) the way the 'Last digest' "
+        "field a few lines above it is. In production last_sweep_summary "
+        "only ever comes from shift/sweep.py's own bounded "
+        "f'{ok}/{total} sources ok, {n} new codes' string, so this isn't "
+        "reachable today -- but render_status has no way to know that, and "
+        "a single overlong or heavily-escaped last_sweep_summary (a future "
+        "caller, a corrupted alert_state row, a schema change) would "
+        "produce a field value over Discord's 1024-unit field-value limit "
+        "and make the whole /newsbot status embed fail to send. Severity: "
+        "low today (no current caller can trigger it), but it's a "
+        "real gap in a module whose entire job is 'never send an embed "
+        "Discord will reject.'"
+    ),
+)
+def test_render_status_alerts_field_value_is_truncated_to_the_field_limit():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="x" * 2000,
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert discord_len(value) <= 1024
