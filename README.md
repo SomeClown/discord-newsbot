@@ -219,5 +219,5 @@ secrets, rollback, backups, log viewing).
 
 ## License
 
-Not yet chosen. Treat this as "all rights reserved" until the owner picks
-one.
+MIT; see [LICENSE](LICENSE). Short version: do what you like with it, keep
+the notice, and don't blame me when a subreddit changes its RSS format.
