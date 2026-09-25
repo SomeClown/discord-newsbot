@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -46,6 +46,7 @@ from newsbot.bot.format import RenderedDigest, render_digest
 from newsbot.collectors.base import (
     Collector,
     CollectorResult,
+    RateLimitState,
     RawItem,
     build_collectors,
     run_collectors,
@@ -75,6 +76,9 @@ from newsbot.store.repo import (
     save_run,
 )
 
+if TYPE_CHECKING:
+    from newsbot.shift.sweep import CodeAlertPoster
+
 logger = logging.getLogger(__name__)
 
 # Discord asks for a User-Agent that identifies the bot and a way to
@@ -101,6 +105,16 @@ class Deps:
     collectors: list[Collector]
     now: Callable[[], datetime]
     alert: Callable[[str], Awaitable[None]]
+    # Shared with the SHiFT alert sweep (design.md §12) so Reddit's gap is
+    # honored across the daily job and every hourly sweep, not reset fresh
+    # each time. `None` (the default) keeps this run's own collection
+    # exactly as it's always behaved -- nothing about the daily job
+    # requires cross-call state on its own.
+    rate_limit_state: RateLimitState | None = None
+    # Set by the bot layer when alerts.enabled; None means "no poster
+    # configured", which is also every existing test's default -- the
+    # daily POST hook (added in `_run_claimed`) is a no-op without one.
+    code_alert_poster: CodeAlertPoster | None = None
 
 
 @dataclass
@@ -182,7 +196,12 @@ async def build_digest(
     cfg = deps.cfg
     now = deps.now()
 
-    results = await run_collectors(deps.collectors, deps.http, timeout_s=_COLLECT_TIMEOUT_S)
+    results = await run_collectors(
+        deps.collectors,
+        deps.http,
+        timeout_s=_COLLECT_TIMEOUT_S,
+        rate_limit_state=deps.rate_limit_state,
+    )
     for result in results:
         logger.info(
             "collector finished",
