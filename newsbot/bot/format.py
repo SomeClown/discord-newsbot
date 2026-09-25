@@ -398,7 +398,7 @@ def _alerts_field_value(alerts: AlertStatus) -> str:
     )
     if not alerts.seeded:
         value += " (seeding)"
-    return value
+    return _truncate_utf16(value, _MAX_FIELD_VALUE, suffix="…")
 
 
 def render_status(

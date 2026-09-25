@@ -673,10 +673,10 @@ class NewsBot(discord.Client):
         """
         try:
             outcome = await run_code_sweep(self.build_sweep_deps())
-            self._sweep_crash_alerted = False
             if outcome is None:
                 logger.info("code sweep skipped: run lock held")
             else:
+                self._sweep_crash_alerted = False
                 logger.info(
                     "code sweep finished",
                     extra={

@@ -396,22 +396,6 @@ async def test_sweep_job_lock_busy_outcome_none_neither_alerts_nor_clears_incorr
     assert alerts == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (newsbot/bot/client.py _sweep_job): a lock-busy sweep (outcome "
-        "is None, not a crash) unconditionally clears _sweep_crash_alerted "
-        "on the success path (`self._sweep_crash_alerted = False` runs "
-        "before the `if outcome is None` check), same as a real successful "
-        "sweep. So a genuinely still-broken sweep that happens to lose the "
-        "lock race to a daily run goes silent about its own ongoing crash "
-        "until the *next* failure, instead of staying flagged. Severity: "
-        "low (this needs another job to be holding the lock at the same "
-        "moment a broken sweep fires, and the next crash re-alerts within "
-        "one more interval) but it is a real behavior gap from what the "
-        "plan's 'once per ongoing failure' design implies."
-    ),
-)
 async def test_sweep_job_lock_busy_does_not_silently_clear_a_real_crash_flag(db_path, monkeypatch):
     cfg = _cfg(alerts_enabled=True)
     bot = NewsBot(cfg, _secrets(), db_path)

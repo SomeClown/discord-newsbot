@@ -548,25 +548,6 @@ def test_render_status_alerts_field_hostile_summary_stays_under_utf16_length():
     assert discord_len(value) < 6000  # at minimum, under Discord's whole-message cap
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (newsbot/bot/format.py _alerts_field_value / render_status): "
-        "the 'SHiFT alerts' field value is never run through "
-        "_truncate_utf16(..., _MAX_FIELD_VALUE) the way the 'Last digest' "
-        "field a few lines above it is. In production last_sweep_summary "
-        "only ever comes from shift/sweep.py's own bounded "
-        "f'{ok}/{total} sources ok, {n} new codes' string, so this isn't "
-        "reachable today -- but render_status has no way to know that, and "
-        "a single overlong or heavily-escaped last_sweep_summary (a future "
-        "caller, a corrupted alert_state row, a schema change) would "
-        "produce a field value over Discord's 1024-unit field-value limit "
-        "and make the whole /newsbot status embed fail to send. Severity: "
-        "low today (no current caller can trigger it), but it's a "
-        "real gap in a module whose entire job is 'never send an embed "
-        "Discord will reject.'"
-    ),
-)
 def test_render_status_alerts_field_value_is_truncated_to_the_field_limit():
     alerts = AlertStatus(
         enabled=True,
