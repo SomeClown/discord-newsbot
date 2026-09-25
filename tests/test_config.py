@@ -422,3 +422,139 @@ def test_bluesky_handle_leading_at_is_stripped():
 
     env = {"ANTHROPIC_API_KEY": "x", "BLUESKY_HANDLE": "@someone.bsky.social"}
     assert load_secrets(env, require_discord=False).bluesky_handle == "someone.bsky.social"
+
+
+# --- alerts: config block (v1.2 SHiFT code alerts, plan step 1) ---
+
+
+def test_alerts_missing_block_gives_disabled_defaults(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.enabled is False
+    assert cfg.alerts.interval_minutes == 60
+    assert cfg.alerts.max_item_age_hours == 48
+    assert cfg.alerts.max_pings_per_day == 3
+    assert cfg.alerts.allow_test_command is False
+
+
+def test_alerts_full_block_parses(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  interval_minutes: 30
+  max_item_age_hours: 24
+  max_pings_per_day: 5
+  allow_test_command: true
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.enabled is True
+    assert cfg.alerts.interval_minutes == 30
+    assert cfg.alerts.max_item_age_hours == 24
+    assert cfg.alerts.max_pings_per_day == 5
+    assert cfg.alerts.allow_test_command is True
+
+
+def test_alerts_unknown_key_rejected(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  role_id: 12345
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("interval_minutes", 14),
+        ("interval_minutes", 1441),
+        ("max_item_age_hours", 0),
+        ("max_pings_per_day", -1),
+    ],
+)
+def test_alerts_out_of_bounds_values_rejected(tmp_path, field, value):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  {field}: {value}
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_bounds_are_inclusive(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  interval_minutes: 15
+  max_item_age_hours: 1
+  max_pings_per_day: 0
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.interval_minutes == 15
+    assert cfg.alerts.max_item_age_hours == 1
+    assert cfg.alerts.max_pings_per_day == 0
+
+
+def test_alerts_allow_test_command_true_logs_a_warning(tmp_path, caplog):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: true
+"""
+    with caplog.at_level("WARNING"):
+        _load_with(tmp_path, text)
+    assert any("allow_test_command" in record.message for record in caplog.records)
+
+
+def test_alerts_allow_test_command_false_logs_no_warning(tmp_path, caplog):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: false
+"""
+    with caplog.at_level("WARNING"):
+        _load_with(tmp_path, text)
+    assert not any("allow_test_command" in record.message for record in caplog.records)

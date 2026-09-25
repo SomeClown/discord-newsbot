@@ -120,6 +120,25 @@ Source = Annotated[
 ]
 
 
+class AlertsCfg(BaseModel, extra="forbid"):
+    """Settings for the SHiFT code alert sweep (design.md §12).
+
+    Absent entirely, `enabled` defaults to False -- an owner who never
+    touches this block never gets an unannounced `@everyone` pinger
+    bolted onto their digest bot. `config.example.yaml` ships it
+    commented with `true`, so turning it on is a deliberate uncomment,
+    not a surprise default.
+    """
+
+    enabled: bool = False
+    interval_minutes: int = Field(60, ge=15, le=1440)
+    max_item_age_hours: int = Field(48, ge=1)
+    # 0 disables pinging entirely without disabling the sweep -- codes
+    # still get recorded and posted, just never with @everyone attached.
+    max_pings_per_day: int = Field(3, ge=0)
+    allow_test_command: bool = False
+
+
 class AppConfig(BaseModel):
     guild_id: int
     admin_channel_id: int | None = None
@@ -127,6 +146,7 @@ class AppConfig(BaseModel):
     digest: DigestCfg
     topics: list[Topic]
     sources: list[Source]
+    alerts: AlertsCfg = AlertsCfg()
 
 
 class Secrets(BaseModel):
@@ -221,6 +241,15 @@ def load_config(path: str | Path) -> AppConfig:
 
     if errors:
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    if cfg.alerts.allow_test_command:
+        # /newsbot test-alert lets anyone with admin_permission post a fake
+        # SHiFT code alert on demand -- exactly what the private test guild
+        # needs and exactly what a production config should never carry,
+        # so a startup log line is the one place this gets said out loud.
+        logging.getLogger(__name__).warning(
+            "alerts.allow_test_command is true; /newsbot test-alert will be registered"
+        )
 
     return cfg
 
