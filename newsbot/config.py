@@ -137,6 +137,13 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # still get recorded and posted, just never with @everyone attached.
     max_pings_per_day: int = Field(3, ge=0)
     allow_test_command: bool = False
+    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics --
+    # a Diablo IV patch note has never once contained a Borderlands SHiFT
+    # code, and pinging the whole server for every game's codes when the
+    # owner only cares about one is a worse default than the sweep quietly
+    # doing nothing most topics ever need. Empty means "every topic",
+    # checked against `cfg.topics` keys at load time (see load_config).
+    topics: list[str] = []
 
 
 class AppConfig(BaseModel):
@@ -207,6 +214,10 @@ def load_config(path: str | Path) -> AppConfig:
         seen_keys.add(topic.key)
 
     known_keys = seen_keys
+
+    for topic_key in cfg.alerts.topics:
+        if topic_key not in known_keys:
+            errors.append(f"alerts.topics references unknown topic {topic_key!r}")
 
     # Fill in Bluesky default names before the uniqueness check, since
     # source_health.source_name is the primary key: two sources silently
