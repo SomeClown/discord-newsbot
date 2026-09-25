@@ -90,7 +90,11 @@ newsbot/
 Requires **Python 3.14** and plain `venv` + `pip` — no `uv`, no Poetry.
 `requirements.txt` is the fully pinned lock file that Docker and CI install
 from; regenerate it with `scripts/lock.sh` after changing the dependency
-list in `pyproject.toml`, never by hand.
+list in `pyproject.toml`, never by hand. Dependabot (`.github/dependabot.yml`)
+proposes weekly PRs bumping individual pins in `requirements.txt` directly,
+which is fine -- it's the same kind of edit `lock.sh` makes, just one
+dependency at a time; run `scripts/lock.sh` yourself afterward if you want
+to also pick up transitive-dependency updates Dependabot doesn't touch.
 
 ```bash
 python3.14 -m venv .venv
