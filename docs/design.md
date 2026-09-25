@@ -332,3 +332,20 @@ Discord's 2000-unit message cap on its own sheds its link first, then
 hard-truncates the source name, rather than ever returning an over-cap
 message that Discord would reject outright (`bot/format.py`'s
 `render_code_alerts`).
+
+- **A14 `/` is a blocking boundary (QA item 6, 2026-09-25):** `CODE_RE`'s
+  boundary lookarounds treat a literal `/` the same as an adjacent
+  letter, digit or hyphen -- a code glued to a URL path separator on
+  either side doesn't match. This was added because a URL slug built out
+  of five hyphen-joined five-letter English words
+  (`.../shift-codes-early-today-guide/`) is indistinguishable from five
+  real code groups to every *other* boundary rule; a `?code=...` query
+  string value is unaffected, since `=` was never a blocking character.
+- **A15 At-least-one-digit rule (QA item 6, 2026-09-25):** `find_codes`/
+  `is_code` additionally require at least one ASCII digit anywhere in the
+  25 characters. Real SHiFT codes are virtually always a mix of letters
+  and digits; an all-letter placeholder (`AAAAA-BBBBB-CCCCC-DDDDD-EEEEE`,
+  the kind used across this repo's own docs and test fixtures before this
+  rule existed) or a hyphenated all-letter phrase essentially never is.
+  A genuine all-letter SHiFT code would be missed by this rule -- judged
+  vanishingly unlikely against the false-positive rate it closes off.

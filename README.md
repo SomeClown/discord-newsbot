@@ -272,8 +272,9 @@ Rough running cost against `config.example.yaml`'s source list:
 - **SHiFT code alerts**: no extra Claude or Brave cost at all — the hourly
   sweep deliberately excludes `web_search` (see
   [SHiFT code alerts](#shift-code-alerts)) and never calls the LLM. The
-  only added cost is Discord API calls (one `GET`/sweep per RSS/Steam/
-  Bluesky source, same as the digest already makes) and, on Bluesky, about
+  only added cost is source fetches (one `GET`/sweep per RSS/Steam/
+  Bluesky source, same as the digest already makes — these are requests to
+  each source's own site, not to Discord's API) and, on Bluesky, about
   24 extra logins a day from rebuilding the collector fresh each sweep.
 
 ## Limitations and known issues
@@ -306,7 +307,15 @@ Rough running cost against `config.example.yaml`'s source list:
   Brave indexes won't alert until the *daily* digest run's own check, if
   at all. A code split across an en dash or similar look-alike dash
   instead of a plain hyphen won't match the pattern (deliberately — see
-  `docs/design.md` §12's clarifications on the regex).
+  `docs/design.md` §12's clarifications on the regex). A code with no
+  digits anywhere in its 25 characters won't be detected either — real
+  SHiFT codes are virtually always a mix of letters and digits, and
+  requiring at least one is what keeps an all-letter URL slug
+  (`.../shift-codes-early-today-guide/`) or placeholder example
+  (`AAAAA-BBBBB-CCCCC-DDDDD-EEEEE`) from matching as if it were a real
+  code. Likewise, a code sitting directly against a `/` (a bare URL path
+  segment, as opposed to a `?code=...` query value) won't match — see
+  `docs/design.md` §12's clarifications for both rules.
 
 ## Safety notes
 

@@ -532,13 +532,18 @@ of digest history and dedupe state lost, worst case). It does not touch
 re-alert.** `alerted_codes` rolls back with everything else -- a code
 first recorded *after* the backup was taken (posted or otherwise) is
 gone from the restored database, and the next sweep that finds it again
-treats it as new. This is bounded, not open-ended: `max_item_age_hours`
-(default 48) still has to consider the item fresh, and
-`max_pings_per_day` still caps how many of those re-alerts can actually
-carry a ping in one day. Worth a heads-up in the channel after a restore
-if alerts are on, same as the "recent digest history jumps backward"
-note above -- it's the same underlying rollback, just visible in a
-different table.
+treats it as new. This is bounded for a *dated* item, not open-ended:
+`max_item_age_hours` (default 48) still has to consider the item fresh,
+and `max_pings_per_day` still caps how many of those re-alerts can
+actually carry a ping in one day. It is **not** bounded at all for an
+*undated* item -- undated items are always treated as fresh (the same
+rule SPEC-DEV 4 and A11 apply everywhere else in this feature), so a
+code whose only sighting has no `published_at` can re-alert after a
+restore no matter how long ago the backup was taken; the daily ping cap
+is still the only thing limiting how loud that re-alert can be. Worth a
+heads-up in the channel after a restore if alerts are on, same as the
+"recent digest history jumps backward" note above -- it's the same
+underlying rollback, just visible in a different table.
 
 ## 10. Recovering a stuck or failed digest
 
