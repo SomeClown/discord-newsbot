@@ -54,6 +54,7 @@ from newsbot.collectors.base import (
 from newsbot.config import AppConfig, ConfigError, load_config, load_secrets
 from newsbot.logging_setup import configure_logging
 from newsbot.pipeline.filter import TopicItem, filter_items
+from newsbot.pipeline.lock import _run_lock, is_run_in_progress
 from newsbot.pipeline.normalize import normalize
 from newsbot.pipeline.publisher import PrintPublisher, Publisher, PublishError
 from newsbot.pipeline.summarize import (
@@ -77,7 +78,7 @@ from newsbot.store.repo import (
 )
 
 if TYPE_CHECKING:
-    from newsbot.shift.sweep import CodeAlertPoster
+    from newsbot.shift.sweep import CodeAlertPoster, CodeCheckOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +126,6 @@ class PipelineOutcome:
     usage: Usage
 
 
-# One lock, shared by every entry point that can trigger a run (the daily
-# job, `/newsbot run-now`, `/newsbot preview`). Two runs racing each other
-# would fight over the same claim row and, worse, could both build a
-# digest before either saved -- the guard protects the database, this
-# protects the two of them from stepping on each other in memory first.
-_run_lock = asyncio.Lock()
-
-
 def local_run_date(now: datetime, timezone: str) -> date:
     """The local calendar date `now` falls on in `timezone`.
 
@@ -144,17 +137,6 @@ def local_run_date(now: datetime, timezone: str) -> date:
     from zoneinfo import ZoneInfo
 
     return now.astimezone(ZoneInfo(timezone)).date()
-
-
-def is_run_in_progress() -> bool:
-    """True if `_run_lock` is currently held by another run.
-
-    Exists so the bot layer (`/newsbot run-now`) can give a quick "a run
-    is already going" reply instead of blocking on the lock for however
-    long a pipeline run takes -- nobody wants a slash command to sit there
-    looking hung for two minutes.
-    """
-    return _run_lock.locked()
 
 
 def _normalize_sync(
@@ -184,14 +166,21 @@ async def build_digest(
     list[str],
     Usage,
     list[CollectorResult],
+    list[RawItem],
 ]:
     """Run collect, normalize, filter and summarize. Writes nothing.
 
     Returns everything `run_daily` needs to decide what happened and, in
     POST mode, what to save: the rendered digest, the items and stories
     ready for `repo.save_run`, an overall status (`ok`/`partial`), header
-    notes, token usage, and the raw per-collector results (for source
-    health bookkeeping, which happens one level up).
+    notes, token usage, the raw per-collector results (for source health
+    bookkeeping, which happens one level up), and the raw collected items
+    (before normalize's own store-dedupe and digest lookback window --
+    SHiFT code alerts, design.md §12: the daily run's own code check
+    runs against these, on its own `max_item_age_hours`/once-per-code
+    rules rather than the digest's, since `StoredItem` -- what actually
+    reaches `save_run` -- has no `full_text` field to find a code in
+    anyway).
     """
     cfg = deps.cfg
     now = deps.now()
@@ -269,7 +258,16 @@ async def build_digest(
     )
 
     rendered = render_digest(run_date, cfg.topics, summaries, fallback_items, coverage_notes)
-    return rendered, stored_items, stories_to_save, status, coverage_notes, usage, results
+    return (
+        rendered,
+        stored_items,
+        stories_to_save,
+        status,
+        coverage_notes,
+        usage,
+        results,
+        collected,
+    )
 
 
 def _build_stored_items(grouped: dict[str, list[TopicItem]]) -> list[StoredItem]:
@@ -331,9 +329,16 @@ async def run_daily(
 async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
     run_date = local_run_date(deps.now(), deps.cfg.digest.timezone)
     try:
-        rendered, _items, _stories, status, notes, usage, _results = await build_digest(
-            deps, run_date
-        )
+        (
+            rendered,
+            _items,
+            _stories,
+            status,
+            notes,
+            usage,
+            _results,
+            _collected,
+        ) = await build_digest(deps, run_date)
         await publisher.publish(rendered)
     except Exception as exc:  # a preview must never take the bot down with it
         logger.exception("preview run failed")
@@ -403,7 +408,9 @@ async def _run_claimed(
     raising; anything that raises past here is `_run_post`'s problem.
     """
     try:
-        rendered, items, stories, status, notes, usage, results = await build_digest(deps, run_date)
+        rendered, items, stories, status, notes, usage, results, collected = await build_digest(
+            deps, run_date
+        )
     except Exception as exc:
         logger.exception("build_digest failed")
         await asyncio.to_thread(
@@ -415,6 +422,15 @@ async def _run_claimed(
     await _record_source_health(deps, results)
 
     message_ids, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
+
+    # The SHiFT alert check (design.md §12) runs regardless of whether the
+    # digest itself made it out -- a code sitting in today's collected
+    # items doesn't stop being real because the digest publish failed.
+    # This never touches `status`/`notes`/`message_ids` below: a code-alert
+    # problem is its own admin alert, not a reason to change what the
+    # digest run reports about itself.
+    await _maybe_check_codes(deps, collected)
+
     if publish_error is not None:
         await asyncio.to_thread(
             _mark_failed_sync,
@@ -521,6 +537,47 @@ async def _publish_with_retry(
             if attempt < len(_PUBLISH_BACKOFF_S):
                 await sleep(_PUBLISH_BACKOFF_S[attempt])
     return (last_error.posted_ids if last_error else []), last_error
+
+
+async def _maybe_check_codes(deps: Deps, collected: list[RawItem]) -> None:
+    """Run the SHiFT alert check against this run's own collected items (design.md §12).
+
+    A no-op whenever alerts aren't configured (`code_alert_poster is
+    None`) or aren't enabled -- every existing caller of `run_daily`, and
+    every test that doesn't set one up, sees exactly today's behavior.
+    Deliberately swallows everything: a bug in the alert path is a problem
+    worth an admin alert, never a reason to turn a digest that posted fine
+    into a `failed` one. `shift/sweep.py` is imported lazily, here and
+    only here, so the normal case (alerts off) never pays for importing a
+    module it isn't going to use, and so `pipeline/run.py` and
+    `shift/sweep.py` can each import from the other without either one
+    eagerly importing the other at module load time.
+
+    The daily run always passes `seeding_ok=True`: unlike the hourly
+    sweep, it doesn't run a health check of its own, but it does always
+    run every non-web_search collector for real, so there's no "half the
+    sources timed out" case to guard against the way there is for a
+    sweep.
+    """
+    if not deps.cfg.alerts.enabled or deps.code_alert_poster is None:
+        return
+    try:
+        from newsbot.shift.sweep import SweepDeps, process_items
+
+        sweep_deps = SweepDeps(
+            cfg=deps.cfg,
+            db_path=deps.db_path,
+            http=deps.http,
+            collectors=[],
+            now=deps.now,
+            alert=deps.alert,
+            poster=deps.code_alert_poster,
+            rate_limit_state=deps.rate_limit_state,
+        )
+        await process_items(sweep_deps, collected, seeding_ok=True)
+    except Exception as exc:  # never let an alert-path bug touch the digest's own outcome
+        logger.exception("SHiFT code alert check failed")
+        await deps.alert(f"newsbot: SHiFT code alert check failed: {exc}")
 
 
 # --- Offline running: fixture collectors and a canned-JSON stub LLM ---
@@ -635,6 +692,11 @@ def main(argv: list[str] | None = None) -> int:
         "--stub-llm", help="JSON file of canned stories, replacing the Claude client"
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="run one SHiFT code alert sweep (design.md §12) instead of the daily pipeline",
+    )
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -651,9 +713,10 @@ def main(argv: list[str] | None = None) -> int:
     # Secrets are only needed for the pieces --fixtures/--stub-llm didn't
     # replace: real collectors want BRAVE_API_KEY (and Bluesky's, if
     # configured), the real LLM wants ANTHROPIC_API_KEY. A fully offline
-    # run (both flags given) needs neither.
+    # run (both flags given) needs neither. --sweep never touches the LLM
+    # at all, so it only needs secrets when it's building real collectors.
     secrets = None
-    if not args.fixtures or not args.stub_llm:
+    if not args.fixtures or (not args.stub_llm and not args.sweep):
         try:
             secrets = load_secrets(require_discord=False)
         except ConfigError as exc:
@@ -669,8 +732,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fixtures:
         collectors: list[Collector] = build_fixture_collectors(Path(args.fixtures))
+    elif args.sweep:
+        collectors = build_collectors(cfg, secrets, include_web_search=False)
     else:
         collectors = build_collectors(cfg, secrets)
+
+    if args.sweep:
+        return _run_sweep_cli(cfg, args.db, collectors)
 
     llm: LLMClient
     if args.stub_llm:
@@ -704,6 +772,47 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
     return 0 if outcome.status in ("ok", "partial", "skipped") else 1
+
+
+def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) -> int:
+    """`python -m newsbot.pipeline.run --sweep`: one sweep, printed instead of posted.
+
+    A thin CLI wrapper around `shift.sweep.run_code_sweep` -- imported
+    lazily for the same reason `pipeline/run.py`'s other code-alert entry
+    point does (see `_maybe_check_codes`): it keeps a normal digest run
+    from ever needing to import `shift/sweep.py` at all.
+    """
+    from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, run_code_sweep
+
+    async def _run() -> CodeCheckOutcome | None:
+        async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as http:
+            deps = SweepDeps(
+                cfg=cfg,
+                db_path=db_path,
+                http=http,
+                collectors=collectors,
+                now=lambda: datetime.now(UTC),
+                alert=_stdout_alert,
+                poster=PrintCodeAlertPoster(),
+            )
+            return await run_code_sweep(deps)
+
+    outcome = asyncio.run(_run())
+    if outcome is None:
+        print("newsbot: sweep skipped, a run is already in progress", file=sys.stderr)
+        return 0
+    logger.info(
+        "sweep finished",
+        extra={
+            "new_candidates": outcome.new_candidates,
+            "posted": outcome.posted,
+            "silent": outcome.silent,
+            "failed": outcome.failed,
+            "ping": outcome.ping,
+            "cap_reached": outcome.cap_reached,
+        },
+    )
+    return 0 if outcome.failed == 0 else 1
 
 
 if __name__ == "__main__":
