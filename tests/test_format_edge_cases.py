@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from newsbot.bot.format import esc, render_digest
+from newsbot.bot.format import discord_len, esc, render_digest, render_status
 from newsbot.config import Topic
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
-from newsbot.store.models import Usage
+from newsbot.store.models import DigestRow, StatusSnapshot, Usage
 
 RUN_DATE = date(2026, 9, 23)
 PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
@@ -189,20 +189,91 @@ def test_a_very_long_single_url_does_not_blow_the_description_limit():
 
 
 def test_multi_codepoint_emoji_headline_does_not_crash_and_respects_the_limit():
-    # Family emoji is a ZWJ sequence of several codepoints per glyph;
-    # Python len() counts codepoints, not rendered glyphs or UTF-16 code
-    # units (which is what Discord's own limit is reportedly measured in).
-    # This test pins our len()-based accounting; see the report for the
-    # note on why that could, in principle, undercount against Discord's
-    # real enforcement.
+    # Family emoji is a ZWJ sequence of several codepoints per glyph, each
+    # one an astral character -- two UTF-16 units apiece, per discord_len().
+    # QA step 20 group 5: the limit here is enforced in UTF-16 units, not
+    # Python's codepoint-counting len(), so this asserts against
+    # discord_len() (the real Discord-facing measure), not just len().
     emoji_headline = "\U0001f468‍\U0001f469‍\U0001f467‍\U0001f466 " * 200
     stories = [_draft(headline=emoji_headline[:190], summary="Family news.")]
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
     description = rendered.embed_messages[0][0].description
-    assert len(description) <= 4096
+    assert discord_len(description) <= 4096
     assert "\U0001f468" in description
+
+
+# --- UTF-16 accounting (QA step 20, group 5) ---
+
+
+def test_discord_len_counts_astral_emoji_as_two_units():
+    assert discord_len("🤖") == 2
+    assert discord_len("ab") == 2
+    assert len("🤖") == 1  # the gap discord_len exists to close
+
+
+def test_description_truncation_never_splits_a_surrogate_pair_near_the_boundary():
+    # 2100 astral emoji is 4200 UTF-16 units -- comfortably past the 4096
+    # description limit, and landing mid-emoji if truncation were done in
+    # raw UTF-16 units instead of by codepoint.
+    stories = [_draft(headline="H", summary="🤖" * 2100)]
+    rendered = render_digest(
+        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
+    )
+    description = rendered.embed_messages[0][0].description
+    assert discord_len(description) <= 4096
+    # A split surrogate pair can't exist in a Python str at all (the type
+    # doesn't allow an unpaired surrogate from ordinary text operations),
+    # so the real assertion is indirect: every character that made it in
+    # is a complete codepoint, which round-tripping through utf-16-le and
+    # back (strict, no surrogatepass) already proves.
+    description.encode("utf-16-le").decode("utf-16-le")
+
+
+def test_topic_title_truncation_respects_utf16_units_not_codepoints():
+    # 200 astral emoji is 400 UTF-16 units, well past the 256-unit title
+    # limit, but only 200 Python characters -- a codepoint-counting
+    # len()-based [:256] slice would let all 200 through untouched.
+    long_name = "🤖" * 200
+    topic = Topic(key="diablo4", name=long_name, aliases=[], entities=[])
+    rendered = render_digest(
+        RUN_DATE, [topic], {"diablo4": _summary("diablo4", [_draft("A")])}, {}, []
+    )
+    embed = rendered.embed_messages[0][0]
+    assert discord_len(embed.title) <= 256
+
+
+def test_message_total_packing_respects_utf16_units_at_the_6000_boundary():
+    # A description made almost entirely of astral emoji: its Python
+    # len() is well under 4096, but its discord_len() is not -- if
+    # _pack_messages() were still using codepoint-counting len(embed) to
+    # decide message boundaries, this would under-count how full a
+    # message really is and could pack past Discord's real 6000 cap.
+    long_summary = "🤖" * 1900
+    stories = [_draft(f"Story {i}", summary=long_summary) for i in range(4)]
+    topics = [Topic(key=f"t{i}", name=f"Topic {i}", aliases=[], entities=[]) for i in range(4)]
+    summaries = {t.key: _summary(t.key, stories) for t in topics}
+    rendered = render_digest(RUN_DATE, topics, summaries, {}, [])
+    for message in rendered.embed_messages:
+        total = sum(discord_len(e.title or "") + discord_len(e.description or "") for e in message)
+        assert total <= 6000
+
+
+def test_status_last_digest_field_value_respects_utf16_field_limit():
+    snap = StatusSnapshot(
+        last_digest=DigestRow(
+            id=1, run_date=RUN_DATE, status="ok", posted_message_ids=[], error_notes=None
+        ),
+        source_health=[],
+        items_last_24h=0,
+        stories_last_24h=0,
+        month_input_tokens=0,
+        month_output_tokens=0,
+    )
+    embed = render_status(snap, 0.0)
+    field = next(f for f in embed.fields if f.name == "Last digest")
+    assert discord_len(field.value) <= 1024
 
 
 def test_unicode_headline_with_combining_marks_and_rtl_text_round_trips():

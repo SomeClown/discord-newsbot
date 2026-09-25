@@ -59,6 +59,45 @@ _URL_SCHEME_RE = re.compile(r"\b([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
 _PALETTE = [0x5865F2, 0x57F287, 0xFEE75C, 0xEB459E, 0xED4245, 0x1ABC9C]
 
 
+def discord_len(s: str) -> int:
+    """Length of `s` in UTF-16 code units, matching how Discord measures its own limits.
+
+    A Python `str` counts codepoints (`len("🤖") == 1`), but Discord's
+    documented limits (title, description, field, embed-total, message)
+    are UTF-16 code units -- and most emoji, plus a good chunk of CJK
+    extension characters, live outside the Basic Multilingual Plane, which
+    makes them *two* UTF-16 units apiece. A digest full of emoji reactions
+    to a patch note could look comfortably under 4096 by `len()` and still
+    bounce off Discord's real limit. `encode("utf-16-le")` is two bytes
+    per unit, hence the `// 2`.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _truncate_utf16(text: str, limit: int, *, suffix: str = "") -> str:
+    """Truncate `text` to at most `limit` UTF-16 units, keeping `suffix` (if any) intact.
+
+    Walks codepoint by codepoint rather than slicing raw UTF-16 units, so
+    an astral character (2 units) is always kept whole or dropped whole --
+    a raw unit-based slice could otherwise cut a surrogate pair in half
+    and leave a lone surrogate sitting at the end of the string, which is
+    exactly the kind of thing that turns into a mojibake diamond in
+    whoever's client renders it.
+    """
+    if discord_len(text) <= limit:
+        return text
+    budget = max(limit - discord_len(suffix), 0)
+    kept: list[str] = []
+    total = 0
+    for ch in text:
+        ch_len = discord_len(ch)
+        if total + ch_len > budget:
+            break
+        kept.append(ch)
+        total += ch_len
+    return "".join(kept).rstrip() + suffix
+
+
 def esc(s: str) -> str:
     """Escape markdown and @mentions, so scraped text can't format itself or ping the server.
 
@@ -137,14 +176,12 @@ def _story_block(story: StoryDraft) -> str:
 
 
 def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+    return _truncate_utf16(text, limit, suffix="…")
 
 
 def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
     color = _topic_color(topic.key)
-    title = esc(topic.name)[:_TITLE_LIMIT]
+    title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
     if not stories:
         return discord.Embed(title=title, description="No new stories today.", color=color)
 
@@ -160,7 +197,7 @@ def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
         description = "\n\n".join(blocks[:kept])
         if cut:
             description += f"\n\n+{cut} more, use /news"
-        if len(description) <= _DESCRIPTION_LIMIT:
+        if discord_len(description) <= _DESCRIPTION_LIMIT:
             break
         kept -= 1
     else:
@@ -175,7 +212,7 @@ def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
 
 def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> discord.Embed:
     color = _topic_color(topic.key)
-    title = esc(topic.name)[:_TITLE_LIMIT]
+    title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
     if not items:
         # No items at all makes the *reason* we have no stories moot --
         # "the model failed" and "there was nothing to summarize" look
@@ -193,13 +230,32 @@ def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> d
     )
 
 
+def _embed_len(embed: discord.Embed) -> int:
+    """`discord.Embed.__len__`, but counted in UTF-16 units instead of codepoints.
+
+    Mirrors discord.py's own `__len__` (title + description + every
+    field's name and value + footer text + author name) field for field,
+    since that total -- not any individual piece -- is what
+    `_MESSAGE_TOTAL_LIMIT` (Discord's 6000-per-message cap) is measured
+    against.
+    """
+    total = discord_len(embed.title or "") + discord_len(embed.description or "")
+    for field in embed.fields:
+        total += discord_len(field.name or "") + discord_len(field.value or "")
+    if embed.footer and embed.footer.text:
+        total += discord_len(embed.footer.text)
+    if embed.author and embed.author.name:
+        total += discord_len(embed.author.name)
+    return total
+
+
 def _pack_messages(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
     """Greedily pack embeds into messages, respecting the 10-embed and 6000-char caps."""
     messages: list[list[discord.Embed]] = []
     current: list[discord.Embed] = []
     current_total = 0
     for embed in embeds:
-        embed_len = len(embed)
+        embed_len = _embed_len(embed)
         if current and (
             len(current) >= _MAX_EMBEDS_PER_MESSAGE
             or current_total + embed_len > _MESSAGE_TOTAL_LIMIT
@@ -280,7 +336,7 @@ def render_story_page(
     pages: int,
 ) -> discord.Embed:
     """Render one page of `/news recent` or `/news search` results."""
-    embed = discord.Embed(title=esc(title)[:_TITLE_LIMIT], color=_PALETTE[0])
+    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
     if not stories:
         embed.description = "No stories found."
         return embed
@@ -311,7 +367,10 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     if snap.last_digest is not None:
         embed.add_field(
             name="Last digest",
-            value=esc(f"{snap.last_digest.run_date.isoformat()} — {snap.last_digest.status}"),
+            value=_truncate_utf16(
+                esc(f"{snap.last_digest.run_date.isoformat()} — {snap.last_digest.status}"),
+                _MAX_FIELD_VALUE,
+            ),
             inline=False,
         )
     else:
