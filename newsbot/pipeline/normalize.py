@@ -138,21 +138,17 @@ def canonicalize(url: str) -> str | None:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
-def normalize(
-    items: list[RawItem],
-    known_urls: Callable[[set[str]], set[str]],
-    now: datetime,
-    lookback: timedelta,
-) -> list[RawItem]:
-    """Canonicalize, dedupe, and drop what's already known or too old.
+def canonicalize_items(items: list[RawItem]) -> list[RawItem]:
+    """Canonicalize URLs and dedupe within the batch -- the two phases `normalize`
+    and the SHiFT code sweep (design.md §12) both need.
 
-    In that order: canonicalize every URL (dropping anything that isn't
-    http(s)); dedupe within this batch, keeping the first-seen item unless
-    a later duplicate has higher trust; ask the store which of the
-    survivors it already has and drop those; then drop anything published
-    before `now - lookback`. An item with no `published_at` (SPEC-DEV 4:
-    Brave doesn't always give us one) is kept -- URL dedupe against the
-    store already stops it from showing up twice.
+    The sweep runs every hour, never writes `items`, and only cares about
+    codes it hasn't alerted before (`alerted_codes` is its own dedupe
+    guard) -- it has no use for `normalize`'s store lookup or 24-hour
+    lookback, both of which exist for the digest's own reasons. This is
+    those two shared phases split out on their own: canonicalize every URL
+    (dropping anything that isn't http(s)), then dedupe within the batch,
+    keeping the first-seen item unless a later duplicate has higher trust.
     """
     canonical_items = []
     for item in items:
@@ -166,11 +162,29 @@ def normalize(
         existing = deduped.get(item.url)
         if existing is None or _TRUST_RANK[item.trust] < _TRUST_RANK[existing.trust]:
             deduped[item.url] = item
+    return list(deduped.values())
 
-    known = known_urls(set(deduped))
+
+def normalize(
+    items: list[RawItem],
+    known_urls: Callable[[set[str]], set[str]],
+    now: datetime,
+    lookback: timedelta,
+) -> list[RawItem]:
+    """Canonicalize, dedupe, and drop what's already known or too old.
+
+    In that order: `canonicalize_items` (canonicalize every URL, dedupe
+    within this batch); ask the store which of the survivors it already
+    has and drop those; then drop anything published before
+    `now - lookback`. An item with no `published_at` (SPEC-DEV 4: Brave
+    doesn't always give us one) is kept -- URL dedupe against the store
+    already stops it from showing up twice.
+    """
+    deduped_items = canonicalize_items(items)
+    known = known_urls({item.url for item in deduped_items})
     cutoff = now - lookback
     return [
         item
-        for item in deduped.values()
+        for item in deduped_items
         if item.url not in known and (item.published_at is None or item.published_at >= cutoff)
     ]

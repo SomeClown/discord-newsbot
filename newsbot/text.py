@@ -66,16 +66,41 @@ def _truncate(value: str, limit: int) -> str:
     return (cut or value[:limit]).rstrip() + "…"
 
 
+def _collapse(html_or_bbcode: str) -> str:
+    """Strip HTML/BBCode from `html_or_bbcode` and collapse whitespace to single spaces.
+
+    Line breaks carry no meaning once the text is headed into a one-line
+    excerpt, an LLM prompt, or a code matcher that only cares whether two
+    tokens are separated by *some* whitespace -- so this collapses
+    everything (tags, newlines, runs of spaces) down to single spaces.
+    Shared by `clean_text` and `plain_text`, which differ only in how much
+    of the result they keep.
+    """
+    stripped = _strip_markup(html_or_bbcode)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
 def clean_text(html_or_bbcode: str, limit: int = 500) -> str:
     """Strip HTML/BBCode from `html_or_bbcode`, collapse whitespace, and truncate.
 
-    Line breaks carry no meaning once the text is headed into a one-line
-    excerpt or an LLM prompt, so this collapses everything -- tags,
-    newlines, runs of spaces -- down to single spaces before truncating.
+    The 500-character default is excerpt-sized: this is what goes in
+    front of the LLM and in `/news recent`, not what a code matcher scans.
     """
-    stripped = _strip_markup(html_or_bbcode)
-    collapsed = re.sub(r"\s+", " ", stripped).strip()
-    return _truncate(collapsed, limit)
+    return _truncate(_collapse(html_or_bbcode), limit)
+
+
+def plain_text(html_or_bbcode: str, limit: int = 100_000) -> str:
+    """Like `clean_text`, but capped for a whole article instead of a one-line excerpt.
+
+    `RawItem.full_text` exists so the SHiFT code matcher (design.md §12)
+    can scan a source's *entire* post instead of the 500-character excerpt
+    stored for summaries -- a code five paragraphs into a patch-notes post
+    would otherwise never be seen. 100,000 characters is a "this should
+    never actually bind" ceiling, not a real limit; nothing we collect is
+    that long, and untruncated text never gets persisted or sent to the
+    LLM regardless (see `RawItem.full_text`'s docstring).
+    """
+    return _truncate(_collapse(html_or_bbcode), limit)
 
 
 def first_line(html_or_text: str, limit: int = 120) -> str:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -53,6 +53,14 @@ class RawItem:
     `topics` restricts (or, for a single-topic source, assigns) which
     topics this item can match -- `None` means "let keyword matching
     against every topic decide" (see `pipeline/filter.py`, SPEC-DEV 3).
+
+    `full_text` is the untruncated companion to `excerpt`, added for the
+    SHiFT code sweep (design.md §12): a code five paragraphs into a
+    patch-notes post never shows up in a 500-character excerpt. It's
+    memory-only -- `compare=False` and `repr=False` keep it out of
+    equality checks and log lines, and `StoredItem` (what actually reaches
+    `save_run`) has no field for it at all, so there's no code path that
+    could persist it or hand it to the LLM even by accident.
     """
 
     url: str
@@ -62,6 +70,7 @@ class RawItem:
     trust: Trust
     published_at: datetime | None
     topics: tuple[str, ...] | None = None
+    full_text: str | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

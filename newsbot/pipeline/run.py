@@ -542,6 +542,7 @@ class FixtureCollector:
                     trust=raw.get("trust", "community"),
                     published_at=(datetime.fromisoformat(published_at) if published_at else None),
                     topics=tuple(raw["topics"]) if raw.get("topics") else None,
+                    full_text=raw.get("full_text"),
                 )
             )
         return items

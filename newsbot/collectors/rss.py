@@ -128,6 +128,24 @@ def _entry_excerpt(entry: feedparser.FeedParserDict) -> str:
     return entry.get("summary") or entry.get("description") or ""
 
 
+def _entry_full_text(entry: feedparser.FeedParserDict) -> str:
+    """Every bit of body text a feed entry offers, for the SHiFT code matcher.
+
+    `entry.content` can hold more than one representation of the same
+    post (text and HTML, say); all of it goes in, on the theory that a
+    code buried in any of them is a code worth finding. `summary` is
+    appended too, but only when a feed used it for something `content`
+    didn't already say -- most feeds that have `content` at all just
+    repeat the same text in `summary`, and there's no reason to scan it
+    twice.
+    """
+    parts = [value for c in (entry.get("content") or []) if (value := c.get("value"))]
+    summary = entry.get("summary") or entry.get("description") or ""
+    if summary and summary not in parts:
+        parts.append(summary)
+    return "\n".join(parts)
+
+
 def _entry_published(entry: feedparser.FeedParserDict) -> datetime | None:
     parsed: struct_time | None = entry.get("published_parsed") or entry.get("updated_parsed")
     if not parsed:
@@ -179,6 +197,7 @@ class RssCollector:
                 # mirror, and a post doesn't really have a headline --
                 # feedparser gives us a bare description instead.
                 title = text.first_line(raw_excerpt) or "(untitled)"
+            raw_full_text = _entry_full_text(entry)
             items.append(
                 RawItem(
                     url=url,
@@ -188,6 +207,7 @@ class RssCollector:
                     trust=self._source.trust,
                     published_at=_entry_published(entry),
                     topics=topics,
+                    full_text=text.plain_text(raw_full_text) if raw_full_text else None,
                 )
             )
         return items

@@ -56,6 +56,7 @@ class SteamCollector:
             # response down with it.
             if not (url and title and date):
                 continue
+            contents = item.get("contents") or ""
             items.append(
                 RawItem(
                     url=url,
@@ -64,11 +65,12 @@ class SteamCollector:
                     # `.get("contents", "")` doesn't catch an explicit
                     # `"contents": null`, which is exactly the shape that
                     # used to crash `clean_text`.
-                    excerpt=text.clean_text(item.get("contents") or ""),
+                    excerpt=text.clean_text(contents),
                     source_name=self._source.name,
                     trust=self._source.trust,
                     published_at=datetime.fromtimestamp(date, tz=UTC),
                     topics=topics,
+                    full_text=text.plain_text(contents) if contents else None,
                 )
             )
         return items

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>SHiFT Code Feed</title>
+    <link>https://example.com/</link>
+    <description>A feed with a SHiFT code buried past the 500-character excerpt cap.</description>
+    <item>
+      <title>Grab this weekend's SHiFT code</title>
+      <link>https://example.com/shift-code-post</link>
+      <guid>https://example.com/shift-code-post</guid>
+      <description>&lt;p&gt;Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Lorem ipsum dolor sit amet, consectetur adipiscing elit. The code is AAAAA-BBBBB-CCCCC-DDDDD-EEEEE, redeem it soon.&lt;/p&gt;</description>
+      <pubDate>Tue, 22 Sep 2026 14:30:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from newsbot.collectors.base import RawItem
-from newsbot.pipeline.normalize import canonicalize, normalize
+from newsbot.pipeline.normalize import canonicalize, canonicalize_items, normalize
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
@@ -365,3 +365,75 @@ def test_canonicalize_strips_leading_www():
     assert canonicalize("https://www.pcgamesn.com/diablo-4/x") == canonicalize(
         "https://pcgamesn.com/diablo-4/x"
     )
+
+
+# --- canonicalize_items: the shared canonicalize+dedupe phases, for the alert sweep ---
+
+
+def test_canonicalize_items_canonicalizes_urls():
+    items = [_item("https://example.com/a/?utm_source=feed")]
+    result = canonicalize_items(items)
+    assert [i.url for i in result] == ["https://example.com/a"]
+
+
+def test_canonicalize_items_drops_non_http_urls():
+    result = canonicalize_items([_item("javascript:alert(1)")])
+    assert result == []
+
+
+def test_canonicalize_items_in_batch_dedupe_first_seen_wins_on_tie():
+    items = [
+        _item("https://example.com/a", trust="press", title="first"),
+        _item("https://example.com/a", trust="press", title="second"),
+    ]
+    result = canonicalize_items(items)
+    assert len(result) == 1
+    assert result[0].title == "first"
+
+
+def test_canonicalize_items_in_batch_dedupe_prefers_higher_trust():
+    items = [
+        _item("https://example.com/a", trust="community", title="first"),
+        _item("https://example.com/a", trust="official", title="second"),
+    ]
+    result = canonicalize_items(items)
+    assert len(result) == 1
+    assert result[0].trust == "official"
+
+
+def test_canonicalize_items_does_not_touch_the_store_or_apply_a_lookback():
+    # Unlike normalize(), canonicalize_items has no known_urls callback and
+    # no lookback window -- a stale, previously-seen URL survives here.
+    items = [
+        _item(
+            "https://example.com/old",
+            published_at=NOW - timedelta(days=365),
+        )
+    ]
+    result = canonicalize_items(items)
+    assert [i.url for i in result] == ["https://example.com/old"]
+
+
+def test_canonicalize_items_preserves_first_seen_order():
+    items = [
+        _item("https://example.com/b"),
+        _item("https://example.com/a"),
+    ]
+    result = canonicalize_items(items)
+    assert [i.url for i in result] == ["https://example.com/b", "https://example.com/a"]
+
+
+def test_normalize_calls_canonicalize_items_under_the_hood():
+    # Pins that normalize() didn't quietly diverge from canonicalize_items
+    # when the shared phases were split out -- same canonicalize+dedupe
+    # result either way, before normalize's own known_urls/lookback steps.
+    items = [
+        _item("https://example.com/a/?utm_source=feed", trust="community", title="first"),
+        _item("https://example.com/a", trust="official", title="second"),
+    ]
+    via_canonicalize_items = canonicalize_items(items)
+    via_normalize = normalize(
+        items, known_urls=lambda urls: set(), now=NOW, lookback=timedelta(hours=24)
+    )
+    assert [i.url for i in via_normalize] == [i.url for i in via_canonicalize_items]
+    assert [i.title for i in via_normalize] == [i.title for i in via_canonicalize_items]

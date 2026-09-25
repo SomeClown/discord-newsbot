@@ -116,6 +116,7 @@ class BlueskyCollector:
                     trust=self._source.trust,
                     published_at=_parse_created_at(record.get("createdAt")),
                     topics=topics,
+                    full_text=text.plain_text(body),
                 )
             )
         return items
