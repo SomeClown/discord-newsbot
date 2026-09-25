@@ -92,6 +92,11 @@ class SourceHealthRow:
     last_error_at: datetime | None
     last_error: str | None
     consecutive_failures: int
+    # True for a configured source with no source_health row yet -- e.g. one
+    # added to config.yaml since the last run. consecutive_failures stays 0
+    # for it (there's nothing to be unhealthy about), so this is the only
+    # way to tell "never run" apart from "ran fine."
+    never_run: bool = False
 
 
 @dataclass(frozen=True)

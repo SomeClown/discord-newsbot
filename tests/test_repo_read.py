@@ -189,7 +189,7 @@ def test_status_snapshot_last_digest_and_counts(conn):
     _save_story(conn, date(2026, 9, 23), headline="Today", url="https://e/today")
 
     now = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
-    snap = repo.status_snapshot(conn, now, datetime(2026, 9, 1, tzinfo=UTC))
+    snap = repo.status_snapshot(conn, now, datetime(2026, 9, 1, tzinfo=UTC), [])
 
     assert snap.last_digest is not None
     assert snap.last_digest.status == "ok"
@@ -200,11 +200,12 @@ def test_status_snapshot_last_digest_and_counts(conn):
 def test_status_snapshot_source_health(conn):
     repo.record_source_result(conn, "Blizzard News", datetime(2026, 9, 23, tzinfo=UTC), "timeout")
     snap = repo.status_snapshot(
-        conn, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC)
+        conn, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC), ["Blizzard News"]
     )
     assert len(snap.source_health) == 1
     assert snap.source_health[0].source_name == "Blizzard News"
     assert snap.source_health[0].consecutive_failures == 1
+    assert snap.source_health[0].never_run is False
 
 
 def test_status_snapshot_month_token_sums_respect_boundary(conn):
@@ -212,9 +213,42 @@ def test_status_snapshot_month_token_sums_respect_boundary(conn):
     _save_story(conn, date(2026, 9, 5), headline="This month", url="https://e/sep")
 
     snap = repo.status_snapshot(
-        conn, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC)
+        conn, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC), []
     )
     # Each _save_story call uses Usage(100, 50); only the September one
     # should count toward the September snapshot.
     assert snap.month_input_tokens == 100
     assert snap.month_output_tokens == 50
+
+
+def test_status_snapshot_omits_removed_source(conn):
+    # A source that used to be configured (and recorded health) but has
+    # since been dropped from config.yaml -- the IGN scenario -- shouldn't
+    # show up just because it kept its row.
+    repo.record_source_result(conn, "IGN", datetime(2026, 9, 23, tzinfo=UTC), "403")
+    repo.record_source_result(conn, "Blizzard News", datetime(2026, 9, 23, tzinfo=UTC), None)
+
+    snap = repo.status_snapshot(
+        conn, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC), ["Blizzard News"]
+    )
+    names = [s.source_name for s in snap.source_health]
+    assert names == ["Blizzard News"]
+
+
+def test_status_snapshot_never_run_source_reported_not_omitted(conn):
+    # "Palworld Steam" is configured but has never recorded health (e.g.
+    # just added to config.yaml); it should still show up, flagged as
+    # never having run, rather than silently disappearing from the list.
+    repo.record_source_result(conn, "Blizzard News", datetime(2026, 9, 23, tzinfo=UTC), None)
+
+    snap = repo.status_snapshot(
+        conn,
+        datetime(2026, 9, 23, tzinfo=UTC),
+        datetime(2026, 9, 1, tzinfo=UTC),
+        ["Blizzard News", "Palworld Steam"],
+    )
+    by_name = {s.source_name: s for s in snap.source_health}
+    assert set(by_name) == {"Blizzard News", "Palworld Steam"}
+    assert by_name["Palworld Steam"].never_run is True
+    assert by_name["Palworld Steam"].consecutive_failures == 0
+    assert by_name["Blizzard News"].never_run is False

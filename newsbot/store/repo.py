@@ -454,9 +454,19 @@ def search_stories(
 
 
 def status_snapshot(
-    conn: sqlite3.Connection, now: datetime, month_start: datetime
+    conn: sqlite3.Connection, now: datetime, month_start: datetime, configured_names: Iterable[str]
 ) -> StatusSnapshot:
-    """Everything `/newsbot status` shows, gathered in one place."""
+    """Everything `/newsbot status` shows, gathered in one place.
+
+    `configured_names` (from `config.configured_source_names`) is the
+    source_health filter: a source dropped from config.yaml still has a
+    row in this table forever (this function only reads; see the module
+    docstring on why pruning isn't its job), but nobody wants it showing
+    up in `/newsbot status` claiming to be unhealthy years later. A
+    configured source with no row yet (just added, never run) still gets
+    a place in the list, marked `never_run`, rather than silently missing
+    from the count.
+    """
     digest_row = conn.execute(
         "SELECT id, run_date, status, posted_message_ids, error_notes "
         "FROM digests ORDER BY run_date DESC LIMIT 1"
@@ -471,10 +481,18 @@ def status_snapshot(
             error_notes=digest_row["error_notes"],
         )
 
-    health_rows = conn.execute(
-        "SELECT source_name, last_success_at, last_error_at, last_error, consecutive_failures "
-        "FROM source_health ORDER BY source_name"
-    ).fetchall()
+    names = list(configured_names)
+    health_rows: list[sqlite3.Row] = []
+    if names:
+        placeholders = ",".join("?" for _ in names)
+        # placeholders is a string of literal "?"s sized to the configured
+        # source list, never interpolated user data; the actual names are
+        # bound below.
+        select = "SELECT source_name, last_success_at, last_error_at, last_error, "
+        select += "consecutive_failures FROM source_health "
+        where = f"WHERE source_name IN ({placeholders})"  # noqa: S608
+        health_rows = conn.execute(select + where, names).fetchall()
+
     source_health = [
         SourceHealthRow(
             source_name=row["source_name"],
@@ -489,6 +507,20 @@ def status_snapshot(
         )
         for row in health_rows
     ]
+    seen_names = {row["source_name"] for row in health_rows}
+    source_health.extend(
+        SourceHealthRow(
+            source_name=name,
+            last_success_at=None,
+            last_error_at=None,
+            last_error=None,
+            consecutive_failures=0,
+            never_run=True,
+        )
+        for name in names
+        if name not in seen_names
+    )
+    source_health.sort(key=lambda s: s.source_name)
 
     since_24h = (now - _ONE_DAY).isoformat()
     items_last_24h = conn.execute(

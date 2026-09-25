@@ -332,6 +332,71 @@ def test_render_status_flags_source_with_3_consecutive_failures():
     assert "Reddit" in embed.description
 
 
+def _healthy_field(embed):
+    return next(f for f in embed.fields if f.name == "Sources healthy")
+
+
+def test_render_status_counts_healthy_of_total():
+    snap = StatusSnapshot(
+        last_digest=None,
+        source_health=[
+            SourceHealthRow(
+                source_name="Blizzard News",
+                last_success_at=datetime(2026, 9, 23, tzinfo=UTC),
+                last_error_at=None,
+                last_error=None,
+                consecutive_failures=0,
+            ),
+            SourceHealthRow(
+                source_name="Reddit",
+                last_success_at=None,
+                last_error_at=datetime(2026, 9, 23, tzinfo=UTC),
+                last_error="403",
+                consecutive_failures=1,
+            ),
+        ],
+        items_last_24h=0,
+        stories_last_24h=0,
+        month_input_tokens=0,
+        month_output_tokens=0,
+    )
+    embed = render_status(snap, spend_usd=0.0)
+    assert _healthy_field(embed).value == "1 of 2"
+
+
+def test_render_status_notes_never_run_source_without_counting_it_healthy():
+    snap = StatusSnapshot(
+        last_digest=None,
+        source_health=[
+            SourceHealthRow(
+                source_name="Blizzard News",
+                last_success_at=datetime(2026, 9, 23, tzinfo=UTC),
+                last_error_at=None,
+                last_error=None,
+                consecutive_failures=0,
+            ),
+            SourceHealthRow(
+                source_name="Palworld Steam",
+                last_success_at=None,
+                last_error_at=None,
+                last_error=None,
+                consecutive_failures=0,
+                never_run=True,
+            ),
+        ],
+        items_last_24h=0,
+        stories_last_24h=0,
+        month_input_tokens=0,
+        month_output_tokens=0,
+    )
+    embed = render_status(snap, spend_usd=0.0)
+    value = _healthy_field(embed).value
+    assert value == "1 of 2 (1 not run yet)"
+    # A never-run source isn't a failure either -- it shouldn't show up in
+    # the "recent failures" list.
+    assert "Palworld Steam" not in (embed.description or "")
+
+
 def test_render_status_stays_under_discords_25_field_limit_with_many_sources():
     # The live test guild found this one: 24 sources used to mean 28 fields.
     health = [

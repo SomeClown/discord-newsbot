@@ -33,7 +33,7 @@ from discord.app_commands import Choice
 from newsbot.bot.client import DiscordPublisher, NewsBot, NullPublisher
 from newsbot.bot.format import render_status, render_story_page
 from newsbot.bot.views import ConfirmView, PagerView
-from newsbot.config import AppConfig, Topic
+from newsbot.config import AppConfig, Topic, configured_source_names
 from newsbot.pipeline.run import RunMode, is_run_in_progress, local_run_date, run_daily
 from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
 from newsbot.store.db import connect
@@ -161,9 +161,11 @@ def _get_digest_sync(db_path: str, run_date) -> DigestRow | None:
         return get_digest(conn, run_date)
 
 
-def _status_snapshot_sync(db_path: str, now: datetime, month_start: datetime) -> StatusSnapshot:
+def _status_snapshot_sync(
+    db_path: str, now: datetime, month_start: datetime, configured_names: set[str]
+) -> StatusSnapshot:
     with closing(connect(db_path)) as conn:
-        return status_snapshot(conn, now, month_start)
+        return status_snapshot(conn, now, month_start, configured_names)
 
 
 # --- Paging glue shared by /news recent and /news search ---
@@ -308,7 +310,9 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         await interaction.response.defer(ephemeral=True)
         now = datetime.now(UTC)
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        snap = await asyncio.to_thread(_status_snapshot_sync, bot.db_path, now, month_start)
+        snap = await asyncio.to_thread(
+            _status_snapshot_sync, bot.db_path, now, month_start, configured_source_names(cfg)
+        )
         spend = estimate_spend_usd(snap.month_input_tokens, snap.month_output_tokens)
         await interaction.followup.send(embed=render_status(snap, spend), ephemeral=True)
 
