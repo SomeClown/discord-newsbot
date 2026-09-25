@@ -31,7 +31,7 @@ from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.shift.decide import CodeCandidate
 from newsbot.shift.match import is_code
-from newsbot.store.models import StatusSnapshot, StoryView
+from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -373,8 +373,46 @@ def render_story_page(
     return embed
 
 
-def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
-    """Render `/newsbot status`: last run, source health, and the running spend estimate."""
+def _alerts_field_value(alerts: AlertStatus) -> str:
+    """The `/newsbot status` "SHiFT alerts" field's value (plan step 10).
+
+    `disabled` when the config block's off; otherwise the last sweep's
+    time and summary (or "no sweep yet" before the first one has run),
+    how many codes have ever posted, and today's ping spend against the
+    cap -- with `(seeding)` appended while the marker's still unset, since
+    "0 codes alerted, pings 0 of 3" reads very differently depending on
+    whether that's "nothing's happened yet" or "we're deliberately
+    staying quiet on purpose" (A1).
+    """
+    if not alerts.enabled:
+        return "disabled"
+    if alerts.last_sweep_at is not None:
+        sweep_part = f"last sweep {alerts.last_sweep_at.isoformat()}"
+        if alerts.last_sweep_summary:
+            sweep_part += f" · {esc(alerts.last_sweep_summary)}"
+    else:
+        sweep_part = "no sweep yet"
+    value = (
+        f"{sweep_part} · {alerts.codes_alerted} codes alerted · "
+        f"pings today {alerts.pings_today} of {alerts.max_pings}"
+    )
+    if not alerts.seeded:
+        value += " (seeding)"
+    return value
+
+
+def render_status(
+    snap: StatusSnapshot, spend_usd: float, alerts: AlertStatus | None = None
+) -> discord.Embed:
+    """Render `/newsbot status`: last run, source health, and the running spend estimate.
+
+    `alerts` is optional so every existing caller (and every test that
+    predates the SHiFT alert sweep) keeps seeing exactly the same embed --
+    the "SHiFT alerts" field only appears when a caller actually has an
+    `AlertStatus` to show, which `/newsbot status`'s handler always does
+    in practice (design.md §12 wants this field shown even when the
+    feature is off, so it computes one regardless of `cfg.alerts.enabled`).
+    """
     embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
 
     if snap.last_digest is not None:
@@ -392,6 +430,9 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     embed.add_field(name="Items (24h)", value=str(snap.items_last_24h))
     embed.add_field(name="Stories (24h)", value=str(snap.stories_last_24h))
     embed.add_field(name="Est. spend this month", value=f"${spend_usd:.2f}")
+
+    if alerts is not None:
+        embed.add_field(name="SHiFT alerts", value=_alerts_field_value(alerts), inline=False)
 
     # One line per source in the description, not one field per source.
     # Discord caps an embed at 25 fields, and the first real config had 24

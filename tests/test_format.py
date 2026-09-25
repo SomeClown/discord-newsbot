@@ -9,7 +9,7 @@ from newsbot.collectors.base import RawItem
 from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
-from newsbot.store.models import DigestRow, SourceHealthRow, StatusSnapshot, Usage
+from newsbot.store.models import AlertStatus, DigestRow, SourceHealthRow, StatusSnapshot, Usage
 
 RUN_DATE = date(2026, 9, 23)
 BL4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
@@ -421,3 +421,106 @@ def test_render_status_stays_under_discords_25_field_limit_with_many_sources():
     assert len(embed.fields) <= 25
     assert len(embed.description) <= 4096
     assert len(embed) <= 6000
+
+
+# --- render_status: SHiFT alerts field (plan step 10) ---
+
+_EMPTY_SNAP = StatusSnapshot(
+    last_digest=None,
+    source_health=[],
+    items_last_24h=0,
+    stories_last_24h=0,
+    month_input_tokens=0,
+    month_output_tokens=0,
+)
+
+
+def _alerts_field(embed):
+    return next(f for f in embed.fields if f.name == "SHiFT alerts")
+
+
+def test_render_status_omits_alerts_field_when_not_given():
+    # Every existing caller (and every test above this one) doesn't pass
+    # `alerts` at all -- the field must not appear, not appear as "disabled".
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0)
+    assert not any(f.name == "SHiFT alerts" for f in embed.fields)
+
+
+def test_render_status_alerts_field_says_disabled_when_not_enabled():
+    alerts = AlertStatus(
+        enabled=False,
+        seeded=False,
+        last_sweep_at=None,
+        last_sweep_summary=None,
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    assert _alerts_field(embed).value == "disabled"
+
+
+def test_render_status_alerts_field_notes_seeding_before_first_healthy_sweep():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=False,
+        last_sweep_at=datetime(2026, 9, 25, 20, 0, tzinfo=UTC),
+        last_sweep_summary="17/19 sources ok, 0 new codes",
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert "(seeding)" in value
+    assert "17/19 sources ok" in value
+
+
+def test_render_status_alerts_field_shows_sweep_summary_and_ping_spend_once_seeded():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="19/19 sources ok, 1 new code",
+        codes_alerted=3,
+        pings_today=1,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert "(seeding)" not in value
+    assert "3 codes alerted" in value
+    assert "pings today 1 of 3" in value
+    assert "19/19 sources ok, 1 new code" in value
+
+
+def test_render_status_alerts_field_no_sweep_yet():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=False,
+        last_sweep_at=None,
+        last_sweep_summary=None,
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert value.startswith("no sweep yet")
+    assert "(seeding)" in value
+
+
+def test_render_status_alerts_field_escapes_hostile_sweep_summary():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="@everyone **pwned**",
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    value = _alerts_field(embed).value
+    assert "@everyone" not in value
+    assert "**pwned**" not in value

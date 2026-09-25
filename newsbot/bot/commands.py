@@ -36,15 +36,31 @@ from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, Topic, configured_source_names
 from newsbot.pipeline.run import RunMode, is_run_in_progress, local_run_date, run_daily
 from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
+from newsbot.shift.match import is_code
+from newsbot.shift.sweep import CodeCheckOutcome, run_test_alert
 from newsbot.store.db import connect
-from newsbot.store.models import DigestRow, StatusSnapshot, StoryView
-from newsbot.store.repo import get_digest, query_stories, search_stories, status_snapshot
+from newsbot.store.models import AlertStatus, DigestRow, StatusSnapshot, StoryView
+from newsbot.store.repo import (
+    alert_status,
+    get_digest,
+    query_stories,
+    search_stories,
+    status_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 6
 _GAME_ALL = "all"
 _LABEL_CHOICES = ("official", "reported", "rumor")
+# run-now, preview, and test-alert all block on the same _run_lock (a
+# sweep holds it too, briefly) -- one shared wording so "busy" reads the
+# same regardless of which of the three tripped over it.
+_BUSY_MESSAGE = "A run or code check is in progress."
+_NOT_A_CODE_MESSAGE = (
+    "That doesn't look like a SHiFT code -- expected five groups of five "
+    "letters or digits joined by hyphens (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)."
+)
 
 
 # --- Pure decision functions: the part of this module worth unit testing ---
@@ -134,6 +150,41 @@ def _page_count(total: int) -> int:
     return max((total + _PAGE_SIZE - 1) // _PAGE_SIZE, 1)
 
 
+def summarize_test_alert(outcome: CodeCheckOutcome) -> str:
+    """Turn one `run_test_alert` outcome into `/newsbot test-alert`'s ephemeral reply.
+
+    `run_test_alert` always treats its one synthetic code as seeded and
+    fresh, so the only ways it can land here are: it posted (with or
+    without a ping -- the cap decided that), it failed to actually send,
+    or the code was already in `alerted_codes` from an earlier test (or a
+    real alert) and `plan_alerts` dropped it before it ever reached
+    `to_post`. `outcome.failed` is checked first: a code that both failed
+    to send *and* somehow looks otherwise silent shouldn't read as
+    "already alerted" just because nothing posted.
+    """
+    if outcome.failed:
+        return "post failed; check the bot's log"
+    if outcome.posted and outcome.ping:
+        return "posted with ping"
+    if outcome.posted and not outcome.ping:
+        return "posted without ping (cap)"
+    return "already alerted, nothing posted"
+
+
+def invalid_test_alert_code_message(code: str) -> str | None:
+    """None if `code` is a real SHiFT code shape; otherwise what to tell the caller.
+
+    A plain function, not inlined into the handler, so a fullwidth or
+    otherwise malformed code -- the slash command option's
+    `Range[str, 29, 29]` only bounds length, not shape, so plenty of
+    29-character garbage still reaches here -- can be exercised without a
+    fake `discord.Interaction`.
+    """
+    if is_code(code):
+        return None
+    return _NOT_A_CODE_MESSAGE
+
+
 # --- Synchronous DB calls, run through asyncio.to_thread by the handlers below ---
 
 
@@ -166,6 +217,11 @@ def _status_snapshot_sync(
 ) -> StatusSnapshot:
     with closing(connect(db_path)) as conn:
         return status_snapshot(conn, now, month_start, configured_names)
+
+
+def _alert_status_sync(db_path: str, today: str, *, enabled: bool, max_pings: int) -> AlertStatus:
+    with closing(connect(db_path)) as conn:
+        return alert_status(conn, today, enabled=enabled, max_pings=max_pings)
 
 
 # --- Paging glue shared by /news recent and /news search ---
@@ -314,14 +370,28 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             _status_snapshot_sync, bot.db_path, now, month_start, configured_source_names(cfg)
         )
         spend = estimate_spend_usd(snap.month_input_tokens, snap.month_output_tokens)
-        await interaction.followup.send(embed=render_status(snap, spend), ephemeral=True)
+        # Computed regardless of cfg.alerts.enabled, same as every other
+        # field here -- an admin reading /newsbot status on a bot where
+        # alerts are off should see "disabled", not have the whole field
+        # vanish and wonder whether the feature exists at all.
+        today = local_run_date(now, cfg.digest.timezone).isoformat()
+        alerts_status = await asyncio.to_thread(
+            _alert_status_sync,
+            bot.db_path,
+            today,
+            enabled=cfg.alerts.enabled,
+            max_pings=cfg.alerts.max_pings_per_day,
+        )
+        await interaction.followup.send(
+            embed=render_status(snap, spend, alerts_status), ephemeral=True
+        )
 
     @group.command(name="run-now", description="Run the pipeline and post the digest now.")
     async def run_now(interaction: discord.Interaction) -> None:
         if not await _check_admin(interaction, cfg.admin_permission):
             return
         if is_run_in_progress():
-            await interaction.response.send_message("A run is in progress.", ephemeral=True)
+            await interaction.response.send_message(_BUSY_MESSAGE, ephemeral=True)
             return
 
         run_date = local_run_date(datetime.now(UTC), cfg.digest.timezone)
@@ -363,7 +433,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             # _run_lock until whatever's running finishes, which reads to
             # the admin as a hung command for however long that takes.
             # A quick "try again in a bit" beats a silent multi-minute wait.
-            await interaction.response.send_message("A run is in progress.", ephemeral=True)
+            await interaction.response.send_message(_BUSY_MESSAGE, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         deps = bot.build_deps()
@@ -377,14 +447,48 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         for message in outcome.rendered.embed_messages:
             await interaction.followup.send(embeds=message, ephemeral=True)
 
+    if cfg.alerts.allow_test_command:
+        # Registered only when the config opts in (config.py already logs
+        # a startup warning when it does) -- a prod config should never
+        # carry a command that lets any admin post a fake @everyone-ping
+        # on demand, and the plan's owner checklist relies on this command
+        # disappearing the moment allow_test_command flips back to false.
+        @group.command(
+            name="test-alert",
+            description="Post a fake SHiFT code alert, to test the pipeline end to end (dev only).",
+        )
+        @app_commands.describe(
+            code="A fake code, shaped like XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+            golden="Treat it as a Golden Key code",
+        )
+        async def test_alert(
+            interaction: discord.Interaction,
+            code: app_commands.Range[str, 29, 29],
+            golden: bool = False,
+        ) -> None:
+            if not await _check_admin(interaction, cfg.admin_permission):
+                return
+            rejection = invalid_test_alert_code_message(code)
+            if rejection is not None:
+                await interaction.response.send_message(rejection, ephemeral=True)
+                return
+            if is_run_in_progress():
+                await interaction.response.send_message(_BUSY_MESSAGE, ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            outcome = await run_test_alert(bot.build_sweep_deps(), code, golden)
+            await interaction.followup.send(summarize_test_alert(outcome), ephemeral=True)
+
     return group
 
 
 __all__ = [
     "estimate_spend_usd",
     "has_admin_permission",
+    "invalid_test_alert_code_message",
     "make_admin_group",
     "make_news_group",
     "needs_confirmation",
     "resolve_query_args",
+    "summarize_test_alert",
 ]
