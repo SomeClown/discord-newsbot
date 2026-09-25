@@ -527,6 +527,7 @@ alerts:
         ("interval_minutes", 14),
         ("interval_minutes", 1441),
         ("max_item_age_hours", 0),
+        ("max_item_age_hours", 721),
         ("max_pings_per_day", -1),
     ],
 )
@@ -562,6 +563,69 @@ alerts:
     assert cfg.alerts.interval_minutes == 15
     assert cfg.alerts.max_item_age_hours == 1
     assert cfg.alerts.max_pings_per_day == 0
+
+
+def test_alerts_max_item_age_hours_upper_bound_is_inclusive_at_720(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  max_item_age_hours: 720
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.max_item_age_hours == 720
+
+
+def test_allow_test_command_true_with_enabled_false_is_a_config_error(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: false
+  allow_test_command: true
+"""
+    with pytest.raises(ConfigError, match="allow_test_command"):
+        _load_with(tmp_path, text)
+
+
+def test_allow_test_command_true_with_enabled_true_is_fine(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: true
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.allow_test_command is True
+
+
+def test_allow_test_command_false_with_enabled_false_is_fine(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: false
+  allow_test_command: false
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.allow_test_command is False
 
 
 def test_alerts_allow_test_command_true_logs_a_warning(tmp_path, caplog):

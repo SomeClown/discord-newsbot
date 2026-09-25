@@ -132,7 +132,7 @@ class AlertsCfg(BaseModel, extra="forbid"):
 
     enabled: bool = False
     interval_minutes: int = Field(60, ge=15, le=1440)
-    max_item_age_hours: int = Field(48, ge=1)
+    max_item_age_hours: int = Field(48, ge=1, le=720)
     # 0 disables pinging entirely without disabling the sweep -- codes
     # still get recorded and posted, just never with @everyone attached.
     max_pings_per_day: int = Field(3, ge=0)
@@ -218,6 +218,17 @@ def load_config(path: str | Path) -> AppConfig:
     for topic_key in cfg.alerts.topics:
         if topic_key not in known_keys:
             errors.append(f"alerts.topics references unknown topic {topic_key!r}")
+
+    if cfg.alerts.allow_test_command and not cfg.alerts.enabled:
+        # A config that turns on the test command but not the feature it
+        # tests is almost certainly a copy-paste mistake, not intent -- it
+        # used to surface as a bare RuntimeError the first time someone
+        # ran /newsbot test-alert, long after config load had already
+        # said everything looked fine.
+        errors.append(
+            "alerts.allow_test_command is true but alerts.enabled is false -- "
+            "/newsbot test-alert has nothing to test with alerts disabled"
+        )
 
     # Fill in Bluesky default names before the uniqueness check, since
     # source_health.source_name is the primary key: two sources silently

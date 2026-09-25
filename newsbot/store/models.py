@@ -130,6 +130,7 @@ class AlertStatus:
     codes_alerted: int
     pings_today: int
     max_pings: int
+    test_command_enabled: bool = False
 
 
 @dataclass(frozen=True)
