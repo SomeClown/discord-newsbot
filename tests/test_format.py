@@ -58,6 +58,22 @@ def test_esc_escapes_markdown_and_everyone_mention():
     assert "@everyone" not in result or "@​everyone" in result  # zero-width-joined, not live
 
 
+def test_esc_defuses_a_url_scheme_that_slipped_through_layer_one():
+    # postprocess() in summarize.py is layer one and should have already
+    # stripped this -- esc() is the belt-and-suspenders second layer for
+    # any text that reaches format.py by some other path (or a defusal
+    # regex that layer one didn't quite cover). A defused scheme should
+    # not survive as a live "scheme://" token.
+    result = esc("click https://evil.example/x for a prize")
+    assert "https://" not in result
+    assert "evil.example" in result  # the text isn't hidden, just not clickable
+
+
+def test_esc_leaves_a_shift_code_alone():
+    result = esc("Shift code: TRICK-4CLIK-3BAIT-URLS9-9WXYZ")
+    assert "TRICK-4CLIK-3BAIT-URLS9-9WXYZ" in result
+
+
 # --- sort order and update placement ---
 
 

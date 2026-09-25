@@ -171,6 +171,30 @@ class TopicSummary:
 _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Anything shaped like `scheme://...` (http, https, steam, discord, or any
+# other scheme a model could invent) or a bare `www.`-prefixed token. This
+# runs on `headline`/`summary` only -- `item_urls` already goes through
+# `canonicalize()` against what we actually collected, which is a much
+# stricter check than "does this look like a URL". Shift codes (the thing
+# this exists to *not* remove; see CLAUDE.md's content policy) don't match
+# either pattern, so a code stays right where the model put it.
+_URL_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S+|\bwww\.\S+", re.IGNORECASE)
+_LINK_REMOVED = "[link removed]"
+
+
+def _strip_urls(text: str) -> str:
+    """Replace any URL-shaped token in `text` with `_LINK_REMOVED`.
+
+    A model writing a headline or summary has no business handing back
+    something a Discord client (or `format.py`'s own `<url>` markup) would
+    turn into a clickable link -- that's how a phishing link riding along
+    with a legitimate Shift code becomes one click instead of a copy-paste.
+    Dropping the token outright (rather than, say, de-schemeing it) is the
+    simpler of two reasonable choices and the one that reads cleanest in a
+    sentence.
+    """
+    return _URL_TOKEN_RE.sub(_LINK_REMOVED, text)
+
 
 def _normalize_headline(headline: str) -> str:
     """Casefold, NFKC-normalize, strip punctuation, collapse whitespace.
@@ -240,8 +264,8 @@ def postprocess(
 
         drafts.append(
             StoryDraft(
-                headline=story.headline,
-                summary=story.summary,
+                headline=_strip_urls(story.headline),
+                summary=_strip_urls(story.summary),
                 label=label,
                 item_urls=urls,
                 update_of_story_id=_match_update_of(story.update_of_headline, prior),

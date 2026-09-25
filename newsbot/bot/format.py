@@ -42,6 +42,15 @@ _LABEL_ORDER = {"official": 0, "reported": 1, "rumor": 2}
 _LABEL_MARKER = {"official": "🟢 OFFICIAL", "reported": "🟡 REPORTED", "rumor": "🔴 RUMOR"}
 _UPDATE_MARKER = "🔁 UPDATE"
 _LINKY_MENTION_RE = re.compile(r"<(?=[#/])")
+# Belt-and-suspenders behind summarize.py's postprocess(), which is
+# supposed to have already stripped any `scheme://...` token out of
+# headline/summary text before it ever reaches this module. This is the
+# second layer, for whatever text reaches an embed some other way (or
+# whatever the first layer's regex didn't quite cover): a zero-width
+# space right after the scheme's colon defuses "https://" into
+# "https:/​/", which reads identically to a person and autolinks to
+# nobody.
+_URL_SCHEME_RE = re.compile(r"\b([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
 
 # A fixed, arbitrary 6-color palette (Discord's own brand blurple plus five
 # others that read fine against dark and light themes). Which topic gets
@@ -63,7 +72,11 @@ def esc(s: str) -> str:
     # A zero-width space after the "<" defuses both without visibly changing
     # the text. test-engineer caught this one; I'd assumed "mentions" meant
     # all of them, which is the kind of assumption that ages badly.
-    return _LINKY_MENTION_RE.sub("<\u200b", escaped)
+    escaped = _LINKY_MENTION_RE.sub("<\u200b", escaped)
+    # Same idea, aimed at a URL scheme instead of a mention: a zero-width
+    # space right after the colon stops "https://evil.example" from ever
+    # being a live "scheme://" token, without changing how it reads.
+    return _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:\u200b", escaped)
 
 
 def _topic_color(topic_key: str) -> int:
