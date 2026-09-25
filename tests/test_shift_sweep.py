@@ -144,6 +144,38 @@ async def test_unseeded_healthy_records_silently_and_sets_marker(db_path, http_c
         assert repo.get_alert_state(conn).seeded is True
 
 
+async def test_healthy_empty_sweep_sets_seeded_marker(db_path, http_client):
+    # QA item 4: an unseeded, healthy sweep that finds zero codes
+    # anywhere still has to flip the marker on -- otherwise the *next*
+    # sweep to find a real fresh code treats it as brand new and silently
+    # seeds it instead of posting.
+    deps = _deps(db_path, http_client)
+    outcome = await process_items(deps, [], seeding_ok=True)
+    assert outcome.posted == 0
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).seeded is True
+
+
+async def test_healthy_empty_sweep_then_fresh_code_posts_with_ping(db_path, http_client):
+    deps = _deps(db_path, http_client)
+    await process_items(deps, [], seeding_ok=True)  # seeds on zero codes
+
+    poster = _FakePoster()
+    deps2 = _deps(db_path, http_client, poster=poster)
+    outcome = await process_items(deps2, [_item(CODE_A)], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is True
+    assert len(poster.sent) == 1
+
+
+async def test_unhealthy_empty_sweep_does_not_set_marker(db_path, http_client):
+    deps = _deps(db_path, http_client)
+    await process_items(deps, [], seeding_ok=False)
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).seeded is False
+
+
 async def test_unseeded_unhealthy_does_not_set_marker(db_path, http_client):
     deps = _deps(db_path, http_client)
     await process_items(deps, [_item(CODE_A)], seeding_ok=False)

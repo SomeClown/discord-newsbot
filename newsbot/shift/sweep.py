@@ -340,14 +340,30 @@ async def process_items(
     already-held lock live here -- this function only needs a batch of
     items and somewhere to record what it decides. `seeding_ok` is the
     caller's call on whether *this* batch is healthy enough to flip the
-    seeded marker on if it isn't already (A1); the sweep passes
-    `decide.seeding_healthy(results)`, the daily run always passes `True`.
+    seeded marker on if it isn't already (A1); both the hourly sweep and
+    the daily run's own code check compute this the same way
+    (`decide.seeding_healthy(results)`), rather than the daily run always
+    assuming it's healthy.
     """
     canonical_items = canonicalize_items(items)
     sightings = sightings_from_items(
         canonical_items, topics=deps.cfg.topics, alert_topics=deps.cfg.alerts.topics
     )
     if not sightings:
+        if seeding_ok:
+            # A healthy sweep that happened to find zero codes anywhere
+            # is still the first healthy sweep -- it has to get to flip
+            # the seeded marker on (A1) the same as one that found
+            # plenty, or the *next* sweep to find a real code treats an
+            # already-seeded feed as brand new and silently seeds it
+            # instead of posting. `record_silent_codes([], mark_seeded=True)`
+            # is exactly "set the marker if it isn't already set", with
+            # nothing to record alongside it.
+            def _mark_seeded_sync() -> None:
+                with closing(connect(deps.db_path)) as conn:
+                    record_silent_codes(conn, [], now=deps.now, mark_seeded=True)
+
+            await asyncio.to_thread(_mark_seeded_sync)
         return _EMPTY_OUTCOME
 
     max_age = timedelta(hours=deps.cfg.alerts.max_item_age_hours)
