@@ -1,0 +1,36 @@
+guild_id: 123456789012345678
+admin_channel_id: 123456789012345679
+admin_permission: manage_guild
+
+digest:
+  channel_id: 123456789012345680
+  time: "09:00"
+  timezone: "America/Los_Angeles"
+  lookback_hours: 24
+  max_items_per_topic: 60
+
+topics:
+  - key: borderlands4
+    name: "Borderlands 4"
+    aliases: ["BL4", "Borderlands"]
+    entities: ["Gearbox"]
+  - key: palworld
+    name: "Palworld"
+    aliases: []
+    entities: ["Pocketpair"]
+
+# Scoped to borderlands4 (A6): the palworld fixture's code is deliberately
+# ignored by this sweep, on purpose, to demonstrate the scoping.
+alerts:
+  enabled: true
+  interval_minutes: 60
+  max_item_age_hours: 48
+  max_pings_per_day: 3
+  topics: [borderlands4]
+
+sources:
+  - type: rss
+    name: "Blizzard News"
+    url: "https://news.blizzard.com/en-us/diablo4/rss"
+    topics: [borderlands4]
+    trust: official
