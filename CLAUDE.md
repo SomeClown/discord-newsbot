@@ -14,6 +14,7 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 - **Gate:** `ruff check . && ruff format --check . && pytest -q` (venv active)
 - Any prompt change needs an owner-reviewed `/newsbot preview` before merging.
 - **Status (2026-09-24):** M1 and M2 complete. Step 17 walkthrough passed in the test guild (digest, thread, /news recent, /news search, paging, /newsbot status|run-now|preview); two bugs found and fixed (status embed over 25 fields; failed commands hung on "thinking"). The second-account permission check hasn't been run yet. Next: M3 (steps 18–22: Docker, CI, QA review, runbook, deploy). Open items for `qa`: URLs with userinfo (`host@other`), and whether Discord counts embed limits in UTF-16 units.
+- **Never run `docker compose ... config` (or anything that resolves `env_file`) against the real `.env`/`.env.dev`.** It prints every secret in plain text. Lint compose files against dummy env files in a scratch directory. (Learned the hard way on 2026-09-24; all four dev credentials had to be rotated.)
 - **Never run two bot processes with the same token.** Both receive every interaction and race; the loser logs `Unknown interaction (10062)`. Stop the local dev bot before starting the Droplet copy, and vice versa. On macOS the process shows as `Python -m newsbot` (capital P), so `pkill -f "python -m newsbot"` misses it.
 - **Content policy (owner, 2026-09-24):** guides and walkthroughs, deals and sales, and Shift/redeem codes are all wanted in the digest. Don't tune the prompt to drop them.
 
