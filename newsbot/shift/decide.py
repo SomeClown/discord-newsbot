@@ -77,10 +77,15 @@ def sightings_from_items(
 
     An empty `alert_topics` scopes to nothing -- every item counts, same as
     the digest's own "no `topics` configured" default. Otherwise an item
-    only contributes sightings if `filter_items` would have matched it to
-    one of `alert_topics` -- dedicated sources included, exactly the same
-    confident-match rule the digest itself uses, so "scope to Borderlands"
-    means what an owner reading design.md §4 would expect it to mean.
+    only contributes sightings if `filter_items` would have *confidently*
+    matched it to one of `alert_topics` -- dedicated sources included, but
+    an `uncertain` (entity-only) match doesn't count. "Gearbox" showing up
+    in an unrelated press item is exactly the kind of match that's good
+    enough for the digest's lower bar (a human reads the headline right
+    next to it) and not good enough to scope a code alert by -- a
+    Borderlands-shaped SHiFT code sitting in an item that only mentioned
+    "Gearbox" in passing has no business alerting a server scoped to a
+    different Gearbox game.
     """
     scoped_items = items
     if alert_topics:
@@ -92,6 +97,7 @@ def sightings_from_items(
             topic_item.item.url
             for topic_key in alert_topics
             for topic_item in grouped.get(topic_key, [])
+            if not topic_item.uncertain
         }
         scoped_items = [item for item in items if item.url in matched_urls]
 

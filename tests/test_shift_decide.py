@@ -168,6 +168,65 @@ def test_sightings_from_items_item_matched_to_both_bl4_and_another_topic_still_c
     assert [s.code for s in sightings] == [CODE_A]
 
 
+def test_sightings_from_items_entity_only_match_never_alerts():
+    # QA item 2: "Gearbox" is an entity, not a Borderlands 4 name/alias --
+    # a press item naming only the studio is an uncertain (entity-only)
+    # match, the same low-confidence signal the digest itself is happy to
+    # show next to a human-readable headline but that this module's job
+    # is to reject outright.
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+    ]
+    item = _item(
+        title=f"Gearbox drops new Tiny Tina's Wonderlands SHiFT code {CODE_A}",
+        trust="press",
+        topics=None,
+    )
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert sightings == []
+
+
+def test_sightings_from_items_dedicated_source_still_counts_alongside_entity_only_item():
+    # The flip side of the entity-only test above: a dedicated (single-
+    # topic) BL4 source with no keyword hit at all is a confident match
+    # (SPEC-DEV 3) and must still alert, in the same batch that also
+    # contains an entity-only item that must not.
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+    ]
+    dedicated = _item(
+        url="https://e/dedicated",
+        title="v1.3 patch notes",
+        excerpt=f"redeem {CODE_A}",
+        topics=("borderlands4",),
+    )
+    entity_only = _item(
+        url="https://e/entity-only",
+        title=f"Gearbox drops new Tiny Tina's Wonderlands SHiFT code {CODE_B}",
+        trust="press",
+        topics=None,
+    )
+    sightings = sightings_from_items(
+        [dedicated, entity_only], topics=topics, alert_topics=["borderlands4"]
+    )
+    assert [s.code for s in sightings] == [CODE_A]
+
+
+def test_sightings_from_items_press_item_confidently_naming_the_topic_still_counts():
+    # A press item that actually names "Borderlands 4" (a confident match,
+    # not an entity-only one) still counts -- item 2 only tightens the
+    # entity-only case, it must not accidentally exclude confident press
+    # matches too.
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+    ]
+    item = _item(
+        title=f"Borderlands 4 SHiFT code just dropped: {CODE_A}", trust="press", topics=None
+    )
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert [s.code for s in sightings] == [CODE_A]
+
+
 def test_sightings_from_items_dedicated_bl4_source_always_counts():
     # A dedicated (single-topic) source counts as a confident match with
     # no keyword check at all -- the flip side of the press-item test
