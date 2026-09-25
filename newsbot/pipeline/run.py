@@ -423,14 +423,6 @@ async def _run_claimed(
 
     message_ids, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
 
-    # The SHiFT alert check (design.md §12) runs regardless of whether the
-    # digest itself made it out -- a code sitting in today's collected
-    # items doesn't stop being real because the digest publish failed.
-    # This never touches `status`/`notes`/`message_ids` below: a code-alert
-    # problem is its own admin alert, not a reason to change what the
-    # digest run reports about itself.
-    await _maybe_check_codes(deps, collected, results)
-
     if publish_error is not None:
         await asyncio.to_thread(
             _mark_failed_sync,
@@ -440,6 +432,18 @@ async def _run_claimed(
             message_ids,
             deps.now,
         )
+        # The SHiFT alert check (design.md §12) runs regardless of whether
+        # the digest itself made it out -- a code sitting in today's
+        # collected items doesn't stop being real because the digest
+        # publish failed. It runs *after* the digest row above is already
+        # durably `failed` (QA item 3), not before: a cancellation landing
+        # inside the code check used to be able to unwind past this whole
+        # function before `_mark_failed_sync` ever ran, letting
+        # `_run_post`'s own outer handler mark the digest failed a second
+        # time with the wrong notes and an empty id list. Now there's
+        # nothing left for a cancellation here to corrupt -- the digest's
+        # own outcome is already on disk.
+        await _maybe_check_codes(deps, collected, results)
         await deps.alert(f"newsbot: publish failed after retries: {publish_error}")
         return PipelineOutcome(
             status="failed", rendered=rendered, notes=[*notes, str(publish_error)], usage=usage
@@ -457,6 +461,11 @@ async def _run_claimed(
         usage,
         deps.now,
     )
+    # Same reasoning as the failure branch above, mirrored for success:
+    # the code check runs only once today's digest is already saved `ok`/
+    # `partial` with its real message ids, so a cancellation inside it has
+    # nothing left to corrupt.
+    await _maybe_check_codes(deps, collected, results)
     return PipelineOutcome(status=status, rendered=rendered, notes=notes, usage=usage)
 
 
@@ -561,6 +570,20 @@ async def _maybe_check_codes(
     real" isn't "successfully": a run where most of those sources timed
     out shouldn't get to declare today's (mostly missing) haul the
     historical baseline any more than an unhealthy sweep should (A1).
+
+    Callers only ever reach this once today's digest row is already
+    durably recorded (QA item 3, `_run_claimed`) -- `_save_run_sync` on
+    success, `_mark_failed_sync` on a publish failure -- so by the time
+    this runs, there's no digest outcome left for anything in here to
+    corrupt. That's what makes it safe to catch `BaseException`, not just
+    `Exception`: a cancellation landing here (the scheduler shutting the
+    process down mid-sweep, say) used to be able to unwind past this
+    function *before* the digest was saved, and `_run_post`'s own
+    catch-all would then mark an already-published digest `failed` with
+    an empty id list. Swallowing it here instead just means this one
+    best-effort code check didn't finish -- the next sweep interval (or
+    tomorrow's run) tries again; the digest that already posted stays
+    exactly as posted.
     """
     if not deps.cfg.alerts.enabled or deps.code_alert_poster is None:
         return
@@ -579,7 +602,8 @@ async def _maybe_check_codes(
             rate_limit_state=deps.rate_limit_state,
         )
         await process_items(sweep_deps, collected, seeding_ok=seeding_healthy(results))
-    except Exception as exc:  # never let an alert-path bug touch the digest's own outcome
+    except BaseException as exc:  # never let an alert-path bug -- or a cancellation -- touch
+        # the digest's own already-recorded outcome; see the docstring above.
         logger.exception("SHiFT code alert check failed")
         await deps.alert(f"newsbot: SHiFT code alert check failed: {exc}")
 

@@ -424,6 +424,37 @@ async def test_daily_hook_exception_does_not_change_digest_status(db_path, http_
     assert any("code alert" in a.lower() for a in alerts)
 
 
+async def test_daily_hook_cancelled_after_successful_publish_leaves_digest_ok_with_ids(
+    db_path, http_client
+):
+    # QA item 3: the code check now runs only after the digest row is
+    # already durably saved -- a CancelledError raised inside it must not
+    # unwind past _run_claimed and let _run_post's own catch-all mark an
+    # already-published digest `failed` with no ids.
+    _seed(db_path)  # already seeded, so this run actually tries to post
+
+    class _CancellingPoster:
+        async def post(self, alert):
+            raise asyncio.CancelledError
+
+    alerts: list[str] = []
+    deps = _daily_deps(
+        db_path, http_client, poster=_CancellingPoster(), mode_alerts=alerts, max_item_age_hours=200
+    )
+    outcome = await run_daily(deps, _PrintDigestPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    assert outcome.status in ("ok", "partial")
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status, posted_message_ids FROM digests ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row["status"] in ("ok", "partial")
+    import json
+
+    assert json.loads(row["posted_message_ids"]) == [1]  # _PrintDigestPublisher's own id
+    assert any("code alert" in a.lower() for a in alerts)
+
+
 async def test_daily_hook_is_a_noop_when_alerts_disabled(db_path, http_client):
     poster = _FakePoster()
     deps = _daily_deps(db_path, http_client, poster=poster, enabled=False)
