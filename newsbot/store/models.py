@@ -100,6 +100,39 @@ class SourceHealthRow:
 
 
 @dataclass(frozen=True)
+class AlertState:
+    """The SHiFT alert sweep's cross-run scratchpad, read out of `alert_state`.
+
+    `seeded` is the marker from A1: while False, every code the sweep
+    finds gets recorded silently instead of posted, so turning the
+    feature on against feeds full of months-old codes doesn't flood the
+    channel on the first run. `ping_count` only means anything alongside
+    `ping_day` -- a stale `ping_day` (not today, in `cfg.digest.timezone`)
+    means the count has already effectively reset; see `pings_used_today`
+    in `shift/decide.py`.
+    """
+
+    seeded: bool
+    last_sweep_at: datetime | None
+    last_sweep_summary: str | None
+    ping_day: str | None
+    ping_count: int
+
+
+@dataclass(frozen=True)
+class AlertStatus:
+    """Everything `/newsbot status`'s SHiFT alerts field needs."""
+
+    enabled: bool
+    seeded: bool
+    last_sweep_at: datetime | None
+    last_sweep_summary: str | None
+    codes_alerted: int
+    pings_today: int
+    max_pings: int
+
+
+@dataclass(frozen=True)
 class StatusSnapshot:
     """Everything `/newsbot status` needs, gathered in one query pass."""
 
