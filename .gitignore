@@ -1,7 +1,7 @@
 .env*
 !.env.example
-config.yaml
-config.dev.yaml
+/config.yaml
+/config.dev.yaml
 data/
 .venv/
 __pycache__/

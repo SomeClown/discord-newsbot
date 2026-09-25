@@ -24,6 +24,8 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 
 from newsbot.store.models import (
+    AlertState,
+    AlertStatus,
     DigestRow,
     PriorStory,
     SourceHealthRow,
@@ -320,6 +322,267 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
             "DELETE FROM stories WHERE created_at < ?", (cutoff_iso,)
         ).rowcount
     return items_deleted, stories_deleted
+
+
+# --- SHiFT code alerts (design.md §12) ---
+#
+# `alerted_codes` is the once-per-code-ever guard and `alert_state` is a
+# key/value scratchpad for the handful of cross-sweep facts that don't
+# deserve their own columns (the seeded marker, the last sweep's summary,
+# today's ping count). Retention (`purge_older_than` above) never touches
+# either table -- there's no lookback window on "have we ever alerted this
+# code before".
+
+
+def _set_alert_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO alert_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def get_alert_state(conn: sqlite3.Connection) -> AlertState:
+    """Read `alert_state` into one dataclass. Missing keys read as `None`/`0`.
+
+    `seeded` collapses the `seeded_at` timestamp into a bool -- nothing
+    downstream cares *when* the marker was set, only whether it's there
+    (see A1 in the plan: losing the marker silently re-seeds, which is
+    the safe direction to fail in).
+    """
+    rows = conn.execute("SELECT key, value FROM alert_state").fetchall()
+    values = {row["key"]: row["value"] for row in rows}
+    last_sweep_at = values.get("last_sweep_at")
+    return AlertState(
+        seeded=values.get("seeded_at") is not None,
+        last_sweep_at=datetime.fromisoformat(last_sweep_at) if last_sweep_at else None,
+        last_sweep_summary=values.get("last_sweep_summary"),
+        ping_day=values.get("ping_day"),
+        ping_count=int(values.get("ping_count") or 0),
+    )
+
+
+def known_codes(conn: sqlite3.Connection, codes: Iterable[str]) -> set[str]:
+    """Return the subset of `codes` already in `alerted_codes`, any status."""
+    code_list = list(codes)
+    found: set[str] = set()
+    for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = code_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a string of literal "?"s sized to the chunk, never
+        # interpolated user data; the actual values are bound below.
+        query = f"SELECT code FROM alerted_codes WHERE code IN ({placeholders})"  # noqa: S608
+        rows = conn.execute(query, chunk)
+        found.update(row["code"] for row in rows)
+    return found
+
+
+def record_silent_codes(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, str, str, str]],
+    *,
+    now: Callable[[], datetime] | None = None,
+    mark_seeded: bool,
+) -> None:
+    """Record codes without posting them: `(code, source_name, item_url, status)`.
+
+    `status` is `'seeded'` (unseeded sweep, A1), `'too_old'` (A11, a
+    fresh-vs-stale call `shift/decide.py` already made), or `'roundup'`
+    (QA item 7, owner decision 2026-09-25: a code whose every sighting
+    came from an item naming more than `max_codes_per_item` distinct
+    codes). `ON CONFLICT DO NOTHING` because a code landing here twice
+    across two sweeps should just stay however it was first recorded.
+    `mark_seeded=True` sets the `seeded_at` marker -- but only if it isn't
+    already set, since the marker means "the first sweep after enabling
+    has run", not "the most recent healthy sweep ran".
+    """
+    now_iso = _resolve_now(now)
+    with conn:
+        for code, source_name, item_url, status in rows:
+            conn.execute(
+                "INSERT INTO alerted_codes "
+                "(code, first_seen_at, source_name, item_url, status) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
+                (code, now_iso, source_name, item_url, status),
+            )
+        if mark_seeded:
+            conn.execute(
+                "INSERT INTO alert_state (key, value) VALUES ('seeded_at', ?) "
+                "ON CONFLICT(key) DO NOTHING",
+                (now_iso,),
+            )
+
+
+def claim_codes(
+    conn: sqlite3.Connection,
+    codes: list[tuple[str, str, str]],
+    *,
+    pinged: bool,
+    local_day: str,
+    now: Callable[[], datetime] | None = None,
+    max_pings: int | None = None,
+) -> bool:
+    """Claim `codes` as `pending` and spend today's ping budget, in one transaction.
+
+    `codes` is `(code, source_name, item_url)`. This is a plain `INSERT`,
+    not `ON CONFLICT DO NOTHING` -- record-then-post (plan §1) depends on
+    a code that's somehow already claimed aborting the *whole* claim,
+    ping spend included, rather than silently claiming its siblings and
+    leaving the budget half-spent for a code that never got recorded.
+    `local_day` resets `ping_count` to 0 first if it doesn't match the
+    stored `ping_day` (a new day in `cfg.digest.timezone`, not UTC
+    midnight -- see A8), then spends one more if `pinged`.
+
+    Runs inside an explicit `BEGIN IMMEDIATE`, not sqlite3's default
+    deferred transaction -- it grabs SQLite's write lock before reading
+    `alert_state`, so a second caller doing the same thing at the same
+    moment (a sweep and a `/newsbot test-alert` both landing in the same
+    second, step 7) blocks on `busy_timeout` and sees this call's
+    committed count, instead of both readers computing "count < max_pings"
+    from the same stale row and over-spending the budget between them.
+
+    `max_pings`, when given, re-checks the cap against that up-to-date
+    count: if `pinged` was asked for but the cap was already reached by
+    the time this claim actually got the write lock, the claim still
+    goes through, just without a ping (`actual_pinged` in the code below,
+    also this function's return value) -- a caller uses that to decide
+    whether to still render the message as pinging. `max_pings=None` (the
+    default) skips the re-check and spends exactly what `pinged` asked
+    for, unchanged from how this function worked before the cap re-check
+    existed; every caller from before that keeps its exact prior
+    behavior.
+
+    An empty `codes` is a no-op -- nothing to claim means nothing to spend
+    a ping on either, and a caller that got this far with `pinged=True`
+    but no codes (shouldn't happen, but "shouldn't" isn't "can't") would
+    otherwise burn a slot of today's budget for an alert that never posts.
+    """
+    if not codes:
+        return False
+    now_iso = _resolve_now(now)
+    # sqlite3's own "begin a transaction on first DML" behavior only ever
+    # issues a deferred BEGIN; to get an immediate write lock instead, the
+    # module's automatic handling has to be turned off (isolation_level =
+    # None -- autocommit) so this can issue "BEGIN IMMEDIATE" itself.
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        state = get_alert_state(conn)
+        count = state.ping_count if state.ping_day == local_day else 0
+        actual_pinged = pinged
+        if max_pings is not None and pinged and count >= max_pings:
+            actual_pinged = False
+        if actual_pinged:
+            count += 1
+        _set_alert_state(conn, "ping_day", local_day)
+        _set_alert_state(conn, "ping_count", str(count))
+        for code, source_name, item_url in codes:
+            conn.execute(
+                "INSERT INTO alerted_codes "
+                "(code, first_seen_at, source_name, item_url, pinged, status) "
+                "VALUES (?, ?, ?, ?, ?, 'pending')",
+                (code, now_iso, source_name, item_url, int(actual_pinged)),
+            )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return actual_pinged
+
+
+def mark_codes_posted(
+    conn: sqlite3.Connection, codes: list[str], *, message_id: int | None
+) -> None:
+    """Flip `codes` (already `pending`) to `posted`, all sharing one `message_id`.
+
+    One call per Discord message -- a batch that split across several
+    messages (`format.py`'s overflow handling) calls this once per
+    message with that message's own id and its own slice of codes.
+    """
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE alerted_codes SET status = 'posted', message_id = ? WHERE code = ?",
+                (message_id, code),
+            )
+
+
+def mark_codes_failed(conn: sqlite3.Connection, codes: list[str]) -> None:
+    """Flip `codes` (already `pending`) to `failed` after a send that never landed."""
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE alerted_codes SET status = 'failed' WHERE code = ?",
+                (code,),
+            )
+
+
+def fail_pending_codes(conn: sqlite3.Connection) -> list[str]:
+    """Flip every still-`pending` code to `failed`; return which ones changed.
+
+    Called once at startup (R4): a `pending` row means a previous process
+    claimed a code and the ping budget, then died before confirming the
+    Discord send actually landed. Flipping it to `failed` here, rather
+    than leaving it `pending` forever, is what lets a future sweep treat
+    the code as already handled instead of retrying a post that might
+    already be sitting in the channel.
+    """
+    with conn:
+        rows = conn.execute("SELECT code FROM alerted_codes WHERE status = 'pending'").fetchall()
+        codes = [row["code"] for row in rows]
+        if codes:
+            conn.execute("UPDATE alerted_codes SET status = 'failed' WHERE status = 'pending'")
+    return codes
+
+
+def record_sweep(
+    conn: sqlite3.Connection, now: Callable[[], datetime] | None, summary: str
+) -> None:
+    """Record that a sweep ran and what it found, e.g. "17/19 sources ok, 1 new code"."""
+    now_iso = _resolve_now(now)
+    with conn:
+        _set_alert_state(conn, "last_sweep_at", now_iso)
+        _set_alert_state(conn, "last_sweep_summary", summary)
+
+
+def alert_status(
+    conn: sqlite3.Connection,
+    today: str,
+    *,
+    enabled: bool,
+    max_pings: int,
+    test_command_enabled: bool = False,
+) -> AlertStatus:
+    """Everything `/newsbot status`'s SHiFT alerts field shows, in one place.
+
+    `today` is the caller's `local_run_date` string (`cfg.digest.timezone`,
+    A8) -- `pings_today` only counts `ping_count` when it was spent on
+    that same local day; a stale `ping_day` from yesterday reads as 0
+    without needing its own reset write. `test_command_enabled` is just
+    `cfg.alerts.allow_test_command` passed through -- it's config, not
+    anything stored, but it lives on this dataclass because it's the one
+    place `render_status` already reads the rest of this from.
+    """
+    state = get_alert_state(conn)
+    codes_alerted = conn.execute(
+        "SELECT COUNT(*) FROM alerted_codes WHERE status = 'posted'"
+    ).fetchone()[0]
+    pings_today = state.ping_count if state.ping_day == today else 0
+    return AlertStatus(
+        enabled=enabled,
+        seeded=state.seeded,
+        last_sweep_at=state.last_sweep_at,
+        last_sweep_summary=state.last_sweep_summary,
+        codes_alerted=codes_alerted,
+        pings_today=pings_today,
+        max_pings=max_pings,
+        test_command_enabled=test_command_enabled,
+    )
 
 
 # --- Read path: /news commands and /newsbot status ---

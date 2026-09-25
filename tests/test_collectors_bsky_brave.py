@@ -41,6 +41,10 @@ async def test_bluesky_collector_parses_fixture_unauthenticated():
     assert items[0].title.startswith("Palworld's new update just dropped")
     assert items[0].topics == ("palworld",)
     assert items[0].published_at is not None
+    assert items[0].full_text == (
+        "Palworld's new update just dropped and it fixes the desync bug "
+        "everyone's been complaining about."
+    )
 
 
 async def test_bluesky_collector_403_html_body_is_skipped_not_a_crash():
@@ -224,6 +228,31 @@ async def test_web_search_collector_parses_fixture():
     assert items[0].topics == ("diablo4",)
     assert items[0].published_at is not None
     assert items[1].published_at is None  # no page_age in the fixture's second result
+    assert items[0].full_text == (
+        "Blizzard has revealed the headline feature coming with Diablo IV's next season."
+    )
+
+
+async def test_web_search_collector_full_text_is_none_for_null_description():
+    body = json.dumps(
+        {
+            "results": [
+                {"url": "https://example.com/a", "title": "Null description", "description": None}
+            ]
+        }
+    ).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(
+            http
+        )
+    assert items[0].full_text is None
 
 
 async def test_web_search_collector_query_expansion_equals_topics_times_queries_per_topic():

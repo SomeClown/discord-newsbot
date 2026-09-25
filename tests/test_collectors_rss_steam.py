@@ -464,6 +464,93 @@ async def test_rss_collector_decodes_entities_and_truncates_long_html_descriptio
     assert len(item.excerpt) <= 500
 
 
+# --- full_text (plan step 4): untruncated companion to excerpt ---
+
+
+async def test_rss_collector_sets_full_text_from_description_when_no_content_tag():
+    body = (FIXTURES / "rss20_sample.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="PC Gamer", url="https://www.pcgamer.com/rss/", trust="press"
+    )
+    transport = _transport({"https://www.pcgamer.com/rss/": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+    assert items[0].full_text == (
+        "Pocketpair has confirmed the next Palworld update adds a new island to explore."
+    )
+
+
+async def test_rss_collector_full_text_is_none_when_entry_has_no_body_text():
+    body = (FIXTURES / "rss20_empty.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Empty Feed", url="https://example.com/empty.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/empty.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert items == []
+
+
+async def test_rss_collector_code_past_500_chars_is_in_full_text_not_excerpt():
+    # The whole point of full_text: excerpt (500 chars, ellipsis-truncated)
+    # never gets far enough into this post to see the code; full_text does.
+    body = (FIXTURES / "rss20_full_text_code.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="SHiFT Feed", url="https://example.com/shift.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/shift.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.excerpt.endswith("…")
+    assert len(item.excerpt) <= 500
+    assert "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE" not in item.excerpt
+    assert item.full_text is not None
+    assert "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE" in item.full_text
+    assert len(item.full_text) > 500
+
+
+async def test_rss_collector_full_text_combines_content_and_differing_summary():
+    body = (FIXTURES / "atom_youtube_sample.xml").read_bytes()
+    source = RssSource(
+        type="rss",
+        name="Diablo YouTube",
+        url="https://www.youtube.com/feeds/videos.xml?channel_id=UCxn8csYeZg6awRnZS-aqg0g",
+        topics=["diablo4"],
+        trust="official",
+    )
+    transport = _transport(
+        {"https://www.youtube.com/feeds/videos.xml": httpx.Response(200, content=body)}
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+    assert items[0].full_text == "Get ready. Season 12 arrives soon."
+
+
+async def test_rss_collector_excerpt_byte_identical_on_existing_fixture_with_full_text_added():
+    # Pins that adding full_text didn't disturb excerpt's own output on an
+    # existing fixture -- same excerpt string test_rss_collector_decodes_
+    # entities_and_truncates_long_html_description already checks, plus
+    # the new full_text field, which should hold the untruncated body.
+    body = (FIXTURES / "rss20_messy_content.xml").read_bytes()
+    source = RssSource(
+        type="rss", name="Messy Feed", url="https://example.com/messy.xml", trust="press"
+    )
+    transport = _transport({"https://example.com/messy.xml": httpx.Response(200, content=body)})
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+    assert items[0].excerpt.endswith("…")
+    assert len(items[0].excerpt) <= 500
+    assert items[0].full_text is not None
+    assert items[0].full_text.endswith("ratione voluptatem sequi nesciunt.")
+    assert len(items[0].full_text) > len(items[0].excerpt)
+
+
 async def test_rss_collector_unparseable_pubdate_gives_none_not_a_crash():
     body = (FIXTURES / "rss20_messy_content.xml").read_bytes()
     source = RssSource(
@@ -573,6 +660,46 @@ async def test_steam_collector_parses_fixture():
     assert items[0].published_at == datetime.fromtimestamp(1758000000, tz=UTC)
     assert items[0].trust == "official"
     assert items[0].topics == ("palworld",)
+    # The fixture's BBCode renders differently with and without inline
+    # separators, so full_text carries both renderings, one per line (see
+    # text.plain_text). The no-separator rendering always comes first.
+    assert items[0].full_text.split("\n")[0] == (
+        "Patch v0.6.2 fixes several crash issues and adds new Pals. See below for the full list."
+    )
+
+
+async def test_steam_collector_full_text_is_none_for_null_contents():
+    body = json.dumps(
+        {
+            "appnews": {
+                "newsitems": [
+                    {
+                        "url": "https://store.steampowered.com/news/app/1/view/1",
+                        "title": "Null contents",
+                        "contents": None,
+                        "date": 1758000000,
+                    }
+                ]
+            }
+        }
+    ).encode()
+    source = SteamSource(
+        type="steam_news",
+        name="Palworld Steam",
+        app_id=1623730,
+        topics=["palworld"],
+        trust="official",
+    )
+    transport = _transport(
+        {
+            "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/": httpx.Response(
+                200, content=body
+            )
+        }
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await SteamCollector(source).collect(http)
+    assert items[0].full_text is None
 
 
 async def test_steam_collector_skips_malformed_items_but_keeps_the_good_ones():

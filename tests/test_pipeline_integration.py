@@ -219,3 +219,40 @@ async def test_fallback_topic_gives_partial(db_path, http_client, monkeypatch):
     items, stories, _story_items, _digests = _row_counts(db_path)
     assert items == 3  # the palworld item is still saved, for dedupe (SPEC-DEV 9)
     assert stories == 1  # only borderlands4 produced a story
+
+
+# --- full_text (plan step 4): FixtureCollector reads it, save_run never stores it ---
+
+
+async def test_fixture_collector_reads_optional_full_text():
+    collectors = build_fixture_collectors(FIXTURES_DIR)
+    borderlands = next(c for c in collectors if c.name == "borderlands4")
+    async with httpx.AsyncClient() as http:
+        items = await borderlands.collect(http)
+    patch_item = next(i for i in items if i.url == "https://example.com/bl4/patch-1")
+    assert patch_item.full_text == (
+        "Fixes several crashes and rebalances loot drop rates based on community "
+        "feedback. Redeem code AAAA1-BBBBB-CCCCC-DDDDD-EEEEE this week only."
+    )
+
+
+async def test_fixture_collector_full_text_defaults_to_none():
+    collectors = build_fixture_collectors(FIXTURES_DIR)
+    borderlands = next(c for c in collectors if c.name == "borderlands4")
+    async with httpx.AsyncClient() as http:
+        items = await borderlands.collect(http)
+    thread_item = next(i for i in items if i.url == "https://example.com/bl4/community-thread")
+    assert thread_item.full_text is None
+
+
+async def test_save_run_stores_no_full_text_column(db_path, http_client):
+    # An item with full_text set makes it all the way through run_daily
+    # without error, and the items table -- unchanged by v1.2's migration
+    # -- has nowhere to put full_text even if something tried.
+    deps = _make_deps(db_path, http_client)
+    outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+    assert outcome.status == "ok"
+
+    with closing(connect(db_path)) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+    assert "full_text" not in columns

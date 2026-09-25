@@ -42,14 +42,19 @@ newsbot/
     summarize.py   Claude call, prompt assembly, schema validation, fallback
     run.py         orchestrates one daily run; also the headless CLI (`python -m newsbot.pipeline.run`)
     publisher.py   the Publisher protocol; PrintPublisher for the CLI
+    lock.py        the one run lock, shared by the daily job and the SHiFT alert sweep (§12)
+  shift/           SHiFT code alerts (§12, v1.2) -- separate near-real-time path, not the digest
+    match.py       pure code/Golden Key text matcher, fixed pattern, no ReDoS surface
+    decide.py      pure planner -- new/fresh/seeded/too_old, ping-or-not, the daily cap
+    sweep.py       the I/O side: runs sweep collectors, claim/post/record, shares pipeline/lock.py
   store/
     migrations/    numbered .sql files
     db.py          connection, WAL, migration runner
     repo.py        all queries (no SQL elsewhere)
   bot/
-    client.py      discord client, scheduler wiring, healthcheck, DiscordPublisher
-    commands.py    /news recent, /news search, /newsbot status|run-now|preview
-    format.py      digest + result embeds, paging, UTF-16-aware limit checks
+    client.py      discord client, scheduler wiring, healthcheck, DiscordPublisher, DiscordCodeAlertPoster
+    commands.py    /news recent, /news search, /newsbot status|run-now|preview|test-alert
+    format.py      digest + result embeds + code alerts, paging, UTF-16-aware limit checks
   alerts.py        admin-channel notifications
   healthcheck.py   Docker HEALTHCHECK entry point
 ```
@@ -161,13 +166,16 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `digests` | id, run_date (UNIQUE), status (pending/ok/partial/failed), posted_message_ids (JSON), error_notes, input_tokens, output_tokens, created_at, updated_at |
 | `source_health` | source_name (PK), last_success_at, last_error_at, last_error, consecutive_failures |
 | `stories_fts` | external-content FTS5 table over `stories(headline, summary)`, kept in sync by AFTER INSERT/DELETE/UPDATE triggers |
+| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25) |
+| `alert_state` | key (PK), value -- a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
 
 - **Double-post guard:** `claim_digest` refuses to hand out a `pending` row for `run_date` if one already exists with status `pending`, `ok` or `partial` — see the ordering in section 4 for why `pending` exists at all. `/newsbot run-now` can force past any of those states after confirmation, replacing that day's row in place (same id). A `failed` row always allows a reclaim, since that day never actually posted.
-- **Retention:** a nightly job deletes items and stories older than 90 days.
-- **Migrations:** numbered `.sql` files are applied at startup, and the applied version is tracked in `PRAGMA user_version`.
-- **Backups:** a host cron job runs `sqlite3 /data/newsbot.db ".backup ..."` each day and keeps the 7 newest.
+- **Record-then-post guard (§12):** `alerted_codes` plays the same role for code alerts that `claim_digest`'s `pending` row plays for the digest -- a batch of codes and the day's ping budget are claimed as `pending` in one transaction *before* anything is sent, and only flipped to `posted` once the send actually lands. A process that dies in between leaves codes `pending`; `fail_pending_codes()` flips those to `failed` at the next startup (and the admin channel is told which codes), so a future sweep never retries a post that might already be sitting in the channel.
+- **Retention:** a nightly job deletes items and stories older than 90 days. `alerted_codes` and `alert_state` are never touched by retention -- there's no lookback window on "have we ever alerted this code before."
+- **Migrations:** numbered `.sql` files are applied at startup, and the applied version is tracked in `PRAGMA user_version`. Migration 002 (v1.2) is purely additive: a pre-1.2 binary still starts up fine against a database already migrated to version 2, it just never reads or writes the two new tables.
+- **Backups:** a host cron job runs `sqlite3 /data/newsbot.db ".backup ..."` each day and keeps the 7 newest. A restore can cause a SHiFT code to re-alert (its `alerted_codes` row rolls back too), bounded by `max_item_age_hours` and `max_pings_per_day` -- see `docs/deploy.md`'s restore runbook.
 
 ## 6. Discord interface
 
@@ -235,3 +243,133 @@ All resolved as of M2 (2026-09-24):
 - Seed source list researched and owner-approved; see `docs/sources-research.md` and `config.example.yaml`.
 - Digest time and timezone confirmed: 09:00 America/Los_Angeles.
 - The owner created the Discord applications (prod and dev), the Anthropic API key, and the Brave Search API key. No Bluesky app password yet — see the dedicated-source note in section 4 for what that costs in coverage.
+
+## 12. SHiFT code alerts (v1.2, approved 2026-09-25)
+
+A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions.
+
+**Pattern.** Five groups of five ASCII letters or digits joined by hyphens (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`), matched case-insensitively and normalized to uppercase. The match must stand alone: not preceded or followed by another letter, digit, or hyphen. It is a fixed, anchored pattern with no user-supplied regex (no ReDoS surface). Matching runs over each item's title and **full** text, not the 500-character excerpt stored for summaries, so collectors must make the untruncated text available to the matcher.
+
+**Wording.** If the item's title or text mentions "golden key" or "golden keys" (case-insensitive), the alert says **New Golden Key code**; otherwise **New SHiFT code**. Multiple new codes found in one check go in a single message with a single ping.
+
+**When it runs.**
+- An hourly alert sweep (interval configurable) runs every collector **except `web_search`** (keeps Brave within its free allowance) and does **not** call Claude. It shares the existing run lock with the daily job and respects the Reddit serial-fetch gap.
+- The daily 09:00 run also checks its collected items for codes.
+- The sweep never writes `items`/`stories` and never affects the digest; the digest's dedupe is unchanged.
+
+**Safeguards on `@everyone`.**
+1. **Once per code, ever.** A new `alerted_codes` table (code PK, first_seen_at, source_name, item_url, message_id, pinged bool) records every code seen; a code already in the table never alerts again.
+2. **Silent seeding.** The first sweep after the feature is enabled (no rows in `alerted_codes` and no seeded marker) records every code it finds without posting, so existing old codes in the feeds don't cause a flood.
+3. **Age limit.** Items whose `published_at` is older than `max_item_age_hours` (default 48) are recorded but not alerted. Undated items are treated as fresh (consistent with SPEC-DEV 4) but still subject to the once-per-code rule and the cap.
+4. **Daily ping cap.** At most `max_pings_per_day` (default 3) alert messages with a ping per local day (America/Los_Angeles). Beyond the cap, alerts still post but without the ping, and an admin alert notes it.
+5. **Mentions stay off elsewhere.** Only alert messages set `allowed_mentions=AllowedMentions(everyone=True)` (and only when pinging); every other send path keeps `AllowedMentions.none()`. Scraped text in the alert (source name) is escaped; the only URL shown is the collected item's canonical URL.
+
+**Config.**
+```yaml
+alerts:
+  enabled: true
+  interval_minutes: 60
+  max_item_age_hours: 48
+  max_pings_per_day: 3
+  ping_trust: ["official", "press"]  # A16, QA item 7 -- who can trigger a ping
+  max_codes_per_item: 5              # A17, QA item 7 -- roundup/megathread threshold
+```
+
+**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code.
+
+### Implementation clarifications (A1–A13, recorded 2026-09-25)
+
+The plan (`docs/plans/2026-09-25-shift-code-alerts.md` §2 and §9) worked
+out thirteen specifics this section left open, plus two owner decisions.
+Recorded briefly here since they're load-bearing for anyone reading the
+code without also reading the plan:
+
+- **A1 Seeding** is decided by the seeded marker alone, set only on a
+  *healthy* sweep (`decide.seeding_healthy`: ≥1 collector succeeded and
+  at least half of the non-skipped ones did) -- both the hourly sweep and
+  the daily run's own check compute this the same way, rather than the
+  daily run always assuming it's healthy. Losing the marker silently
+  re-seeds (the safe direction: a missed alert, never a flood).
+- **A2 State column:** `alerted_codes.status TEXT CHECK IN ('seeded',
+  'too_old', 'pending', 'posted', 'failed', 'roundup')` -- see §5;
+  `'roundup'` added under QA item 7 (below).
+- **A3 Mixed batch wording:** all-golden batches say "New Golden Key
+  code(s)"; a mixed batch keeps "New SHiFT code(s)" with a "Golden Key:"
+  prefix on each golden entry.
+- **A4 Overflow:** only the first of several overflow messages ever
+  carries the ping; the daily cap counts that as one ping regardless of
+  how many messages the batch spilled into.
+- **A5 AllowedMentions:** exactly one place in `newsbot/` may construct
+  `AllowedMentions(everyone=True, ...)` -- the module constant
+  `_PING_EVERYONE` in `bot/client.py` -- pinned by a source-scanning test
+  (`tests/test_mentions_tripwire.py`) so a future send path can't
+  reintroduce a second one by accident.
+- **A6 Game scoping (owner decision):** scope to `alerts.topics`, the
+  same confident/dedicated-source match `pipeline.filter.filter_items`
+  uses for the digest -- empty means every topic.
+- **A7 Default:** `alerts.enabled` defaults to `false` when the block is
+  absent; `config.example.yaml` ships it commented with `true`.
+- **A8 Timezone:** the daily ping cap resets on the local calendar day in
+  `cfg.digest.timezone` (`local_run_date`), not UTC midnight.
+- **A9 Source health:** sweeps never write `source_health` and never
+  trigger the 3-consecutive-failures alert; sweep health lives in
+  `alert_state.last_sweep_summary` instead.
+- **A10 Lock:** a sweep skips its turn (no wait) if the run lock is held;
+  the daily job still waits for it, same as before this feature existed.
+- **A11 Too-old codes (owner decision):** a code first seen only in a
+  stale item is recorded `'too_old'` and never alerts later, even once
+  seeded.
+- **A12 Golden wording:** `\bgolden[\s_-]*keys?\b`, case-insensitive.
+- **A13 Untrusted text:** the item title is never shown in an alert;
+  the source name is escaped the same way digest text is; the only URL
+  shown is the collected item's own canonical URL via `_safe_link`.
+
+Two implementation notes worth recording alongside these: the code
+pattern (`shift/match.py`'s `CODE_RE`) is **not** `re.IGNORECASE` --
+`[A-Za-z0-9]` already covers both cases without the flag, and adding it
+would widen Unicode boundary checks to admit lookalikes like the Kelvin
+sign or Turkish dotless ı, which is exactly the confusable-character
+class this pattern is designed to reject. And a single alert entry whose
+own content (a long source name plus a long collected URL) would exceed
+Discord's 2000-unit message cap on its own sheds its link first, then
+hard-truncates the source name, rather than ever returning an over-cap
+message that Discord would reject outright (`bot/format.py`'s
+`render_code_alerts`).
+
+- **A14 `/` is a blocking boundary (QA item 6, 2026-09-25):** `CODE_RE`'s
+  boundary lookarounds treat a literal `/` the same as an adjacent
+  letter, digit or hyphen -- a code glued to a URL path separator on
+  either side doesn't match. This was added because a URL slug built out
+  of five hyphen-joined five-letter English words
+  (`.../shift-codes-early-today-guide/`) is indistinguishable from five
+  real code groups to every *other* boundary rule; a `?code=...` query
+  string value is unaffected, since `=` was never a blocking character.
+- **A15 At-least-one-digit rule (QA item 6, 2026-09-25):** `find_codes`/
+  `is_code` additionally require at least one ASCII digit anywhere in the
+  25 characters. Real SHiFT codes are virtually always a mix of letters
+  and digits; an all-letter placeholder (`AAAAA-BBBBB-CCCCC-DDDDD-EEEEE`,
+  the kind used across this repo's own docs and test fixtures before this
+  rule existed) or a hyphenated all-letter phrase essentially never is.
+  A genuine all-letter SHiFT code would be missed by this rule -- judged
+  vanishingly unlikely against the false-positive rate it closes off.
+- **A16 Trust-gated pings (QA item 7 option A, owner decision,
+  2026-09-25):** a new `alerts.ping_trust` config list (default
+  `["official", "press"]`) decides which sources' sightings can make a
+  batch ping -- not which codes get to post. Every new code in a batch
+  still posts, community-only included; `plan_alerts` only withholds the
+  `@everyone` when *none* of the batch's `to_post` candidates are
+  `trusted` (`decide.aggregate`'s "any sighting's trust is in
+  `ping_trust`"), and in that case the daily ping cap isn't spent and no
+  "cap reached" admin alert fires -- there was nothing the cap actually
+  stopped. Trusted candidates sort ahead of untrusted ones within
+  `to_post` (still first-seen order inside each group), so a pinging
+  batch's first (only ping-bearing) message is guaranteed to carry a
+  trusted code.
+- **A17 Silent roundups (QA item 7, owner decision, 2026-09-25):** a new
+  `alerts.max_codes_per_item` config int (default 5) marks an item naming
+  more distinct codes than that as a roundup or megathread, not a genuine
+  single-code announcement. Every sighting from a roundup item is ignored
+  for a code that also has at least one non-roundup sighting in the same
+  batch ("judged by the normal item"); a code whose *every* sighting is
+  from a roundup item is recorded silently as `'roundup'` (A2) and never
+  reaches the seeded/too_old/post logic at all, regardless of `seeded`.

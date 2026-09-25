@@ -171,3 +171,71 @@ def test_bot_constructs_with_default_non_privileged_intents(cfg):
     assert bot.intents.presences is False
     assert bot.intents.message_content is False
     assert bot.intents == discord.Intents.default()
+
+
+# --- /newsbot test-alert (plan step 10): registered only when allow_test_command ---
+
+
+class _FakeBot:
+    db_path = ":memory:"
+
+
+def _cfg_with_test_alert(tmp_path, monkeypatch, *, allow_test_command: bool):
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    config_text = f"""
+guild_id: 1
+digest:
+  channel_id: 2
+  time: "09:00"
+  timezone: "America/Los_Angeles"
+topics:
+  - key: palworld
+    name: "Palworld"
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+alerts:
+  enabled: true
+  allow_test_command: {"true" if allow_test_command else "false"}
+"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_text)
+    return load_config(config_path)
+
+
+def test_test_alert_registered_when_allow_test_command_true(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=True)
+    group = make_admin_group(cfg, _FakeBot())
+    assert {c.name for c in group.commands} == {"status", "run-now", "preview", "test-alert"}
+
+
+def test_test_alert_absent_when_allow_test_command_false(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=False)
+    group = make_admin_group(cfg, _FakeBot())
+    assert {c.name for c in group.commands} == {"status", "run-now", "preview"}
+
+
+def test_test_alert_absent_by_default(cfg):
+    # The fixture config carries no alerts: block at all, which defaults
+    # allow_test_command to False -- the same "never surprise a prod
+    # config" default AlertsCfg documents for the whole feature.
+    group = make_admin_group(cfg, _FakeBot())
+    assert "test-alert" not in {c.name for c in group.commands}
+
+
+def test_test_alert_code_option_is_exactly_29_characters(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=True)
+    group = make_admin_group(cfg, _FakeBot())
+    code = _param(_command(group, "test-alert"), "code")
+    assert code.min_value == 29
+    assert code.max_value == 29
+
+
+def test_test_alert_golden_option_defaults_false(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=True)
+    group = make_admin_group(cfg, _FakeBot())
+    golden = _param(_command(group, "test-alert"), "golden")
+    assert golden.default is False

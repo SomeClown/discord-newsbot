@@ -29,7 +29,9 @@ from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
-from newsbot.store.models import StatusSnapshot, StoryView
+from newsbot.shift.decide import CodeCandidate
+from newsbot.shift.match import is_code
+from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -38,6 +40,13 @@ _MAX_EMBEDS_PER_MESSAGE = 10
 _HEADER_LIMIT = 2000
 _MAX_LINKS_SHOWN = 3
 _MAX_FIELD_VALUE = 1024
+# Discord's plain-message content cap (as opposed to an embed's much bigger
+# limits above) -- code alerts are plain messages, not embeds, since a code
+# is meant to be select-and-copy-able, and an embed's description puts a
+# faint background behind text that makes triple-clicking to select it a
+# worse experience than it needs to be.
+_ALERT_CONTENT_LIMIT = 2000
+_CONTINUATION_HEADER = "**(continued)**"
 
 _LABEL_ORDER = {"official": 0, "reported": 1, "rumor": 2}
 _LABEL_MARKER = {"official": "🟢 OFFICIAL", "reported": "🟡 REPORTED", "rumor": "🔴 RUMOR"}
@@ -364,8 +373,48 @@ def render_story_page(
     return embed
 
 
-def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
-    """Render `/newsbot status`: last run, source health, and the running spend estimate."""
+def _alerts_field_value(alerts: AlertStatus) -> str:
+    """The `/newsbot status` "SHiFT alerts" field's value (plan step 10).
+
+    `disabled` when the config block's off; otherwise the last sweep's
+    time and summary (or "no sweep yet" before the first one has run),
+    how many codes have ever posted, and today's ping spend against the
+    cap -- with `(seeding)` appended while the marker's still unset, since
+    "0 codes alerted, pings 0 of 3" reads very differently depending on
+    whether that's "nothing's happened yet" or "we're deliberately
+    staying quiet on purpose" (A1).
+    """
+    if not alerts.enabled:
+        return "disabled"
+    if alerts.last_sweep_at is not None:
+        sweep_part = f"last sweep {alerts.last_sweep_at.isoformat()}"
+        if alerts.last_sweep_summary:
+            sweep_part += f" · {esc(alerts.last_sweep_summary)}"
+    else:
+        sweep_part = "no sweep yet"
+    value = (
+        f"{sweep_part} · {alerts.codes_alerted} codes alerted · "
+        f"pings today {alerts.pings_today} of {alerts.max_pings}"
+    )
+    if not alerts.seeded:
+        value += " (seeding)"
+    if alerts.test_command_enabled:
+        value += " · test command ENABLED"
+    return _truncate_utf16(value, _MAX_FIELD_VALUE, suffix="…")
+
+
+def render_status(
+    snap: StatusSnapshot, spend_usd: float, alerts: AlertStatus | None = None
+) -> discord.Embed:
+    """Render `/newsbot status`: last run, source health, and the running spend estimate.
+
+    `alerts` is optional so every existing caller (and every test that
+    predates the SHiFT alert sweep) keeps seeing exactly the same embed --
+    the "SHiFT alerts" field only appears when a caller actually has an
+    `AlertStatus` to show, which `/newsbot status`'s handler always does
+    in practice (design.md §12 wants this field shown even when the
+    feature is off, so it computes one regardless of `cfg.alerts.enabled`).
+    """
     embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
 
     if snap.last_digest is not None:
@@ -383,6 +432,9 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     embed.add_field(name="Items (24h)", value=str(snap.items_last_24h))
     embed.add_field(name="Stories (24h)", value=str(snap.stories_last_24h))
     embed.add_field(name="Est. spend this month", value=f"${spend_usd:.2f}")
+
+    if alerts is not None:
+        embed.add_field(name="SHiFT alerts", value=_alerts_field_value(alerts), inline=False)
 
     # One line per source in the description, not one field per source.
     # Discord caps an embed at 25 fields, and the first real config had 24
@@ -411,6 +463,159 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     return embed
 
 
+@dataclass
+class RenderedAlert:
+    """One Discord message's worth of a SHiFT code alert batch.
+
+    `codes` is that message's own slice of the codes it announces -- when a
+    batch splits across several messages (see `render_code_alerts`),
+    `shift/sweep.py` needs to know which codes to mark `posted` against
+    which message id, and a code that landed in message 2 shouldn't get
+    stamped with message 1's id just because it was easier to track one
+    running total.
+    """
+
+    content: str
+    codes: list[str]
+    ping: bool
+    # A deterministic id for this message, passed to `channel.send(nonce=...)`
+    # (plan §1) so a retried send after a `PublishError` -- our own client
+    # gave up waiting for a response, not necessarily proof the message
+    # never landed -- can't turn into a second `@everyone` in the channel.
+    # Discord dedupes two sends sharing a nonce within its own short
+    # window; deriving it from `codes` and this message's position in the
+    # batch (not from wall-clock time or a random value) is what makes a
+    # retry of *this* message reuse the *same* nonce instead of minting a
+    # fresh one that Discord has never seen before.
+    nonce: str = ""
+
+
+def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
+    suffix = "s" if plural else ""
+    if all(c.golden for c in candidates):
+        return f"New Golden Key code{suffix}"
+    return f"New SHiFT code{suffix}"
+
+
+def _alert_block(
+    candidate: CodeCandidate, *, golden_prefix: bool, max_len: int | None = None
+) -> str:
+    # Checked, not just trusted: this is the one place a code goes out to
+    # Discord, and a code that somehow isn't shaped like a code (a bug
+    # upstream, not a real scenario) is worth a loud failure here rather
+    # than a quietly wrong alert. A plain `assert` strips out under `-O`;
+    # this doesn't get to.
+    if not is_code(candidate.code):
+        raise ValueError(f"not a SHiFT code: {candidate.code!r}")
+    prefix = "Golden Key: " if golden_prefix and candidate.golden else ""
+    code_block = f"```\n{candidate.code}\n```"
+    safe_url = _safe_link(candidate.item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    block = f"{code_block}\n{prefix}{esc(candidate.source_name)}{link}"
+    if max_len is None or discord_len(block) <= max_len:
+        return block
+
+    # Long enough that even a message holding this one entry alone would
+    # bust Discord's 2000-unit cap (a hostile or just very long source
+    # name plus a long collected URL, most likely) -- shed the link
+    # first. The code itself is the whole point of the alert; the source
+    # name is the next thing worth keeping (it's what a reader checks
+    # against before trusting a code); the link is the part most likely
+    # to already be redundant with "click the code, go to shift.gearbox
+    # website" and the first thing worth losing.
+    block = f"{code_block}\n{prefix}{esc(candidate.source_name)}"
+    if discord_len(block) <= max_len:
+        return block
+
+    # Still too long -- hard-truncate the source name itself. The fenced
+    # code block (```\n<code>\n```) and any golden-key prefix are fixed
+    # and never truncated: a partial code would be actively wrong, not
+    # just abbreviated.
+    fixed_len = discord_len(code_block) + 1 + discord_len(prefix)  # +1 for the joining "\n"
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(candidate.source_name), name_budget, suffix="…")
+    return f"{code_block}\n{prefix}{truncated_name}"
+
+
+def render_code_alerts(
+    candidates: list[CodeCandidate], *, ping: bool, test: bool = False
+) -> list[RenderedAlert]:
+    """Render a batch of new SHiFT codes into one or more alert messages.
+
+    One ping covers the whole batch (A4): only the first message's header
+    carries `@everyone` (and only if `ping` is true to begin with); every
+    continuation starts with `_CONTINUATION_HEADER` instead and never
+    pings, no matter how many messages the batch spills into. Mixed
+    golden/non-golden batches (A3) keep the plain "New SHiFT code(s)"
+    title but prefix each golden entry with "Golden Key:" so it doesn't
+    read as an ordinary code.
+    """
+    if not candidates:
+        return []
+
+    mixed = any(c.golden for c in candidates) and not all(c.golden for c in candidates)
+    title = _alert_title(candidates, plural=len(candidates) > 1)
+    test_prefix = "[TEST] " if test else ""
+    first_header = ("@everyone " if ping else "") + f"**{test_prefix}{title}**"
+
+    # The most room any one entry can ever count on: alone in its own
+    # message, under whichever header is longer (always the first
+    # message's, thanks to "@everyone " and the title, but the max is
+    # cheap insurance against that assumption changing later) plus the
+    # "\n\n" joining the header to the block.
+    solo_budget = (
+        _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER)) - 2
+    )
+    entries = []
+    for c in candidates:
+        block = _alert_block(c, golden_prefix=mixed)
+        if discord_len(block) > solo_budget:
+            block = _alert_block(c, golden_prefix=mixed, max_len=solo_budget)
+        entries.append((c.code, block))
+
+    # Greedily pack entries into batches under Discord's 2000-char message
+    # cap, counting each batch's own header (the first batch's is longer,
+    # thanks to "@everyone " and the title) plus a "\n\n" joiner per entry.
+    # Every entry is already guaranteed to fit `solo_budget` on its own
+    # (see above), so this loop only ever has to decide when to start a
+    # *new* batch, never split one entry across two.
+    batches: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_len = 0
+    for code, block in entries:
+        header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+        block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
+        if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append((code, block))
+        current_len += block_len
+    if current:
+        batches.append(current)
+
+    rendered = []
+    for i, batch in enumerate(batches):
+        header = first_header if i == 0 else _CONTINUATION_HEADER
+        content = "\n\n".join([header, *(block for _, block in batch)])
+        # Belt-and-suspenders on the packing loop above: nothing should
+        # ever reach here over the cap, but a RenderedAlert that snuck
+        # past it would be silently rejected by Discord, losing a code
+        # nobody would notice was lost -- worth a loud failure instead of
+        # a plain `assert`, which strips out under `-O`.
+        if discord_len(content) > _ALERT_CONTENT_LIMIT:
+            raise ValueError(
+                f"rendered alert content exceeds {_ALERT_CONTENT_LIMIT} UTF-16 units "
+                f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
+            )
+        batch_codes = [code for code, _ in batch]
+        nonce = hashlib.sha256(f"{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+        rendered.append(
+            RenderedAlert(content=content, codes=batch_codes, ping=ping and i == 0, nonce=nonce)
+        )
+    return rendered
+
+
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
@@ -432,8 +637,10 @@ def to_text(r: RenderedDigest) -> str:
 
 
 __all__ = [
+    "RenderedAlert",
     "RenderedDigest",
     "esc",
+    "render_code_alerts",
     "render_digest",
     "render_status",
     "render_story_page",

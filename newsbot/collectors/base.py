@@ -12,8 +12,9 @@ one at a time, while everything else still runs concurrently.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -53,6 +54,14 @@ class RawItem:
     `topics` restricts (or, for a single-topic source, assigns) which
     topics this item can match -- `None` means "let keyword matching
     against every topic decide" (see `pipeline/filter.py`, SPEC-DEV 3).
+
+    `full_text` is the untruncated companion to `excerpt`, added for the
+    SHiFT code sweep (design.md §12): a code five paragraphs into a
+    patch-notes post never shows up in a 500-character excerpt. It's
+    memory-only -- `compare=False` and `repr=False` keep it out of
+    equality checks and log lines, and `StoredItem` (what actually reaches
+    `save_run`) has no field for it at all, so there's no code path that
+    could persist it or hand it to the LLM even by accident.
     """
 
     url: str
@@ -62,6 +71,7 @@ class RawItem:
     trust: Trust
     published_at: datetime | None
     topics: tuple[str, ...] | None = None
+    full_text: str | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,23 @@ async def _run_one(
         )
 
 
+@dataclass
+class RateLimitState:
+    """The one piece of state a Reddit-shaped rate limit needs across calls.
+
+    `run_collectors`' old in-call-only gap (space members of one group
+    `rate_limit_gap_s` apart, reset every call) is exactly right for one
+    daily run, but the SHiFT alert sweep (design.md §12) calls
+    `run_collectors` every `interval_minutes` from the same process, and
+    Reddit doesn't reset its patience just because the previous call
+    returned. Threading one `RateLimitState` through every call -- the
+    daily job's and every sweep's alike -- is what makes the gap a real
+    cross-call throttle instead of a fresh burst every hour.
+    """
+
+    last_fetch: dict[str, float] = field(default_factory=dict)
+
+
 async def run_collectors(
     collectors: Sequence[Collector],
     http: httpx.AsyncClient,
@@ -113,40 +140,77 @@ async def run_collectors(
     *,
     rate_limit_gap_s: float = _DEFAULT_RATE_LIMIT_GAP_S,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    rate_limit_state: RateLimitState | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[CollectorResult]:
     """Run every collector, concurrently except within a shared `rate_limit_key`.
 
     Collectors with no `rate_limit_key` (or a `None` one) each get their own
-    solo group and run alongside everything else. Collectors that share a
-    key (currently just the Reddit sources) run one at a time within their
-    group, `rate_limit_gap_s` apart -- but that group itself still runs
-    concurrently with every other group, so a throttled Reddit fetch
-    doesn't hold up an RSS feed that has nothing to do with it.
+    solo group and run alongside everything else, and never wait on
+    anything. Collectors that share a key (currently just the Reddit
+    sources) run one at a time within their group, `rate_limit_gap_s`
+    apart -- but that group itself still runs concurrently with every
+    other group, so a throttled Reddit fetch doesn't hold up an RSS feed
+    that has nothing to do with it.
+
+    Without `rate_limit_state` (the default, and today's behavior), the
+    gap only applies *within* one call: the first collector in a group
+    never waits, and the clock resets to zero the next time this function
+    is called. With a `rate_limit_state`, every keyed collector -- the
+    first in its group included -- waits out whatever's left of the gap
+    since that key's *last* fetch, tracked across calls. That's what lets
+    the hourly sweep and the daily job share one Reddit throttle instead
+    of each starting a fresh burst.
     """
-    groups: dict[object, list[Collector]] = {}
+    keyed: dict[str, list[Collector]] = {}
+    unkeyed: list[Collector] = []
     for collector in collectors:
         key = getattr(collector, "rate_limit_key", None)
-        groups.setdefault(key if key is not None else object(), []).append(collector)
+        if key is None:
+            unkeyed.append(collector)
+        else:
+            keyed.setdefault(key, []).append(collector)
 
-    async def run_group(members: list[Collector]) -> list[CollectorResult]:
+    async def run_keyed_group(key: str, members: list[Collector]) -> list[CollectorResult]:
         results = []
         for i, collector in enumerate(members):
-            if i:
+            if rate_limit_state is not None:
+                last = rate_limit_state.last_fetch.get(key)
+                if last is not None:
+                    wait = rate_limit_gap_s - (clock() - last)
+                    if wait > 0:
+                        await sleep(wait)
+            elif i:
                 await sleep(rate_limit_gap_s)
             results.append(await _run_one(collector, http, timeout_s))
+            if rate_limit_state is not None:
+                rate_limit_state.last_fetch[key] = clock()
         return results
 
-    grouped = await asyncio.gather(*(run_group(members) for members in groups.values()))
+    async def run_solo(collector: Collector) -> list[CollectorResult]:
+        return [await _run_one(collector, http, timeout_s)]
+
+    tasks = [run_keyed_group(key, members) for key, members in keyed.items()]
+    tasks += [run_solo(collector) for collector in unkeyed]
+    grouped = await asyncio.gather(*tasks)
     return [result for group in grouped for result in group]
 
 
-def build_collectors(cfg: AppConfig, secrets: Secrets) -> list[Collector]:
+def build_collectors(
+    cfg: AppConfig, secrets: Secrets, *, include_web_search: bool = True
+) -> list[Collector]:
     """Turn every configured source into its matching collector.
 
     A `web_search` source with no `BRAVE_API_KEY` is skipped here too, as a
     second line of defense -- `config.py` already warns and is expected to
     have dropped it, but a collector built without a key it needs would
     just fail on every run instead of being invisible, which is worse.
+
+    `include_web_search=False` is the SHiFT alert sweep's own reason to
+    call this (design.md §12): Brave News has a modest free allowance, and
+    an hourly sweep calling it 24x a day on top of the daily digest's own
+    calls would eat through it for a collector type that's the least
+    likely place to find a redeem code anyway.
     """
     from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
     from newsbot.collectors.rss import RssCollector
@@ -168,7 +232,7 @@ def build_collectors(cfg: AppConfig, secrets: Secrets) -> list[Collector]:
         elif isinstance(source, BlueskySource):
             collectors.append(BlueskyCollector(source, bluesky_session))
         elif isinstance(source, WebSearchSource):
-            if not secrets.brave_api_key:
+            if not include_web_search or not secrets.brave_api_key:
                 continue
             collectors.append(
                 WebSearchCollector(source, cfg.topics, secrets.brave_api_key.get_secret_value())

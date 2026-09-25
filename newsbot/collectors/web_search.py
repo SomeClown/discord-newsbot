@@ -98,19 +98,25 @@ class WebSearchCollector:
             title = result.get("title")
             if not (url and title):
                 continue
+            # `.get(..., "")` only covers a *missing* key; Brave has sent
+            # an explicit `"description": null` in the wild, which sails
+            # right past that default and into `clean_text(None)`, which
+            # doesn't have a good day.
+            description = result.get("description") or ""
             results.append(
                 RawItem(
                     url=url,
                     title=title,
-                    # `.get(..., "")` only covers a *missing* key; Brave
-                    # has sent an explicit `"description": null` in the
-                    # wild, which sails right past that default and into
-                    # `clean_text(None)`, which doesn't have a good day.
-                    excerpt=text.clean_text(result.get("description") or ""),
+                    excerpt=text.clean_text(description),
                     source_name=self._source.name,
                     trust=self._source.trust,
                     published_at=_parse_page_age(result.get("page_age")),
                     topics=(topic_key,),
+                    # Brave only ever gives us a snippet, never full-page
+                    # text -- this is the same source `excerpt` is built
+                    # from, just uncapped at 500 characters, not some
+                    # additional fetch of the whole article.
+                    full_text=text.plain_text(description) if description else None,
                 )
             )
         return results

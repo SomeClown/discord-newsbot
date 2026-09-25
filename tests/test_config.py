@@ -347,6 +347,47 @@ def test_example_config_loads(monkeypatch):
     assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
 
 
+def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):
+    # The entire `alerts:` block in config.example.yaml is commented out
+    # (plan step 11: shown, not enabled, since it names a real
+    # @everyone-capable feature) -- loading the example file as-is should
+    # produce exactly AlertsCfg()'s untouched defaults, not whatever the
+    # commented-out values happen to say.
+    from newsbot.config import AlertsCfg
+
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(EXAMPLE)
+    assert cfg.alerts == AlertsCfg()
+    assert cfg.alerts.enabled is False
+
+
+def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(monkeypatch):
+    # The example file's comment block (interval_minutes: 60,
+    # max_item_age_hours: 48, max_pings_per_day: 3, allow_test_command:
+    # false) is meant to describe AlertsCfg's real defaults for an owner
+    # who's about to uncomment it -- if config.py's defaults ever drift
+    # from that comment, this catches the documentation going stale
+    # rather than an owner finding out by uncommenting a wrong number.
+    from newsbot.config import AlertsCfg
+
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    example_text = EXAMPLE.read_text()
+    alerts_comment_lines = [
+        line
+        for line in example_text.splitlines()
+        if line.strip().startswith("#") and "alerts" not in line.lower()
+    ]
+    commented_block = "\n".join(alerts_comment_lines)
+    defaults = AlertsCfg()
+    assert f"interval_minutes: {defaults.interval_minutes}" in commented_block
+    assert f"max_item_age_hours: {defaults.max_item_age_hours}" in commented_block
+    assert f"max_pings_per_day: {defaults.max_pings_per_day}" in commented_block
+    assert f"allow_test_command: {str(defaults.allow_test_command).lower()}" in commented_block
+    ping_trust_yaml = "[" + ", ".join(defaults.ping_trust) + "]"
+    assert f"ping_trust: {ping_trust_yaml}" in commented_block
+    assert f"max_codes_per_item: {defaults.max_codes_per_item}" in commented_block
+
+
 def test_topic_search_queries_default_empty():
     topic = Topic(key="palworld", name="Palworld")
     assert topic.search_queries == []
@@ -422,3 +463,250 @@ def test_bluesky_handle_leading_at_is_stripped():
 
     env = {"ANTHROPIC_API_KEY": "x", "BLUESKY_HANDLE": "@someone.bsky.social"}
     assert load_secrets(env, require_discord=False).bluesky_handle == "someone.bsky.social"
+
+
+# --- alerts: config block (v1.2 SHiFT code alerts, plan step 1) ---
+
+
+def test_alerts_missing_block_gives_disabled_defaults(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.enabled is False
+    assert cfg.alerts.interval_minutes == 60
+    assert cfg.alerts.max_item_age_hours == 48
+    assert cfg.alerts.max_pings_per_day == 3
+    assert cfg.alerts.allow_test_command is False
+    assert cfg.alerts.ping_trust == ["official", "press"]
+    assert cfg.alerts.max_codes_per_item == 5
+
+
+def test_alerts_full_block_parses(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  interval_minutes: 30
+  max_item_age_hours: 24
+  max_pings_per_day: 5
+  allow_test_command: true
+  ping_trust: [official]
+  max_codes_per_item: 10
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.enabled is True
+    assert cfg.alerts.interval_minutes == 30
+    assert cfg.alerts.max_item_age_hours == 24
+    assert cfg.alerts.max_pings_per_day == 5
+    assert cfg.alerts.allow_test_command is True
+    assert cfg.alerts.ping_trust == ["official"]
+    assert cfg.alerts.max_codes_per_item == 10
+
+
+def test_alerts_max_codes_per_item_must_be_at_least_one(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  max_codes_per_item: 0
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_ping_trust_rejects_unknown_trust_level(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  ping_trust: [official, rumor]
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_ping_trust_empty_list_is_accepted():
+    # An owner who wants no ping ever, from any source, can set this to
+    # [] directly -- plan_alerts never finds a "trusted" candidate, so
+    # every batch posts without pinging, same as ping_trust never
+    # matching anything. Not the same as max_pings_per_day: 0 (that still
+    # spends nothing either way; this at least documents the intent).
+    from newsbot.config import AlertsCfg
+
+    assert AlertsCfg(ping_trust=[]).ping_trust == []
+
+
+def test_alerts_unknown_key_rejected(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  role_id: 12345
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("interval_minutes", 14),
+        ("interval_minutes", 1441),
+        ("max_item_age_hours", 0),
+        ("max_item_age_hours", 721),
+        ("max_pings_per_day", -1),
+    ],
+)
+def test_alerts_out_of_bounds_values_rejected(tmp_path, field, value):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  {field}: {value}
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_bounds_are_inclusive(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  interval_minutes: 15
+  max_item_age_hours: 1
+  max_pings_per_day: 0
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.interval_minutes == 15
+    assert cfg.alerts.max_item_age_hours == 1
+    assert cfg.alerts.max_pings_per_day == 0
+
+
+def test_alerts_max_item_age_hours_upper_bound_is_inclusive_at_720(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  max_item_age_hours: 720
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.max_item_age_hours == 720
+
+
+def test_allow_test_command_true_with_enabled_false_is_a_config_error(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: false
+  allow_test_command: true
+"""
+    with pytest.raises(ConfigError, match="allow_test_command"):
+        _load_with(tmp_path, text)
+
+
+def test_allow_test_command_true_with_enabled_true_is_fine(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: true
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.allow_test_command is True
+
+
+def test_allow_test_command_false_with_enabled_false_is_fine(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: false
+  allow_test_command: false
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.alerts.allow_test_command is False
+
+
+def test_alerts_allow_test_command_true_logs_a_warning(tmp_path, caplog):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: true
+"""
+    with caplog.at_level("WARNING"):
+        _load_with(tmp_path, text)
+    assert any("allow_test_command" in record.message for record in caplog.records)
+
+
+def test_alerts_allow_test_command_false_logs_no_warning(tmp_path, caplog):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  enabled: true
+  allow_test_command: false
+"""
+    with caplog.at_level("WARNING"):
+        _load_with(tmp_path, text)
+    assert not any("allow_test_command" in record.message for record in caplog.records)

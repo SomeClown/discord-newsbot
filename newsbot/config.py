@@ -120,6 +120,43 @@ Source = Annotated[
 ]
 
 
+class AlertsCfg(BaseModel, extra="forbid"):
+    """Settings for the SHiFT code alert sweep (design.md §12).
+
+    Absent entirely, `enabled` defaults to False -- an owner who never
+    touches this block never gets an unannounced `@everyone` pinger
+    bolted onto their digest bot. `config.example.yaml` ships it
+    commented with `true`, so turning it on is a deliberate uncomment,
+    not a surprise default.
+    """
+
+    enabled: bool = False
+    interval_minutes: int = Field(60, ge=15, le=1440)
+    max_item_age_hours: int = Field(48, ge=1, le=720)
+    # 0 disables pinging entirely without disabling the sweep -- codes
+    # still get recorded and posted, just never with @everyone attached.
+    max_pings_per_day: int = Field(3, ge=0)
+    allow_test_command: bool = False
+    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics --
+    # a Diablo IV patch note has never once contained a Borderlands SHiFT
+    # code, and pinging the whole server for every game's codes when the
+    # owner only cares about one is a worse default than the sweep quietly
+    # doing nothing most topics ever need. Empty means "every topic",
+    # checked against `cfg.topics` keys at load time (see load_config).
+    topics: list[str] = []
+    # QA item 7 option A (owner decision, 2026-09-25): trust-gated pings.
+    # A community-only code (a Reddit thread guessing a code, say) still
+    # posts -- codes aren't gatekept by trust, only the @everyone ping is.
+    # A batch pings only if at least one code queued to post came from a
+    # source whose trust is in this list.
+    ping_trust: list[Trust] = ["official", "press"]
+    # QA item 7 (owner decision, 2026-09-25): an item naming more than
+    # this many distinct codes is a roundup/megathread, not a genuine
+    # single-code announcement -- its sightings don't count toward
+    # alerting (shift/decide.py's aggregate/sightings_from_items).
+    max_codes_per_item: int = Field(5, ge=1)
+
+
 class AppConfig(BaseModel):
     guild_id: int
     admin_channel_id: int | None = None
@@ -127,6 +164,7 @@ class AppConfig(BaseModel):
     digest: DigestCfg
     topics: list[Topic]
     sources: list[Source]
+    alerts: AlertsCfg = AlertsCfg()
 
 
 class Secrets(BaseModel):
@@ -188,6 +226,21 @@ def load_config(path: str | Path) -> AppConfig:
 
     known_keys = seen_keys
 
+    for topic_key in cfg.alerts.topics:
+        if topic_key not in known_keys:
+            errors.append(f"alerts.topics references unknown topic {topic_key!r}")
+
+    if cfg.alerts.allow_test_command and not cfg.alerts.enabled:
+        # A config that turns on the test command but not the feature it
+        # tests is almost certainly a copy-paste mistake, not intent -- it
+        # used to surface as a bare RuntimeError the first time someone
+        # ran /newsbot test-alert, long after config load had already
+        # said everything looked fine.
+        errors.append(
+            "alerts.allow_test_command is true but alerts.enabled is false -- "
+            "/newsbot test-alert has nothing to test with alerts disabled"
+        )
+
     # Fill in Bluesky default names before the uniqueness check, since
     # source_health.source_name is the primary key: two sources silently
     # sharing a name would silently share health tracking too.
@@ -221,6 +274,15 @@ def load_config(path: str | Path) -> AppConfig:
 
     if errors:
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    if cfg.alerts.allow_test_command:
+        # /newsbot test-alert lets anyone with admin_permission post a fake
+        # SHiFT code alert on demand -- exactly what the private test guild
+        # needs and exactly what a production config should never carry,
+        # so a startup log line is the one place this gets said out loud.
+        logging.getLogger(__name__).warning(
+            "alerts.allow_test_command is true; /newsbot test-alert will be registered"
+        )
 
     return cfg
 

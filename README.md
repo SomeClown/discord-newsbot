@@ -48,10 +48,74 @@ nobody mistakes a leak for a patch note. A topic with nothing new just says
 - **`/newsbot preview`** (admin) — runs the pipeline and shows the digest only to
   the admin who ran it. Nothing is saved or posted, so a preview never
   changes what the next real run sees.
+- **`/newsbot test-alert code:<XXXXX-XXXXX-XXXXX-XXXXX-XXXXX> golden:<bool, default false>`**
+  (admin, **dev only**) — posts a fake SHiFT code alert to exercise the
+  sweep end to end, without waiting for a real code to show up. Only
+  registered when `alerts.allow_test_command: true`; see
+  [SHiFT code alerts](#shift-code-alerts) below.
 
 Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
 only the person who ran the command can use.
+
+## SHiFT code alerts
+
+A separate, near-real-time path alongside the daily digest (`alerts:` in
+`config.yaml`, off by default): an hourly sweep runs every collector except
+`web_search` (no Claude call, no `items`/`stories` writes), and the daily
+09:00 run also checks its own collected items, looking for a SHiFT/Golden
+Key redeem code (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) in the item's full text.
+A new code posts to the digest channel with an `@everyone` ping.
+
+Safeguards, since a ping is the one thing this bot can do that's hard to
+take back:
+
+- **Once per code, ever.** Every code seen is recorded in `alerted_codes`;
+  a code already there never alerts again, on any later sweep.
+- **Silent seeding.** The first sweep after enabling the feature (or after
+  losing its own "seeded" marker) records whatever codes it finds without
+  posting, so months of old codes already sitting in a feed don't flood
+  the channel the moment this is turned on.
+- **Age limit.** A code first seen only in an item older than
+  `alerts.max_item_age_hours` (default 48) is recorded but never posted.
+- **Daily ping cap.** At most `alerts.max_pings_per_day` (default 3)
+  messages a day carry a ping (local day, `digest.timezone`); beyond
+  that, codes still post, just without `@everyone`, and an admin alert
+  notes it.
+- **Scoped to specific games.** `alerts.topics` (default: every topic)
+  restricts the sweep to items that match those topics, the same
+  confident/dedicated-source rule the digest itself uses — a Diablo IV
+  patch note has never once contained a Borderlands SHiFT code.
+- **Who can trigger a ping.** Every new code still posts, but only a code
+  seen from a source whose trust is in `alerts.ping_trust` (default:
+  `official`, `press`) is enough to make its batch carry the `@everyone`.
+  A community-only code (a Reddit thread guessing at one, say) still
+  posts quietly — it just isn't, on its own, the reason a ping fires. A
+  batch mixing trusted and community-only codes pings once and puts the
+  trusted code(s) first in the message. A batch with nothing trusted in
+  it doesn't spend the daily cap either — there was nothing for the cap
+  to actually stop.
+- **Roundups don't alert.** An item naming more than
+  `alerts.max_codes_per_item` (default 5) distinct codes is a roundup or
+  megathread, not a genuine single-code announcement — its codes are
+  recorded silently and never alert. A code that also shows up in a
+  normal, non-roundup item in the same run is judged entirely by that
+  normal item instead.
+
+`/newsbot status` shows the last sweep's time and source summary, how many
+codes have ever posted, and today's ping spend against the cap (plus
+`(seeding)` while the marker's still unset). `/newsbot test-alert` — dev
+only, gated behind `alerts.allow_test_command` — posts one fake code
+through the exact same claim/post/cap machinery a real one would use,
+which is how the private test guild verifies the whole path (including the
+Discord permission below) without waiting for Gearbox to hand out a code.
+
+**Discord permission required:** the bot's role needs **Mention @everyone,
+@here, and All Roles** in the digest channel. Without it, Discord still
+posts the alert message, it just silently drops the notification — the bot
+notices (it checks the permission before every ping) and sends an admin
+alert instead of failing quietly. See
+[`docs/deploy.md`](docs/deploy.md) for how to grant it.
 
 ## Architecture
 
@@ -73,14 +137,19 @@ newsbot/
     summarize.py    Claude call, prompt assembly, schema validation, fallback
     run.py          orchestrates one daily run; also the headless CLI entry point
     publisher.py    Publisher protocol (stdout for the CLI, Discord for the bot)
+    lock.py         the one run lock, shared by the daily job and the code sweep
+  shift/            SHiFT code alerts (design.md §12) -- separate from the digest
+    match.py        pure code/Golden Key text matcher, no ReDoS surface
+    decide.py       pure planner: what's new, fresh, worth a ping, worth seeding
+    sweep.py        the I/O side: sweep collectors, claim/post/record, run lock
   store/
     migrations/     numbered .sql files
     db.py           connection, WAL, migration runner
     repo.py         all queries (no SQL anywhere else)
   bot/
-    client.py       discord client, scheduler wiring, heartbeat
-    commands.py     /news, /news search, /newsbot status|run-now|preview
-    format.py       digest + result embeds, paging, UTF-16-aware limits
+    client.py       discord client, scheduler wiring, heartbeat, code alert poster
+    commands.py     /news, /news search, /newsbot status|run-now|preview|test-alert
+    format.py       digest + result embeds + code alerts, paging, UTF-16-aware limits
   alerts.py         admin-channel notifications
   healthcheck.py    Docker HEALTHCHECK entry point (checks the heartbeat file)
 ```
@@ -215,6 +284,13 @@ Rough running cost against `config.example.yaml`'s source list:
 - **Brave Search**: 2 queries per topic × 3 topics = about **6 requests per
   run**, roughly **180 requests a month** — comfortably inside Brave's free
   tier as configured.
+- **SHiFT code alerts**: no extra Claude or Brave cost at all — the hourly
+  sweep deliberately excludes `web_search` (see
+  [SHiFT code alerts](#shift-code-alerts)) and never calls the LLM. The
+  only added cost is source fetches (one `GET`/sweep per RSS/Steam/
+  Bluesky source, same as the digest already makes — these are requests to
+  each source's own site, not to Discord's API) and, on Bluesky, about
+  24 extra logins a day from rebuilding the collector fresh each sweep.
 
 ## Limitations and known issues
 
@@ -236,6 +312,25 @@ Rough running cost against `config.example.yaml`'s source list:
   `BLUESKY_APP_PASSWORD` set, those sources are skipped with a coverage
   note, not treated as a failure. The three official-account RSS feeds work
   regardless — no auth needed for those.
+- **SHiFT code alerts can miss or delay a code.** Reddit's `/top?t=day`
+  sort can take a while to surface a brand new post, so a code posted to a
+  subreddit first might not alert until it's climbed the day's top posts
+  (or shown up on an official feed instead). A code embedded only in an
+  image (a screenshot, a stream overlay) is invisible to this — the
+  matcher only reads text. Brave News is excluded from the sweep entirely
+  (see Costs above), so a code that only ever appears in a press article
+  Brave indexes won't alert until the *daily* digest run's own check, if
+  at all. A code split across an en dash or similar look-alike dash
+  instead of a plain hyphen won't match the pattern (deliberately — see
+  `docs/design.md` §12's clarifications on the regex). A code with no
+  digits anywhere in its 25 characters won't be detected either — real
+  SHiFT codes are virtually always a mix of letters and digits, and
+  requiring at least one is what keeps an all-letter URL slug
+  (`.../shift-codes-early-today-guide/`) or placeholder example
+  (`AAAAA-BBBBB-CCCCC-DDDDD-EEEEE`) from matching as if it were a real
+  code. Likewise, a code sitting directly against a `/` (a bare URL path
+  segment, as opposed to a `?code=...` query value) won't match — see
+  `docs/design.md` §12's clarifications for both rules.
 
 ## Safety notes
 
@@ -248,8 +343,14 @@ Rough running cost against `config.example.yaml`'s source list:
 - Any URL text that shows up inside a model-written headline or summary is
   stripped before rendering, so scraped or generated text can't grow a fake
   markdown link next to a real one.
-- All messages are sent with `allowed_mentions=none` — scraped text can't
-  ping `@everyone`, a role, or a user.
+- Every send is `allowed_mentions=none` — scraped text can't ping
+  `@everyone`, a role, or a user — **except** a SHiFT code alert message,
+  which is the one deliberate exception: it's allowed to set
+  `AllowedMentions(everyone=True)`, and only when the alert pipeline
+  itself (not scraped text) has decided to ping. That's a fixed module
+  constant used in exactly one place, pinned by a test that scans
+  `newsbot/`'s source for any other `AllowedMentions(everyone=True, ...)`
+  call — see `docs/design.md` §12 and `newsbot/bot/client.py`.
 
 ## Deployment
 

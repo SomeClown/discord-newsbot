@@ -80,6 +80,29 @@ def test_purge_on_empty_database_returns_zero_zero(conn):
     assert repo.purge_older_than(conn, datetime(2030, 1, 1, tzinfo=UTC)) == (0, 0)
 
 
+def test_purge_older_than_never_touches_alerted_codes_or_alert_state(conn):
+    # design.md §12 / plan §4: retention has no lookback for "have we ever
+    # alerted this code before" -- purge_older_than only ever compares
+    # items.collected_at and stories.created_at, so a code recorded years
+    # ago (and the seeded/last-sweep state alongside it) must survive a
+    # purge that would happily delete an item from the same moment.
+    from newsbot.store import repo
+
+    repo.record_silent_codes(
+        conn,
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        now=lambda: datetime(2000, 1, 1, tzinfo=UTC),
+        mark_seeded=True,
+    )
+    repo.record_sweep(conn, lambda: datetime(2000, 1, 1, tzinfo=UTC), "old sweep")
+
+    items_deleted, stories_deleted = repo.purge_older_than(conn, datetime(2030, 1, 1, tzinfo=UTC))
+
+    assert (items_deleted, stories_deleted) == (0, 0)
+    assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM alert_state").fetchone()[0] > 0
+
+
 def test_purge_independent_item_and_story_cutoffs(conn):
     """items.collected_at and stories.created_at are compared
     independently: one can survive without the other."""

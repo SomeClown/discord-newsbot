@@ -221,3 +221,41 @@ sources:
   - type: web_search
     queries_per_topic: 2
     trust: press
+
+# SHiFT code alerts (design.md §12, v1.2) -- an hourly sweep separate from
+# the daily digest that posts any new SHiFT/Golden Key redeem code it finds,
+# with an @everyone ping (once per code, ever, capped per day). Commented
+# out by default (AlertsCfg.enabled defaults to False with the block
+# entirely absent too, but writing it out and commenting it is the more
+# honest "here's what turning this on actually looks like" than making an
+# owner go read config.py to find the field names). Uncomment, fill in
+# topics for your own game list, and see README.md's "SHiFT code alerts"
+# section and docs/deploy.md before flipping enabled to true in prod --
+# the bot's role needs the "Mention @everyone, @here, and All Roles"
+# permission in the digest channel, or the ping silently gets dropped.
+# alerts:
+#   enabled: true
+#   # Scope the sweep to specific topic keys (A6) -- empty means every
+#   # topic, but a code from an unrelated game pinging the whole server
+#   # is a worse default than a deliberate, narrow list. Borderlands 4 is
+#   # the game that actually has SHiFT codes among the three this example
+#   # config tracks; Palworld and Diablo IV don't use this reward system.
+#   topics: [borderlands4]
+#   interval_minutes: 60
+#   max_item_age_hours: 48
+#   max_pings_per_day: 3
+#   # Which sources can trigger the @everyone ping (QA item 7 option A) --
+#   # every new code still posts regardless of trust, this only decides
+#   # whether the batch it's in pings. community-only codes always post
+#   # quietly.
+#   ping_trust: [official, press]
+#   # An item naming more than this many distinct codes is a roundup or
+#   # megathread, not a genuine single-code announcement -- its codes are
+#   # recorded silently ('roundup') and never alert (QA item 7).
+#   max_codes_per_item: 5
+#   # WARNING: this registers /newsbot test-alert, which lets any admin
+#   # post a fake code alert (with a real @everyone ping, cap and
+#   # once-per-code guard included) on demand. Meant for the private test
+#   # guild only -- leave this false (or the whole alerts: block out) in
+#   # a production config. config.py logs a startup warning if it's true.
+#   allow_test_command: false
