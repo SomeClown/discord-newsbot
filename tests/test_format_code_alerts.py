@@ -13,8 +13,8 @@ import pytest
 from newsbot.bot.format import discord_len, render_code_alerts
 from newsbot.shift.decide import CodeCandidate
 
-CODE_A = "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"
-CODE_B = "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"
+CODE_A = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
+CODE_B = "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"
 
 
 def _candidate(**kwargs) -> CodeCandidate:

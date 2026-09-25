@@ -97,7 +97,7 @@ def test_rejects_six_char_group():
 
 
 def test_rejects_six_group_chain():
-    assert find_codes("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE-FFFFF") == []
+    assert find_codes("AAAA1-BBBBB-CCCCC-DDDDD-EEEEE-FFFFF") == []
 
 
 def test_rejects_four_group_chain():
@@ -165,6 +165,44 @@ def test_rejects_zero_width_space_inside():
 
 def test_rejects_soft_hyphen_inside():
     assert find_codes("ABCDE-FGH1­2-34IJK-LMNOP-QR5ST") == []
+
+
+# --- QA item 6: `/` boundary and the at-least-one-digit rule ---
+
+
+def test_rejects_code_preceded_by_slash():
+    assert find_codes(f"path/{CODE}") == []
+
+
+def test_rejects_code_followed_by_slash():
+    assert find_codes(f"{CODE}/path") == []
+
+
+def test_rejects_code_between_two_slashes():
+    assert find_codes(f"https://example.com/redeem/{CODE}/confirm") == []
+
+
+def test_rejects_all_letter_five_by_five_no_digit():
+    assert find_codes("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE") == []
+
+
+def test_rejects_url_slug_shaped_like_a_code_no_digit_no_slash():
+    # Five hyphen-joined, five-letter English words -- exactly the shape
+    # CODE_RE's boundary rules alone can't distinguish from five real
+    # groups. Both example slugs from the QA report.
+    assert find_codes("https://example.com/shift-codes-early-today-guide/") == []
+    assert find_codes("shift-codes-early-today-guide") == []
+
+
+def test_all_letter_five_by_five_is_not_a_code():
+    assert is_code("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE") is False
+
+
+def test_a_code_with_a_digit_still_matches_with_slash_boundary_in_effect():
+    # The `/` boundary and the digit rule are both new restrictions, not
+    # a regression against ordinary text -- a real code sitting in an
+    # ordinary sentence (no slash touching it) still matches.
+    assert find_codes(f"Redeem this code: {CODE} today") == [CODE]
 
 
 # --- is_code ---

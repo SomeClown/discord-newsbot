@@ -25,8 +25,8 @@ from newsbot.shift.decide import (
 )
 from newsbot.store.models import AlertState
 
-CODE_A = "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"
-CODE_B = "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"
+CODE_A = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
+CODE_B = "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
 MAX_AGE = timedelta(hours=48)
 

@@ -507,9 +507,9 @@ async def test_rss_collector_code_past_500_chars_is_in_full_text_not_excerpt():
     item = items[0]
     assert item.excerpt.endswith("…")
     assert len(item.excerpt) <= 500
-    assert "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE" not in item.excerpt
+    assert "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE" not in item.excerpt
     assert item.full_text is not None
-    assert "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE" in item.full_text
+    assert "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE" in item.full_text
     assert len(item.full_text) > 500
 
 

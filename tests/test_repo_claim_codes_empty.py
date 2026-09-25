@@ -34,7 +34,7 @@ def test_claim_codes_empty_list_does_not_spend_a_ping(conn):
 def test_claim_codes_empty_list_after_prior_claims_leaves_budget_untouched(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,

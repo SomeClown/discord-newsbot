@@ -24,9 +24,13 @@ import re
 # Five ASCII alnum groups joined by hyphens, with boundary lookarounds that
 # block any adjacent Unicode letter or digit (`\W`/`\w` are Unicode-aware
 # by default, which is exactly what's wanted: a code glued to "café" or a
-# Cyrillic word is still glued, not standalone) and any adjacent literal
+# Cyrillic word is still glued, not standalone), any adjacent literal
 # hyphen (so a six-group chain or a code embedded in a longer dash-joined
-# run never matches a five-group slice of itself).
+# run never matches a five-group slice of itself), and any adjacent literal
+# `/` (so a URL path segment shaped like a code -- a slug such as
+# `/shift-codes-early-today-guide/`, or five real groups sitting right up
+# against a path separator -- doesn't match either; a query string's
+# `?code=...` is unaffected, since `=` isn't blocked).
 #
 # Deliberately no re.IGNORECASE: the flag doesn't just relax A-Z/a-z, it
 # widens what an ASCII-looking class matches to include Unicode characters
@@ -39,7 +43,21 @@ import re
 # is exactly what would turn a fullwidth "Ａ" or a Kelvin sign into the
 # ASCII letter it's impersonating, defeating the whole point of rejecting
 # them here.
-CODE_RE = re.compile(r"(?<![^\W_])(?<!-)([A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4})(?![^\W_])(?!-)")
+CODE_RE = re.compile(
+    r"(?<![^\W_])(?<!-)(?<!/)([A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4})(?![^\W_])(?!-)(?!/)"
+)
+
+# Real SHiFT codes are virtually always a mix of letters and digits; a
+# hyphenated URL slug built entirely out of English words (the boundary
+# rules above can't tell "shift-codes-early-today-guide" from five real
+# groups, since both are five hyphen-joined five-letter runs) or an
+# all-letter placeholder example (AAAAA-BBBBB-CCCCC-DDDDD-EEEEE, the kind
+# that shows up in this very codebase's own docs and fixtures) essentially
+# never contains one. Requiring at least one ASCII digit somewhere in the
+# 25 characters costs almost nothing against a real code (see design.md
+# §12's clarifications for the actual math) and rejects both of those at
+# once, on top of (not instead of) the `/` boundary above.
+_HAS_DIGIT_RE = re.compile(r"\d")
 
 # "Golden Key", "golden keys", "#GoldenKeys", "golden\nkey" all count;
 # "golden keyboard" and "gold key" don't. `[\s_-]*` (not `+`) is what makes
@@ -60,9 +78,10 @@ def find_codes(text: str) -> list[str]:
     codes: list[str] = []
     for match in CODE_RE.finditer(text):
         code = match.group(1).upper()
-        if code not in seen:
-            seen.add(code)
-            codes.append(code)
+        if code in seen or not _HAS_DIGIT_RE.search(code):
+            continue
+        seen.add(code)
+        codes.append(code)
     return codes
 
 
@@ -72,9 +91,10 @@ def is_code(value: str) -> bool:
     Used to validate a code typed into `/newsbot test-alert` -- CODE_RE's
     boundary lookarounds trivially succeed at the start and end of a bare
     string (there's no character there to fail them), so this is just
-    "does the whole string match the shape", case included.
+    "does the whole string match the shape", case included, plus the same
+    at-least-one-digit rule `find_codes` applies.
     """
-    return CODE_RE.fullmatch(value) is not None
+    return CODE_RE.fullmatch(value) is not None and bool(_HAS_DIGIT_RE.search(value))
 
 
 def mentions_golden_key(text: str) -> bool:

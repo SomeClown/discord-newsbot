@@ -35,7 +35,7 @@ from newsbot.store.db import connect, migrate
 
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=UTC)
-CODE_A = "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"
+CODE_A = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
 
 
 def _cfg(**alert_overrides):

@@ -73,7 +73,7 @@ def test_plain_text_collapses_whitespace_and_newlines():
 
 
 def test_plain_text_default_cap_is_100_000_chars():
-    long_code_bearing_text = "filler " * 20_000 + "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
+    long_code_bearing_text = "filler " * 20_000 + "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE"
     result = plain_text(long_code_bearing_text)
     assert len(result) <= 100_001  # +1 for the ellipsis clean_text/_truncate may add
     assert "filler" in result

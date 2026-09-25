@@ -20,7 +20,7 @@ from newsbot.pipeline.normalize import canonicalize_items
 from newsbot.shift.match import find_codes
 from newsbot.text import plain_text
 
-CODE = "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
+CODE = "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE"
 
 
 # --- 100,000-char cap boundary ---

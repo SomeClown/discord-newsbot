@@ -170,11 +170,11 @@ def test_is_command_owner_different_ids():
 
 
 def test_invalid_test_alert_code_message_accepts_a_real_code():
-    assert invalid_test_alert_code_message("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE") is None
+    assert invalid_test_alert_code_message("AAAA1-BBBBB-CCCCC-DDDDD-EEEEE") is None
 
 
 def test_invalid_test_alert_code_message_accepts_lowercase():
-    assert invalid_test_alert_code_message("aaaaa-bbbbb-ccccc-ddddd-eeeee") is None
+    assert invalid_test_alert_code_message("aaaa1-bbbbb-ccccc-ddddd-eeeee") is None
 
 
 def test_invalid_test_alert_code_message_rejects_wrong_group_sizes():

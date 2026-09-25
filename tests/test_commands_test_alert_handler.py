@@ -28,7 +28,7 @@ from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps
 from newsbot.store.db import connect, migrate
 
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
-VALID_CODE = "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"
+VALID_CODE = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
 
 
 class FakeResponse:

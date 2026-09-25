@@ -232,7 +232,7 @@ async def test_fixture_collector_reads_optional_full_text():
     patch_item = next(i for i in items if i.url == "https://example.com/bl4/patch-1")
     assert patch_item.full_text == (
         "Fixes several crashes and rebalances loot drop rates based on community "
-        "feedback. Redeem code AAAAA-BBBBB-CCCCC-DDDDD-EEEEE this week only."
+        "feedback. Redeem code AAAA1-BBBBB-CCCCC-DDDDD-EEEEE this week only."
     )
 
 

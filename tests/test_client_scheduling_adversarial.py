@@ -213,7 +213,7 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
             "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, "
             "pinged, status) VALUES (?, ?, ?, ?, 0, 'pending')",
             (
-                "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA",
+                "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA",
                 "2026-09-25T00:00:00+00:00",
                 "Gearbox Blog",
                 "https://example.com/a",
@@ -222,12 +222,12 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
         conn.commit()
 
     await _run_setup_hook(bot)
-    assert bot._interrupted_codes == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"]
+    assert bot._interrupted_codes == ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"]
 
     with closing(connect(db_path)) as conn:
         status = conn.execute(
             "SELECT status FROM alerted_codes WHERE code = ?",
-            ("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA",),
+            ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA",),
         ).fetchone()[0]
     assert status == "failed"
 
@@ -247,7 +247,7 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
 
     await bot.on_ready()
     assert len(alerts) == 1
-    assert "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA" in alerts[0]
+    assert "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA" in alerts[0]
 
     # A reconnect fires on_ready again -- the interrupted-codes report is
     # a one-time thing, not repeated on every reconnect.

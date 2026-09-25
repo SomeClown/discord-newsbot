@@ -15,7 +15,7 @@ from __future__ import annotations
 from newsbot.shift.match import find_codes, mentions_golden_key
 from newsbot.text import plain_text
 
-CODE = "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
+CODE = "AAAA1-BBBBB-CCCCC-DDDDD-EEEEE"
 
 
 # --- markup survivors after plain_text: the matcher only ever sees text.py's output ---
@@ -26,24 +26,24 @@ def test_code_split_by_html_bold_tag_still_matches():
     # the two halves glued back together with nothing between them --
     # which is exactly what should happen when the tag sits *inside* the
     # code's boundary, as opposed to right after it (see the xfail below).
-    assert find_codes(plain_text("<b>AAAAA</b>-BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
+    assert find_codes(plain_text("<b>AAAA1</b>-BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
 
 
 def test_code_split_by_bbcode_bold_tag_still_matches():
-    assert find_codes(plain_text("[b]AAAAA[/b]-BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
+    assert find_codes(plain_text("[b]AAAA1[/b]-BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
 
 
 def test_code_with_numeric_entity_hyphen_still_matches():
     # &#45; is a numeric character reference for "-"; HTMLParser decodes it
     # (convert_charrefs=True) before the matcher ever sees the text.
-    assert find_codes(plain_text("AAAAA&#45;BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
+    assert find_codes(plain_text("AAAA1&#45;BBBBB-CCCCC-DDDDD-EEEEE")) == [CODE]
 
 
 def test_code_surrounded_by_nbsp_still_matches():
     # &nbsp; decodes to U+00A0, which _collapse's \s+ regex treats as
     # ordinary whitespace and folds down to a single space -- same
     # boundary as a real space, not a glued character.
-    text = plain_text("code&nbsp;AAAAA-BBBBB-CCCCC-DDDDD-EEEEE&nbsp;end")
+    text = plain_text("code&nbsp;AAAA1-BBBBB-CCCCC-DDDDD-EEEEE&nbsp;end")
     assert find_codes(text) == [CODE]
 
 
@@ -69,8 +69,21 @@ def test_code_in_a_query_string_is_matched():
     assert find_codes(f"https://shift.gearboxsoftware.com/rewards?code={CODE}&src=x") == [CODE]
 
 
-def test_code_as_a_bare_url_path_segment_is_matched():
-    assert find_codes(f"https://example.com/redeem/{CODE}") == [CODE]
+def test_code_as_a_bare_url_path_segment_does_not_match():
+    # QA item 6: `/` is now a blocking boundary on either side of a code
+    # -- a bare path segment (as opposed to a query-string value, which
+    # `test_code_in_a_query_string_is_matched` above still covers) reads
+    # as "glued to the URL's structure", the same reasoning that already
+    # applied to a letter, digit or hyphen.
+    assert find_codes(f"https://example.com/redeem/{CODE}") == []
+
+
+def test_code_followed_by_slash_does_not_match():
+    assert find_codes(f"{CODE}/redeem") == []
+
+
+def test_code_preceded_by_slash_does_not_match():
+    assert find_codes(f"path/{CODE}") == []
 
 
 # --- Markdown code spans ---

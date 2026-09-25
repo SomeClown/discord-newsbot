@@ -139,7 +139,7 @@ Reward filtering, code validation/expiry, OCR, per-source sweep exclusions, X/Tw
 
 ## 7. Owner test-guild checklist before tagging v1.2.0
 1. `config.dev.yaml`: `alerts: {enabled: true, interval_minutes: 15, allow_test_command: true}`; ensure no other bot uses the dev token; start the dev bot.
-2. Before granting the permission: `/newsbot test-alert code:AAAAA-BBBBB-CCCCC-DDDDD-EEEEE` → posts, no notification, admin channel reports the missing permission.
+2. Before granting the permission: `/newsbot test-alert code:AAAA1-BBBBB-CCCCC-DDDDD-EEEEE` → posts, no notification, admin channel reports the missing permission.
 3. Grant **Mention @everyone, @here, and All Roles** in the digest channel; a new code notifies a second account.
 4. Same code again → "already alerted, nothing posted".
 5. Two more new codes (3 pings), then a 4th → posts without ping + cap admin alert.

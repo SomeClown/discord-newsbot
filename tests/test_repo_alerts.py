@@ -47,14 +47,14 @@ def test_get_alert_state_on_empty_db_is_all_falsy_defaults(conn):
 def test_known_codes_returns_only_recorded_subset(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
         now=_now,
         mark_seeded=True,
     )
     known = repo.known_codes(
-        conn, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"]
+        conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"]
     )
-    assert known == {"AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"}
+    assert known == {"AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"}
 
 
 def test_known_codes_chunks_past_sqlite_variable_limit(conn):
@@ -70,7 +70,7 @@ def test_known_codes_chunks_past_sqlite_variable_limit(conn):
 def test_record_silent_codes_sets_seeded_marker_when_requested(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
         now=_now,
         mark_seeded=True,
     )
@@ -80,7 +80,7 @@ def test_record_silent_codes_sets_seeded_marker_when_requested(conn):
 def test_record_silent_codes_does_not_set_marker_when_unhealthy(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
         now=_now,
         mark_seeded=False,
     )
@@ -101,7 +101,7 @@ def test_record_silent_codes_does_not_reset_marker_once_set(conn):
 def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
         now=_now,
         mark_seeded=True,
     )
@@ -109,12 +109,12 @@ def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
     # this should be a no-op, not overwrite "seeded" with "too_old".
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "too_old")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "too_old")],
         now=_now,
         mark_seeded=False,
     )
     row = conn.execute(
-        "SELECT status FROM alerted_codes WHERE code = 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA'"
+        "SELECT status FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
     ).fetchone()
     assert row["status"] == "seeded"
 
@@ -125,13 +125,13 @@ def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
 def test_claim_codes_inserts_pending_rows_and_spends_ping(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
     row = conn.execute(
-        "SELECT status, pinged FROM alerted_codes WHERE code = 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA'"
+        "SELECT status, pinged FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
     ).fetchone()
     assert row["status"] == "pending"
     assert row["pinged"] == 1
@@ -143,7 +143,7 @@ def test_claim_codes_inserts_pending_rows_and_spends_ping(conn):
 def test_claim_codes_unpinged_does_not_spend_budget(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
@@ -156,14 +156,14 @@ def test_claim_codes_unpinged_does_not_spend_budget(conn):
 def test_claim_codes_accumulates_ping_count_same_day(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
     repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -174,14 +174,14 @@ def test_claim_codes_accumulates_ping_count_same_day(conn):
 def test_claim_codes_resets_count_on_a_new_local_day(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
     repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=True,
         local_day="2026-09-26",
         now=_now,
@@ -194,7 +194,7 @@ def test_claim_codes_resets_count_on_a_new_local_day(conn):
 def test_claim_codes_duplicate_code_rolls_back_rows_and_ping_count(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -203,8 +203,8 @@ def test_claim_codes_duplicate_code_rolls_back_rows_and_ping_count(conn):
         repo.claim_codes(
             conn,
             [
-                ("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
-                ("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),  # dup, aborts the txn
+                ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
+                ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),  # dup, aborts the txn
             ],
             pinged=True,
             local_day="2026-09-25",
@@ -213,7 +213,7 @@ def test_claim_codes_duplicate_code_rolls_back_rows_and_ping_count(conn):
     # Neither the new code nor the extra ping spend survived the rollback.
     assert (
         conn.execute(
-            "SELECT COUNT(*) FROM alerted_codes WHERE code = 'BBBBB-BBBBB-BBBBB-BBBBB-BBBBB'"
+            "SELECT COUNT(*) FROM alerted_codes WHERE code = 'BBBB2-BBBBB-BBBBB-BBBBB-BBBBB'"
         ).fetchone()[0]
         == 0
     )
@@ -227,8 +227,8 @@ def test_mark_codes_posted_sets_status_and_shared_message_id(conn):
     repo.claim_codes(
         conn,
         [
-            ("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),
-            ("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
+            ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),
+            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
         ],
         pinged=True,
         local_day="2026-09-25",
@@ -236,27 +236,27 @@ def test_mark_codes_posted_sets_status_and_shared_message_id(conn):
     )
     repo.mark_codes_posted(
         conn,
-        ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"],
+        ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"],
         message_id=42,
     )
     rows = conn.execute("SELECT code, status, message_id FROM alerted_codes").fetchall()
     assert {(r["code"], r["status"], r["message_id"]) for r in rows} == {
-        ("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "posted", 42),
-        ("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "posted", 42),
+        ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "posted", 42),
+        ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "posted", 42),
     }
 
 
 def test_mark_codes_failed_sets_status(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
     )
-    repo.mark_codes_failed(conn, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"])
+    repo.mark_codes_failed(conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"])
     row = conn.execute(
-        "SELECT status FROM alerted_codes WHERE code = 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA'"
+        "SELECT status FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
     ).fetchone()
     assert row["status"] == "failed"
 
@@ -264,7 +264,7 @@ def test_mark_codes_failed_sets_status(conn):
 def test_fail_pending_codes_flips_only_pending_rows(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
@@ -272,32 +272,32 @@ def test_fail_pending_codes_flips_only_pending_rows(conn):
     repo.record_silent_codes(
         conn,
         [
-            ("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b", "seeded"),
-            ("CCCCC-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c", "too_old"),
+            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b", "seeded"),
+            ("CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c", "too_old"),
         ],
         now=_now,
         mark_seeded=True,
     )
     repo.claim_codes(
         conn,
-        [("DDDDD-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d")],
+        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
-    repo.mark_codes_posted(conn, ["DDDDD-DDDDD-DDDDD-DDDDD-DDDDD"], message_id=1)
+    repo.mark_codes_posted(conn, ["DDDD4-DDDDD-DDDDD-DDDDD-DDDDD"], message_id=1)
 
     flipped = repo.fail_pending_codes(conn)
 
-    assert flipped == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"]
+    assert flipped == ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"]
     statuses = {
         row["code"]: row["status"] for row in conn.execute("SELECT code, status FROM alerted_codes")
     }
     assert statuses == {
-        "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA": "failed",
-        "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB": "seeded",
-        "CCCCC-CCCCC-CCCCC-CCCCC-CCCCC": "too_old",
-        "DDDDD-DDDDD-DDDDD-DDDDD-DDDDD": "posted",
+        "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA": "failed",
+        "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB": "seeded",
+        "CCCC3-CCCCC-CCCCC-CCCCC-CCCCC": "too_old",
+        "DDDD4-DDDDD-DDDDD-DDDDD-DDDDD": "posted",
     }
 
 
@@ -320,12 +320,12 @@ def test_alert_status_reports_seeded_sweep_and_pings(conn):
     repo.record_sweep(conn, _now, "17/19 sources ok, 1 new code")
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
-    repo.mark_codes_posted(conn, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"], message_id=1)
+    repo.mark_codes_posted(conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"], message_id=1)
 
     status = repo.alert_status(conn, "2026-09-25", enabled=True, max_pings=3)
 
@@ -340,7 +340,7 @@ def test_alert_status_reports_seeded_sweep_and_pings(conn):
 def test_alert_status_pings_today_is_zero_on_a_new_day(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -376,7 +376,7 @@ def test_alerted_codes_rejects_invalid_status(conn):
             conn.execute(
                 "INSERT INTO alerted_codes "
                 "(code, first_seen_at, source_name, item_url, status) "
-                "VALUES ('AAAAA-AAAAA-AAAAA-AAAAA-AAAAA', 'now', 'Src', 'https://e/a', 'bogus')"
+                "VALUES ('AAAA1-AAAAA-AAAAA-AAAAA-AAAAA', 'now', 'Src', 'https://e/a', 'bogus')"
             )
 
 
@@ -386,5 +386,5 @@ def test_alerted_codes_rejects_invalid_pinged_value(conn):
             conn.execute(
                 "INSERT INTO alerted_codes "
                 "(code, first_seen_at, source_name, item_url, pinged, status) "
-                "VALUES ('AAAAA-AAAAA-AAAAA-AAAAA-AAAAA', 'now', 'Src', 'https://e/a', 2, 'seeded')"
+                "VALUES ('AAAA1-AAAAA-AAAAA-AAAAA-AAAAA', 'now', 'Src', 'https://e/a', 2, 'seeded')"
             )

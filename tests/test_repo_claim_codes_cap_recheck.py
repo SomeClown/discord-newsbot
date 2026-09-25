@@ -57,7 +57,7 @@ def test_max_pings_none_skips_the_recheck_same_as_before(conn):
 def test_max_pings_downgrades_a_ping_once_the_cap_is_reached(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -65,7 +65,7 @@ def test_max_pings_downgrades_a_ping_once_the_cap_is_reached(conn):
     )
     actual = repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -74,7 +74,7 @@ def test_max_pings_downgrades_a_ping_once_the_cap_is_reached(conn):
     assert actual is False
     assert repo.get_alert_state(conn).ping_count == 1  # the second claim never spent one
     row = conn.execute(
-        "SELECT pinged FROM alerted_codes WHERE code = 'BBBBB-BBBBB-BBBBB-BBBBB-BBBBB'"
+        "SELECT pinged FROM alerted_codes WHERE code = 'BBBB2-BBBBB-BBBBB-BBBBB-BBBBB'"
     ).fetchone()
     assert row["pinged"] == 0  # the row itself reflects what actually happened, not what was asked
 
@@ -82,7 +82,7 @@ def test_max_pings_downgrades_a_ping_once_the_cap_is_reached(conn):
 def test_max_pings_leaves_an_unpinged_request_unpinged(conn):
     actual = repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
@@ -95,7 +95,7 @@ def test_max_pings_leaves_an_unpinged_request_unpinged(conn):
 def test_max_pings_under_the_cap_still_pings(conn):
     actual = repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -137,8 +137,8 @@ def test_two_connections_racing_the_last_ping_slot_only_one_gets_it(tmp_path):
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=_claim, args=("t1", "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"))
-    t2 = threading.Thread(target=_claim, args=("t2", "BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"))
+    t1 = threading.Thread(target=_claim, args=("t1", "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"))
+    t2 = threading.Thread(target=_claim, args=("t2", "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"))
     t1.start()
     t2.start()
     t1.join(timeout=5)
@@ -156,7 +156,7 @@ def test_two_connections_racing_the_last_ping_slot_only_one_gets_it(tmp_path):
 def test_duplicate_code_still_rolls_back_cleanly_with_max_pings_set(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -165,7 +165,7 @@ def test_duplicate_code_still_rolls_back_cleanly_with_max_pings_set(conn):
     with pytest.raises(sqlite3.IntegrityError):
         repo.claim_codes(
             conn,
-            [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+            [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
             pinged=True,
             local_day="2026-09-25",
             now=_now,

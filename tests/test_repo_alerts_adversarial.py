@@ -73,14 +73,14 @@ def test_ping_day_boundary_is_exact_string_equality_not_calendar_adjacency(conn)
     # looks like from this layer's point of view.
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
     repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=True,
         local_day="2026-09-26",  # the very next local day, one calendar day later
         now=_now,
@@ -95,14 +95,14 @@ def test_three_claims_across_a_local_midnight_rollover_reset_exactly_once(conn):
     # the count should track only the current local_day's claims.
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
     repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
@@ -111,7 +111,7 @@ def test_three_claims_across_a_local_midnight_rollover_reset_exactly_once(conn):
 
     repo.claim_codes(
         conn,
-        [("CCCCC-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c")],
+        [("CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c")],
         pinged=True,
         local_day="2026-09-26",
         now=_now,
@@ -120,7 +120,7 @@ def test_three_claims_across_a_local_midnight_rollover_reset_exactly_once(conn):
 
     repo.claim_codes(
         conn,
-        [("DDDDD-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d")],
+        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d")],
         pinged=True,
         local_day="2026-09-26",
         now=_now,
@@ -141,7 +141,7 @@ def test_concurrent_claim_of_same_code_from_two_connections_fails_cleanly(tmp_pa
     try:
         repo.claim_codes(
             conn1,
-            [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+            [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
             pinged=True,
             local_day="2026-09-25",
             now=_now,
@@ -152,7 +152,7 @@ def test_concurrent_claim_of_same_code_from_two_connections_fails_cleanly(tmp_pa
         with pytest.raises(sqlite3.IntegrityError):
             repo.claim_codes(
                 conn2,
-                [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+                [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
                 pinged=True,
                 local_day="2026-09-25",
                 now=_now,
@@ -162,7 +162,7 @@ def test_concurrent_claim_of_same_code_from_two_connections_fails_cleanly(tmp_pa
         state = repo.get_alert_state(conn1)
         assert state.ping_count == 1
         row = conn1.execute(
-            "SELECT status FROM alerted_codes WHERE code = 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA'"
+            "SELECT status FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
         ).fetchone()
         assert row["status"] == "pending"
     finally:
@@ -176,19 +176,19 @@ def test_concurrent_claim_of_same_code_from_two_connections_fails_cleanly(tmp_pa
 def test_fail_pending_codes_called_twice_second_call_flips_nothing(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
     )
     first = repo.fail_pending_codes(conn)
-    assert first == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"]
+    assert first == ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"]
 
     second = repo.fail_pending_codes(conn)
     assert second == []
 
     row = conn.execute(
-        "SELECT status FROM alerted_codes WHERE code = 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA'"
+        "SELECT status FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
     ).fetchone()
     assert row["status"] == "failed"  # not reverted or touched again
 
@@ -199,25 +199,25 @@ def test_fail_pending_codes_called_twice_second_call_flips_nothing(conn):
 def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
     repo.claim_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
         pinged=True,
         local_day="2026-09-25",
         now=_now,
     )
-    repo.mark_codes_posted(conn, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"], message_id=1)
+    repo.mark_codes_posted(conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"], message_id=1)
 
     repo.claim_codes(
         conn,
-        [("BBBBB-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
+        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
     )
-    repo.mark_codes_failed(conn, ["BBBBB-BBBBB-BBBBB-BBBBB-BBBBB"])
+    repo.mark_codes_failed(conn, ["BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"])
 
     repo.claim_codes(
         conn,
-        [("CCCCC-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c")],
+        [("CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c")],
         pinged=False,
         local_day="2026-09-25",
         now=_now,
@@ -227,7 +227,7 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
 
     repo.record_silent_codes(
         conn,
-        [("DDDDD-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d", "too_old")],
+        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d", "too_old")],
         now=_now,
         mark_seeded=True,
     )
@@ -295,7 +295,7 @@ def test_migration_002_applies_on_real_v1_schema_with_related_data_and_fk_on(tmp
         assert conn.execute("SELECT COUNT(*) FROM alert_state").fetchone()[0] == 0
         repo.claim_codes(
             conn,
-            [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+            [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
             pinged=True,
             local_day="2026-09-25",
             now=_now,

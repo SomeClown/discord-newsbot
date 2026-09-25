@@ -93,7 +93,7 @@ def _alert(*, ping: bool, codes: list[str] | None = None) -> RenderedAlert:
     header = "@everyone " if ping else ""
     return RenderedAlert(
         content=f"{header}**New SHiFT code**",
-        codes=codes or ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"],
+        codes=codes or ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"],
         ping=ping,
     )
 
@@ -198,7 +198,7 @@ async def test_channel_fetch_transient_network_error_wraps_as_publish_error():
 
 def _candidate(**kwargs) -> CodeCandidate:
     defaults = dict(
-        code="AAAAA-AAAAA-AAAAA-AAAAA-AAAAA",
+        code="AAAA1-AAAAA-AAAAA-AAAAA-AAAAA",
         golden=False,
         source_name="Gearbox Blog",
         item_url="https://e.com/a",

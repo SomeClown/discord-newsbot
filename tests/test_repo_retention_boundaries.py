@@ -90,7 +90,7 @@ def test_purge_older_than_never_touches_alerted_codes_or_alert_state(conn):
 
     repo.record_silent_codes(
         conn,
-        [("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
         now=lambda: datetime(2000, 1, 1, tzinfo=UTC),
         mark_seeded=True,
     )

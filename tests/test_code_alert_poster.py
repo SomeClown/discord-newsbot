@@ -95,7 +95,7 @@ def _alert(*, ping: bool, codes: list[str] | None = None) -> RenderedAlert:
     header = "@everyone " if ping else ""
     return RenderedAlert(
         content=f"{header}**New SHiFT code**",
-        codes=codes or ["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"],
+        codes=codes or ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"],
         ping=ping,
     )
 
@@ -137,9 +137,9 @@ async def test_literal_everyone_text_in_content_cannot_ping_when_ping_false():
     client = FakeClient(channel)
     poster = DiscordCodeAlertPoster(client, channel_id=1)
     alert = RenderedAlert(
-        content="**New SHiFT code**\n```\nAAAAA-AAAAA-AAAAA-AAAAA-AAAAA\n```\n"
+        content="**New SHiFT code**\n```\nAAAA1-AAAAA-AAAAA-AAAAA-AAAAA\n```\n"
         "Some Source · <https://example.com/@everyone/path>",
-        codes=["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"],
+        codes=["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"],
         ping=False,
     )
 
