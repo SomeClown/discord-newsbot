@@ -387,8 +387,12 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     # One line per source in the description, not one field per source.
     # Discord caps an embed at 25 fields, and the first real config had 24
     # sources plus four summary fields; you can guess how that went.
-    healthy = sum(1 for s in snap.source_health if s.consecutive_failures == 0)
-    embed.add_field(name="Sources healthy", value=f"{healthy} of {len(snap.source_health)}")
+    healthy = sum(1 for s in snap.source_health if s.consecutive_failures == 0 and not s.never_run)
+    never_run = sum(1 for s in snap.source_health if s.never_run)
+    healthy_value = f"{healthy} of {len(snap.source_health)}"
+    if never_run:
+        healthy_value += f" ({never_run} not run yet)"
+    embed.add_field(name="Sources healthy", value=healthy_value)
 
     problems = sorted(
         (s for s in snap.source_health if s.consecutive_failures > 0),

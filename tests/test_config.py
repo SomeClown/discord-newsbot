@@ -8,9 +8,11 @@ from newsbot.config import (
     BlueskySource,
     ConfigError,
     RssSource,
+    Secrets,
     SteamSource,
     Topic,
     WebSearchSource,
+    configured_source_names,
     load_config,
     load_secrets,
 )
@@ -33,6 +35,42 @@ def test_source_union_routes_each_type(monkeypatch):
     cfg = load_config(FIXTURE)
     types = {type(s) for s in cfg.sources}
     assert types == {RssSource, SteamSource, BlueskySource, WebSearchSource}
+
+
+# --- configured_source_names ---
+
+
+def test_configured_source_names_includes_every_source_type(monkeypatch):
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(FIXTURE)
+    names = configured_source_names(cfg)
+    assert names == {
+        "Blizzard News",  # rss, explicit name
+        "Palworld Steam",  # steam_news, explicit name
+        "Bluesky: Palworld",  # bluesky_search, default name from the query
+        "Brave Search",  # web_search, default name
+    }
+
+
+def test_configured_source_names_matches_what_collectors_actually_record(monkeypatch):
+    # The whole point of this helper is that it can't drift from what
+    # build_collectors wires up -- every Collector sets `self.name =
+    # source.name`, so these two sets have to be exactly equal.
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(FIXTURE)
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="anthropic-key",
+        brave_api_key="brave-key",
+        bluesky_handle=None,
+        bluesky_app_password=None,
+    )
+
+    from newsbot.collectors.base import build_collectors
+
+    collectors = build_collectors(cfg, secrets)
+
+    assert configured_source_names(cfg) == {c.name for c in collectors}
 
 
 def _load_with(tmp_path: Path, text: str):

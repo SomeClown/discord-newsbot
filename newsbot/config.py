@@ -225,6 +225,21 @@ def load_config(path: str | Path) -> AppConfig:
     return cfg
 
 
+def configured_source_names(cfg: AppConfig) -> set[str]:
+    """The `source_name` every currently-configured source records health under.
+
+    This has to match `build_collectors` exactly -- every `Collector` sets
+    `self.name = source.name`, and `cfg.sources` already has Bluesky's
+    default name filled in by the time `load_config` returns it (see
+    above), so this is just "read `.name` off what's configured" with one
+    place to fix if a fifth source type ever shows up and someone forgets.
+    Used to filter `/newsbot status` down to sources that still exist,
+    instead of every source that ever recorded health (see the IGN
+    incident in CLAUDE.md).
+    """
+    return {source.name for source in cfg.sources}
+
+
 def load_secrets(env: Mapping[str, str] = os.environ, *, require_discord: bool = True) -> Secrets:
     """Load secrets from the environment (never from config.yaml).
 
