@@ -93,7 +93,13 @@ else
 fi
 
 # --- 5. pull the image and recreate the container -----------------------
-echo "deploy.sh: pulling ${TAG:-latest}..."
+# docker compose reads TAG from .env on its own, but this shell doesn't,
+# so without this the message below cheerfully said "latest" while
+# compose pulled whatever .env pinned. Only the TAG line is read.
+if [ -z "${TAG:-}" ] && [ -f .env ]; then
+    ENV_TAG="$(grep -E '^TAG=' .env | tail -n 1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+echo "deploy.sh: pulling ${TAG:-${ENV_TAG:-latest}}..."
 "${COMPOSE[@]}" pull
 
 echo "deploy.sh: recreating container..."

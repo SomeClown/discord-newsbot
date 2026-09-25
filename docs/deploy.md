@@ -360,6 +360,13 @@ normally fine -- this only matters if you're deliberately pointing a local
 process at the prod token for some reason, which should be rare and
 short-lived.
 
+**After tagging a release, wait for CI to finish before deploying it.**
+The `vX.Y.Z` tag triggers a build that takes a minute or two; run
+`deploy.sh` too early and the pull fails with `manifest unknown`. Nothing
+breaks (the script stops before touching the running container), but you
+do get to run it again. `gh run list --limit 3` shows when the tag's build
+is done.
+
 ## 8. Rollback
 
 Every image is tagged `latest` (main branch), `sha-<short>` (every
