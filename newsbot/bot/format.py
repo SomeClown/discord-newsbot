@@ -398,6 +398,8 @@ def _alerts_field_value(alerts: AlertStatus) -> str:
     )
     if not alerts.seeded:
         value += " (seeding)"
+    if alerts.test_command_enabled:
+        value += " · test command ENABLED"
     return _truncate_utf16(value, _MAX_FIELD_VALUE, suffix="…")
 
 
@@ -476,6 +478,16 @@ class RenderedAlert:
     content: str
     codes: list[str]
     ping: bool
+    # A deterministic id for this message, passed to `channel.send(nonce=...)`
+    # (plan §1) so a retried send after a `PublishError` -- our own client
+    # gave up waiting for a response, not necessarily proof the message
+    # never landed -- can't turn into a second `@everyone` in the channel.
+    # Discord dedupes two sends sharing a nonce within its own short
+    # window; deriving it from `codes` and this message's position in the
+    # batch (not from wall-clock time or a random value) is what makes a
+    # retry of *this* message reuse the *same* nonce instead of minting a
+    # fresh one that Discord has never seen before.
+    nonce: str = ""
 
 
 def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
@@ -596,8 +608,10 @@ def render_code_alerts(
                 f"rendered alert content exceeds {_ALERT_CONTENT_LIMIT} UTF-16 units "
                 f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
             )
+        batch_codes = [code for code, _ in batch]
+        nonce = hashlib.sha256(f"{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
         rendered.append(
-            RenderedAlert(content=content, codes=[code for code, _ in batch], ping=ping and i == 0)
+            RenderedAlert(content=content, codes=batch_codes, ping=ping and i == 0, nonce=nonce)
         )
     return rendered
 

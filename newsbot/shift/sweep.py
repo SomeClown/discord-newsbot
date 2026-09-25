@@ -19,6 +19,7 @@ startup) but can never double-spend a ping or post the same batch twice.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import closing
@@ -143,6 +144,28 @@ async def _known_codes_for(deps: SweepDeps, candidates: list[CodeCandidate]) -> 
     return await asyncio.to_thread(_sync)
 
 
+_PING_PREFIX = "@everyone "
+
+
+def _strip_ping(alert: RenderedAlert) -> RenderedAlert:
+    """A copy of `alert` with the ping turned off -- same nonce, same codes.
+
+    Used by `_post_with_retry` when a ping-bearing send raised
+    `PublishError`: our client gave up waiting for a response, but that's
+    not proof Discord never got the message (the deterministic `nonce`
+    handles that half). What it *doesn't* rule out is that Discord got it
+    and the ping already went out -- so a retry must never risk a second
+    live `@everyone` for the same batch. The content's "@everyone " prefix
+    is stripped the same deterministic way `render_code_alerts` added it,
+    rather than re-rendering from the candidates (which `_post_with_retry`
+    doesn't have -- only the already-rendered `RenderedAlert` does).
+    """
+    content = alert.content
+    if content.startswith(_PING_PREFIX):
+        content = content[len(_PING_PREFIX) :]
+    return dataclasses.replace(alert, content=content, ping=False)
+
+
 async def _post_with_retry(
     deps: SweepDeps, alert: RenderedAlert
 ) -> tuple[int | None, Exception | None]:
@@ -155,14 +178,29 @@ async def _post_with_retry(
     mid-post should propagate, leaving its already-claimed codes `pending`
     for `fail_pending_codes` to find at the next startup, not get silently
     marked `failed` by a handler that was never meant to catch it.
+
+    Every attempt after the first reuses `alert.nonce` (set once by
+    `render_code_alerts` and never changed here) so Discord can dedupe a
+    retry against a first attempt that actually landed but whose response
+    we never saw. That covers a retried post landing twice in the
+    channel; it says nothing about a retried *ping*, which Discord's
+    nonce dedup has no opinion on -- a duplicate message with the ping
+    stripped is still a duplicate message, but a duplicate `@everyone` is
+    the one failure mode worth refusing to risk even once. So a
+    ping-bearing alert that fails once retries with the ping already
+    turned off (`_strip_ping`): the first attempt is the only one that
+    ever could have pinged, whether or not it actually landed.
     """
+    current = alert
     last_error: Exception | None = None
     for attempt in range(len(_POST_BACKOFF_S) + 1):
         try:
-            message_id = await deps.poster.post(alert)
+            message_id = await deps.poster.post(current)
             return message_id, None
         except PublishError as exc:
             last_error = exc
+            if current.ping:
+                current = _strip_ping(current)
             if attempt < len(_POST_BACKOFF_S):
                 await deps.sleep(_POST_BACKOFF_S[attempt])
         except Exception as exc:  # non-PublishError: final immediately, no retry
@@ -202,15 +240,37 @@ async def _apply_plan(
 
     posted = 0
     failed = 0
+    cap_reached = plan.cap_reached
+    final_ping = plan.ping
     if plan.to_post:
-        rendered = render_code_alerts(plan.to_post, ping=plan.ping, test=test)
-
-        def _claim_sync() -> None:
+        # claim_codes re-checks the ping cap itself, inside its own
+        # BEGIN IMMEDIATE transaction, against whatever `pings_today`
+        # looks like *right now* -- not the copy `plan_alerts` computed
+        # a moment ago from a plain read (plan step 7). A sweep and a
+        # concurrent `/newsbot test-alert` can both reach this point
+        # having each seen "budget available"; only one of them actually
+        # gets to spend it, and `actual_ping` is that outcome, which is
+        # what actually gets rendered and posted -- not `plan.ping`.
+        def _claim_sync() -> bool:
             rows = [(c.code, c.source_name, c.item_url) for c in plan.to_post]
             with closing(connect(deps.db_path)) as conn:
-                claim_codes(conn, rows, pinged=plan.ping, local_day=today, now=deps.now)
+                return claim_codes(
+                    conn,
+                    rows,
+                    pinged=plan.ping,
+                    local_day=today,
+                    now=deps.now,
+                    max_pings=deps.cfg.alerts.max_pings_per_day,
+                )
 
-        await asyncio.to_thread(_claim_sync)
+        final_ping = await asyncio.to_thread(_claim_sync)
+        if plan.ping and not final_ping:
+            cap_reached = True
+        rendered = render_code_alerts(plan.to_post, ping=final_ping, test=test)
+
+        begin_batch = getattr(deps.poster, "begin_batch", None)
+        if begin_batch is not None:
+            begin_batch()
 
         failed_from_here = False
         failed_codes: list[str] = []
@@ -242,7 +302,13 @@ async def _apply_plan(
                 + ", ".join(failed_codes)
             )
 
-    if plan.cap_reached:
+    if cap_reached and deps.cfg.alerts.max_pings_per_day > 0:
+        # Suppressed at max_pings_per_day == 0 (step 8): with the cap set
+        # to zero, *every* batch with something fresh to post trivially
+        # "reaches" it -- that's the config working as intended (pinging
+        # is turned off on purpose), not an admin-worthy event, and
+        # alerting on it every single sweep would just be noise trained
+        # to be ignored.
         await deps.alert("newsbot: SHiFT code alert daily ping cap reached; posted without a ping")
 
     return CodeCheckOutcome(
@@ -250,8 +316,8 @@ async def _apply_plan(
         posted=posted,
         silent=len(plan.silent),
         failed=failed,
-        ping=plan.ping,
-        cap_reached=plan.cap_reached,
+        ping=final_ping,
+        cap_reached=cap_reached,
     )
 
 
@@ -345,7 +411,7 @@ async def run_code_sweep(deps: SweepDeps) -> CodeCheckOutcome | None:
         return outcome
 
 
-async def run_test_alert(deps: SweepDeps, code: str, golden: bool) -> CodeCheckOutcome:
+async def run_test_alert(deps: SweepDeps, code: str, golden: bool) -> CodeCheckOutcome | None:
     """Post (or explain why not) one synthetic code, for `/newsbot test-alert`.
 
     Treated as already seeded (so it always tries to post rather than
@@ -354,21 +420,37 @@ async def run_test_alert(deps: SweepDeps, code: str, golden: bool) -> CodeCheckO
     code already sitting in the feeds. Still recorded and still counted
     against the daily ping cap: a test that pinged for free wouldn't
     actually test the cap.
+
+    Wrapped in the same `run_lock_or_skip` an hourly sweep uses (step 7):
+    without it, an admin firing `/newsbot test-alert` at the same moment
+    an hourly sweep is mid-`claim_codes` could still race it (the command
+    handler's own `is_run_in_progress()` pre-check has a window between
+    checking and calling this), landing two writers on `alerted_codes` at
+    once. `claim_codes`'s own `BEGIN IMMEDIATE` (step 7) would still keep
+    that from corrupting anything, but skipping the whole attempt outright
+    is simpler than making an admin wait out someone else's sweep. Returns
+    `None` (never anything else) when skipped, same as `run_code_sweep`.
     """
-    sighting = CodeSighting(
-        code=code.upper(),
-        golden=golden,
-        source_name=_TEST_SOURCE_NAME,
-        item_url=_TEST_ITEM_URL,
-        trust="official",
-        published_at=deps.now(),
-    )
-    max_age = timedelta(hours=deps.cfg.alerts.max_item_age_hours)
-    candidates = aggregate([sighting], now=deps.now(), max_age=max_age)
-    _, today = await _read_ping_state(deps)
-    return await _apply_plan(
-        deps, candidates, seeded=True, seeding_ok=False, today=today, test=True
-    )
+    from newsbot.pipeline.lock import run_lock_or_skip
+
+    async with run_lock_or_skip() as acquired:
+        if not acquired:
+            return None
+
+        sighting = CodeSighting(
+            code=code.upper(),
+            golden=golden,
+            source_name=_TEST_SOURCE_NAME,
+            item_url=_TEST_ITEM_URL,
+            trust="official",
+            published_at=deps.now(),
+        )
+        max_age = timedelta(hours=deps.cfg.alerts.max_item_age_hours)
+        candidates = aggregate([sighting], now=deps.now(), max_age=max_age)
+        _, today = await _read_ping_state(deps)
+        return await _apply_plan(
+            deps, candidates, seeded=True, seeding_ok=False, today=today, test=True
+        )
 
 
 __all__ = [

@@ -328,6 +328,17 @@ class DiscordCodeAlertPoster:
     def __init__(self, client: NewsBot, channel_id: int) -> None:
         self._client = client
         self._channel_id = channel_id
+        # Dedupes the missing-permission admin alert within one sweep
+        # (design.md §12 step 8): `begin_batch()` resets this at the start
+        # of every `shift/sweep.py._apply_plan` call, so a batch that
+        # spills into several messages -- or a single message that
+        # `_post_with_retry` retries several times -- alerts an admin once
+        # per sweep, not once per message and not once per retry.
+        self._missing_permission_alerted = False
+
+    def begin_batch(self) -> None:
+        """Reset the missing-permission dedupe flag; called once per sweep."""
+        self._missing_permission_alerted = False
 
     async def post(self, alert: RenderedAlert) -> int | None:
         channel = self._client.get_channel(self._channel_id)
@@ -350,10 +361,14 @@ class DiscordCodeAlertPoster:
                 # nobody) but throws away the chance the permission gets
                 # granted *before* the next code shows up.
                 mentions = _PING_EVERYONE
-                await self._client.alert(_MISSING_MENTION_PERMISSION_ALERT)
+                if not self._missing_permission_alerted:
+                    self._missing_permission_alerted = True
+                    await self._client.alert(_MISSING_MENTION_PERMISSION_ALERT)
 
         try:
-            message = await channel.send(alert.content, allowed_mentions=mentions)
+            message = await channel.send(
+                alert.content, allowed_mentions=mentions, nonce=alert.nonce or None
+            )
         except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
             _classify_send_error(exc)
         return message.id

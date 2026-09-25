@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-import pytest
-
 from newsbot.bot.format import discord_len, esc, render_digest, render_status, to_text
 from newsbot.collectors.base import RawItem
 from newsbot.config import Topic
@@ -510,6 +508,36 @@ def test_render_status_alerts_field_no_sweep_yet():
     value = _alerts_field(embed).value
     assert value.startswith("no sweep yet")
     assert "(seeding)" in value
+
+
+def test_render_status_alerts_field_shows_test_command_enabled():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="19/19 sources ok, 1 new code",
+        codes_alerted=3,
+        pings_today=1,
+        max_pings=3,
+        test_command_enabled=True,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    assert "test command ENABLED" in _alerts_field(embed).value
+
+
+def test_render_status_alerts_field_omits_test_command_note_when_disabled():
+    alerts = AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=datetime(2026, 9, 25, 21, 0, tzinfo=UTC),
+        last_sweep_summary="19/19 sources ok, 1 new code",
+        codes_alerted=3,
+        pings_today=1,
+        max_pings=3,
+        test_command_enabled=False,
+    )
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    assert "test command" not in _alerts_field(embed).value
 
 
 def test_render_status_alerts_field_escapes_hostile_sweep_summary():

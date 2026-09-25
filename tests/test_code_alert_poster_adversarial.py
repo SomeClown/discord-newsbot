@@ -1,11 +1,12 @@
 """Adversarial tests for `DiscordCodeAlertPoster`, beyond `test_code_alert_poster.py`.
 
-The angle here (test-engineer brief, 2026-09-25): a missing "Mention
-@everyone" permission alerts admin once *per call* (not once ever, and not
-zero times on a second offense), channel-not-found/fetch failure goes
-through the shared `_classify_send_error` the same as a plain send failure,
-and a whole `render_code_alerts` -> `DiscordCodeAlertPoster.post` pipeline
-never lets a continuation message carry a live ping.
+The angle here (test-engineer brief, 2026-09-25, updated for plan step 8's
+per-sweep dedupe): a missing "Mention @everyone" permission alerts admin
+once per *sweep* (`begin_batch()`'s dedupe window) -- not once ever, and not
+once per individual post() call within that same window -- channel-not-found/
+fetch failure goes through the shared `_classify_send_error` the same as a
+plain send failure, and a whole `render_code_alerts` -> `DiscordCodeAlertPoster.post`
+pipeline never lets a continuation message carry a live ping.
 """
 
 from __future__ import annotations
@@ -48,7 +49,9 @@ class FakeChannel:
     def permissions_for(self, member: object) -> FakePermissions:
         return FakePermissions(mention_everyone=self._can_mention)
 
-    async def send(self, content: str, *, allowed_mentions: discord.AllowedMentions):
+    async def send(
+        self, content: str, *, allowed_mentions: discord.AllowedMentions, nonce: str | None = None
+    ):
         self._next_id += 1
         self.sent.append((content, allowed_mentions))
         return FakeMessage(self._next_id)
@@ -95,23 +98,42 @@ def _alert(*, ping: bool, codes: list[str] | None = None) -> RenderedAlert:
     )
 
 
-# --- missing permission: alerts once per call, not once ever ---
+# --- missing permission: alerts once per sweep, not once ever, not once per post() ---
 
 
-async def test_missing_permission_alerts_admin_once_per_call_not_once_ever():
+async def test_missing_permission_alerts_admin_once_per_sweep_not_once_ever():
+    # Two separate sweeps (each starting its own begin_batch() dedupe
+    # window) both missing the permission -- two separate admin alerts,
+    # not a single one-shot warning that stops repeating forever.
     channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=False)
     client = FakeClient(channel)
     poster = DiscordCodeAlertPoster(client, channel_id=1)
 
+    poster.begin_batch()
     await poster.post(_alert(ping=True))
+    poster.begin_batch()
     await poster.post(_alert(ping=True))
 
-    # Two separate pings, both missing the permission -- two separate
-    # admin alerts, not a single one-shot warning that stops repeating.
     assert len(client.alerts) == 2
     assert len(channel.sent) == 2
     for _content, mentions in channel.sent:
         assert mentions.to_dict() == {"parse": ["everyone"]}
+
+
+async def test_missing_permission_dedupes_within_one_sweeps_begin_batch_window():
+    # Same sweep (no begin_batch() between them, e.g. an overflow batch's
+    # several messages, or _post_with_retry's several attempts at one
+    # message) -- only the first missing-permission post() alerts.
+    channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=False)
+    client = FakeClient(channel)
+    poster = DiscordCodeAlertPoster(client, channel_id=1)
+
+    poster.begin_batch()
+    await poster.post(_alert(ping=True))
+    await poster.post(_alert(ping=True))
+
+    assert len(client.alerts) == 1
+    assert len(channel.sent) == 2
 
 
 async def test_missing_permission_then_permission_granted_only_alerts_for_the_first_call():
@@ -119,6 +141,7 @@ async def test_missing_permission_then_permission_granted_only_alerts_for_the_fi
     client = FakeClient(channel)
     poster = DiscordCodeAlertPoster(client, channel_id=1)
 
+    poster.begin_batch()
     await poster.post(_alert(ping=True))
     channel._can_mention = True
     await poster.post(_alert(ping=True))

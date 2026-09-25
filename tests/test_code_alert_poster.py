@@ -44,17 +44,21 @@ class FakeChannel:
         self.guild = guild
         self._can_mention = can_mention
         self.sent: list[tuple[str, discord.AllowedMentions]] = []
+        self.nonces: list[str | None] = []
         self.next_error: Exception | None = None
         self._next_id = 100
 
     def permissions_for(self, member: object) -> FakePermissions:
         return FakePermissions(mention_everyone=self._can_mention)
 
-    async def send(self, content: str, *, allowed_mentions: discord.AllowedMentions):
+    async def send(
+        self, content: str, *, allowed_mentions: discord.AllowedMentions, nonce: str | None = None
+    ):
         if self.next_error is not None:
             raise self.next_error
         self._next_id += 1
         self.sent.append((content, allowed_mentions))
+        self.nonces.append(nonce)
         return FakeMessage(self._next_id)
 
 
