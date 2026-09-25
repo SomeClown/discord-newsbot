@@ -76,7 +76,10 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
             return
         addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
     for addr in addresses:
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
+        # `is_global` rather than a list of is_private/is_loopback/...: the
+        # list missed CGNAT space (100.64.0.0/10), and I'd rather let the
+        # stdlib keep the catalogue of non-public ranges than keep it myself.
+        if not addr.is_global:
             raise ValueError(f"redirected to a non-public host: {host} ({addr})")
 
 

@@ -352,19 +352,6 @@ async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_p
             await RssCollector(source, sleep=_noop_sleep).collect(http)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: shared/CGNAT address space (100.64.0.0/10, RFC 6598) is not "
-        "flagged by Python's ipaddress.is_private/is_loopback/is_link_local, "
-        "so _reject_private_redirect() (newsbot/collectors/rss.py) lets a "
-        "redirect chain ending at a 100.64.x.x address straight through. "
-        "Some cloud providers route internal-only services through this "
-        "range specifically because it isn't RFC 1918 -- the same shape of "
-        "hole the 169.254.169.254 case above already closes, just a "
-        "narrower and less-well-known range. Severity: LOW-MEDIUM."
-    ),
-)
 async def test_rss_collector_rejects_redirect_to_cgnat_shared_address_space():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":

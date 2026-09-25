@@ -186,7 +186,10 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # stricter check than "does this look like a URL". Shift codes (the thing
 # this exists to *not* remove; see CLAUDE.md's content policy) don't match
 # either pattern, so a code stays right where the model put it.
-_URL_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S+|\bwww\.\S+", re.IGNORECASE)
+_URL_TOKEN_RE = re.compile(
+    r"\b[a-z][a-z0-9+.\-]*://\S+|\bwww\.\S+|\b(?:discord\.gg|discord(?:app)?\.com/invite)/\S+",
+    re.IGNORECASE,
+)
 _LINK_REMOVED = "[link removed]"
 
 

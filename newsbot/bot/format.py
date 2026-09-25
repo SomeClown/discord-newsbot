@@ -52,6 +52,9 @@ _LINKY_MENTION_RE = re.compile(r"<(?=[#/])")
 # "https:/​/", which reads identically to a person and autolinks to
 # nobody.
 _URL_SCHEME_RE = re.compile(r"\b([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
+# Discord makes invite links clickable even without a scheme, because of
+# course it does.
+_BARE_INVITE_RE = re.compile(r"\b(discord\.gg|discord(?:app)?\.com/invite)/", re.IGNORECASE)
 
 # A fixed, arbitrary 6-color palette (Discord's own brand blurple plus five
 # others that read fine against dark and light themes). Which topic gets
@@ -116,7 +119,8 @@ def esc(s: str) -> str:
     # Same idea, aimed at a URL scheme instead of a mention: a zero-width
     # space right after the colon stops "https://evil.example" from ever
     # being a live "scheme://" token, without changing how it reads.
-    return _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:\u200b", escaped)
+    escaped = _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:\u200b", escaped)
+    return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}\u200b/", escaped)
 
 
 def _topic_color(topic_key: str) -> int:

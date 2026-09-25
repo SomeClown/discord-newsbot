@@ -35,6 +35,7 @@ _TRACKING_PARAMS = {
     "feature",
 }
 
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
 # What's allowed to survive path re-encoding unescaped, on top of the
@@ -100,6 +101,9 @@ def canonicalize(url: str) -> str | None:
     # different hat; the first live run posted both, side by side, like a
     # typo with confidence.
     host = host.removeprefix("www.")
+    # "example.com." is the fully qualified spelling of "example.com"; same
+    # host, and the dedupe shouldn't be fooled by punctuation.
+    host = host.rstrip(".")
     try:
         host.encode("idna")
     except UnicodeError:
@@ -111,9 +115,15 @@ def canonicalize(url: str) -> str | None:
         port = parts.port
     except ValueError:
         return None
+    # urlsplit() hands IPv6 hosts back without their brackets; the URL
+    # doesn't parse again unless they go back on.
+    if ":" in host:
+        host = f"[{host}]"
     netloc = host if port in (None, _DEFAULT_PORTS[scheme]) else f"{host}:{port}"
 
     path = quote(parts.path, safe=_PATH_SAFE) or "/"
+    # %3e and %3E are the same byte; pick one so dedupe agrees with itself.
+    path = _PERCENT_ESCAPE_RE.sub(lambda m: m.group(0).upper(), path)
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/") or "/"
 
