@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from newsbot.collectors.base import RawItem
 
@@ -37,6 +37,17 @@ _TRACKING_PARAMS = {
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
+# What's allowed to survive path re-encoding unescaped, on top of the
+# characters `quote()` already treats as always-safe (letters, digits,
+# `_.-~`). This is RFC 3986's path-segment sub-delims plus `/` (so we're
+# not re-splitting the path into segments) and `%` (so re-encoding an
+# already-canonical path is a no-op instead of double-escaping it).
+# Deliberately *not* in this set: `<>[]"` \``, space, and anything
+# non-ASCII -- those are exactly the characters that let a story's URL
+# break out of format.py's `<url>` autolink and grow a markdown
+# `[text](url)` link next to it that points somewhere else entirely.
+_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
+
 
 def canonicalize(url: str) -> str | None:
     """Return the canonical form of `url`, or None if it isn't http(s).
@@ -46,6 +57,24 @@ def canonicalize(url: str) -> str | None:
     every other query param alone, and drops a trailing slash from a
     non-root path. `http` and `https` are deliberately not merged into
     one; the spec doesn't ask for it, and future me is welcome to it.
+
+    Rejects anything with userinfo in the netloc (`user:pass@host`, or
+    just `user@host`) outright rather than passing it through -- there's
+    no legitimate reason a news URL needs credentials in it, and it's a
+    classic way to make a link's *displayed* host and its *actual* host
+    disagree. Also rejects a host that doesn't survive IDNA encoding: a
+    bidirectional override character (U+202E and friends) in a hostname
+    is a textbook homograph trick, and IDNA's nameprep step already
+    refuses those, so this just declines to catch the exception and
+    ship the URL anyway.
+
+    The path gets percent-re-encoded (`urllib.parse.quote`, idempotent)
+    rather than passed through -- angle brackets, square brackets, quotes,
+    backticks, raw spaces, control characters and non-ASCII (including
+    bidi overrides) in a path are all things a member's client would
+    happily treat as the end of a URL, which is exactly how a poisoned
+    path could close `format.py`'s `<url>` autolink early and grow a fake
+    markdown link right after it.
     """
     try:
         parts = urlsplit(url)
@@ -59,12 +88,22 @@ def canonicalize(url: str) -> str | None:
         return None
     if not parts.hostname:
         return None
+    if "@" in parts.netloc:
+        # Credentials in a URL, or just a stray "@" that pushes everything
+        # before it into what a browser would treat as a discarded
+        # username. Neither belongs in a news link; reject rather than
+        # try to guess what was meant.
+        return None
 
     host = parts.hostname.lower()
     # "www.pcgamesn.com" and "pcgamesn.com" are the same article wearing a
     # different hat; the first live run posted both, side by side, like a
     # typo with confidence.
     host = host.removeprefix("www.")
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        return None
     try:
         # `.port` is validated lazily, so "example.com:99999" sails through
         # urlsplit() and only explodes here. Found by test-engineer, not by me,
@@ -73,11 +112,8 @@ def canonicalize(url: str) -> str | None:
     except ValueError:
         return None
     netloc = host if port in (None, _DEFAULT_PORTS[scheme]) else f"{host}:{port}"
-    if "@" in parts.netloc:
-        userinfo = parts.netloc.rsplit("@", 1)[0]
-        netloc = f"{userinfo}@{netloc}"
 
-    path = parts.path or "/"
+    path = quote(parts.path, safe=_PATH_SAFE) or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/") or "/"
 

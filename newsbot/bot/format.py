@@ -27,6 +27,7 @@ import discord
 
 from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
+from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import StatusSnapshot, StoryView
 
@@ -97,13 +98,32 @@ def _sort_key(story: StoryDraft) -> tuple[int, int]:
     return (_LABEL_ORDER[story.label], -len(story.item_urls))
 
 
+def _safe_link(url: str) -> str | None:
+    """Re-run `url` through `canonicalize()` immediately before it's wrapped in `<...>`.
+
+    Every URL that reaches here should already be canonical -- item_urls
+    via `pipeline.summarize.postprocess`, fallback items via
+    `pipeline.normalize.normalize()` at collection time -- but "should
+    already be" is exactly the kind of assumption that's cheap to just
+    re-check right where it matters. `canonicalize()` percent-encodes any
+    angle bracket, square bracket, quote, backtick or space in the path,
+    which is what stops a poisoned URL from closing this markup's
+    `<...>` autolink early and growing a fake
+    `[text](url)` link right after it. Returns None (and the caller drops
+    the link) on the rare case a URL doesn't survive re-canonicalizing at
+    all, rather than ever emitting one unescaped.
+    """
+    return canonicalize(url)
+
+
 def _link_line(urls: list[str]) -> str:
-    shown = urls[:_MAX_LINKS_SHOWN]
+    safe_urls = [safe for url in urls if (safe := _safe_link(url)) is not None]
+    shown = safe_urls[:_MAX_LINKS_SHOWN]
     # `<url>` (angle brackets) tells Discord "link this, but don't expand
     # it into a preview card" -- without that, three or four stacked link
     # previews turn one story into a wall of thumbnails.
     line = " · ".join(f"<{url}>" for url in shown)
-    extra = len(urls) - len(shown)
+    extra = len(safe_urls) - len(shown)
     if extra > 0:
         line += f" · +{extra} more"
     return line
@@ -163,9 +183,11 @@ def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> d
         return discord.Embed(title=title, description="No new stories today.", color=color)
 
     lines = [esc(note)] if note else []
-    lines.extend(
-        f"• {esc(topic_item.item.title)} — <{topic_item.item.url}>" for topic_item in items
-    )
+    for topic_item in items:
+        safe_url = _safe_link(topic_item.item.url)
+        if safe_url is None:
+            continue
+        lines.append(f"• {esc(topic_item.item.title)} — <{safe_url}>")
     return discord.Embed(
         title=title, description=_truncate_description("\n".join(lines)), color=color
     )

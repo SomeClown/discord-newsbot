@@ -172,6 +172,45 @@ def test_fallback_topic_renders_items_as_headline_and_link_list():
     assert "Summary unavailable" in description
 
 
+def test_story_url_with_breakout_characters_never_produces_a_masked_link():
+    # A URL shaped to break out of the <...> autolink and grow a fake
+    # [text](url) markdown link right after it (see normalize.py's
+    # canonicalize() docstring). Even if a URL like this somehow reached
+    # render_digest without going through postprocess's canonicalize
+    # check first, _safe_link()'s re-canonicalize at render time has to
+    # catch it.
+    malicious = "https://ok.example/a> **boom** [Official patch notes](https://evil.example/x)"
+    stories = [
+        StoryDraft(
+            headline="Headline",
+            summary="Summary.",
+            label="official",
+            item_urls=[malicious],
+            update_of_story_id=None,
+        )
+    ]
+    rendered = render_digest(
+        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
+    )
+    description = rendered.embed_messages[0][0].description
+    assert "](https://evil.example" not in description
+    assert "> **boom**" not in description
+
+
+def test_fallback_item_url_with_breakout_characters_never_produces_a_masked_link():
+    malicious = "https://ok.example/a> **boom** [Official patch notes](https://evil.example/x)"
+    item = _topic_item(title="Patch notes posted", url=malicious)
+    summaries = {
+        "palworld": _summary(
+            "palworld", fallback=True, note="Summary unavailable; showing headlines."
+        )
+    }
+    rendered = render_digest(RUN_DATE, [PALWORLD], summaries, {"palworld": [item]}, [])
+    description = rendered.embed_messages[0][0].description
+    assert "](https://evil.example" not in description
+    assert "> **boom**" not in description
+
+
 def test_fallback_topic_with_no_items_shows_no_new_stories():
     summaries = {
         "palworld": _summary(

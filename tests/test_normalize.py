@@ -128,8 +128,55 @@ def test_canonicalize_rejects_empty_host():
     assert canonicalize("https:///path") is None
 
 
-def test_canonicalize_keeps_userinfo_in_netloc():
-    assert canonicalize("https://user:pass@example.com/a") == "https://user:pass@example.com/a"
+def test_canonicalize_rejects_userinfo_in_netloc():
+    # Was previously preserved verbatim; QA flagged that credentials (or
+    # any "user@host" shape) in a link have no legitimate reason to be in
+    # a news URL and are a classic way to make the displayed host and the
+    # actual host disagree. Rejecting outright is simpler than guessing
+    # which part was meant to be the real host.
+    assert canonicalize("https://user:pass@example.com/a") is None
+
+
+def test_canonicalize_rejects_bare_at_in_netloc():
+    assert canonicalize("https://evil@example.com/a") is None
+
+
+# --- path/host metacharacter and homograph defenses ---
+
+
+def test_canonicalize_percent_encodes_path_breakout_characters():
+    # ">" and a space are exactly what would close format.py's `<url>`
+    # autolink early; "[" and "]" are what would then let a
+    # `[text](url)` markdown link grow right after it. None of those four
+    # should survive as literal characters in the canonical path.
+    result = canonicalize("https://example.com/a> **boom** [Official patch notes](x)")
+    assert result is not None
+    for char in "><[] ":
+        assert char not in result
+
+
+def test_canonicalize_path_quoting_is_idempotent():
+    once = canonicalize("https://example.com/a b/c[d]")
+    twice = canonicalize(once)
+    assert once == twice
+
+
+def test_canonicalize_percent_encodes_non_ascii_path():
+    assert canonicalize("https://example.com/café") == "https://example.com/caf%C3%A9"
+
+
+def test_canonicalize_percent_encodes_bidi_override_in_path():
+    result = canonicalize("https://example.com/a‮b")
+    assert result is not None
+    assert "‮" not in result
+
+
+def test_canonicalize_rejects_bidi_override_in_host():
+    assert canonicalize("https://exa‮mple.com/a") is None
+
+
+def test_canonicalize_rejects_host_with_overlong_label():
+    assert canonicalize(f"https://{'a' * 70}.com/x") is None
 
 
 def test_canonicalize_handles_extremely_long_url():
