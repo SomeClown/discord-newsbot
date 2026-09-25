@@ -235,3 +235,34 @@ All resolved as of M2 (2026-09-24):
 - Seed source list researched and owner-approved; see `docs/sources-research.md` and `config.example.yaml`.
 - Digest time and timezone confirmed: 09:00 America/Los_Angeles.
 - The owner created the Discord applications (prod and dev), the Anthropic API key, and the Brave Search API key. No Bluesky app password yet — see the dedicated-source note in section 4 for what that costs in coverage.
+
+## 12. SHiFT code alerts (v1.2, approved 2026-09-25)
+
+A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions.
+
+**Pattern.** Five groups of five ASCII letters or digits joined by hyphens (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`), matched case-insensitively and normalized to uppercase. The match must stand alone: not preceded or followed by another letter, digit, or hyphen. It is a fixed, anchored pattern with no user-supplied regex (no ReDoS surface). Matching runs over each item's title and **full** text, not the 500-character excerpt stored for summaries, so collectors must make the untruncated text available to the matcher.
+
+**Wording.** If the item's title or text mentions "golden key" or "golden keys" (case-insensitive), the alert says **New Golden Key code**; otherwise **New SHiFT code**. Multiple new codes found in one check go in a single message with a single ping.
+
+**When it runs.**
+- An hourly alert sweep (interval configurable) runs every collector **except `web_search`** (keeps Brave within its free allowance) and does **not** call Claude. It shares the existing run lock with the daily job and respects the Reddit serial-fetch gap.
+- The daily 09:00 run also checks its collected items for codes.
+- The sweep never writes `items`/`stories` and never affects the digest; the digest's dedupe is unchanged.
+
+**Safeguards on `@everyone`.**
+1. **Once per code, ever.** A new `alerted_codes` table (code PK, first_seen_at, source_name, item_url, message_id, pinged bool) records every code seen; a code already in the table never alerts again.
+2. **Silent seeding.** The first sweep after the feature is enabled (no rows in `alerted_codes` and no seeded marker) records every code it finds without posting, so existing old codes in the feeds don't cause a flood.
+3. **Age limit.** Items whose `published_at` is older than `max_item_age_hours` (default 48) are recorded but not alerted. Undated items are treated as fresh (consistent with SPEC-DEV 4) but still subject to the once-per-code rule and the cap.
+4. **Daily ping cap.** At most `max_pings_per_day` (default 3) alert messages with a ping per local day (America/Los_Angeles). Beyond the cap, alerts still post but without the ping, and an admin alert notes it.
+5. **Mentions stay off elsewhere.** Only alert messages set `allowed_mentions=AllowedMentions(everyone=True)` (and only when pinging); every other send path keeps `AllowedMentions.none()`. Scraped text in the alert (source name) is escaped; the only URL shown is the collected item's canonical URL.
+
+**Config.**
+```yaml
+alerts:
+  enabled: true
+  interval_minutes: 60
+  max_item_age_hours: 48
+  max_pings_per_day: 3
+```
+
+**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (for the private test guild) is provided so the path can be exercised end to end without waiting for a real code.
