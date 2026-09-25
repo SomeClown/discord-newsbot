@@ -24,9 +24,13 @@ _TZ = ZoneInfo("America/Los_Angeles")
 _DIGEST_TIME = time(9, 0)
 
 
-def _digest_row(status: str) -> DigestRow:
+def _digest_row(status: str, posted_message_ids: list[int] | None = None) -> DigestRow:
     return DigestRow(
-        id=1, run_date=date(2026, 9, 23), status=status, posted_message_ids=[], error_notes=None
+        id=1,
+        run_date=date(2026, 9, 23),
+        status=status,
+        posted_message_ids=posted_message_ids or [],
+        error_notes=None,
     )
 
 
@@ -64,6 +68,16 @@ def test_should_catch_up_after_time_pending_row_is_false():
     # responsible for alerting an admin in this case, not for guessing.
     now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
     assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("pending")) is False
+
+
+def test_should_catch_up_after_time_failed_row_with_posted_ids_is_false():
+    # Some of the digest already landed in the channel before publishing
+    # died -- an unattended catch-up retry here would double-post the
+    # header. This is the caller's cue to alert an admin instead (see
+    # _PARTIAL_FAILURE_STARTUP_ALERT), the same as a pending row.
+    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
+    row = _digest_row("failed", posted_message_ids=[111, 222])
+    assert should_catch_up(now_local, _DIGEST_TIME, row) is False
 
 
 def test_should_catch_up_exactly_at_scheduled_time_is_true():

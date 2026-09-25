@@ -72,13 +72,19 @@ def resolve_query_args(
 def needs_confirmation(existing: DigestRow | None) -> bool:
     """True if `/newsbot run-now` should ask before running again.
 
-    Only `ok`/`partial` (today already posted) needs confirming. `failed`
-    means today never actually made it to Discord, so a plain re-run is
-    fine; no row at all means there's nothing to confirm over. A `pending`
-    row is a different, crash-recovery situation that `run-now`'s caller
-    handles before this function ever gets consulted.
+    `ok`/`partial` (today already posted) always needs confirming, and so
+    does a `failed` row with a non-empty `posted_message_ids` -- that
+    combination means a publish attempt got the header (and maybe some
+    embeds) into the channel before it died, so a plain re-run would post
+    a second header on top of the one already there. A `failed` row with
+    nothing posted is a clean failure (never reached Discord at all), so
+    it doesn't need asking; no row at all obviously doesn't either.
     """
-    return existing is not None and existing.status in ("ok", "partial")
+    if existing is None:
+        return False
+    if existing.status in ("ok", "partial"):
+        return True
+    return existing.status == "failed" and bool(existing.posted_message_ids)
 
 
 def has_admin_permission(permissions: discord.Permissions, admin_permission: str) -> bool:
@@ -310,9 +316,11 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         force = False
         if needs_confirmation(existing):
             view = ConfirmView(interaction.user.id)
-            await interaction.response.send_message(
-                "Today's digest already posted. Post again?", view=view, ephemeral=True
-            )
+            if existing is not None and existing.status == "failed":
+                prompt = "A previous run may have crashed mid-post; check the channel. Post anyway?"
+            else:
+                prompt = "Today's digest already posted. Post again?"
+            await interaction.response.send_message(prompt, view=view, ephemeral=True)
             await view.wait()
             if not view.value:
                 await interaction.edit_original_response(content="Cancelled.", view=None)

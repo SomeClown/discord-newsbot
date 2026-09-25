@@ -19,7 +19,20 @@ from newsbot.bot.format import RenderedDigest, to_text
 
 
 class PublishError(Exception):
-    """A publish attempt failed. `run_daily` retries a few times before giving up on it."""
+    """A publish attempt failed. `run_daily` retries a few times before giving up on it.
+
+    `posted_ids` carries whatever message ids the failed attempt already
+    got back from Discord before it died -- a `DiscordPublisher` posts the
+    header, then a thread, then one message per embed batch, and any of
+    those can be the one that fails. Without this, a publish that got the
+    header and two embeds out before a third one timed out would report
+    "nothing posted" right alongside a channel that very much has a
+    header and two embeds sitting in it.
+    """
+
+    def __init__(self, message: str, posted_ids: list[int] | None = None) -> None:
+        super().__init__(message)
+        self.posted_ids: list[int] = posted_ids or []
 
 
 class Publisher(Protocol):

@@ -27,6 +27,7 @@ from datetime import time as dt_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -69,28 +70,46 @@ _PENDING_STARTUP_ALERT = (
     "already posted. Check the channel and `/newsbot status`, then "
     "`/newsbot run-now` (with force, if it asks) once you know which."
 )
+_PARTIAL_FAILURE_STARTUP_ALERT = (
+    "newsbot: today's digest row is 'failed' but some messages already "
+    "posted before it died. Check the channel and `/newsbot status`, then "
+    "`/newsbot run-now` if you want to retry (it'll ask for confirmation "
+    "before posting again)."
+)
 
 
 def should_catch_up(now_local: datetime, digest_time: dt_time, existing: DigestRow | None) -> bool:
     """Decide whether startup should run today's digest right now.
 
     True iff local time is past `digest_time` and there's no digest row
-    for today, or today's row is `failed` (a `failed` row means today
-    genuinely never posted, so a retry is safe). False before the
-    scheduled time, or if a row already exists as `ok`/`partial` (already
-    posted) or `pending` (ambiguous -- see `_PENDING_STARTUP_ALERT`; the
-    caller alerts instead of guessing).
+    for today, or today's row is `failed` with nothing posted (a clean
+    failure -- collection or summarizing blew up before anything reached
+    Discord, so a retry is safe). False before the scheduled time, if a
+    row already exists as `ok`/`partial` (already posted), if it's
+    `pending` (ambiguous -- see `_PENDING_STARTUP_ALERT`; the caller
+    alerts instead of guessing), or if it's `failed` but
+    `posted_message_ids` is non-empty (some of the digest made it to the
+    channel before publishing failed -- an unattended retry here would
+    double-post the header or the parts that landed; the caller alerts
+    instead, same as `pending`).
     """
     if now_local.time() < digest_time:
         return False
     if existing is None:
         return True
-    return existing.status == "failed"
+    return existing.status == "failed" and not existing.posted_message_ids
 
 
 def _parse_digest_time(time_str: str) -> dt_time:
     hour, minute = (int(part) for part in time_str.split(":"))
     return dt_time(hour, minute)
+
+
+# Errors worth retrying: the network blipped, or a request timed out
+# before a response came back at all. `discord.HTTPException` is handled
+# separately below, since whether *that* is retryable depends on the
+# status code Discord actually sent back.
+_TRANSIENT_ERRORS = (aiohttp.ClientError, OSError, TimeoutError)
 
 
 class DiscordPublisher:
@@ -100,39 +119,101 @@ class DiscordPublisher:
     `run_daily`'s guard, save and retry logic runs identically whether the
     digest is heading to a terminal or a channel -- this class's only job
     is turning a `RenderedDigest` into Discord API calls and message ids.
+
+    One instance is built fresh per run (see `NewsBot.publisher_for_today`
+    and the `/newsbot run-now` handler) and then reused across every
+    attempt `run.py`'s `_publish_with_retry` makes at it -- that's what
+    makes resumability possible. It tracks which messages it's already
+    gotten an id back for on `self`, so a retried `publish()` call picks
+    up where the last attempt left off instead of reposting the header (and
+    however many embed messages already landed) on every retry. Before
+    this tracking existed, three transient failures in a row meant the
+    channel got the same digest four times.
     """
 
-    def __init__(self, client: discord.Client, channel_id: int, run_date: date) -> None:
+    def __init__(self, client: NewsBot, channel_id: int, run_date: date) -> None:
+        # `NewsBot`, not plain `discord.Client`: this needs `.alert()` for
+        # the non-fatal thread-creation path below, which only `NewsBot`
+        # has. Forward-referenced since `NewsBot` is defined later in this
+        # same module.
         self._client = client
         self._channel_id = channel_id
         self._run_date = run_date
+        self._header_msg: discord.Message | None = None
+        self._thread_created = False
+        self._posted_ids: list[int] = []
 
     async def publish(self, r: RenderedDigest) -> list[int]:
         channel = self._client.get_channel(self._channel_id)
         if channel is None:
             try:
                 channel = await self._client.fetch_channel(self._channel_id)
-            except discord.HTTPException as exc:
-                raise PublishError(f"can't reach digest channel {self._channel_id}: {exc}") from exc
+            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+                self._reraise_or_wrap(exc)
 
-        try:
-            header_msg = await channel.send(
-                r.header, allowed_mentions=discord.AllowedMentions.none()
-            )
+        if self._header_msg is None:
+            try:
+                self._header_msg = await channel.send(
+                    r.header, allowed_mentions=discord.AllowedMentions.none()
+                )
+            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+                self._reraise_or_wrap(exc)
+            self._posted_ids.append(self._header_msg.id)
+
+        if not self._thread_created:
             # The thread hangs off the header message, not the channel --
             # that's what makes it show up as a reply thread on today's
             # digest instead of a bare, disconnected discussion channel.
-            await header_msg.create_thread(name=f"News {self._run_date.isoformat()}")
+            # Losing the thread isn't worth losing the digest over, though:
+            # the header and embeds below are the part anyone's actually
+            # here to read, so a thread failure gets logged and alerted,
+            # not raised.
+            try:
+                await self._header_msg.create_thread(name=f"News {self._run_date.isoformat()}")
+            except Exception as exc:  # noqa: BLE001 -- deliberately swallowed, see above
+                logger.error(
+                    "couldn't create the discussion thread for %s; posting without one",
+                    self._run_date,
+                    exc_info=exc,
+                )
+                await self._client.alert(f"newsbot: couldn't create the discussion thread: {exc}")
+            self._thread_created = True
 
-            message_ids = [header_msg.id]
-            for embeds in r.embed_messages:
+        # `self._posted_ids` already has the header (and, on a retry, any
+        # embed messages a prior attempt got through) -- skip straight to
+        # the first one this attempt hasn't sent yet.
+        already_sent = len(self._posted_ids) - 1
+        for embeds in r.embed_messages[already_sent:]:
+            try:
                 sent = await channel.send(
                     embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
                 )
-                message_ids.append(sent.id)
-        except discord.HTTPException as exc:
-            raise PublishError(f"discord send failed: {exc}") from exc
-        return message_ids
+            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+                self._reraise_or_wrap(exc)
+            self._posted_ids.append(sent.id)
+
+        return list(self._posted_ids)
+
+    def _reraise_or_wrap(self, exc: Exception) -> None:
+        """Classify a send/fetch failure: wrap it as `PublishError` if it's
+        worth retrying, or let it propagate as-is if it isn't.
+
+        `discord.Forbidden` and friends (any 4xx) mean the request will
+        never succeed no matter how many times `_publish_with_retry`
+        tries it -- wrapping those would just burn the retry budget on a
+        permissions problem that needs a human, not a backoff timer.
+        """
+        if isinstance(exc, discord.HTTPException):
+            if exc.status is not None and 400 <= exc.status < 500:
+                raise exc
+            raise PublishError(
+                f"discord send failed: {exc}", posted_ids=list(self._posted_ids)
+            ) from exc
+        if isinstance(exc, _TRANSIENT_ERRORS):
+            raise PublishError(
+                f"discord send failed: {exc}", posted_ids=list(self._posted_ids)
+            ) from exc
+        raise exc
 
 
 class NullPublisher:
@@ -270,6 +351,8 @@ class NewsBot(discord.Client):
             await self._daily_job()
         elif existing is not None and existing.status == "pending":
             await self.alert(_PENDING_STARTUP_ALERT)
+        elif existing is not None and existing.status == "failed" and existing.posted_message_ids:
+            await self.alert(_PARTIAL_FAILURE_STARTUP_ALERT)
 
     def _get_digest_sync(self, run_date: date) -> DigestRow | None:
         with closing(connect(self.db_path)) as conn:

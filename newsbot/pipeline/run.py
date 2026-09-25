@@ -429,8 +429,21 @@ async def _record_source_health(deps: Deps, results: list[CollectorResult]) -> N
 
 async def _publish_with_retry(
     publisher: Publisher, rendered: RenderedDigest, *, sleep: Callable[[float], Awaitable[None]]
-) -> tuple[list[int], Exception | None]:
-    last_error: Exception | None = None
+) -> tuple[list[int], PublishError | None]:
+    """Retry `publisher.publish()` on transient failure, with backoff.
+
+    Only `PublishError` is caught here -- that's the contract the
+    `Publisher` protocol documents, and a resumable publisher (see
+    `DiscordPublisher`) is exactly what makes retrying the *same*
+    publisher instance safe: each attempt picks up where the last one
+    left off instead of reposting what already made it through. On final
+    failure, the ids returned come from the error itself
+    (`PublishError.posted_ids`), not an empty list -- those ids are real
+    messages sitting in the channel, and `_run_post` needs them to record
+    against the `failed` row so a human (or `needs_confirmation`) knows
+    part of the digest already posted.
+    """
+    last_error: PublishError | None = None
     for attempt in range(len(_PUBLISH_BACKOFF_S) + 1):
         try:
             return await publisher.publish(rendered), None
@@ -438,7 +451,7 @@ async def _publish_with_retry(
             last_error = exc
             if attempt < len(_PUBLISH_BACKOFF_S):
                 await sleep(_PUBLISH_BACKOFF_S[attempt])
-    return [], last_error
+    return (last_error.posted_ids if last_error else []), last_error
 
 
 # --- Offline running: fixture collectors and a canned-JSON stub LLM ---

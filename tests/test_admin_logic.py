@@ -18,9 +18,13 @@ from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
 from newsbot.store.models import DigestRow
 
 
-def _digest_row(status: str) -> DigestRow:
+def _digest_row(status: str, posted_message_ids: list[int] | None = None) -> DigestRow:
     return DigestRow(
-        id=1, run_date=date(2026, 9, 23), status=status, posted_message_ids=[], error_notes=None
+        id=1,
+        run_date=date(2026, 9, 23),
+        status=status,
+        posted_message_ids=posted_message_ids or [],
+        error_notes=None,
     )
 
 
@@ -111,6 +115,20 @@ def test_needs_confirmation_pending_row_is_false():
     # run-now's caller handles a pending row before ever asking this
     # question (see should_catch_up's docstring for why it's ambiguous).
     assert needs_confirmation(_digest_row("pending")) is False
+
+
+def test_needs_confirmation_failed_row_with_posted_ids_is_true():
+    # A publish that got the header out before dying leaves a real
+    # message in the channel -- re-running unconfirmed would post a
+    # second header on top of it.
+    assert needs_confirmation(_digest_row("failed", posted_message_ids=[111])) is True
+
+
+def test_needs_confirmation_failed_row_with_no_posted_ids_is_false():
+    # Nothing reached Discord, so a plain re-run is safe -- this is the
+    # same case test_needs_confirmation_failed_row_is_false pins, spelled
+    # out explicitly now that "failed" isn't a single monolithic case.
+    assert needs_confirmation(_digest_row("failed", posted_message_ids=[])) is False
 
 
 # --- estimate_spend_usd ---
