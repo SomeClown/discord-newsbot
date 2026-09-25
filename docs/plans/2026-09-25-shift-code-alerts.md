@@ -152,5 +152,5 @@ Reward filtering, code validation/expiry, OCR, per-source sweep exclusions, X/Tw
 12. Prod: grant the permission in the prod guild, add `alerts: {enabled: true}` to the Droplet's `config.yaml`, tag, wait for CI, `deploy.sh`.
 
 ## 9. Owner decisions (2026-09-25)
-- **A6 game scoping:** _pending_
-- **A11 too-old codes stay silent forever:** _pending_
+- **A6 game scoping: scope to topics (option A).** Implement Step 5b: `AlertsCfg.topics: list[str]` validated against topic keys; only items that `filter_items` matches to those topics count (dedicated sources included). `config.example.yaml` and the prod config set `topics: [borderlands4]`. An empty list means all topics, but the example and docs must steer to scoping.
+- **A11 too-old codes stay silent forever (option A).** A code first seen only in stale items is recorded `too_old` and never alerts later.
