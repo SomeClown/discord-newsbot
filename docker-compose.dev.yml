@@ -3,6 +3,12 @@
 # checkout instead of pulling from GHCR, and points at the dev bot's
 # token, config and database so it never touches prod data.
 #
+# This file's `env_file: .env.dev` is the *only* env_file in play for
+# this combination -- the base docker-compose.yml deliberately carries
+# no env_file of its own (see its comment), so there's no path by which
+# a variable missing from .env.dev could quietly fall back to prod's
+# .env instead of just being missing (which is at least loud).
+#
 # IMPORTANT -- only ONE instance per bot token may run (see CLAUDE.md).
 # This override uses the *dev* bot token from .env.dev, which must be a
 # different token than whatever's in prod's .env on the Droplet. Even so:

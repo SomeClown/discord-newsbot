@@ -178,9 +178,9 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 ## 7. Deployment
 
 - Multi-stage `Dockerfile` on `python:3.14-slim`, running as a non-root user
-- `docker-compose.yml`: one service, `restart: unless-stopped`, `./config.yaml:/app/config.yaml:ro`, `./data:/data`, `env_file: .env`, and log rotation (json-file, max-size 10m, max-file 3)
+- `docker-compose.yml`: base service settings shared by prod and dev -- `restart: unless-stopped`, read-only root filesystem, and log rotation (json-file, max-size 10m, max-file 3). Deliberately carries no `image` and no `env_file`: those differ per environment and live in `docker-compose.prod.yml` (`env_file: .env`, `./config.yaml:/app/config.yaml:ro`, `./data:/data`) and `docker-compose.dev.yml` (`env_file: .env.dev`, `./config.dev.yaml:/app/config.yaml:ro`) respectively. The split exists because Compose merges `env_file` lists by concatenation across `-f` files rather than replacing them -- a base-level `env_file: .env` would still be loaded under the dev override, so a secret missing from `.env.dev` could silently fall back to prod's `.env`.
 - Healthcheck: the process writes a heartbeat file every 60s when the gateway is connected and the scheduler is running. The healthcheck fails if the file is more than 3 minutes old.
-- GitHub Actions runs `ruff` and `pytest` on every push. On `main`, once tests pass, it builds and pushes the image to GHCR. The Droplet deploys with `docker compose pull && docker compose up -d`.
+- GitHub Actions runs `ruff` and `pytest` on every push. On `main`, once tests pass, it builds and pushes the image to GHCR. The Droplet deploys with `docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`.
 - The Discord gateway uses outgoing connections only, so no inbound ports or domain are needed.
 - **Missed-run catch-up:** on startup, if today's digest is missing and the scheduled time has passed, run it (subject to the double-post guard).
 

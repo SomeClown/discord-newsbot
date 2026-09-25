@@ -1,30 +1,31 @@
-# Production compose file: one service, pulling a pre-built image from
-# GHCR. See docs/deploy.md for the Droplet runbook (pull, up -d, rollback
-# by TAG, log viewing, restore-from-backup).
+# Base compose file: settings shared by prod and dev, and nothing that's
+# environment-specific. On its own, `docker compose -f docker-compose.yml
+# up` doesn't do anything useful -- combine it with either
+# docker-compose.prod.yml or docker-compose.dev.yml.
 #
-# GHCR_OWNER isn't known yet (Checkpoint F: the owner creates the GitHub
-# repo and decides public/private), so it's a variable rather than
-# hardcoded. Set it in the Droplet's .env alongside the secrets, or export
-# it in the shell before `docker compose up`.
+# QA step 20, group 7: this file used to also carry `image:` and
+# `env_file: .env` directly, with docker-compose.dev.yml layered on top
+# as an override. That was a trap -- Compose merges `env_file` lists by
+# concatenation across `-f` files, not by replacement, so the dev
+# override's `env_file: .env.dev` didn't *replace* this file's
+# `env_file: .env`, it added to it. A variable missing from `.env.dev`
+# (say, DISCORD_TOKEN, if the dev token hadn't been generated yet) would
+# then silently fall back to whatever was in prod's `.env`. `image` and
+# `env_file` now live only in docker-compose.prod.yml, specifically so
+# there's no file the dev override could inherit a prod secret from.
 #
 # IMPORTANT -- only ONE instance of this bot may run per Discord bot
 # token, ever (see CLAUDE.md). Both processes would receive every gateway
 # interaction and race for it; the loser logs `Unknown interaction
-# (10062)` and confuses whoever's watching. Do not bring this file up
-# while the local `python -m newsbot` or `docker-compose.dev.yml` is
-# running against the same token, and vice versa.
+# (10062)` and confuses whoever's watching. Do not bring the prod overlay
+# up while the local `python -m newsbot` or the dev overlay is running
+# against the same token, and vice versa.
 
 services:
   newsbot:
-    image: ghcr.io/${GHCR_OWNER:-owner}/discord-newsbot:${TAG:-latest}
     restart: unless-stopped
-    env_file: .env
     environment:
       NEWSBOT_CONFIG: /app/config.yaml
-      NEWSBOT_DB: /data/newsbot.db
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./data:/data
     read_only: true
     tmpfs:
       - /tmp
