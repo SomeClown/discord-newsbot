@@ -167,11 +167,35 @@ class NewsBot(discord.Client):
         self.secrets = secrets
         self.db_path = db_path
         self.tree = app_commands.CommandTree(self)
+        self.tree.on_error = self._on_command_error
 
         self.http_client: httpx.AsyncClient | None = None
         self.llm: LLMClient | None = None
         self.scheduler: AsyncIOScheduler | None = None
         self._ready_once = False
+
+    async def _on_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Log a failed command and tell the person who ran it.
+
+        Without this, a handler that raises after `defer()` leaves Discord
+        showing "thinking..." until the heat death of the interaction token,
+        which is how the first live `/newsbot status` announced its bug.
+        """
+        logger.error(
+            "command failed",
+            extra={"command": getattr(interaction.command, "qualified_name", None)},
+            exc_info=error,
+        )
+        message = "Something went wrong running that command. The details are in the bot's log."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.HTTPException:
+            logger.warning("couldn't report a command failure back to the user")
 
     async def setup_hook(self) -> None:
         # Imported here, not at module scope: commands.py imports NewsBot

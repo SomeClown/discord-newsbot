@@ -244,5 +244,31 @@ def test_render_status_flags_source_with_3_consecutive_failures():
         month_output_tokens=500,
     )
     embed = render_status(snap, spend_usd=1.23)
-    field = next(f for f in embed.fields if f.name == "Reddit")
-    assert "⚠️" in field.value
+    assert "⚠️" in embed.description
+    assert "Reddit" in embed.description
+
+
+def test_render_status_stays_under_discords_25_field_limit_with_many_sources():
+    # The live test guild found this one: 24 sources used to mean 28 fields.
+    health = [
+        SourceHealthRow(
+            source_name=f"Source {i}",
+            last_success_at=None,
+            last_error_at=None,
+            last_error="timed out after 20.0s" if i % 5 == 0 else None,
+            consecutive_failures=1 if i % 5 == 0 else 0,
+        )
+        for i in range(60)
+    ]
+    snap = StatusSnapshot(
+        last_digest=None,
+        source_health=health,
+        items_last_24h=0,
+        stories_last_24h=0,
+        month_input_tokens=0,
+        month_output_tokens=0,
+    )
+    embed = render_status(snap, spend_usd=0.0)
+    assert len(embed.fields) <= 25
+    assert len(embed.description) <= 4096
+    assert len(embed) <= 6000

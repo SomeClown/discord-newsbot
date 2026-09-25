@@ -286,12 +286,25 @@ def render_status(snap: StatusSnapshot, spend_usd: float) -> discord.Embed:
     embed.add_field(name="Stories (24h)", value=str(snap.stories_last_24h))
     embed.add_field(name="Est. spend this month", value=f"${spend_usd:.2f}")
 
-    for source in snap.source_health:
-        flag = " ⚠️" if source.consecutive_failures >= 3 else ""
-        value = f"failures: {source.consecutive_failures}{flag}"
-        if source.last_error:
-            value += f"\n{esc(source.last_error)}"
-        embed.add_field(name=esc(source.source_name)[:_TITLE_LIMIT], value=value[:_MAX_FIELD_VALUE])
+    # One line per source in the description, not one field per source.
+    # Discord caps an embed at 25 fields, and the first real config had 24
+    # sources plus four summary fields; you can guess how that went.
+    healthy = sum(1 for s in snap.source_health if s.consecutive_failures == 0)
+    embed.add_field(name="Sources healthy", value=f"{healthy} of {len(snap.source_health)}")
+
+    problems = sorted(
+        (s for s in snap.source_health if s.consecutive_failures > 0),
+        key=lambda s: (-s.consecutive_failures, s.source_name.casefold()),
+    )
+    if problems:
+        lines = ["**Sources with recent failures**"]
+        for source in problems:
+            flag = "⚠️ " if source.consecutive_failures >= 3 else ""
+            error = f": {source.last_error.splitlines()[0][:120]}" if source.last_error else ""
+            lines.append(esc(f"{flag}{source.source_name} ({source.consecutive_failures}){error}"))
+        embed.description = _truncate_description("\n".join(lines))
+    else:
+        embed.description = "Every source answered on its last run."
 
     return embed
 
