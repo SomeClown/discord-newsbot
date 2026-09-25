@@ -196,6 +196,11 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
      Threads, Embed Links, Create Public Threads**, and optionally **Read
      Message History** (only needed if you want the bot to see prior
      messages in a thread it's posting to; not required for its own posts).
+   - **If you're enabling SHiFT code alerts (§15, "Enabling SHiFT code
+     alerts," near the end of this document), also check "Mention
+     @everyone, @here, and All Roles"** -- without it, the bot still
+     posts a new code, it just can't actually notify anyone; §15 also
+     covers granting this to a bot that's already invited.
 4. Invite it to the community guild. The owner does this step in person
    per plan Checkpoint H -- `devops` doesn't hold the prod token.
 
@@ -405,6 +410,17 @@ If a rollback is needed because of bad data (not just bad code), see §10,
 Restore from backup, below -- rolling back the image doesn't undo anything
 already written to the database.
 
+**Rolling back past v1.2.0 (SHiFT code alerts) is safe.** Migration 002
+(`alerted_codes`, `alert_state`) is purely additive -- it only adds
+tables, never touches `items`/`stories`/`digests`/`source_health` -- and
+the migration runner never rolls a schema *back* down on its own. A v1.1.1
+image (pre-alerts) still starts up fine against a database already
+migrated to `user_version` 2: it just never reads or writes the two new
+tables, since nothing in that version's code references them. Rolling
+back doesn't need `config.yaml`'s `alerts:` block removed either; an
+older binary simply ignores config it doesn't know about, the same as any
+other config field a newer version added.
+
 ## 9. Backups
 
 `scripts/backup.sh` takes an online-safe snapshot with `sqlite3 .backup`
@@ -511,6 +527,18 @@ sensible follow-up but explicitly out of scope for v1 -- see
 A restore rolls the database back to the backup's point in time (up to 24h
 of digest history and dedupe state lost, worst case). It does not touch
 `config.yaml`, `.env`, or the image -- only `data/newsbot.db`.
+
+**If SHiFT code alerts are enabled, a restore can cause a code to
+re-alert.** `alerted_codes` rolls back with everything else -- a code
+first recorded *after* the backup was taken (posted or otherwise) is
+gone from the restored database, and the next sweep that finds it again
+treats it as new. This is bounded, not open-ended: `max_item_age_hours`
+(default 48) still has to consider the item fresh, and
+`max_pings_per_day` still caps how many of those re-alerts can actually
+carry a ping in one day. Worth a heads-up in the channel after a restore
+if alerts are on, same as the "recent digest history jumps backward"
+note above -- it's the same underlying rollback, just visible in a
+different table.
 
 ## 10. Recovering a stuck or failed digest
 
@@ -619,3 +647,45 @@ whether `config.yaml` or `.env` ended up as an empty directory instead of
 a file (see §2, "A file, not a directory") -- this is the single most
 likely cause of an otherwise-inexplicable startup crash on a brand new
 `/opt/newsbot` setup.
+
+## 15. Enabling SHiFT code alerts
+
+New in v1.2.0 (`design.md` §12). Off by default -- nothing below changes
+existing behavior until you do it.
+
+1. **Grant the mention permission.** The bot's role needs **Mention
+   @everyone, @here, and All Roles** in the digest channel, or a ping
+   posts silently un-pinged (the bot notices and sends an admin alert,
+   but nobody gets notified that first time). Two ways to grant it to a
+   bot that's already invited, without re-inviting:
+   - **Server-wide (simplest):** Server Settings → Roles → the bot's own
+     role → toggle on "Mention @everyone, @here, and All Roles".
+   - **Digest-channel-only override (narrower):** the digest channel's
+     own Settings → Permissions → add the bot's role → toggle on the
+     same permission just for that channel, leaving the role's
+     server-wide permissions untouched. Prefer this if the bot's role
+     is also used anywhere you specifically don't want it able to ping.
+2. **Turn it on in `config.yaml`:**
+   ```yaml
+   alerts:
+     enabled: true
+     topics: [borderlands4]   # scope to the game(s) that actually use SHiFT codes
+   ```
+   Everything else (`interval_minutes`, `max_item_age_hours`,
+   `max_pings_per_day`) is fine at its default; see
+   `config.example.yaml`'s commented block for what each one does. Leave
+   `allow_test_command` out (or `false`) in prod -- it registers
+   `/newsbot test-alert`, which is meant for the private test guild only.
+3. **Redeploy** the normal way (`./scripts/deploy.sh` or the by-hand
+   steps in §7) -- migration 002 (`alerted_codes`, `alert_state`) applies
+   itself at startup the same way every other migration does; nothing
+   extra to run by hand.
+4. **Confirm it's live:** `/newsbot status` should show a "SHiFT alerts"
+   field instead of "disabled". The first real sweep seeds silently
+   (shows `(seeding)`, posts nothing) -- that's expected, not a bug; see
+   `design.md` §12's silent-seeding safeguard.
+
+Rolling this back out is just `alerts.enabled: false` (or removing the
+`alerts:` block entirely) and redeploying -- migration 002 stays applied
+(it's additive and harmless either way; see §8, Rollback, above), the
+sweep simply stops running.
