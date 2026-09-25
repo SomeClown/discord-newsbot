@@ -212,7 +212,11 @@ async def build_digest(
         if not topic_items:
             continue
         summaries[topic.key] = await summarize_topic(
-            deps.llm, topic, topic_items, prior_by_topic.get(topic.key, [])
+            deps.llm,
+            topic,
+            topic_items,
+            prior_by_topic.get(topic.key, []),
+            all_topics=cfg.topics,
         )
 
     stored_items = _build_stored_items(grouped)

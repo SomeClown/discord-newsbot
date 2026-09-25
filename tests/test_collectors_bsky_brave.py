@@ -405,3 +405,32 @@ async def test_web_search_collector_skips_results_missing_url_or_title():
 
     assert len(items) == 1
     assert items[0].url == "https://example.com/a"
+
+
+async def test_web_search_collector_tolerates_a_null_description():
+    # QA step 20, group 6c: Brave returning `"description": null` (present
+    # key, null value -- not a missing key) used to crash the whole
+    # collector inside text.clean_text(None), losing every item that
+    # request would have returned, not just the one with the null field.
+    body = json.dumps(
+        {
+            "results": [
+                {"url": "https://example.com/a", "title": "Null description", "description": None},
+                {"url": "https://example.com/b", "title": "Has one", "description": "d"},
+            ]
+        }
+    ).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep).collect(
+            http
+        )
+
+    assert len(items) == 2
+    assert items[0].excerpt == ""

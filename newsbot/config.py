@@ -159,9 +159,13 @@ def load_config(path: str | Path) -> AppConfig:
     errors: list[str] = []
 
     # admin_permission must name a real discord.Permissions flag, checked
-    # against the class itself (importing discord for this is free; we
-    # already depend on it for everything else).
-    if not hasattr(discord.Permissions, cfg.admin_permission):
+    # against VALID_FLAGS (the actual name -> bit mapping), not hasattr()
+    # against the class -- discord.Permissions also has real attributes
+    # like `value` (a property) and `all`/`none` (classmethods) that
+    # hasattr() would happily call a "flag" too, which is how "value"
+    # used to sail through config validation as an admin_permission that
+    # then had no bit to check anyone's permissions against.
+    if cfg.admin_permission not in discord.Permissions.VALID_FLAGS:
         errors.append(
             f"admin_permission {cfg.admin_permission!r} is not a discord.Permissions flag"
         )

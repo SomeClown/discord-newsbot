@@ -141,6 +141,26 @@ digest:
         _load_with(tmp_path, text)
 
 
+def test_admin_permission_value_is_rejected(tmp_path):
+    # "value", "all", "none", etc. are real attributes on
+    # discord.Permissions (a property and two classmethods), but none of
+    # them name an actual permission flag -- hasattr() alone can't tell
+    # the difference, which used to let "value" (and friends) sail
+    # through as a configured admin_permission that then has no bit to
+    # check against a real user's permissions.
+    text = f"""
+guild_id: 1
+admin_permission: value
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
 def test_duplicate_topic_keys_rejected(tmp_path):
     text = """
 guild_id: 1

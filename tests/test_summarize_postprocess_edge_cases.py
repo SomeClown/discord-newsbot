@@ -20,6 +20,9 @@ from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.summarize import StoriesOut, StoryOut, postprocess
 from newsbot.store.models import PriorStory
 
+_HEADLINE_MAX = 200
+_SUMMARY_MAX = 400
+
 DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
 
 
@@ -223,3 +226,51 @@ def test_duplicate_stories_with_identical_headline_and_urls_both_survive():
     story_b = _story(headline="Same headline", item_urls=["https://real.example.com/a"])
     drafts = postprocess(StoriesOut(stories=[story_a, story_b]), items, [])
     assert len(drafts) == 2
+
+
+# --- length truncation (QA step 20, group 6b) ---
+#
+# StoryOut used to enforce headline/summary length with pydantic's
+# max_length -- but the SDK's structured-output mode strips schema-level
+# length constraints before sending the schema to the model, so a model
+# response that actually ran long would fail pydantic validation with no
+# way to ever succeed (a whole StoriesOut response rejected over one
+# over-length field). Length limits are now enforced by truncating in
+# postprocess() instead, after any max_length Field constraint was
+# removed from StoryOut itself.
+
+
+def test_overlong_headline_no_longer_raises_a_validation_error():
+    # This is the actual bug: constructing a StoryOut with a headline
+    # this long used to raise pydantic.ValidationError.
+    StoryOut(
+        headline="H" * 500,
+        summary="short",
+        label="reported",
+        item_urls=["https://real.example.com/a"],
+        relevant=True,
+    )
+
+
+def test_postprocess_truncates_an_overlong_headline():
+    items = [_topic_item(url="https://real.example.com/a")]
+    story = _story(headline="H" * 500)
+    drafts = postprocess(StoriesOut(stories=[story]), items, [])
+    assert len(drafts[0].headline) <= _HEADLINE_MAX
+    assert drafts[0].headline.endswith("…")
+
+
+def test_postprocess_truncates_an_overlong_summary():
+    items = [_topic_item(url="https://real.example.com/a")]
+    story = _story(summary="S" * 1000)
+    drafts = postprocess(StoriesOut(stories=[story]), items, [])
+    assert len(drafts[0].summary) <= _SUMMARY_MAX
+    assert drafts[0].summary.endswith("…")
+
+
+def test_postprocess_leaves_a_short_headline_and_summary_untouched():
+    items = [_topic_item(url="https://real.example.com/a")]
+    story = _story(headline="Short headline", summary="Short summary.")
+    drafts = postprocess(StoriesOut(stories=[story]), items, [])
+    assert drafts[0].headline == "Short headline"
+    assert drafts[0].summary == "Short summary."

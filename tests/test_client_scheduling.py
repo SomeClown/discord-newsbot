@@ -10,12 +10,12 @@ directly) that don't need a running bot to exercise.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 
-from newsbot.bot.client import should_catch_up
+from newsbot.bot.client import _should_alert_two_instances, should_catch_up
 from newsbot.healthcheck import is_healthy
 from newsbot.pipeline.run import local_run_date
 from newsbot.store.models import DigestRow
@@ -146,6 +146,33 @@ def test_should_catch_up_ambiguous_fall_back_time_agrees_on_both_occurrences():
     second_occurrence = datetime(2026, 11, 1, 1, 30, tzinfo=_TZ, fold=1)
     assert should_catch_up(first_occurrence, digest_time, None) is False
     assert should_catch_up(second_occurrence, digest_time, None) is False
+
+
+# --- _should_alert_two_instances (QA step 20, group 6i) ---
+
+
+def test_should_alert_two_instances_first_time_no_prior_alert():
+    assert _should_alert_two_instances(None, datetime(2026, 9, 23, tzinfo=UTC), timedelta(hours=1))
+
+
+def test_should_alert_two_instances_true_after_cooldown_elapses():
+    last = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
+    now = datetime(2026, 9, 23, 10, 1, tzinfo=UTC)
+    assert _should_alert_two_instances(last, now, timedelta(hours=1)) is True
+
+
+def test_should_alert_two_instances_false_within_cooldown():
+    last = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
+    now = datetime(2026, 9, 23, 9, 30, tzinfo=UTC)
+    assert _should_alert_two_instances(last, now, timedelta(hours=1)) is False
+
+
+def test_should_alert_two_instances_false_exactly_at_cooldown_boundary():
+    # Strict >=, matching should_catch_up's own strict-boundary convention
+    # elsewhere in this module.
+    last = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
+    now = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    assert _should_alert_two_instances(last, now, timedelta(hours=1)) is True
 
 
 # --- CronTrigger DST behavior ---

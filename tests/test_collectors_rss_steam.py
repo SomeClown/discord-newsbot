@@ -4,6 +4,7 @@ httpx.MockTransport stands in for the network. Nothing here calls a real
 socket -- if it does, that's a bug, not a slow test.
 """
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import httpx
 import pytest
 
 from newsbot.collectors.base import RawItem, build_collectors, run_collectors
-from newsbot.collectors.rss import RssCollector
+from newsbot.collectors.rss import _RETRY_BACKOFFS_S, RssCollector, _fetch_body
 from newsbot.collectors.steam import SteamCollector
 from newsbot.config import (
     AppConfig,
@@ -202,7 +203,13 @@ async def test_rss_collector_retries_on_429_then_succeeds():
         items = await RssCollector(source, sleep=recording_sleep).collect(http)
 
     assert len(calls) == 3
-    assert sleeps == [5.0, 15.0]
+    # QA step 20, group 6f: the old backoffs (5.0, 15.0 -- 20s just in
+    # sleeps, before any request latency) didn't fit inside
+    # pipeline/run.py's 20s _COLLECT_TIMEOUT_S, so the third (successful)
+    # attempt could never actually land within the budget. Shrunk so the
+    # full retry sequence has real room left for request round trips too.
+    assert sleeps == [_RETRY_BACKOFFS_S[0], _RETRY_BACKOFFS_S[1]]
+    assert sum(_RETRY_BACKOFFS_S) < 15.0  # leaves headroom under the 20s collector timeout
     assert len(items) == 2
 
 
@@ -221,6 +228,66 @@ async def test_rss_collector_gives_up_after_retries_and_raises():
     async with httpx.AsyncClient(transport=transport) as http:
         with pytest.raises(httpx.HTTPStatusError):
             await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+# --- byte cap (QA step 20, group 6f) ---
+
+
+async def test_fetch_body_caps_response_at_5mb():
+    # A feed (broken, malicious, or just enormous) that tries to hand back
+    # more than 5MB shouldn't get to make this collector buffer the whole
+    # thing into memory -- _fetch_body is the one place that reads the
+    # response body, so the cap is tested directly against it rather than
+    # through collect()'s parse step (whether an oversized-then-truncated
+    # body happens to still parse is feedparser's business, not this
+    # cap's).
+    oversized = b"a" * (6 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=oversized)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        body = await _fetch_body(http, "https://example.com/huge.xml", sleep=_noop_sleep)
+    assert len(body) == 5 * 1024 * 1024
+
+
+# --- redirect-to-private-host rejection (QA step 20, group 6g) ---
+
+
+async def test_rss_collector_rejects_redirect_to_link_local_metadata_host():
+    # 169.254.169.254 is the cloud-provider instance-metadata address --
+    # the canonical SSRF target. A feed URL that redirects there should
+    # never get followed to completion.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(
+                302, headers={"Location": "http://169.254.169.254/latest/meta-data/"}
+            )
+        return httpx.Response(200, content=b"secret metadata, never seen")
+
+    source = RssSource(
+        type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ValueError, match="non-public"):
+            await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+async def test_rss_collector_allows_a_redirect_to_a_normal_public_host():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": "https://cdn.example.net/feed.xml"})
+        return httpx.Response(200, content=(FIXTURES / "rss20_empty.xml").read_bytes())
+
+    source = RssSource(
+        type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert items == []
 
 
 # --- Bozo feed with no entries is an error ---
@@ -394,6 +461,70 @@ async def test_steam_collector_parses_fixture():
     assert items[0].published_at == datetime.fromtimestamp(1758000000, tz=UTC)
     assert items[0].trust == "official"
     assert items[0].topics == ("palworld",)
+
+
+async def test_steam_collector_skips_malformed_items_but_keeps_the_good_ones():
+    # QA step 20, group 6c: one bad item (missing url, missing title, a
+    # null contents field, a missing date) shouldn't take the other,
+    # perfectly good items in the same response down with it.
+    body = json.dumps(
+        {
+            "appnews": {
+                "newsitems": [
+                    {
+                        "title": "Missing URL",
+                        "contents": "no url here",
+                        "date": 1758000000,
+                    },
+                    {
+                        "url": "https://store.steampowered.com/news/app/1/view/2",
+                        "contents": "no title here",
+                        "date": 1758000000,
+                    },
+                    {
+                        "url": "https://store.steampowered.com/news/app/1/view/3",
+                        "title": "Missing date",
+                        "contents": "no date here",
+                    },
+                    {
+                        "url": "https://store.steampowered.com/news/app/1/view/4",
+                        "title": "Null contents",
+                        "contents": None,
+                        "date": 1758000000,
+                    },
+                    {
+                        "url": "https://store.steampowered.com/news/app/1/view/5",
+                        "title": "The good one",
+                        "contents": "perfectly fine",
+                        "date": 1758000000,
+                    },
+                ]
+            }
+        }
+    ).encode()
+    source = SteamSource(
+        type="steam_news",
+        name="Palworld Steam",
+        app_id=1623730,
+        topics=["palworld"],
+        trust="official",
+    )
+    transport = _transport(
+        {
+            "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/": httpx.Response(
+                200, content=body
+            )
+        }
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        items = await SteamCollector(source).collect(http)
+
+    titles = {item.title for item in items}
+    assert "Null contents" in titles  # null contents shouldn't drop the item
+    assert "The good one" in titles
+    assert "Missing URL" not in titles
+    assert "Missing date" not in titles
+    assert len(items) == 2  # only the two items with url/title/date all present
 
 
 async def test_steam_collector_500_becomes_error_via_run_collectors():

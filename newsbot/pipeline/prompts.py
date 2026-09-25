@@ -57,6 +57,23 @@ _PRIOR_HEADER = (
 )
 
 
+def _format_games_list(topics: list[Topic]) -> str:
+    """ "A, B and C" from a list of topics, matching the old hardcoded string's shape.
+
+    No Oxford comma, "and" before the last name, plain "A and B" for
+    exactly two, and just the one name for a single topic -- picked to
+    reproduce the original hardcoded "Borderlands 4, Palworld and Diablo
+    IV" byte-for-byte when given those three topics in that order.
+    """
+    names = [t.name for t in topics]
+    if not names:
+        # Shouldn't happen (config requires >= 1 topic); not worth crashing over.
+        return "these games"
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def _item_payload(n: int, topic_item: TopicItem) -> dict:
     item = topic_item.item
     return {
@@ -70,15 +87,27 @@ def _item_payload(n: int, topic_item: TopicItem) -> dict:
     }
 
 
-def build_prompt(topic: Topic, items: list[TopicItem], prior: list[PriorStory]) -> tuple[str, str]:
+def build_prompt(
+    topic: Topic,
+    items: list[TopicItem],
+    prior: list[PriorStory],
+    *,
+    all_topics: list[Topic] | None = None,
+) -> tuple[str, str]:
     """Build the (system, user) prompt pair for one topic's summarize call.
 
     The user message names the topic once and then hands over items as a
     JSON array wrapped in `<items>` delimiters, so the untrusted-data
     warning above it is unambiguous about where the scraped text starts
     and ends.
+
+    `all_topics` names every game SYSTEM_PROMPT should say the bot tracks
+    -- normally `cfg.topics`, so the prompt stays in sync with whatever's
+    actually configured instead of a string someone has to remember to
+    update by hand. Defaults to just `[topic]` for callers (mostly tests)
+    that don't have the full list handy and don't care.
     """
-    system = SYSTEM_PROMPT.format(games="Borderlands 4, Palworld and Diablo IV")
+    system = SYSTEM_PROMPT.format(games=_format_games_list(all_topics or [topic]))
 
     lines = [f"Topic: {topic.name} (key: {topic.key})", ""]
     if prior:

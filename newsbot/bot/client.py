@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
+import uuid
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -47,6 +49,39 @@ from newsbot.store.models import DigestRow
 from newsbot.store.repo import get_digest, purge_older_than
 
 logger = logging.getLogger(__name__)
+
+# One id per process, generated at import time -- not persisted, not
+# configured, just enough to tell two log lines (or two admin alerts)
+# apart when they might be coming from two different processes holding
+# the same bot token (see CLAUDE.md's "never run two bot processes with
+# the same token" rule, and _maybe_alert_two_instances below, which is
+# what actually catches that happening).
+_INSTANCE_ID = uuid.uuid4().hex[:8]
+_HOSTNAME = socket.gethostname()
+
+# Discord's JSON error codes (distinct from the HTTP status) for the two
+# ways a second process racing this one on the same token shows up: it
+# responds to an interaction gateway-delivered to this process too, loses
+# the race, and its own attempt to respond either finds the interaction
+# already gone (10062, "Unknown interaction") or already answered (40060,
+# "Interaction has already been acknowledged").
+_TWO_INSTANCE_ERROR_CODES = frozenset({10062, 40060})
+_TWO_INSTANCE_ALERT_COOLDOWN = timedelta(hours=1)
+
+
+def _should_alert_two_instances(
+    last_alert: datetime | None, now: datetime, cooldown: timedelta = _TWO_INSTANCE_ALERT_COOLDOWN
+) -> bool:
+    """True if `cooldown` has passed since the last two-instance alert (or there wasn't one).
+
+    A second process on the same token doesn't cause one 10062/40060 --
+    it causes a steady stream of them, one per interaction it loses the
+    race on. Alerting on every single one would just be a different,
+    noisier way of drowning out the channel; this caps it at once an hour
+    while the problem is still ongoing.
+    """
+    return last_alert is None or now - last_alert >= cooldown
+
 
 # The container healthcheck (see healthcheck.py) polls this file's mtime,
 # not the process directly -- there's no port to poll, since the gateway
@@ -255,6 +290,7 @@ class NewsBot(discord.Client):
         self.llm: LLMClient | None = None
         self.scheduler: AsyncIOScheduler | None = None
         self._ready_once = False
+        self._last_two_instance_alert: datetime | None = None
 
     async def _on_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -270,6 +306,12 @@ class NewsBot(discord.Client):
             extra={"command": getattr(interaction.command, "qualified_name", None)},
             exc_info=error,
         )
+        original = getattr(error, "original", error)
+        if (
+            isinstance(original, discord.HTTPException)
+            and original.code in _TWO_INSTANCE_ERROR_CODES
+        ):
+            await self._maybe_alert_two_instances(original.code)
         message = "Something went wrong running that command. The details are in the bot's log."
         try:
             if interaction.response.is_done():
@@ -279,12 +321,40 @@ class NewsBot(discord.Client):
         except discord.HTTPException:
             logger.warning("couldn't report a command failure back to the user")
 
+    async def _maybe_alert_two_instances(self, error_code: int) -> None:
+        """Alert the admin channel that another process may be using this bot's token.
+
+        Rate-limited to once an hour (`_should_alert_two_instances`) so a
+        genuine collision -- which shows up as a steady stream of 10062s
+        and 40060s, one per lost race, not a single one -- doesn't turn
+        into an alert storm on top of the collision itself.
+        """
+        now = datetime.now(UTC)
+        if not _should_alert_two_instances(self._last_two_instance_alert, now):
+            return
+        self._last_two_instance_alert = now
+        logger.error(
+            "possible two-instance collision on this bot token",
+            extra={
+                "discord_error_code": error_code,
+                "instance_id": _INSTANCE_ID,
+                "hostname": _HOSTNAME,
+            },
+        )
+        await self.alert(
+            f"newsbot: got Discord error code {error_code} responding to an interaction, "
+            "which usually means another process is using this bot's token. "
+            f"This instance: {_HOSTNAME} ({_INSTANCE_ID})."
+        )
+
     async def setup_hook(self) -> None:
         # Imported here, not at module scope: commands.py imports NewsBot
         # (for type hints on the factories' `bot` argument), and importing
         # it back at module scope would make a circular import out of what
         # is otherwise a plain layering.
         from newsbot.bot.commands import make_admin_group, make_news_group
+
+        logger.info("newsbot starting", extra={"instance_id": _INSTANCE_ID, "hostname": _HOSTNAME})
 
         self.http_client = httpx.AsyncClient(headers={"User-Agent": _USER_AGENT})
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())

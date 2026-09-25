@@ -88,6 +88,12 @@ class WebSearchCollector:
         data = response.json()
         results = []
         for result in data.get("results", []):
+            if not isinstance(result, dict):
+                # Brave's shape is trusted about as far as any third-party
+                # API's is: a malformed entry (not even an object) skips,
+                # rather than taking the rest of this query's results with
+                # it.
+                continue
             url = result.get("url")
             title = result.get("title")
             if not (url and title):
@@ -96,7 +102,11 @@ class WebSearchCollector:
                 RawItem(
                     url=url,
                     title=title,
-                    excerpt=text.clean_text(result.get("description", "")),
+                    # `.get(..., "")` only covers a *missing* key; Brave
+                    # has sent an explicit `"description": null` in the
+                    # wild, which sails right past that default and into
+                    # `clean_text(None)`, which doesn't have a good day.
+                    excerpt=text.clean_text(result.get("description") or ""),
                     source_name=self._source.name,
                     trust=self._source.trust,
                     published_at=_parse_page_age(result.get("page_age")),

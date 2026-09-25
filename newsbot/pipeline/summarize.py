@@ -49,8 +49,16 @@ _FALLBACK_NOTE = "Summary unavailable; showing headlines."
 
 
 class StoryOut(BaseModel):
-    headline: str = Field(min_length=1, max_length=200)
-    summary: str = Field(min_length=1, max_length=400)
+    # No `max_length` here on purpose: the Anthropic SDK's structured-
+    # output mode strips length constraints out of the schema it actually
+    # sends the model (only `min_length` and the rest of the shape
+    # survive), so a model response that ran long would fail pydantic
+    # validation here with absolutely no way to ever pass -- the model
+    # was never told the limit it just got rejected for. Length is
+    # enforced downstream instead, by truncating in postprocess()'s
+    # `_truncate` calls.
+    headline: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
     label: Literal["official", "reported", "rumor"]
     item_urls: list[str]
     relevant: bool
@@ -182,6 +190,19 @@ _URL_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S+|\bwww\.\S+", re.IGNORECA
 _LINK_REMOVED = "[link removed]"
 
 
+_HEADLINE_MAX = 200
+_SUMMARY_MAX = 400
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Hard-truncate `text` to `limit` characters, replacing StoryOut's old
+    `max_length=...` Field constraints now that those live here instead.
+    """
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _strip_urls(text: str) -> str:
     """Replace any URL-shaped token in `text` with `_LINK_REMOVED`.
 
@@ -264,8 +285,8 @@ def postprocess(
 
         drafts.append(
             StoryDraft(
-                headline=_strip_urls(story.headline),
-                summary=_strip_urls(story.summary),
+                headline=_truncate(_strip_urls(story.headline), _HEADLINE_MAX),
+                summary=_truncate(_strip_urls(story.summary), _SUMMARY_MAX),
                 label=label,
                 item_urls=urls,
                 update_of_story_id=_match_update_of(story.update_of_headline, prior),
@@ -281,6 +302,7 @@ async def summarize_topic(
     prior: list[PriorStory],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    all_topics: list[Topic] | None = None,
 ) -> TopicSummary:
     """Summarize one topic's items, with retry and a fallback on repeated failure.
 
@@ -290,8 +312,12 @@ async def summarize_topic(
     rest of the budget on a request that's going to fail the same way
     again. Token usage accumulates across every attempt, successful or
     not -- a response we can't use still cost money.
+
+    `all_topics` just passes through to `build_prompt` (see its
+    docstring); `build_digest` is the one real caller and always has
+    `cfg.topics` on hand to pass.
     """
-    system, user = build_prompt(topic, items, prior)
+    system, user = build_prompt(topic, items, prior, all_topics=all_topics)
     input_tokens = output_tokens = 0
 
     for attempt in range(len(_BACKOFF_S)):

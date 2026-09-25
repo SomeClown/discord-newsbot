@@ -354,6 +354,13 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
     async def preview(interaction: discord.Interaction) -> None:
         if not await _check_admin(interaction, cfg.admin_permission):
             return
+        if is_run_in_progress():
+            # Same reasoning as run-now: run_daily would just block on
+            # _run_lock until whatever's running finishes, which reads to
+            # the admin as a hung command for however long that takes.
+            # A quick "try again in a bit" beats a silent multi-minute wait.
+            await interaction.response.send_message("A run is in progress.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         deps = bot.build_deps()
         outcome = await run_daily(deps, NullPublisher(), mode=RunMode.PREVIEW)
