@@ -65,9 +65,18 @@ def test_claim_digest_blocked_by_partial(conn):
     assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
 
 
-def test_claim_digest_pending_blocks_even_with_force(conn):
+def test_claim_digest_pending_is_reclaimed_with_force(conn):
+    # Behavior change (QA step 20, group 4): force now overrides pending
+    # too, not just ok/partial -- see test_repo_guard_edge_cases.py for
+    # the reasoning (the in-process _run_lock already rules out a live
+    # concurrent run, so a pending row here is always a crash artifact).
+    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
+    assert repo.claim_digest(conn, date(2026, 9, 23), force=True) == digest_id
+
+
+def test_claim_digest_pending_still_blocks_without_force(conn):
     repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=True) is None
+    assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
 
 
 def test_claim_digest_failed_allows_reclaim_without_force(conn):

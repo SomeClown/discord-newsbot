@@ -334,6 +334,52 @@ async def _run_post(
         )
 
     try:
+        return await _run_claimed(deps, publisher, digest_id, run_date, sleep=sleep)
+    except BaseException as exc:
+        # build_digest failing and publish failing after retries both
+        # already have their own handling below, and return a normal
+        # PipelineOutcome instead of raising. If something gets past both
+        # of those, it's a shape of failure this module didn't
+        # anticipate -- a bug, a publisher raising something other than
+        # PublishError, the run getting cancelled -- and the one thing
+        # that must not happen is `digest_id` staying `pending` forever,
+        # since that blocks every run (and, pre-group-4, every admin)
+        # after it. Record it failed with whatever got posted (a
+        # PublishError-shaped exception carries that; anything else
+        # didn't get far enough to post anything) and keep propagating:
+        # this function isn't the place to decide whether the caller can
+        # recover from it.
+        posted_ids = list(getattr(exc, "posted_ids", None) or [])
+        logger.exception("unhandled error after claiming %s; marking it failed", run_date)
+        await asyncio.to_thread(
+            _mark_failed_sync,
+            deps.db_path,
+            digest_id,
+            f"unhandled error: {exc!r}",
+            posted_ids,
+            deps.now,
+        )
+        raise
+
+
+async def _run_claimed(
+    deps: Deps,
+    publisher: Publisher,
+    digest_id: int,
+    run_date: date,
+    *,
+    sleep: Callable[[float], Awaitable[None]],
+) -> PipelineOutcome:
+    """The part of `_run_post` that runs once the day is claimed.
+
+    Split out from `_run_post` so that function's outer `except
+    BaseException` reads as what it is: a last-resort net around
+    everything below, not the normal control flow. Every failure this
+    function already knows how to handle (a bad collect/summarize, a
+    publish that never recovers) returns a `PipelineOutcome` instead of
+    raising; anything that raises past here is `_run_post`'s problem.
+    """
+    try:
         rendered, items, stories, status, notes, usage, results = await build_digest(deps, run_date)
     except Exception as exc:
         logger.exception("build_digest failed")

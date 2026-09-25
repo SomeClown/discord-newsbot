@@ -119,12 +119,21 @@ def claim_digest(
 
     Returns the digest id (status set to `pending`) if the claim succeeds,
     or `None` if it's blocked:
-      - a `pending` row already exists (something else is running, or
-        crashed mid-run; either way, we don't want to overlap it)
+      - a `pending` row already exists and `force` wasn't passed
+        (something else is running, or crashed mid-run; either way, we
+        don't want to overlap it without being asked to)
       - an `ok`/`partial` row exists and `force` wasn't passed
     A `failed` row always allows a reclaim (that day never actually posted).
-    `force=True` against `ok`/`partial` updates the existing row in place,
-    keeping its id, rather than inserting a second row for the same date.
+    `force=True` against `pending`/`ok`/`partial` updates the existing row
+    in place, keeping its id, rather than inserting a second row for the
+    same date.
+
+    `force` overriding `pending` (added for QA step 20, group 4) relies on
+    `pipeline/run.py`'s in-process `_run_lock`, held for the whole guard
+    dance, to already rule out two runs racing to claim the same date --
+    the only way this layer ever sees a `pending` row at all is a crash
+    that happened before `save_run`/`mark_digest_failed` got to run, which
+    means it's always safe to force past.
     """
     now_iso = _resolve_now(now)
     with conn:
@@ -140,9 +149,7 @@ def claim_digest(
             return cur.lastrowid
 
         digest_id, status = row["id"], row["status"]
-        if status == "pending":
-            return None
-        if status in ("ok", "partial") and not force:
+        if status in ("pending", "ok", "partial") and not force:
             return None
         conn.execute(
             "UPDATE digests SET status = 'pending', updated_at = ? WHERE id = ?",

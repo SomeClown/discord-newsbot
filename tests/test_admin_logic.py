@@ -111,10 +111,13 @@ def test_needs_confirmation_failed_row_is_false():
     assert needs_confirmation(_digest_row("failed")) is False
 
 
-def test_needs_confirmation_pending_row_is_false():
-    # run-now's caller handles a pending row before ever asking this
-    # question (see should_catch_up's docstring for why it's ambiguous).
-    assert needs_confirmation(_digest_row("pending")) is False
+def test_needs_confirmation_pending_row_is_true():
+    # Behavior change (QA step 20, group 4): a pending row used to be
+    # handled entirely by run-now's caller before this function was ever
+    # consulted; it's now folded in here, since claim_digest(force=True)
+    # can reclaim a pending row too, and an admin should be asked before
+    # that happens, same as for ok/partial.
+    assert needs_confirmation(_digest_row("pending")) is True
 
 
 def test_needs_confirmation_failed_row_with_posted_ids_is_true():

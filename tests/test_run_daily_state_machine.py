@@ -11,6 +11,7 @@ on `partial` rather than `failed`.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,9 +118,12 @@ async def test_stale_pending_row_blocks_a_plain_run(db_path, http_client):
     assert (items, stories, digests) == (0, 0, 1)  # only the pre-existing pending row
 
 
-async def test_stale_pending_row_blocks_even_with_force(db_path, http_client):
-    # Mirrors repo.claim_digest's own contract (test_repo_guard_edge_cases.py):
-    # force overrides ok/partial, never pending. Pinned again here at the
+async def test_stale_pending_row_is_reclaimed_with_force(db_path, http_client):
+    # Mirrors repo.claim_digest's own contract (test_repo_guard_edge_cases.py),
+    # changed deliberately in QA step 20 group 4: force now overrides
+    # pending too, not just ok/partial, since the only way run_daily ever
+    # sees a stale pending row is a prior crash (the in-process _run_lock
+    # already rules out a concurrent live run). Pinned again here at the
     # run_daily level, since that's the boundary an operator running
     # `--force` by hand actually sees.
     with closing(connect(db_path)) as conn:
@@ -130,9 +134,10 @@ async def test_stale_pending_row_blocks_even_with_force(db_path, http_client):
         deps, PrintPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep
     )
 
-    assert outcome.status == "skipped"
+    assert outcome.status == "ok"
     items, stories, _story_items, digests = _row_counts(db_path)
-    assert (items, stories, digests) == (0, 0, 1)
+    assert digests == 1
+    assert items > 0
 
 
 async def test_preview_ignores_a_stale_pending_row_entirely(db_path, http_client):
@@ -202,3 +207,64 @@ async def test_every_topic_falling_back_gives_partial_not_failed(db_path, http_c
     with closing(connect(db_path)) as conn:
         status = conn.execute("SELECT status FROM digests").fetchone()[0]
     assert status == "partial"
+
+
+# --- an unanticipated exception after the claim still marks the row failed ---
+#
+# build_digest failing and publish failing after retries both already had
+# their own try/except that marks the row failed and returns a normal
+# PipelineOutcome. This is the case QA flagged that neither of those
+# covers: something else goes wrong after the claim (a bug, a publisher
+# that raises something other than PublishError, a cancellation) and
+# nothing catches it -- leaving a bare `pending` row that blocks every
+# future run and every future admin forever, since nothing ever calls
+# mark_digest_failed for it.
+
+
+class _RaisesUnexpectedly:
+    """A publisher that raises a plain RuntimeError instead of PublishError.
+
+    Simulates a bug, or any exception type `_publish_with_retry` was never
+    told to expect -- the retry loop only catches `PublishError`, so this
+    is exactly the shape of thing that used to escape `_run_post` entirely.
+    """
+
+    async def publish(self, r):
+        raise RuntimeError("the publisher itself has a bug")
+
+
+async def test_unexpected_exception_after_claim_marks_the_row_failed_not_pending(
+    db_path, http_client
+):
+    deps = _make_deps(db_path, http_client)
+
+    with pytest.raises(RuntimeError, match="the publisher itself has a bug"):
+        await run_daily(deps, _RaisesUnexpectedly(), mode=RunMode.POST, sleep=_no_sleep)
+
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM digests WHERE run_date = ?", (RUN_DATE_LOCAL.isoformat(),)
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "failed"
+
+
+class _RaisesCancelled:
+    """Simulates the run being cancelled mid-publish (e.g. process shutdown)."""
+
+    async def publish(self, r):
+        raise asyncio.CancelledError()
+
+
+async def test_cancellation_after_claim_marks_the_row_failed_not_pending(db_path, http_client):
+    deps = _make_deps(db_path, http_client)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_daily(deps, _RaisesCancelled(), mode=RunMode.POST, sleep=_no_sleep)
+
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM digests WHERE run_date = ?", (RUN_DATE_LOCAL.isoformat(),)
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "failed"

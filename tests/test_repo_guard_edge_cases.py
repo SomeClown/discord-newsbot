@@ -3,12 +3,18 @@ tests in test_repo_write.py.
 
 The interesting failure mode for a daily cron job is the one where it dies
 halfway through: `claim_digest` leaves a `pending` row behind, and nothing
-in the repo layer knows how long ago that was. That's intentional -- the
-plan (SPEC-DEV 2) puts staleness detection and admin alerting one layer up,
-in the scheduler that hasn't been built yet -- but it means `claim_digest`
-itself has to keep refusing a `pending` row forever, not just for a bit.
-These tests pin that "forever" on purpose, so a future change to the guard
-has to break a test to change it, rather than drifting quietly.
+in the repo layer knows how long ago that was. `claim_digest` itself still
+refuses a plain (unforced) `pending` row forever, not just for a bit --
+staleness detection and admin alerting live one layer up, in
+`needs_confirmation`/`should_catch_up` (bot/commands.py, bot/client.py).
+
+`force=True` *does* now override `pending` (QA step 20, group 4): the
+in-process `_run_lock` in `pipeline/run.py` already rules out two runs
+racing each other, so a `pending` row a force-claim can see is always a
+crash artifact, never a live run -- refusing to reclaim it just left
+admins stuck waiting on `mark_digest_failed`, which a crashed process
+never got to run. This module's tests pin that new contract on purpose,
+same as they pinned the old one.
 """
 
 from contextlib import closing
@@ -44,12 +50,19 @@ def test_stale_pending_still_blocks_without_force(conn):
     assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
 
 
-def test_stale_pending_still_blocks_with_force(conn):
-    """`force` is documented to only override ok/partial, never pending --
-    age doesn't change that."""
-    repo.claim_digest(conn, date(2026, 9, 23), force=False)
+def test_stale_pending_is_reclaimed_with_force(conn):
+    """Behavior change (QA step 20, group 4): `force` now overrides a `pending`
+    row too, not just ok/partial. The in-process `_run_lock` in run.py already
+    stops two runs from claiming concurrently, so a `pending` row surviving to
+    the *next* run is always a crash artifact, not an active run -- forcing
+    past it is what lets an admin recover from a stuck row without waiting
+    for `mark_digest_failed` to run first. (Was pinned the other way as
+    test_stale_pending_still_blocks_with_force; deliberately changed here,
+    not a regression.)"""
+    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
     _backdate_pending(conn, date(2026, 9, 23), datetime(2026, 9, 16, tzinfo=UTC))
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=True) is None
+    reclaimed = repo.claim_digest(conn, date(2026, 9, 23), force=True)
+    assert reclaimed == digest_id
 
 
 def test_failed_allows_reclaim_with_force_too(conn):

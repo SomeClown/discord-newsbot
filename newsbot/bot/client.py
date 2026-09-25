@@ -68,13 +68,14 @@ _PENDING_STARTUP_ALERT = (
     "newsbot: found a 'pending' digest row at startup. That usually means "
     "the process crashed mid-run last time -- it may or may not have "
     "already posted. Check the channel and `/newsbot status`, then "
-    "`/newsbot run-now` (with force, if it asks) once you know which."
+    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "before posting again, since we can't tell whether today already went out."
 )
 _PARTIAL_FAILURE_STARTUP_ALERT = (
     "newsbot: today's digest row is 'failed' but some messages already "
     "posted before it died. Check the channel and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry (it'll ask for confirmation "
-    "before posting again)."
+    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "before posting again, since part of today's digest is already out there."
 )
 
 

@@ -78,11 +78,21 @@ def needs_confirmation(existing: DigestRow | None) -> bool:
     embeds) into the channel before it died, so a plain re-run would post
     a second header on top of the one already there. A `failed` row with
     nothing posted is a clean failure (never reached Discord at all), so
-    it doesn't need asking; no row at all obviously doesn't either.
+    it doesn't need asking.
+
+    `pending` also needs confirming (QA step 20, group 4): it means either
+    something else is mid-run right now, or -- far more likely, since
+    `is_run_in_progress()` already caught the former before this function
+    is even consulted -- a previous run crashed between claiming the day
+    and saving or failing it, and nobody knows whether it posted. `run-now`
+    passes `force=True` through to `claim_digest` after the admin confirms,
+    which (as of the same change) is what actually lets the reclaim
+    succeed instead of silently no-op'ing into "skipped". No row at all
+    obviously doesn't need asking either.
     """
     if existing is None:
         return False
-    if existing.status in ("ok", "partial"):
+    if existing.status in ("ok", "partial", "pending"):
         return True
     return existing.status == "failed" and bool(existing.posted_message_ids)
 
@@ -316,7 +326,12 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         force = False
         if needs_confirmation(existing):
             view = ConfirmView(interaction.user.id)
-            if existing is not None and existing.status == "failed":
+            # "pending" and "failed-with-something-posted" are both the
+            # same underlying situation from an admin's point of view: a
+            # run died partway through and nobody knows for sure what
+            # made it to the channel. "ok"/"partial" is the unambiguous
+            # case -- it definitely posted, this would just post again.
+            if existing is not None and existing.status in ("pending", "failed"):
                 prompt = "A previous run may have crashed mid-post; check the channel. Post anyway?"
             else:
                 prompt = "Today's digest already posted. Post again?"
