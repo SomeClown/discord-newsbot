@@ -4,6 +4,7 @@ httpx.MockTransport stands in for the network. Nothing here calls a real
 socket -- if it does, that's a bug, not a slow test.
 """
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -288,6 +289,130 @@ async def test_rss_collector_allows_a_redirect_to_a_normal_public_host():
     async with httpx.AsyncClient(transport=transport) as http:
         items = await RssCollector(source, sleep=_noop_sleep).collect(http)
     assert items == []
+
+
+# --- adversarial: every private/loopback/link-local IP shape from a literal redirect ---
+
+
+@pytest.mark.parametrize(
+    "location_host",
+    [
+        "127.0.0.1",
+        "[::1]",  # IPv6 literals need brackets in a URL authority
+        "10.4.5.6",
+        "0.0.0.0",  # noqa: S104 -- a redirect target under test, not a bind address
+        "169.254.169.254",
+        "192.168.1.1",
+        "172.16.0.1",
+    ],
+)
+async def test_rss_collector_rejects_redirect_to_every_private_ip_shape(location_host):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": f"http://{location_host}/x"})
+        return httpx.Response(200, content=b"never seen")
+
+    source = RssSource(
+        type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ValueError, match="non-public"):
+            await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_private_address(
+    monkeypatch,
+):
+    # The literal-IP cases above never exercise the DNS-resolution branch
+    # of _reject_private_redirect -- a redirect to a *hostname* (not an IP
+    # literal) that happens to resolve to a private address needs the
+    # same rejection, and only mocking the resolver can prove that branch
+    # actually runs and actually rejects.
+    loop = asyncio.get_running_loop()
+
+    async def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "internal.attacker.example":
+            return [(2, 1, 6, "", ("10.13.14.15", 0))]
+        raise OSError(f"unexpected resolution attempt for {host!r}")
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": "http://internal.attacker.example/x"})
+        return httpx.Response(200, content=b"never seen")
+
+    source = RssSource(
+        type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ValueError, match="non-public"):
+            await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: shared/CGNAT address space (100.64.0.0/10, RFC 6598) is not "
+        "flagged by Python's ipaddress.is_private/is_loopback/is_link_local, "
+        "so _reject_private_redirect() (newsbot/collectors/rss.py) lets a "
+        "redirect chain ending at a 100.64.x.x address straight through. "
+        "Some cloud providers route internal-only services through this "
+        "range specifically because it isn't RFC 1918 -- the same shape of "
+        "hole the 169.254.169.254 case above already closes, just a "
+        "narrower and less-well-known range. Severity: LOW-MEDIUM."
+    ),
+)
+async def test_rss_collector_rejects_redirect_to_cgnat_shared_address_space():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"Location": "http://100.64.0.1/x"})
+        return httpx.Response(200, content=b"never seen")
+
+    source = RssSource(
+        type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ValueError, match="non-public"):
+            await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+# --- adversarial: 5MB cap with no Content-Length header, and exactly-at-cap body ---
+
+
+async def test_fetch_body_at_exactly_5mb_is_not_truncated():
+    exact = b"a" * (5 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=exact)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        body = await _fetch_body(http, "https://example.com/exact.xml", sleep=_noop_sleep)
+    assert len(body) == 5 * 1024 * 1024
+    assert body == exact
+
+
+async def test_fetch_body_cap_applies_even_without_a_content_length_header():
+    # _fetch_body reads via aiter_bytes() chunk-by-chunk and never
+    # consults Content-Length to decide when to stop -- this pins that a
+    # response streamed without that header (a chunked-transfer response,
+    # which is exactly what a malicious or misconfigured server might
+    # send to dodge a length-based guard) is still capped correctly.
+    oversized = b"b" * (6 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = httpx.Response(200, content=oversized)
+        del response.headers["content-length"]
+        return response
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        body = await _fetch_body(http, "https://example.com/huge.xml", sleep=_noop_sleep)
+    assert len(body) == 5 * 1024 * 1024
 
 
 # --- Bozo feed with no entries is an error ---

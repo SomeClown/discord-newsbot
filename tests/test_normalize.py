@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from newsbot.collectors.base import RawItem
 from newsbot.pipeline.normalize import canonicalize, normalize
 
@@ -217,6 +219,82 @@ def test_canonicalize_punycode_host_is_lowercased():
 
 def test_canonicalize_out_of_range_port_returns_none_instead_of_raising():
     assert canonicalize("http://example.com:99999/a") is None
+
+
+# --- adversarial cases test-engineer went looking for (QA step 20, group 3) ---
+
+
+def test_canonicalize_at_sign_survives_unescaped_in_path():
+    # "@" is a legitimate path character (a handle in a URL shape like
+    # "/users/@name") and is in _PATH_SAFE -- only netloc "@" (credentials)
+    # is rejected. Pins the distinction the docstring draws between the two.
+    assert canonicalize("https://example.com/users/@handle") == "https://example.com/users/@handle"
+
+
+def test_canonicalize_already_percent_encoded_path_is_left_as_is_not_double_escaped():
+    # "%" is in _PATH_SAFE specifically so re-canonicalizing an
+    # already-canonical path is a no-op -- this is the idempotency
+    # guarantee _safe_link()'s render-time re-check depends on.
+    assert canonicalize("https://example.com/a%20b") == "https://example.com/a%20b"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: canonicalize() strips the brackets off an IPv6 host without "
+        "re-adding them, producing 'https://::1/path' instead of "
+        "'https://[::1]/path'. That string doesn't even round-trip through "
+        "urlsplit() as the same host -- urlsplit('https://::1/path').hostname "
+        "comes back None, and the port-looking suffix after the last ':' gets "
+        "misread. Any IPv6-hosted source URL comes out canonicalized into "
+        "something no client (Discord's or otherwise) can dereference. "
+        "newsbot/pipeline/normalize.py, canonicalize(), the `netloc = host if "
+        "port in ... else f'{host}:{port}'` line. Severity: MEDIUM (breaks "
+        "the link entirely for a real, if uncommon, class of source URLs; "
+        "not a security issue since nothing malicious rides along)."
+    ),
+)
+def test_canonicalize_ipv6_host_keeps_its_brackets():
+    result = canonicalize("https://[::1]/path")
+    assert result == "https://[::1]/path"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: a trailing dot on an FQDN host ('example.com.') is not "
+        "stripped before comparison, so 'https://example.com/x' and "
+        "'https://example.com./x' canonicalize to two different strings "
+        "even though they're DNS-identical (a trailing dot just means "
+        "'absolute name'). That's a dedupe-bypass: the same story posted "
+        "with a trailing-dot URL variant would slip past the UNIQUE "
+        "constraint and the digest could show it twice. "
+        "newsbot/pipeline/normalize.py, canonicalize(), the "
+        "`host = host.removeprefix('www.')` line has no trailing-dot "
+        "equivalent. Severity: LOW (correctness/dedupe, not security)."
+    ),
+)
+def test_canonicalize_trailing_dot_on_host_is_treated_as_the_same_host():
+    assert canonicalize("https://example.com./x") == canonicalize("https://example.com/x")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: an already-percent-encoded path byte's hex digits aren't "
+        "case-normalized -- '%3e' and '%3E' both survive quote() as-is "
+        "(the whole escape triplet is 'safe' since '%' itself is in "
+        "_PATH_SAFE), so the same resource fetched with different-cased "
+        "percent-encoding dedupes as two different URLs. "
+        "newsbot/pipeline/normalize.py, canonicalize(), `path = "
+        "quote(parts.path, safe=_PATH_SAFE)`. Severity: LOW (dedupe "
+        "correctness only; RFC 3986 says percent-encoding hex digits should "
+        "be treated case-insensitively but most sources won't vary this in "
+        "practice)."
+    ),
+)
+def test_canonicalize_percent_encoded_hex_case_does_not_affect_identity():
+    assert canonicalize("https://example.com/a%3e") == canonicalize("https://example.com/a%3E")
 
 
 # --- normalize ---

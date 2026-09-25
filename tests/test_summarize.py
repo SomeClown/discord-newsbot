@@ -128,6 +128,21 @@ def test_prompt_games_list_with_two_topics_has_no_oxford_comma():
     assert "Palworld and Diablo IV" in system
 
 
+def test_prompt_games_list_with_four_topics_still_has_no_oxford_comma():
+    # The 3-topic case is the one the docstring promises byte-for-byte
+    # compatibility for; a 4th game (the whole reason this got built
+    # instead of staying a hardcoded string) needs the same "A, B, C and
+    # D" shape, not an Oxford comma before "and".
+    palworld = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
+    bl4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
+    fifth = Topic(key="fifth", name="Some Fifth Game", aliases=[], entities=[])
+    system, _user = build_prompt(
+        DIABLO4, [_topic_item()], [], all_topics=[bl4, palworld, DIABLO4, fifth]
+    )
+    assert "Borderlands 4, Palworld, Diablo IV and Some Fifth Game" in system
+    assert "Diablo IV, and Some Fifth Game" not in system  # no Oxford comma
+
+
 def test_prompt_games_list_defaults_to_the_single_topic_when_not_given():
     # A caller that doesn't pass all_topics (some of this file's own
     # tests, e.g.) still gets a sane games list -- just the one topic it

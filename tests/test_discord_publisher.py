@@ -209,3 +209,100 @@ async def test_channel_fetch_failure_is_wrapped_as_publish_error():
 
     with pytest.raises(PublishError):
         await publisher.publish(_rendered(1))
+
+
+# --- adversarial: multiple retries, thread-failure-then-retry, header-retry ---
+
+
+async def test_retry_survives_two_consecutive_transient_failures_before_succeeding():
+    # Not just one failed attempt then a clean retry -- the embed keeps
+    # failing transiently across two whole attempts before finally
+    # landing on the third, and the header must still never be reposted.
+    channel = FakeChannel()
+    channel.fail_on_call = {1: aiohttp.ClientError("blip 1")}
+    client = FakeClient(channel)
+    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+
+    with pytest.raises(PublishError):
+        await publisher.publish(_rendered(1))
+    assert len(channel.sent) == 1  # only the header landed
+
+    # FakeChannel's call index keeps counting across attempts (it's a
+    # property of the channel, not of one publish() call) -- the header
+    # was call 0, the failed embed was call 1, so the retry's embed
+    # attempt is call 2.
+    channel.fail_on_call = {2: aiohttp.ClientError("blip 2")}
+    with pytest.raises(PublishError):
+        await publisher.publish(_rendered(1))
+    assert len(channel.sent) == 1  # header still not reposted, embed still failing
+
+    channel.fail_on_call = {}
+    ids = await publisher.publish(_rendered(1))
+    assert len(ids) == 2
+    assert len(channel.sent) == 2  # header sent exactly once total, across all three attempts
+    header_sends = [c for c in channel.sent if c[0] is not None]
+    assert len(header_sends) == 1
+
+
+async def test_retry_after_header_send_itself_fails_does_not_double_post_header():
+    channel = FakeChannel()
+    channel.fail_on_call = {0: aiohttp.ClientError("header blip")}
+    client = FakeClient(channel)
+    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+
+    with pytest.raises(PublishError):
+        await publisher.publish(_rendered(1))
+    assert len(channel.sent) == 0  # header never actually landed
+
+    channel.fail_on_call = {}
+    ids = await publisher.publish(_rendered(1))
+    assert len(ids) == 2
+    header_sends = [c for c in channel.sent if c[0] is not None]
+    assert len(header_sends) == 1  # exactly one header, sent on the successful retry
+
+
+async def test_thread_creation_is_not_retried_after_a_later_transient_embed_failure():
+    # Thread creation fails (non-fatally, alerts once) on the first
+    # attempt; the second embed then fails transiently and the whole
+    # publish() call raises. On retry, thread creation must not be
+    # attempted a second time -- it already ran (and already alerted)
+    # once, and _thread_created is set regardless of success.
+    channel = FakeChannel()
+    client = FakeClient(channel)
+    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+
+    real_send = channel.send
+
+    async def send_with_failures(content=None, *, embeds=None, allowed_mentions=None):
+        message = await real_send(content, embeds=embeds, allowed_mentions=allowed_mentions)
+        if content is not None:  # header call: break its thread
+            message.thread_error = discord.HTTPException(_fake_response(500), "thread failed")
+        return message
+
+    channel.send = send_with_failures
+    channel.fail_on_call = {2: aiohttp.ClientError("second embed blip")}
+
+    with pytest.raises(PublishError):
+        await publisher.publish(_rendered(2))
+    assert len(client.alerts) == 1  # thread failure alerted exactly once
+
+    channel.fail_on_call = {}
+    ids = await publisher.publish(_rendered(2))
+    assert len(ids) == 3
+    assert len(client.alerts) == 1  # not alerted again -- thread creation wasn't retried
+
+
+async def test_publish_with_no_embed_messages_still_resumable_and_posts_only_header():
+    channel = FakeChannel()
+    client = FakeClient(channel)
+    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+
+    ids = await publisher.publish(_rendered(0))
+    assert len(ids) == 1
+    assert len(channel.sent) == 1
+
+    # A second publish() call on the same (already-succeeded) instance
+    # must not repost anything either.
+    ids_again = await publisher.publish(_rendered(0))
+    assert ids_again == ids
+    assert len(channel.sent) == 1

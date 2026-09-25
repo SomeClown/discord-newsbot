@@ -161,6 +161,58 @@ digest:
         _load_with(tmp_path, text)
 
 
+def test_admin_permission_all_classmethod_is_rejected(tmp_path):
+    # "all" and "none" are classmethods on discord.Permissions, same
+    # shape of false-positive as "value" -- hasattr() would have called
+    # either "a real flag" too.
+    text = f"""
+guild_id: 1
+admin_permission: all
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_admin_permission_none_classmethod_is_rejected(tmp_path):
+    text = f"""
+guild_id: 1
+admin_permission: none
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_every_real_permission_flag_name_is_accepted(tmp_path):
+    # The flip side of the "value"/"all"/"none" false-positive cases:
+    # every name VALID_FLAGS actually considers a real permission bit
+    # must still load cleanly -- the fix shouldn't have narrowed the
+    # accepted set to less than what it's supposed to be.
+    import discord
+
+    for flag_name in discord.Permissions.VALID_FLAGS:
+        text = f"""
+guild_id: 1
+admin_permission: {flag_name}
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+        cfg = _load_with(tmp_path, text)
+        assert cfg.admin_permission == flag_name
+
+
 def test_duplicate_topic_keys_rejected(tmp_path):
     text = """
 guild_id: 1

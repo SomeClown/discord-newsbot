@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+import pytest
+
 from newsbot.bot.format import esc, render_digest, render_status, to_text
 from newsbot.collectors.base import RawItem
 from newsbot.config import Topic
@@ -72,6 +74,66 @@ def test_esc_defuses_a_url_scheme_that_slipped_through_layer_one():
 def test_esc_leaves_a_shift_code_alone():
     result = esc("Shift code: TRICK-4CLIK-3BAIT-URLS9-9WXYZ")
     assert "TRICK-4CLIK-3BAIT-URLS9-9WXYZ" in result
+
+
+def test_esc_defuses_an_uppercase_scheme():
+    # _URL_SCHEME_RE is re.IGNORECASE, but that's exactly the kind of
+    # thing worth pinning: "HTTPS://" is just as clickable in most
+    # clients as "https://".
+    result = esc("go to HTTPS://evil.example/x now")
+    assert "HTTPS://" not in result
+
+
+def test_esc_defuses_a_scheme_inside_a_markdown_masked_link():
+    # "[legit-looking text](https://evil.example)" is the classic masked-
+    # link phishing shape -- the scheme inside the parens is what needs
+    # defusing, same as bare prose.
+    result = esc("[Official patch notes](https://evil.example/x)")
+    assert "https://" not in result
+
+
+def test_esc_defuses_a_scheme_inside_an_angle_bracket_autolink():
+    # "<https://evil.example>" is Discord's own raw-autolink syntax --
+    # _URL_SCHEME_RE doesn't special-case being inside "<...>", so this
+    # should come out defused just like any other scheme token.
+    result = esc("<https://evil.example/x>")
+    assert "https://" not in result
+
+
+def test_esc_leaves_a_bare_discord_invite_untouched():
+    # Neither summarize.py's _URL_TOKEN_RE (requires a scheme or a
+    # "www." prefix) nor format.py's _URL_SCHEME_RE (requires "scheme:")
+    # matches a bare "discord.gg/<code>" with no scheme -- documenting
+    # current behavior, not asserting it's safe. See the xfail right
+    # below for why this might still be a live risk.
+    result = esc("join our discord.gg/abc123 server for the giveaway")
+    assert "discord.gg/abc123" in result
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "POSSIBLE GAP: Discord's own client is known to auto-detect "
+        "invite-shaped strings (discord.gg/<code>, discordapp.com/invite/"
+        "<code>) as clickable/joinable even with no 'http://' or 'https://' "
+        "prefix at all, because it scans message content for the invite "
+        "pattern specifically rather than relying on generic autolinking. "
+        "Neither summarize.py's _URL_TOKEN_RE (postprocess layer) nor "
+        "format.py's _URL_SCHEME_RE (esc() layer) requires or defuses "
+        "anything without a scheme or 'www.' prefix, so a model-written "
+        "headline/summary that echoes a bare 'discord.gg/<code>' from a "
+        "scraped article would sail through both layers untouched. Not "
+        "independently verified against live Discord in this session (no "
+        "network/gateway access here) -- flagging for the implementer to "
+        "confirm against a real client before deciding whether it needs a "
+        "fix. Severity: MEDIUM if confirmed (a scam/rickroll invite server "
+        "join button in the digest), unclear if Discord doesn't actually "
+        "autolink bare invite strings this way."
+    ),
+)
+def test_esc_defuses_a_bare_discord_invite_too():
+    result = esc("join our discord.gg/abc123 server for the giveaway")
+    assert "discord.gg/abc123" not in result
 
 
 # --- sort order and update placement ---

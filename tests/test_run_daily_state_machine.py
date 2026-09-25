@@ -12,6 +12,7 @@ on `partial` rather than `failed`.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -268,3 +269,61 @@ async def test_cancellation_after_claim_marks_the_row_failed_not_pending(db_path
         ).fetchone()
     assert row is not None
     assert row["status"] == "failed"
+
+
+class _RaisesUnexpectedlyAfterPartialPublish:
+    """A publisher that partially posts, then blows up with something other than
+    PublishError -- the exact shape `_run_post`'s `getattr(exc, "posted_ids", ...)`
+    fallback exists for. Whatever ids it carries on the exception must actually
+    make it into the failed row, not just the row's status.
+    """
+
+    def __init__(self):
+        self.posted_ids = [111, 222]
+
+    async def publish(self, r):
+        raise RuntimeError("partial post, then a bug") from None
+
+
+async def test_unexpected_exception_posted_ids_are_persisted_on_the_failed_row(
+    db_path, http_client
+):
+    publisher = _RaisesUnexpectedlyAfterPartialPublish()
+
+    class _Wrapper:
+        async def publish(self, r):
+            try:
+                await publisher.publish(r)
+            except RuntimeError as exc:
+                exc.posted_ids = publisher.posted_ids
+                raise
+
+    deps = _make_deps(db_path, http_client)
+
+    with pytest.raises(RuntimeError):
+        await run_daily(deps, _Wrapper(), mode=RunMode.POST, sleep=_no_sleep)
+
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status, posted_message_ids FROM digests WHERE run_date = ?",
+            (RUN_DATE_LOCAL.isoformat(),),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "failed"
+    assert json.loads(row["posted_message_ids"]) == [111, 222]
+
+
+async def test_normal_success_is_unaffected_by_the_baseexception_safety_net(db_path, http_client):
+    # The outer `except BaseException` in `_run_post` must never catch and
+    # swallow a normal successful run -- it should only ever see something
+    # that escapes `_run_claimed`'s own handling.
+    deps = _make_deps(db_path, http_client)
+
+    outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    assert outcome.status == "ok"
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM digests WHERE run_date = ?", (RUN_DATE_LOCAL.isoformat(),)
+        ).fetchone()
+    assert row["status"] == "ok"
