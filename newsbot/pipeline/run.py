@@ -429,7 +429,7 @@ async def _run_claimed(
     # This never touches `status`/`notes`/`message_ids` below: a code-alert
     # problem is its own admin alert, not a reason to change what the
     # digest run reports about itself.
-    await _maybe_check_codes(deps, collected)
+    await _maybe_check_codes(deps, collected, results)
 
     if publish_error is not None:
         await asyncio.to_thread(
@@ -539,7 +539,9 @@ async def _publish_with_retry(
     return (last_error.posted_ids if last_error else []), last_error
 
 
-async def _maybe_check_codes(deps: Deps, collected: list[RawItem]) -> None:
+async def _maybe_check_codes(
+    deps: Deps, collected: list[RawItem], results: list[CollectorResult]
+) -> None:
     """Run the SHiFT alert check against this run's own collected items (design.md §12).
 
     A no-op whenever alerts aren't configured (`code_alert_poster is
@@ -553,15 +555,17 @@ async def _maybe_check_codes(deps: Deps, collected: list[RawItem]) -> None:
     `shift/sweep.py` can each import from the other without either one
     eagerly importing the other at module load time.
 
-    The daily run always passes `seeding_ok=True`: unlike the hourly
-    sweep, it doesn't run a health check of its own, but it does always
-    run every non-web_search collector for real, so there's no "half the
-    sources timed out" case to guard against the way there is for a
-    sweep.
+    `seeding_ok` is computed the same way the hourly sweep computes it --
+    `decide.seeding_healthy(results)` -- rather than always `True`. The
+    daily run does run every non-web_search collector for real, but "for
+    real" isn't "successfully": a run where most of those sources timed
+    out shouldn't get to declare today's (mostly missing) haul the
+    historical baseline any more than an unhealthy sweep should (A1).
     """
     if not deps.cfg.alerts.enabled or deps.code_alert_poster is None:
         return
     try:
+        from newsbot.shift.decide import seeding_healthy
         from newsbot.shift.sweep import SweepDeps, process_items
 
         sweep_deps = SweepDeps(
@@ -574,7 +578,7 @@ async def _maybe_check_codes(deps: Deps, collected: list[RawItem]) -> None:
             poster=deps.code_alert_poster,
             rate_limit_state=deps.rate_limit_state,
         )
-        await process_items(sweep_deps, collected, seeding_ok=True)
+        await process_items(sweep_deps, collected, seeding_ok=seeding_healthy(results))
     except Exception as exc:  # never let an alert-path bug touch the digest's own outcome
         logger.exception("SHiFT code alert check failed")
         await deps.alert(f"newsbot: SHiFT code alert check failed: {exc}")

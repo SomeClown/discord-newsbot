@@ -38,15 +38,16 @@ from apscheduler.triggers.interval import IntervalTrigger
 from discord import app_commands
 
 from newsbot.alerts import send_alert
-from newsbot.bot.format import RenderedDigest
-from newsbot.collectors.base import build_collectors
+from newsbot.bot.format import RenderedAlert, RenderedDigest
+from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
 from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import Deps, RunMode, local_run_date, run_daily
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
+from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store.db import connect
 from newsbot.store.models import DigestRow
-from newsbot.store.repo import get_digest, purge_older_than
+from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,40 @@ def _parse_digest_time(time_str: str) -> dt_time:
 # status code Discord actually sent back.
 _TRANSIENT_ERRORS = (aiohttp.ClientError, OSError, TimeoutError)
 
+# The one and only place `AllowedMentions(everyone=True, ...)` is allowed to
+# appear in newsbot/ (design.md §12, A5) -- `tests/test_mentions_tripwire.py`
+# scans the source tree to hold that line. Every other send in this file
+# (the client's own default, DiscordPublisher's digest sends) stays
+# `AllowedMentions.none()`; only a code alert that `decide.plan_alerts`
+# actually decided should ping gets this one.
+_PING_EVERYONE = discord.AllowedMentions(
+    everyone=True, users=False, roles=False, replied_user=False
+)
+
+
+def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None) -> None:
+    """Classify a send/fetch failure shared by `DiscordPublisher` and `DiscordCodeAlertPoster`.
+
+    Wraps as `PublishError` (worth retrying: a 5xx, a network blip, a
+    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else) --
+    see `DiscordPublisher._reraise_or_wrap`'s original docstring for why
+    a permissions problem shouldn't burn a retry budget. `posted_ids`
+    only means anything to `DiscordPublisher`'s resumable multi-message
+    publish; `DiscordCodeAlertPoster` posts one message at a time and
+    always passes `None` (which becomes an empty list).
+    """
+    if isinstance(exc, discord.HTTPException):
+        if exc.status is not None and 400 <= exc.status < 500:
+            raise exc
+        raise PublishError(
+            f"discord send failed: {exc}", posted_ids=list(posted_ids or [])
+        ) from exc
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        raise PublishError(
+            f"discord send failed: {exc}", posted_ids=list(posted_ids or [])
+        ) from exc
+    raise exc
+
 
 class DiscordPublisher:
     """The `Publisher` the real bot uses: posts the digest, then opens a discussion thread on it.
@@ -238,18 +273,10 @@ class DiscordPublisher:
         never succeed no matter how many times `_publish_with_retry`
         tries it -- wrapping those would just burn the retry budget on a
         permissions problem that needs a human, not a backoff timer.
+        Delegates to `_classify_send_error`, shared with
+        `DiscordCodeAlertPoster` below.
         """
-        if isinstance(exc, discord.HTTPException):
-            if exc.status is not None and 400 <= exc.status < 500:
-                raise exc
-            raise PublishError(
-                f"discord send failed: {exc}", posted_ids=list(self._posted_ids)
-            ) from exc
-        if isinstance(exc, _TRANSIENT_ERRORS):
-            raise PublishError(
-                f"discord send failed: {exc}", posted_ids=list(self._posted_ids)
-            ) from exc
-        raise exc
+        _classify_send_error(exc, posted_ids=self._posted_ids)
 
 
 class NullPublisher:
@@ -265,6 +292,89 @@ class NullPublisher:
 
     async def publish(self, r: RenderedDigest) -> list[int]:
         return []
+
+
+_MISSING_MENTION_PERMISSION_ALERT = (
+    "newsbot: a SHiFT code alert wanted to ping @everyone, but this bot's "
+    "role is missing 'Mention @everyone, @here, and All Roles' in the "
+    "digest channel -- Discord posts the message but silently drops the "
+    "ping. Posted anyway; grant the permission (docs/deploy.md) if you "
+    "want the next one to actually notify anyone."
+)
+
+
+class DiscordCodeAlertPoster:
+    """The `CodeAlertPoster` (`shift/sweep.py`) the real bot uses: one message per alert.
+
+    Structurally the small sibling of `DiscordPublisher` above -- same
+    channel-resolution dance, same error classification (`_classify_send_error`,
+    factored out of `DiscordPublisher._reraise_or_wrap` for exactly this
+    reuse) -- but with none of that class's resumability bookkeeping,
+    since `shift/sweep.py` already tracks per-message claim/post state of
+    its own (`claim_codes`/`mark_codes_posted`) and only ever asks this to
+    post one message at a time.
+
+    `alert.ping` is `decide.plan_alerts`'s call, not this class's -- all
+    this does is turn that into the one `AllowedMentions` that's actually
+    allowed to set `everyone=True` anywhere in this codebase (`_PING_EVERYONE`,
+    A5), or `AllowedMentions.none()` otherwise. Before honoring a ping, it
+    checks whether the bot's own role can actually mention `@everyone` in
+    this channel -- missing that permission doesn't stop the alert from
+    still posting (the code itself is the important part), it just gets
+    an admin alert instead of a silent, permission-dropped ping nobody
+    would otherwise notice.
+    """
+
+    def __init__(self, client: NewsBot, channel_id: int) -> None:
+        self._client = client
+        self._channel_id = channel_id
+
+    async def post(self, alert: RenderedAlert) -> int | None:
+        channel = self._client.get_channel(self._channel_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(self._channel_id)
+            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+                _classify_send_error(exc)
+
+        mentions = discord.AllowedMentions.none()
+        if alert.ping:
+            if self._can_mention_everyone(channel):
+                mentions = _PING_EVERYONE
+            else:
+                # Still posts with _PING_EVERYONE's intent -- Discord just
+                # drops the actual notification on its end when the role
+                # lacks the permission, same as the plan's owner checklist
+                # describes. Using .none() here instead would be strictly
+                # worse: it changes nothing about who gets notified (still
+                # nobody) but throws away the chance the permission gets
+                # granted *before* the next code shows up.
+                mentions = _PING_EVERYONE
+                await self._client.alert(_MISSING_MENTION_PERMISSION_ALERT)
+
+        try:
+            message = await channel.send(alert.content, allowed_mentions=mentions)
+        except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+            _classify_send_error(exc)
+        return message.id
+
+    @staticmethod
+    def _can_mention_everyone(channel: object) -> bool:
+        """Whether this bot's role can actually ping `@everyone` in `channel`.
+
+        `channel.guild.me` is `None` for a DM (not a real deployment
+        shape here, but cheap to guard) or before the gateway has cached
+        the guild member -- either way, "can't tell" reads as "can't", the
+        safe direction: it still posts, it just also alerts.
+        """
+        guild = getattr(channel, "guild", None)
+        me = getattr(guild, "me", None) if guild is not None else None
+        if me is None:
+            return False
+        permissions_for = getattr(channel, "permissions_for", None)
+        if permissions_for is None:
+            return False
+        return bool(permissions_for(me).mention_everyone)
 
 
 class NewsBot(discord.Client):
@@ -291,6 +401,25 @@ class NewsBot(discord.Client):
         self.scheduler: AsyncIOScheduler | None = None
         self._ready_once = False
         self._last_two_instance_alert: datetime | None = None
+
+        # Shared with build_sweep_deps() the same way build_deps() shares
+        # it with the daily job -- so Reddit's cross-call gap is honored
+        # across the daily 09:00 run and every hourly sweep alike, not
+        # reset fresh each time one or the other happens to run.
+        self._rate_limit_state = RateLimitState()
+        # Set below in setup_hook() when alerts.enabled; stays None
+        # otherwise, which is also build_deps()'s existing default -- an
+        # alerts-off bot behaves exactly as it did before this feature.
+        self.code_alert_poster: CodeAlertPoster | None = None
+        # Codes fail_pending_codes() flips from 'pending' to 'failed' at
+        # startup (R4) -- a prior process claimed them and the ping
+        # budget, then died before confirming the send landed. Reported
+        # once on the first on_ready, then never referenced again.
+        self._interrupted_codes: list[str] = []
+        # True once a sweep crash has alerted the admin channel; cleared
+        # by the next successful sweep, so a sweep that's failing on every
+        # interval pages once instead of once an hour.
+        self._sweep_crash_alerted = False
 
     async def _on_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -399,7 +528,34 @@ class NewsBot(discord.Client):
             coalesce=True,
             max_instances=1,
         )
+
+        if self.cfg.alerts.enabled:
+            self.code_alert_poster = DiscordCodeAlertPoster(self, self.cfg.digest.channel_id)
+            # A prior process may have died between claiming a code (and
+            # spending the ping budget on it) and confirming the Discord
+            # send landed (R4) -- flip those back to 'failed' before
+            # anything else can touch alerted_codes, and remember which
+            # ones so the first on_ready can tell an admin.
+            self._interrupted_codes = await asyncio.to_thread(self._fail_pending_codes_sync)
+            self.scheduler.add_job(
+                self._sweep_job,
+                IntervalTrigger(minutes=self.cfg.alerts.interval_minutes, timezone=tz),
+                id="code-sweep",
+                # The first sweep two minutes after startup, not
+                # immediately: setup_hook is still finishing (the gateway
+                # hasn't necessarily cached guild/channel state yet), and
+                # a sweep at t=0 would race that.
+                next_run_time=datetime.now(tz) + timedelta(minutes=2),
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=300,
+            )
+
         self.scheduler.start()
+
+    def _fail_pending_codes_sync(self) -> list[str]:
+        with closing(connect(self.db_path)) as conn:
+            return fail_pending_codes(conn)
 
     async def on_ready(self) -> None:
         # discord.py fires on_ready on every reconnect, not just the first
@@ -408,6 +564,16 @@ class NewsBot(discord.Client):
         if self._ready_once:
             return
         self._ready_once = True
+        if self._interrupted_codes:
+            # Reported once, before catch-up runs -- an admin reading this
+            # should see "these may be stuck" before anything else happens
+            # that could distract from it, and it's a one-time read: this
+            # list isn't re-checked on a later reconnect.
+            await self.alert(
+                "newsbot: found SHiFT code(s) left 'pending' from a prior crash: "
+                + ", ".join(self._interrupted_codes)
+                + ". They were never confirmed posted; check the digest channel."
+            )
         await self._catch_up()
 
     async def _catch_up(self) -> None:
@@ -448,6 +614,31 @@ class NewsBot(discord.Client):
             collectors=build_collectors(self.cfg, self.secrets),
             now=lambda: datetime.now(UTC),
             alert=self.alert,
+            rate_limit_state=self._rate_limit_state,
+            code_alert_poster=self.code_alert_poster,
+        )
+
+    def build_sweep_deps(self) -> SweepDeps:
+        """Assemble a fresh `SweepDeps` for one hourly code sweep.
+
+        Collectors are built fresh here too, same as `build_deps`, and for
+        an extra reason specific to Bluesky: its session JWT lasts about
+        two hours with no refresh, so a sweep every `interval_minutes`
+        rebuilding its own `BlueskyCollector` (and logging in again) is
+        what keeps that source working sweep after sweep instead of going
+        silently stale partway through the day.
+        """
+        if self.http_client is None or self.code_alert_poster is None:
+            raise RuntimeError("build_sweep_deps() called before alerts were set up")
+        return SweepDeps(
+            cfg=self.cfg,
+            db_path=self.db_path,
+            http=self.http_client,
+            collectors=build_collectors(self.cfg, self.secrets, include_web_search=False),
+            now=lambda: datetime.now(UTC),
+            alert=self.alert,
+            poster=self.code_alert_poster,
+            rate_limit_state=self._rate_limit_state,
         )
 
     async def alert(self, text: str) -> None:
@@ -468,6 +659,38 @@ class NewsBot(discord.Client):
         except Exception as exc:  # the job boundary: nothing here may take the process down
             logger.exception("daily job crashed at the job boundary")
             await self.alert(f"newsbot: daily job crashed: {exc}")
+
+    async def _sweep_job(self) -> None:
+        """The job boundary for the hourly SHiFT alert sweep (design.md §12).
+
+        Same shape as `_daily_job`: nothing raised in here may take the
+        process down. Unlike the two-instance alert, a crash here alerts
+        only the *first* time (`_sweep_crash_alerted`) -- a sweep that
+        fails every interval would otherwise page an admin channel once an
+        hour for the same underlying problem, which teaches everyone to
+        ignore the channel. The next *successful* sweep clears the flag,
+        so a fixed problem goes back to paging on its next failure.
+        """
+        try:
+            outcome = await run_code_sweep(self.build_sweep_deps())
+            self._sweep_crash_alerted = False
+            if outcome is None:
+                logger.info("code sweep skipped: run lock held")
+            else:
+                logger.info(
+                    "code sweep finished",
+                    extra={
+                        "posted": outcome.posted,
+                        "silent": outcome.silent,
+                        "failed": outcome.failed,
+                        "ping": outcome.ping,
+                    },
+                )
+        except Exception as exc:
+            logger.exception("code sweep crashed at the job boundary")
+            if not self._sweep_crash_alerted:
+                self._sweep_crash_alerted = True
+                await self.alert(f"newsbot: SHiFT code sweep crashed: {exc}")
 
     async def _retention_job(self) -> None:
         try:
@@ -504,6 +727,7 @@ class NewsBot(discord.Client):
 
 __all__ = [
     "HEARTBEAT",
+    "DiscordCodeAlertPoster",
     "DiscordPublisher",
     "NewsBot",
     "NullPublisher",
