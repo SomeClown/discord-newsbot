@@ -392,7 +392,14 @@ async def test_run_code_sweep_writes_no_digest_tables(db_path, http_client):
 
 
 def _daily_deps(
-    db_path, http_client, *, poster=None, mode_alerts=None, enabled=True, max_item_age_hours=48
+    db_path,
+    http_client,
+    *,
+    poster=None,
+    mode_alerts=None,
+    enabled=True,
+    max_item_age_hours=48,
+    collectors=None,
 ):
     cfg = load_config(CONFIG_PATH)
     alerts_cfg = cfg.alerts.model_copy(
@@ -409,7 +416,9 @@ def _daily_deps(
         db_path=db_path,
         http=http_client,
         llm=StubLLM(INTEGRATION_FIXTURES / "llm.json"),
-        collectors=build_fixture_collectors(INTEGRATION_FIXTURES),
+        collectors=collectors
+        if collectors is not None
+        else build_fixture_collectors(INTEGRATION_FIXTURES),
         now=lambda: NOW,
         alert=alert,
         code_alert_poster=poster,
@@ -429,6 +438,52 @@ async def test_daily_post_run_checks_codes_and_alerts_once(db_path, http_client)
     with closing(connect(db_path)) as conn:
         assert repo.get_alert_state(conn).seeded is True
         assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 1
+
+
+class _WebSearchOnlyCollector:
+    # source_type = "web_search" is the only thing that matters here --
+    # the daily run's own code check has to treat this the same as the
+    # hourly sweep does (which never even builds a web_search collector
+    # at all): a code that only ever showed up here was never seeded.
+    source_type = "web_search"
+    rate_limit_key = None
+
+    def __init__(self, name: str, items: list[RawItem]) -> None:
+        self.name = name
+        self._items = items
+
+    async def collect(self, http):
+        return self._items
+
+
+async def test_daily_hook_never_alerts_on_a_web_search_only_code(db_path, http_client):
+    web_search_item = _item(CODE_A, url="https://example.com/brave-result", trust="community")
+    non_web_search_item = RawItem(
+        url="https://example.com/other",
+        title="An ordinary post with no code",
+        excerpt="Nothing to see here.",
+        source_name="Some RSS Feed",
+        trust="community",
+        published_at=NOW,
+        topics=None,
+    )
+    collectors = [
+        _WebSearchOnlyCollector("Brave Search", [web_search_item]),
+        _WebSearchOnlyCollector("not-brave", [non_web_search_item]),  # source_type overridden below
+    ]
+    collectors[1].source_type = "rss"
+
+    poster = _FakePoster()
+    deps = _daily_deps(db_path, http_client, poster=poster, collectors=collectors)
+    outcome = await run_daily(deps, _PrintDigestPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    assert outcome.status in ("ok", "partial")
+    with closing(connect(db_path)) as conn:
+        # web_search_item's code never even got recorded, let alone
+        # seeded or posted -- it's as if that sweep-invisible item never
+        # existed for the code check at all.
+        assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0
+    assert poster.sent == []
 
 
 async def test_daily_preview_run_never_checks_codes(db_path, http_client):

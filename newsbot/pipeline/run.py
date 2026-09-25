@@ -591,6 +591,25 @@ async def _maybe_check_codes(
         from newsbot.shift.decide import seeding_healthy
         from newsbot.shift.sweep import SweepDeps, process_items
 
+        # The hourly sweep never runs web_search at all (it builds its own
+        # collector list with include_web_search=False, to keep Brave
+        # within its free allowance) -- a code that only ever showed up in
+        # a Brave result was never seeded by any sweep, so the daily run's
+        # own check has to hold itself to the same restriction, not just
+        # collect from everything it happens to have on hand. Filtered by
+        # object identity, not URL: `collected` is exactly `results`' own
+        # items, unmodified by anything upstream of here, so id() is a
+        # precise, collision-proof way to ask "which result did this item
+        # come from" without assuming two different sources never share a
+        # URL.
+        web_search_item_ids = {
+            id(item)
+            for result in results
+            if result.source_type == "web_search"
+            for item in result.items
+        }
+        sweepable_items = [item for item in collected if id(item) not in web_search_item_ids]
+
         sweep_deps = SweepDeps(
             cfg=deps.cfg,
             db_path=deps.db_path,
@@ -601,7 +620,7 @@ async def _maybe_check_codes(
             poster=deps.code_alert_poster,
             rate_limit_state=deps.rate_limit_state,
         )
-        await process_items(sweep_deps, collected, seeding_ok=seeding_healthy(results))
+        await process_items(sweep_deps, sweepable_items, seeding_ok=seeding_healthy(results))
     except BaseException as exc:  # never let an alert-path bug -- or a cancellation -- touch
         # the digest's own already-recorded outcome; see the docstring above.
         logger.exception("SHiFT code alert check failed")
