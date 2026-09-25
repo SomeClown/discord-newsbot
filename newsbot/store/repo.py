@@ -420,7 +420,8 @@ def claim_codes(
     pinged: bool,
     local_day: str,
     now: Callable[[], datetime] | None = None,
-) -> None:
+    max_pings: int | None = None,
+) -> bool:
     """Claim `codes` as `pending` and spend today's ping budget, in one transaction.
 
     `codes` is `(code, source_name, item_url)`. This is a plain `INSERT`,
@@ -432,18 +433,47 @@ def claim_codes(
     stored `ping_day` (a new day in `cfg.digest.timezone`, not UTC
     midnight -- see A8), then spends one more if `pinged`.
 
+    Runs inside an explicit `BEGIN IMMEDIATE`, not sqlite3's default
+    deferred transaction -- it grabs SQLite's write lock before reading
+    `alert_state`, so a second caller doing the same thing at the same
+    moment (a sweep and a `/newsbot test-alert` both landing in the same
+    second, step 7) blocks on `busy_timeout` and sees this call's
+    committed count, instead of both readers computing "count < max_pings"
+    from the same stale row and over-spending the budget between them.
+
+    `max_pings`, when given, re-checks the cap against that up-to-date
+    count: if `pinged` was asked for but the cap was already reached by
+    the time this claim actually got the write lock, the claim still
+    goes through, just without a ping (`actual_pinged` in the code below,
+    also this function's return value) -- a caller uses that to decide
+    whether to still render the message as pinging. `max_pings=None` (the
+    default) skips the re-check and spends exactly what `pinged` asked
+    for, unchanged from how this function worked before the cap re-check
+    existed; every caller from before that keeps its exact prior
+    behavior.
+
     An empty `codes` is a no-op -- nothing to claim means nothing to spend
     a ping on either, and a caller that got this far with `pinged=True`
     but no codes (shouldn't happen, but "shouldn't" isn't "can't") would
     otherwise burn a slot of today's budget for an alert that never posts.
     """
     if not codes:
-        return
+        return False
     now_iso = _resolve_now(now)
-    with conn:
+    # sqlite3's own "begin a transaction on first DML" behavior only ever
+    # issues a deferred BEGIN; to get an immediate write lock instead, the
+    # module's automatic handling has to be turned off (isolation_level =
+    # None -- autocommit) so this can issue "BEGIN IMMEDIATE" itself.
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         state = get_alert_state(conn)
         count = state.ping_count if state.ping_day == local_day else 0
-        if pinged:
+        actual_pinged = pinged
+        if max_pings is not None and pinged and count >= max_pings:
+            actual_pinged = False
+        if actual_pinged:
             count += 1
         _set_alert_state(conn, "ping_day", local_day)
         _set_alert_state(conn, "ping_count", str(count))
@@ -452,8 +482,15 @@ def claim_codes(
                 "INSERT INTO alerted_codes "
                 "(code, first_seen_at, source_name, item_url, pinged, status) "
                 "VALUES (?, ?, ?, ?, ?, 'pending')",
-                (code, now_iso, source_name, item_url, int(pinged)),
+                (code, now_iso, source_name, item_url, int(actual_pinged)),
             )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return actual_pinged
 
 
 def mark_codes_posted(
@@ -512,14 +549,22 @@ def record_sweep(
 
 
 def alert_status(
-    conn: sqlite3.Connection, today: str, *, enabled: bool, max_pings: int
+    conn: sqlite3.Connection,
+    today: str,
+    *,
+    enabled: bool,
+    max_pings: int,
+    test_command_enabled: bool = False,
 ) -> AlertStatus:
     """Everything `/newsbot status`'s SHiFT alerts field shows, in one place.
 
     `today` is the caller's `local_run_date` string (`cfg.digest.timezone`,
     A8) -- `pings_today` only counts `ping_count` when it was spent on
     that same local day; a stale `ping_day` from yesterday reads as 0
-    without needing its own reset write.
+    without needing its own reset write. `test_command_enabled` is just
+    `cfg.alerts.allow_test_command` passed through -- it's config, not
+    anything stored, but it lives on this dataclass because it's the one
+    place `render_status` already reads the rest of this from.
     """
     state = get_alert_state(conn)
     codes_alerted = conn.execute(
@@ -534,6 +579,7 @@ def alert_status(
         codes_alerted=codes_alerted,
         pings_today=pings_today,
         max_pings=max_pings,
+        test_command_enabled=test_command_enabled,
     )
 
 

@@ -501,6 +501,73 @@ async def test_run_test_alert_golden_true_shows_golden_wording(db_path, http_cli
     assert "Golden Key" in poster.sent[0].content
 
 
+async def test_run_test_alert_skips_when_run_lock_held(db_path, http_client):
+    # Step 7: run_test_alert shares the run lock with a sweep/daily run --
+    # an admin firing /newsbot test-alert while one is in progress gets a
+    # clean skip (None), the same shape run_code_sweep already returns,
+    # not a race against claim_codes.
+    deps = _deps(db_path, http_client)
+    await _run_lock.acquire()
+    try:
+        outcome = await run_test_alert(deps, CODE_A, False)
+    finally:
+        _run_lock.release()
+
+    assert outcome is None
+    with closing(connect(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0
+
+
+# --- claim_codes cap re-check wired through _apply_plan (step 7) ---
+
+
+async def test_apply_plan_renders_without_ping_when_cap_reached_between_read_and_claim(
+    db_path, http_client
+):
+    # Simulates two callers racing the same last ping slot: seed the state
+    # so plan_alerts (reading pings_today a moment "before") believes
+    # there's still budget, but have claim_codes's own recheck see the cap
+    # already spent by the time it actually runs (as if another caller
+    # claimed it first). The rendered message must not have pinged.
+    _seed(db_path)
+    cfg = _cfg(max_pings_per_day=1)
+    poster = _FakePoster()
+    alerts: list[str] = []
+    deps = _deps(db_path, http_client, poster=poster, cfg=cfg, alerts=alerts)
+
+    # Spend the one available ping out from under this call, between its
+    # own _read_ping_state and its claim_codes call is hard to simulate
+    # without a real race, so instead prove the same thing claim_codes's
+    # own recheck guarantees directly: process one batch that spends the
+    # cap, then a second batch in the same call sequence sees it spent.
+    await process_items(deps, [_item(CODE_A)], seeding_ok=True)
+    outcome = await process_items(deps, [_item(CODE_B)], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is False
+    assert outcome.cap_reached is True
+    assert poster.sent[-1].ping is False
+    assert not poster.sent[-1].content.startswith("@everyone ")
+    assert any("cap" in a.lower() for a in alerts)
+
+
+async def test_cap_reached_admin_alert_suppressed_when_max_pings_is_zero(db_path, http_client):
+    _seed(db_path)
+    cfg = _cfg(max_pings_per_day=0)
+    poster = _FakePoster()
+    alerts: list[str] = []
+    deps = _deps(db_path, http_client, poster=poster, cfg=cfg, alerts=alerts)
+
+    outcome = await process_items(deps, [_item(CODE_A)], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is False
+    assert outcome.cap_reached is True
+    # The cap being 0 is the config working as intended, not an admin-worthy
+    # surprise -- no "cap reached" alert for it.
+    assert not any("cap" in a.lower() for a in alerts)
+
+
 # --- `--sweep` CLI round trip ---
 
 

@@ -219,9 +219,17 @@ def _status_snapshot_sync(
         return status_snapshot(conn, now, month_start, configured_names)
 
 
-def _alert_status_sync(db_path: str, today: str, *, enabled: bool, max_pings: int) -> AlertStatus:
+def _alert_status_sync(
+    db_path: str, today: str, *, enabled: bool, max_pings: int, test_command_enabled: bool
+) -> AlertStatus:
     with closing(connect(db_path)) as conn:
-        return alert_status(conn, today, enabled=enabled, max_pings=max_pings)
+        return alert_status(
+            conn,
+            today,
+            enabled=enabled,
+            max_pings=max_pings,
+            test_command_enabled=test_command_enabled,
+        )
 
 
 # --- Paging glue shared by /news recent and /news search ---
@@ -381,6 +389,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             today,
             enabled=cfg.alerts.enabled,
             max_pings=cfg.alerts.max_pings_per_day,
+            test_command_enabled=cfg.alerts.allow_test_command,
         )
         await interaction.followup.send(
             embed=render_status(snap, spend, alerts_status), ephemeral=True
@@ -477,6 +486,12 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
                 return
             await interaction.response.defer(ephemeral=True)
             outcome = await run_test_alert(bot.build_sweep_deps(), code, golden)
+            if outcome is None:
+                # Lost the race between the pre-check above and actually
+                # acquiring the run lock (step 7) -- something else (a
+                # sweep, another test-alert) grabbed it first.
+                await interaction.followup.send(_BUSY_MESSAGE, ephemeral=True)
+                return
             await interaction.followup.send(summarize_test_alert(outcome), ephemeral=True)
 
     return group

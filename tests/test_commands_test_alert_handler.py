@@ -265,6 +265,30 @@ async def test_busy_run_in_progress_gets_the_busy_message(db_path):
     assert interaction.followup.messages == []
 
 
+async def test_run_test_alert_returning_none_gets_the_busy_message(db_path, monkeypatch):
+    # The pre-check (is_run_in_progress()) has a window between checking
+    # and actually calling run_test_alert -- something could grab the lock
+    # in between. run_test_alert itself now shares the lock (step 7) and
+    # returns None on that race, same shape as run_code_sweep; the handler
+    # has to turn that into the same busy message, not crash on None.
+    import newsbot.bot.commands as commands_module
+
+    cfg = _cfg()
+    bot = _FakeBot(db_path)
+    bot.cfg = cfg
+    command = _test_alert_command(cfg, bot)
+    interaction = FakeInteraction(permissions=_admin_permissions(cfg))
+
+    async def _fake_run_test_alert(deps, code, golden):
+        return None
+
+    monkeypatch.setattr(commands_module, "run_test_alert", _fake_run_test_alert)
+
+    await command.callback(interaction, code=VALID_CODE, golden=False)
+
+    assert interaction.followup.messages == [("A run or code check is in progress.", True)]
+
+
 async def test_not_busy_after_lock_released_reaches_the_pipeline(db_path):
     cfg = _cfg()
     bot = _FakeBot(db_path)
