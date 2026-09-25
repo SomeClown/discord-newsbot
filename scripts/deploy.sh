@@ -47,30 +47,7 @@ fi
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 
-# --- 1. refuse a dirty working tree -----------------------------------
-# A routine update should never pull over local edits to tracked files --
-# if something changed docker-compose.yml or scripts/*.sh by hand on the
-# Droplet, that's a signal to go look, not to silently discard or merge it.
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "deploy.sh: working tree has local changes to tracked files -- refusing to pull." >&2
-    echo "  git status --short" >&2
-    git status --short >&2
-    exit 1
-fi
-
-# --- 2. pull the repo ---------------------------------------------------
-echo "deploy.sh: pulling repo (git pull --ff-only)..."
-git pull --ff-only
-
-# --- 3. back up the database before touching the running container -----
-if [ -f data/newsbot.db ]; then
-    echo "deploy.sh: backing up data/newsbot.db..."
-    ./scripts/backup.sh data/newsbot.db data/backups
-else
-    echo "deploy.sh: no database at data/newsbot.db yet -- skipping backup (first deploy)."
-fi
-
-# --- 4. refuse to deploy during the digest window -----------------------
+# --- 1. refuse to deploy during the digest window -----------------------
 # The scheduled digest fires at 09:00 America/Los_Angeles; recreating the
 # container mid-run risks an interrupted post. The Droplet's own clock is
 # UTC (see docs/deploy.md §1), so this is computed in America/Los_Angeles
@@ -87,6 +64,32 @@ if [ "$FORCE" -ne 1 ]; then
         echo "  Use --force to override if you're sure this is safe." >&2
         exit 1
     fi
+fi
+
+# --- 2. refuse a dirty working tree -----------------------------------
+# A routine update should never pull over local edits to tracked files --
+# if something changed docker-compose.yml or scripts/*.sh by hand on the
+# Droplet, that's a signal to go look, not to silently discard or merge it.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "deploy.sh: working tree has local changes to tracked files -- refusing to pull." >&2
+    echo "  git status --short" >&2
+    git status --short >&2
+    exit 1
+fi
+
+# --- 3. pull the repo ---------------------------------------------------
+echo "deploy.sh: pulling repo (git pull --ff-only)..."
+git pull --ff-only
+
+# --- 4. back up the database before touching the running container -----
+if [ -f data/newsbot.db ]; then
+    echo "deploy.sh: backing up data/newsbot.db..."
+    # data/ belongs to the container's uid 10001, not to whoever's running
+    # this script, hence sudo. (The first draft forgot, and would have
+    # failed on the very first upgrade that had a database worth saving.)
+    sudo ./scripts/backup.sh data/newsbot.db data/backups
+else
+    echo "deploy.sh: no database at data/newsbot.db yet -- skipping backup (first deploy)."
 fi
 
 # --- 5. pull the image and recreate the container -----------------------

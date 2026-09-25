@@ -12,5 +12,6 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/newsbot
 ExecStart=/opt/newsbot/scripts/backup.sh data/newsbot.db data/backups
-StandardOutput=append:/opt/newsbot/data/backups/backup.log
-StandardError=append:/opt/newsbot/data/backups/backup.log
+# Output goes to the journal: `journalctl -u newsbot-backup`. (An append:
+# file under data/backups/ fails if that directory doesn't exist yet,
+# because systemd opens it before the script gets a chance to create it.)

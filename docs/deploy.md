@@ -453,7 +453,7 @@ entry has to be written in the host's own UTC time, and re-adjusted by
 hand across DST if you want the backup to stay pinned to 08:30 Pacific:
 
 ```bash
-crontab -e
+sudo crontab -e
 ```
 
 ```cron
@@ -465,10 +465,9 @@ crontab -e
 30 15 * * * cd /opt/newsbot && ./scripts/backup.sh data/newsbot.db data/backups >> data/backups/backup.log 2>&1
 ```
 
-Install as the user that owns `/opt/newsbot`, not root, since the plain
-cron path needs read access to `data/newsbot.db` via the group-read
-workaround in §2 (root doesn't have this restriction, which is one more
-reason the systemd path, running as root, is simpler).
+Install it in **root's** crontab (`sudo crontab -e`, as above): `data/`
+belongs to the container's uid 10001, and root is the simplest user that
+can read it and write `data/backups/`. Same reasoning as the systemd unit.
 
 Off-host copies (DigitalOcean snapshots, `rsync` to elsewhere) are a
 sensible follow-up but explicitly out of scope for v1 -- see
