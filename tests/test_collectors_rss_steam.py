@@ -660,7 +660,10 @@ async def test_steam_collector_parses_fixture():
     assert items[0].published_at == datetime.fromtimestamp(1758000000, tz=UTC)
     assert items[0].trust == "official"
     assert items[0].topics == ("palworld",)
-    assert items[0].full_text == (
+    # The fixture's BBCode renders differently with and without inline
+    # separators, so full_text carries both renderings, one per line (see
+    # text.plain_text). The no-separator rendering always comes first.
+    assert items[0].full_text.split("\n")[0] == (
         "Patch v0.6.2 fixes several crash issues and adds new Pals. See below for the full list."
     )
 

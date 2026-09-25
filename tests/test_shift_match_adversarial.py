@@ -12,8 +12,6 @@ directly.
 
 from __future__ import annotations
 
-import pytest
-
 from newsbot.shift.match import find_codes, mentions_golden_key
 from newsbot.text import plain_text
 
@@ -150,34 +148,11 @@ def test_golden_key_mention_survives_bbcode_stripping():
 # --- real bugs found while writing the above ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "text.plain_text's BBCode stripper (_BBCODE_RE.sub) removes tag "
-        "tokens without inserting a separator, same as its HTML inline-tag "
-        "path (_TextExtractor only newlines on _BLOCK_TAGS). A code "
-        "immediately followed by a non-block tag/BBCode tag and then more "
-        "text with no intervening whitespace gets glued to that text and "
-        "silently disappears from find_codes -- a missed code, not a false "
-        "positive, but exactly the failure mode the sweep can't afford. "
-        "Steam posts routinely wrap a code in [b]...[/b] right before "
-        "another BBCode block (a [list] item, a [quote]) with no space."
-    ),
-)
 def test_bbcode_tag_abutting_following_text_does_not_swallow_the_code():
     text = plain_text(f"[b]{CODE}[/b]Golden Keys!")
     assert find_codes(text) == [CODE]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Same root cause as the BBCode case above, via the HTML path: "
-        "_TextExtractor only inserts a newline around _BLOCK_TAGS, so an "
-        "inline tag like <b> that abuts following text with no whitespace "
-        "glues the code to that text and find_codes misses it entirely."
-    ),
-)
 def test_html_inline_tag_abutting_following_text_does_not_swallow_the_code():
     text = plain_text(f"<b>{CODE}</b>Golden Keys!")
     assert find_codes(text) == [CODE]

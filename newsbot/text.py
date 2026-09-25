@@ -29,17 +29,16 @@ _BBCODE_RE = re.compile(r"\[/?[a-zA-Z*]+(?:=[^\]]*)?\]")
 class _TextExtractor(HTMLParser):
     """Collects the text content of an HTML fragment, one block tag = one newline."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, separate_inline: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self._parts: list[str] = []
+        self._inline_sep = " " if separate_inline else ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self._parts.append("\n")
+        self._parts.append("\n" if tag in _BLOCK_TAGS else self._inline_sep)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS:
-            self._parts.append("\n")
+        self._parts.append("\n" if tag in _BLOCK_TAGS else self._inline_sep)
 
     def handle_data(self, data: str) -> None:
         self._parts.append(data)
@@ -48,12 +47,17 @@ class _TextExtractor(HTMLParser):
         return "".join(self._parts)
 
 
-def _strip_markup(html_or_bbcode: str) -> str:
-    """Strip HTML tags (keeping line breaks) and Steam BBCode tags."""
-    extractor = _TextExtractor()
+def _strip_markup(html_or_bbcode: str, *, separate_inline: bool = False) -> str:
+    """Strip HTML tags (keeping line breaks) and Steam BBCode tags.
+
+    With `separate_inline`, every inline tag becomes a space instead of
+    vanishing, so `[b]CODE[/b]Golden` doesn't weld the code onto the next
+    word. Off by default, because it also turns `<b>BL</b>4` into "BL 4".
+    """
+    extractor = _TextExtractor(separate_inline=separate_inline)
     extractor.feed(html_or_bbcode)
     extractor.close()
-    return _BBCODE_RE.sub("", extractor.text())
+    return _BBCODE_RE.sub(" " if separate_inline else "", extractor.text())
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -66,7 +70,7 @@ def _truncate(value: str, limit: int) -> str:
     return (cut or value[:limit]).rstrip() + "…"
 
 
-def _collapse(html_or_bbcode: str) -> str:
+def _collapse(html_or_bbcode: str, *, separate_inline: bool = False) -> str:
     """Strip HTML/BBCode from `html_or_bbcode` and collapse whitespace to single spaces.
 
     Line breaks carry no meaning once the text is headed into a one-line
@@ -76,7 +80,7 @@ def _collapse(html_or_bbcode: str) -> str:
     Shared by `clean_text` and `plain_text`, which differ only in how much
     of the result they keep.
     """
-    stripped = _strip_markup(html_or_bbcode)
+    stripped = _strip_markup(html_or_bbcode, separate_inline=separate_inline)
     return re.sub(r"\s+", " ", stripped).strip()
 
 
@@ -99,8 +103,21 @@ def plain_text(html_or_bbcode: str, limit: int = 100_000) -> str:
     never actually bind" ceiling, not a real limit; nothing we collect is
     that long, and untruncated text never gets persisted or sent to the
     LLM regardless (see `RawItem.full_text`'s docstring).
+
+    Markup is a trap for the matcher in both directions. Strip tags with
+    no separator and `[b]CODE[/b]Golden Keys` glues the code to "Golden";
+    strip them with a space and `<b>ABCDE</b>-FGHIJ-...` falls apart at
+    the hyphen. Rather than pick which half of the codes to miss, this
+    returns both renderings, one per line, when they differ. Nobody reads
+    `full_text` but the matcher, and the matcher dedupes, so the only cost
+    is a little memory. (test-engineer found the gluing case; I had
+    confidently assumed tags were always followed by whitespace.)
     """
-    return _truncate(_collapse(html_or_bbcode), limit)
+    joined = _collapse(html_or_bbcode)
+    spaced = _collapse(html_or_bbcode, separate_inline=True)
+    if joined == spaced:
+        return _truncate(joined, limit)
+    return _truncate(joined, limit) + "\n" + _truncate(spaced, limit)
 
 
 def first_line(html_or_text: str, limit: int = 120) -> str:
