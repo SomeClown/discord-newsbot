@@ -10,6 +10,13 @@ Droplet. Differences for other distros are called out where they matter
 Droplet turns out to be something else entirely, the Docker and sqlite3
 commands below are the same everywhere -- only the install step changes.
 
+By the time a change reaches this document, it should already have gone
+through the standard release flow -- feature branch, PR, merge to
+`main`, tried against the test guild with the dev bot using the
+published image, then a version tag -- documented in the README's
+[Releasing](../README.md#releasing) section. This document picks up
+from "there's a tag or image I want running on the Droplet."
+
 ## 1. Prerequisites (one-time, on the Droplet)
 
 **Minimum Docker Engine: 20.10.10.** Older versions (19.03, notably --

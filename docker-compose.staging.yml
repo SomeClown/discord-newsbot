@@ -1,0 +1,28 @@
+# Staging overlay: `docker compose -f docker-compose.yml -f
+# docker-compose.staging.yml pull && docker compose -f docker-compose.yml
+# -f docker-compose.staging.yml up -d`. Same dev token, config, and
+# database as docker-compose.dev.yml (test guild, never prod), but pulls
+# the published GHCR image instead of building from the local checkout --
+# this is the "try the actual published image against the test guild
+# before tagging a release" step in the standard workflow (see README's
+# Releasing section and docs/deploy.md).
+#
+# TAG defaults to latest (the newest build off main); set TAG in the
+# shell or in .env.dev if you want to try a specific sha- or release tag
+# instead: `TAG=sha-abc1234 docker compose -f docker-compose.yml -f
+# docker-compose.staging.yml pull`.
+#
+# IMPORTANT -- only ONE instance per bot token may run (see CLAUDE.md).
+# This uses the *dev* bot token from .env.dev. Stop docker-compose.dev.yml
+# (or a local `python -m newsbot` against .env.dev) before bringing this
+# up -- same token, same race as any other dev-vs-dev collision.
+
+services:
+  newsbot:
+    image: ghcr.io/${GHCR_OWNER:-someclown}/discord-newsbot:${TAG:-latest}
+    env_file: .env.dev
+    environment:
+      NEWSBOT_DB: /data/dev.db
+    volumes:
+      - ./config.dev.yaml:/app/config.yaml:ro
+      - ./data:/data

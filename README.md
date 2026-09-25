@@ -144,6 +144,41 @@ Any change to the summarization prompt needs an owner-reviewed
 `/newsbot preview` before it merges — that's the whole point of the preview
 command existing.
 
+### Releasing
+
+The standard path from a change to a running production bot:
+
+1. **Feature branch, PR.** CI (`.github/workflows/ci.yml`) runs the gate
+   (lint, format check, tests) on every push and PR.
+2. **Merge to `main`.** CI publishes `ghcr.io/someclown/discord-newsbot:latest`
+   and a `sha-<short>` tag for that specific build.
+3. **Try the published image against the test guild**, with the dev bot,
+   before trusting it anywhere near prod:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+   ```
+   `docker-compose.staging.yml` is the same dev token/config/database as
+   `docker-compose.dev.yml` (`.env.dev`, `config.dev.yaml`, `data/dev.db`)
+   but pulls the GHCR image instead of building locally — the point is to
+   exercise the exact artifact that would get deployed, not a fresh local
+   build of the same source. Stop `docker-compose.dev.yml` (or a local
+   `python -m newsbot` against `.env.dev`) first; it's still the dev
+   token, so it's still one-instance-per-token (see `CLAUDE.md`), just
+   like running the dev bot any other way. It's unrelated to prod's
+   token, so prod can keep running the whole time regardless.
+4. **Tag a release** once the staging check looks good:
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+   CI additionally publishes semver tags (`1.1.0`, `1.1`) for a tagged
+   push.
+5. **Deploy** with `./scripts/deploy.sh` on the Droplet — see
+   [`docs/deploy.md`](docs/deploy.md). Pin `TAG=1.1.0` in the Droplet's
+   `.env` for a deliberate upgrade; rolling back is changing `TAG` back
+   to the previous value.
+
 ## Configuration
 
 `config.yaml` (git-ignored; `config.example.yaml` is the committed template)
