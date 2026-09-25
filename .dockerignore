@@ -1,0 +1,36 @@
+# Anything here either doesn't belong in the image (secrets, local state,
+# dev tooling caches) or would just bloat it for no benefit (tests, git
+# history). If it wouldn't survive a fresh clone, it doesn't belong here
+# either.
+
+.git
+.github
+
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+build/
+*.egg-info/
+
+# Secrets and local config -- these get bind-mounted or env-file'd in at
+# runtime, never baked into a layer.
+.env
+.env.*
+!.env.example
+config.yaml
+config.dev.yaml
+data/
+
+# Tests aren't needed to run the bot, only to develop it.
+tests/
+
+# Docs and docker artifacts themselves don't need to be inside the image.
+docs/
+README.md
+CLAUDE.md
+Dockerfile
+docker-compose*.yml
+.dockerignore

@@ -1,0 +1,37 @@
+# Production compose file: one service, pulling a pre-built image from
+# GHCR. See docs/deploy.md for the Droplet runbook (pull, up -d, rollback
+# by TAG, log viewing, restore-from-backup).
+#
+# GHCR_OWNER isn't known yet (Checkpoint F: the owner creates the GitHub
+# repo and decides public/private), so it's a variable rather than
+# hardcoded. Set it in the Droplet's .env alongside the secrets, or export
+# it in the shell before `docker compose up`.
+#
+# IMPORTANT -- only ONE instance of this bot may run per Discord bot
+# token, ever (see CLAUDE.md). Both processes would receive every gateway
+# interaction and race for it; the loser logs `Unknown interaction
+# (10062)` and confuses whoever's watching. Do not bring this file up
+# while the local `python -m newsbot` or `docker-compose.dev.yml` is
+# running against the same token, and vice versa.
+
+services:
+  newsbot:
+    image: ghcr.io/${GHCR_OWNER:-owner}/discord-newsbot:${TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NEWSBOT_CONFIG: /app/config.yaml
+      NEWSBOT_DB: /data/newsbot.db
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

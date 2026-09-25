@@ -1,0 +1,30 @@
+# Local dev override: `docker compose -f docker-compose.yml -f
+# docker-compose.dev.yml up --build`. Builds the image from the local
+# checkout instead of pulling from GHCR, and points at the dev bot's
+# token, config and database so it never touches prod data.
+#
+# IMPORTANT -- only ONE instance per bot token may run (see CLAUDE.md).
+# This override uses the *dev* bot token from .env.dev, which must be a
+# different token than whatever's in prod's .env on the Droplet. Even so:
+# never bring this override up at the same time as a local `python -m
+# newsbot` process using the same .env.dev -- that's the same token twice,
+# and it races itself just as badly as dev-vs-prod would.
+
+services:
+  newsbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: discord-newsbot:dev
+    env_file: .env.dev
+    environment:
+      NEWSBOT_DB: /data/dev.db
+    volumes:
+      # Same container target as the base file (/app/config.yaml), just a
+      # different host source -- this replaces the base mount instead of
+      # adding a second one. Mounting an extra target for a config.yaml
+      # that doesn't exist on a dev machine would make Docker silently
+      # create an empty ./config.yaml directory on the host, which is the
+      # kind of "why is there a folder here" mystery nobody needs.
+      - ./config.dev.yaml:/app/config.yaml:ro
+      - ./data:/data
