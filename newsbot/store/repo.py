@@ -431,7 +431,14 @@ def claim_codes(
     `local_day` resets `ping_count` to 0 first if it doesn't match the
     stored `ping_day` (a new day in `cfg.digest.timezone`, not UTC
     midnight -- see A8), then spends one more if `pinged`.
+
+    An empty `codes` is a no-op -- nothing to claim means nothing to spend
+    a ping on either, and a caller that got this far with `pinged=True`
+    but no codes (shouldn't happen, but "shouldn't" isn't "can't") would
+    otherwise burn a slot of today's budget for an alert that never posts.
     """
+    if not codes:
+        return
     now_iso = _resolve_now(now)
     with conn:
         state = get_alert_state(conn)
