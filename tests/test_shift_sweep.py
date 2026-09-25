@@ -22,7 +22,13 @@ from newsbot.config import load_config
 from newsbot.pipeline.lock import _run_lock
 from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import Deps, RunMode, StubLLM, build_fixture_collectors, run_daily
-from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, process_items, run_code_sweep
+from newsbot.shift.sweep import (
+    PrintCodeAlertPoster,
+    SweepDeps,
+    process_items,
+    run_code_sweep,
+    run_test_alert,
+)
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
 
@@ -243,6 +249,68 @@ async def test_non_publish_error_fails_immediately_without_retry(db_path, http_c
     assert _row(db_path, CODE_A)["status"] == "failed"
 
 
+async def test_poster_fails_on_second_of_three_messages_earlier_codes_stay_posted(
+    db_path, http_client
+):
+    # A batch big enough to split into 3 Discord messages (format.py's
+    # own overflow handling); message 1 posts fine, message 2 fails every
+    # retry, message 3 is marked failed without ever being attempted.
+    # The ping (spent once, at claim time, before any message went out)
+    # must stay spent regardless of which message actually carried it.
+    _seed(db_path)
+    items = [
+        _item(f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA", url=f"https://example.com/{'a' * 300}/{i}")
+        for i in range(12)
+    ]
+
+    class _FailsOnSecondPoster:
+        # Fails every attempt (including retries) of the *second distinct*
+        # message content it sees, so message 1 posts once and message 2
+        # exhausts its retries -- a call-count check alone would miss
+        # this, since a retry re-invokes `post()` for the same message.
+        def __init__(self) -> None:
+            self.calls = 0
+            self.sent: list = []
+            self._seen_contents: list[str] = []
+
+        async def post(self, alert):
+            self.calls += 1
+            if alert.content not in self._seen_contents:
+                self._seen_contents.append(alert.content)
+            message_index = self._seen_contents.index(alert.content)
+            if message_index == 1:
+                raise PublishError("second message failed")
+            self.sent.append(alert)
+            return 1000 + self.calls
+
+    poster = _FailsOnSecondPoster()
+    alerts: list[str] = []
+    deps = _deps(db_path, http_client, poster=poster, alerts=alerts)
+    outcome = await process_items(deps, items, seeding_ok=True)
+
+    assert outcome.ping is True
+    assert outcome.posted == 5  # message 1's codes only
+    assert outcome.failed == 7  # message 2's + message 3's codes, message 3 never attempted
+    # message 1's poster call, plus message 2's 1 attempt + 3 retries --
+    # message 3 is marked failed without ever calling the poster again.
+    assert poster.calls == 5
+
+    with closing(connect(db_path)) as conn:
+        statuses = {
+            row["code"]: row["status"]
+            for row in conn.execute("SELECT code, status FROM alerted_codes").fetchall()
+        }
+    posted_codes = [code for code, status in statuses.items() if status == "posted"]
+    failed_codes = [code for code, status in statuses.items() if status == "failed"]
+    assert len(posted_codes) == 5
+    assert len(failed_codes) == 7
+    with closing(connect(db_path)) as conn:
+        # The ping was spent once at claim time (before any message sent)
+        # and stays spent no matter which message failed.
+        assert repo.get_alert_state(conn).ping_count == 1
+    assert any("failed" in a.lower() for a in alerts)
+
+
 async def test_cancelled_error_leaves_code_pending_for_fail_pending_codes(db_path, http_client):
     _seed(db_path)
 
@@ -374,3 +442,115 @@ async def test_daily_hook_is_a_noop_when_no_poster_configured(db_path, http_clie
 class _PrintDigestPublisher:
     async def publish(self, r) -> list[int]:
         return [1]
+
+
+# --- run_test_alert ---
+
+
+async def test_run_test_alert_posts_with_ping_and_counts_against_cap(db_path, http_client):
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    outcome = await run_test_alert(deps, CODE_A, False)
+    assert outcome.posted == 1
+    assert outcome.ping is True
+    assert poster.sent[0].content.startswith("@everyone ")
+    assert "[TEST] " in poster.sent[0].content
+    row = _row(db_path, CODE_A)
+    assert row["status"] == "posted"
+    with closing(connect(db_path)) as conn:
+        # Still counted against the daily cap -- a free test alert
+        # wouldn't actually exercise the cap.
+        assert repo.get_alert_state(conn).ping_count == 1
+
+
+async def test_run_test_alert_does_not_set_the_seeded_marker(db_path, http_client):
+    # A test alert is treated as already seeded (so it always tries to
+    # post) without ever setting the marker itself -- it doesn't get to
+    # vouch for every other code sitting in the feeds.
+    deps = _deps(db_path, http_client)
+    await run_test_alert(deps, CODE_A, False)
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).seeded is False
+
+
+async def test_run_test_alert_with_already_known_code_posts_nothing(db_path, http_client):
+    # The code was already alerted (posted) for real; a test run against
+    # the same code shouldn't re-post it or spend another ping -- known
+    # codes are dropped in plan_alerts regardless of the caller.
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    await process_items(deps, [_item(CODE_A)], seeding_ok=True)
+    assert len(poster.sent) == 1
+    first_ping_count = None
+    with closing(connect(db_path)) as conn:
+        first_ping_count = repo.get_alert_state(conn).ping_count
+
+    outcome = await run_test_alert(deps, CODE_A, False)
+    assert outcome.posted == 0
+    assert outcome.silent == 0
+    assert len(poster.sent) == 1  # no second post
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).ping_count == first_ping_count  # cap untouched
+
+
+async def test_run_test_alert_golden_true_shows_golden_wording(db_path, http_client):
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    await run_test_alert(deps, CODE_A, True)
+    assert "Golden Key" in poster.sent[0].content
+
+
+# --- `--sweep` CLI round trip ---
+
+
+def test_sweep_cli_round_trip_is_idempotent_against_the_same_fixtures(tmp_path):
+    import subprocess
+    import sys
+
+    shift_fixtures = Path(__file__).parent / "fixtures" / "shift"
+    config_path = shift_fixtures / "config.yaml"
+    db_path_cli = str(tmp_path / "sweep_cli.db")
+
+    def _run_sweep_cli() -> subprocess.CompletedProcess:
+        # Every argument is a fixed literal or a path this test built
+        # itself -- nothing here comes from untrusted input.
+        return subprocess.run(  # noqa: S603
+            [
+                sys.executable,
+                "-m",
+                "newsbot.pipeline.run",
+                "--config",
+                str(config_path),
+                "--db",
+                db_path_cli,
+                "--fixtures",
+                str(shift_fixtures),
+                "--sweep",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    first = _run_sweep_cli()
+    assert first.returncode == 0, first.stderr
+
+    with closing(connect(db_path_cli)) as conn:
+        first_rows = conn.execute("SELECT code, status FROM alerted_codes").fetchall()
+        first_state = repo.get_alert_state(conn)
+    assert len(first_rows) == 1
+    assert first_rows[0]["status"] == "seeded"
+    assert first_state.seeded is True  # borderlands4.json's collector set was healthy
+
+    second = _run_sweep_cli()
+    assert second.returncode == 0, second.stderr
+
+    with closing(connect(db_path_cli)) as conn:
+        second_rows = conn.execute("SELECT code, status FROM alerted_codes").fetchall()
+        # Never posted, never pinged: the code was already recorded
+        # `seeded` on the first run, so the second run's identical
+        # fixtures data drops it as already-known rather than re-alerting.
+        assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 1
+        assert repo.get_alert_state(conn).ping_count == 0
+    assert [dict(r) for r in second_rows] == [dict(r) for r in first_rows]

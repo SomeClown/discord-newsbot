@@ -124,6 +124,60 @@ def test_sightings_from_items_drops_items_outside_scoped_topics():
     assert sightings == []
 
 
+def test_sightings_from_items_press_item_not_mentioning_bl4_never_alerts():
+    # A press item with no `topics` pin gets checked against every topic
+    # by keyword; one that never names Borderlands 4 (or an alias) at all
+    # shouldn't count toward the scoped alert topic just because it's a
+    # press item covering games in general.
+    topics = [Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"])]
+    item = _item(
+        title=f"This week in gaming news: a code appeared, {CODE_A}",
+        trust="press",
+        topics=None,
+    )
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert sightings == []
+
+
+def test_sightings_from_items_diablo_item_never_alerts_when_scoped_to_bl4():
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
+        Topic(key="diablo4", name="Diablo IV"),
+    ]
+    item = _item(title=f"Diablo IV season code: {CODE_A}", topics=("diablo4",))
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert sightings == []
+
+
+def test_sightings_from_items_item_matched_to_both_bl4_and_another_topic_still_counts():
+    # An item explicitly pinned to more than one topic isn't a "dedicated"
+    # single-topic source (SPEC-DEV 3's no-keyword-check rule only applies
+    # when `len(item.topics) == 1`), so it goes through the normal
+    # keyword match for each of its candidate topics. As long as it
+    # confidently matches borderlands4 too, it should still count even
+    # though it's also tagged for another topic.
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld"),
+    ]
+    item = _item(
+        title=f"Crossover event: BL4 and Palworld code {CODE_A}",
+        topics=("borderlands4", "palworld"),
+    )
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert [s.code for s in sightings] == [CODE_A]
+
+
+def test_sightings_from_items_dedicated_bl4_source_always_counts():
+    # A dedicated (single-topic) source counts as a confident match with
+    # no keyword check at all -- the flip side of the press-item test
+    # above: this is what "dedicated BL4 sources do alert" means.
+    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    item = _item(title="v1.3 patch notes", excerpt=f"redeem {CODE_A}", topics=("borderlands4",))
+    sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
+    assert [s.code for s in sightings] == [CODE_A]
+
+
 # --- aggregate ---
 
 
@@ -186,6 +240,37 @@ def test_aggregate_ties_break_on_first_seen():
     second = _sighting(source_name="Second", published_at=NOW)
     candidates = aggregate([first, second], now=NOW, max_age=MAX_AGE)
     assert candidates[0].source_name == "First"
+
+
+def test_aggregate_stale_dated_plus_undated_sighting_is_fresh():
+    # One stale, dated sighting and one undated sighting of the same
+    # code: the undated sighting is treated as fresh (no date to judge it
+    # stale by), so the aggregate is fresh even though the only dated
+    # sighting is old.
+    stale_dated = _sighting(source_name="Old", published_at=NOW - timedelta(hours=200))
+    undated = _sighting(source_name="Mystery", published_at=None)
+    candidates = aggregate([stale_dated, undated], now=NOW, max_age=MAX_AGE)
+    assert len(candidates) == 1
+    assert candidates[0].fresh is True
+
+
+def test_aggregate_only_stale_dated_sightings_is_stale():
+    a = _sighting(source_name="Old A", published_at=NOW - timedelta(hours=72))
+    b = _sighting(source_name="Old B", published_at=NOW - timedelta(hours=100))
+    candidates = aggregate([a, b], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].fresh is False
+
+
+def test_aggregate_golden_true_even_if_only_stale_sighting_mentions_it():
+    # `golden` is "any sighting mentions it", independent of `fresh` --
+    # a code that ends up recorded `too_old` (never posted) still carries
+    # the right golden flag in case that judgment ever matters again.
+    stale_golden = _sighting(
+        golden=True, source_name="Old", published_at=NOW - timedelta(hours=200)
+    )
+    candidates = aggregate([stale_golden], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].golden is True
+    assert candidates[0].fresh is False
 
 
 def test_aggregate_deterministic_first_seen_order():

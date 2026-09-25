@@ -172,3 +172,90 @@ def test_split_batch_when_unpinged_never_pings_any_message():
     assert len(rendered) > 1
     assert all(not m.ping for m in rendered)
     assert all("@everyone" not in m.content for m in rendered)
+
+
+# --- adversarial: ping=False must never leave a live "@everyone" ---
+
+
+def test_ping_false_hostile_source_name_never_leaves_live_everyone():
+    # escape_mentions() inserts a zero-width space, so "@everyone" as a
+    # contiguous substring should never survive from a source name, ping
+    # or not.
+    rendered = render_code_alerts([_candidate(source_name="@everyone")], ping=False)
+    assert "@everyone" not in rendered[0].content
+    assert rendered[0].ping is False
+
+
+def test_ping_false_source_name_with_at_here_never_leaves_live_mention():
+    rendered = render_code_alerts([_candidate(source_name="ping @here now")], ping=False)
+    assert "@here" not in rendered[0].content
+
+
+def test_ping_true_url_containing_everyone_text_is_not_escaped():
+    # Documents current behavior rather than asserting a guarantee the
+    # module never made: _safe_link/canonicalize doesn't strip or escape
+    # the literal substring "@everyone" out of a URL's path, unlike
+    # source names (which go through esc()). The real backstop against an
+    # actual ping is AllowedMentions at send time (A5), not this module --
+    # but it does mean the *rendered text* can contain a live-looking
+    # "@everyone" coming from an untrusted URL even when ping=False.
+    hostile_url = "https://example.com/path/@everyone/x"
+    rendered = render_code_alerts([_candidate(item_url=hostile_url)], ping=False)
+    assert "@everyone" in rendered[0].content  # comes from the URL, not the header
+    assert not rendered[0].content.startswith("@everyone")  # header itself never pings
+    assert rendered[0].ping is False
+
+
+# --- code-block injection via source name ---
+
+
+def test_source_name_with_fence_does_not_break_out_of_the_code_block():
+    hostile = "```\nnot a code\n``` @everyone pwned"
+    rendered = render_code_alerts([_candidate(source_name=hostile)], ping=True)
+    content = rendered[0].content
+    # The only unescaped fence pair in the message is the one wrapping the
+    # actual code; a hostile source name's backticks must come through
+    # escaped (backslashed), not as a second live fence.
+    assert content.count("```") == 2
+    assert content.count("@everyone") == 1  # only the header's
+
+
+# --- overflow: exact UTF-16 boundary and an overlong single entry ---
+
+
+def test_batch_at_exactly_the_2000_unit_boundary_does_not_split():
+    # Build one candidate whose rendered message lands on exactly the
+    # 2000 UTF-16-unit content cap, using an astral emoji (2 units each)
+    # in the source name so the boundary math has to get UTF-16 counting
+    # right, not codepoint counting.
+    base_candidate = _candidate(source_name="X")
+    base_len = discord_len(render_code_alerts([base_candidate], ping=True)[0].content)
+    pad_units_needed = 2000 - base_len
+    assert pad_units_needed > 0
+    ascii_pad = "Y" if pad_units_needed % 2 else ""
+    emoji_pad = "\U0001f600" * ((pad_units_needed - len(ascii_pad)) // 2)
+    padded = _candidate(source_name="X" + ascii_pad + emoji_pad)
+    rendered = render_code_alerts([padded], ping=True)
+    assert len(rendered) == 1
+    assert discord_len(rendered[0].content) == 2000
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG: render_code_alerts only splits *between* entries, never "
+        "within one. A single candidate whose own block (long source name "
+        "+ long collected URL) exceeds 2000 UTF-16 units still comes back "
+        "as one RenderedAlert over the cap, which Discord will reject "
+        "outright -- see newsbot/bot/format.py's packing loop in "
+        "render_code_alerts."
+    ),
+)
+def test_single_entry_alone_exceeding_2000_units_is_not_split_further():
+    # A single code's block (long source name + long URL) can, on its
+    # own, exceed the 2000-unit message cap. render_code_alerts only
+    # splits *between* entries, never within one.
+    huge_candidate = _candidate(source_name="S" * 50, item_url="https://example.com/" + "a" * 3000)
+    rendered = render_code_alerts([huge_candidate], ping=True)
+    assert len(rendered) == 1
+    assert discord_len(rendered[0].content) <= 2000
