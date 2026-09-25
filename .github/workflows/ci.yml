@@ -30,21 +30,29 @@ jobs:
 
   build:
     needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Runs on pushes to main (the "latest" rolling tag) and on version
+    # tags (v1.1.0 etc, for pinned releases -- see docs/deploy.md's
+    # rollback section on why prod should pin TAG to a release, not float
+    # on latest).
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - uses: docker/setup-buildx-action@v3
 

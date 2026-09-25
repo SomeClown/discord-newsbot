@@ -217,10 +217,16 @@ BLUESKY_HANDLE=<optional>
 BLUESKY_APP_PASSWORD=<optional>
 ```
 
-`GHCR_OWNER` also needs to be set somewhere `docker compose` can see it --
-either add it to `.env` or `export GHCR_OWNER=someclown` in the shell
-before running compose commands. `docker-compose.prod.yml` defaults it to
-`owner`, which is a placeholder, not a real fallback.
+`docker-compose.prod.yml` defaults `GHCR_OWNER` to `someclown`, so
+there's nothing to set for this repo's own Droplet. It's still a
+variable rather than hardcoded, in case that ever needs to change --
+override it in `.env` or `export GHCR_OWNER=...` in the shell before
+running compose commands if so.
+
+**Pin `TAG` in `.env` for deliberate upgrades** (e.g. `TAG=1.1.0`)
+rather than leaving it unset (which floats on `latest`, the newest build
+off `main`). Pinning makes "what's running" explicit and makes a
+rollback a one-line `.env` edit -- see §8, Rollback, below.
 
 **Never run `docker compose ... config` (or anything else that resolves
 `env_file`) against this real `.env`.** It prints every secret in plain
@@ -232,24 +238,17 @@ learned-the-hard-way; see `CLAUDE.md`.)
 
 ## 5. GHCR image access
 
-Package visibility (public vs. private) isn't decided yet as of this
-writing. Both cases:
+`ghcr.io/someclown/discord-newsbot` is public, so `docker compose pull`
+works with no login on the Droplet -- nothing to do here.
 
-**If the GHCR package is public:** nothing to do. `docker compose pull`
-works with no login.
-
-**If the GHCR package is private:** log in once, from the Droplet, with a
-classic Personal Access Token scoped to `read:packages` (not a fine-grained
-token tied to the wrong repo, and not `write:packages` -- this Droplet only
-ever pulls):
-
-```bash
-docker login ghcr.io -u <your-github-username>
-# paste the PAT when prompted for a password
-```
-
-Docker stores the resulting credential in `~/.docker/config.json` on the
-Droplet. Don't put the PAT in `.env` or any file that gets committed.
+(If that ever changes to a private package, log in once from the
+Droplet with a classic Personal Access Token scoped to `read:packages`
+-- not a fine-grained token tied to the wrong repo, and not
+`write:packages`, since this Droplet only ever pulls: `docker login
+ghcr.io -u <your-github-username>`, then paste the PAT when prompted for
+a password. Docker stores the resulting credential in
+`~/.docker/config.json`; don't put the PAT in `.env` or any file that
+gets committed.)
 
 ## 6. First deploy
 

@@ -3,10 +3,12 @@
 # docker-compose.prod.yml up -d`. See docs/deploy.md for the full Droplet
 # runbook (rollback by TAG, log viewing, restore-from-backup).
 #
-# GHCR_OWNER isn't known yet (Checkpoint F: the owner creates the GitHub
-# repo and decides public/private), so it's a variable rather than
-# hardcoded. Set it in the Droplet's .env alongside the secrets, or export
-# it in the shell before `docker compose up`.
+# GHCR_OWNER defaults to `someclown`, now that the repo (public,
+# github.com/SomeClown/discord-newsbot) and image
+# (ghcr.io/someclown/discord-newsbot, also public) are both settled. It's
+# still a variable, not hardcoded into the image reference, in case that
+# ever needs to change -- override it in the Droplet's .env or the shell
+# if so.
 #
 # `env_file: .env` lives here, not in the base docker-compose.yml -- see
 # that file's comment for why that split matters (it's what stops a
@@ -18,7 +20,7 @@
 
 services:
   newsbot:
-    image: ghcr.io/${GHCR_OWNER:-owner}/discord-newsbot:${TAG:-latest}
+    image: ghcr.io/${GHCR_OWNER:-someclown}/discord-newsbot:${TAG:-latest}
     env_file: .env
     environment:
       NEWSBOT_DB: /data/newsbot.db
