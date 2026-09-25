@@ -244,6 +244,15 @@ sources:
 #   interval_minutes: 60
 #   max_item_age_hours: 48
 #   max_pings_per_day: 3
+#   # Which sources can trigger the @everyone ping (QA item 7 option A) --
+#   # every new code still posts regardless of trust, this only decides
+#   # whether the batch it's in pings. community-only codes always post
+#   # quietly.
+#   ping_trust: [official, press]
+#   # An item naming more than this many distinct codes is a roundup or
+#   # megathread, not a genuine single-code announcement -- its codes are
+#   # recorded silently ('roundup') and never alert (QA item 7).
+#   max_codes_per_item: 5
 #   # WARNING: this registers /newsbot test-alert, which lets any admin
 #   # post a fake code alert (with a real @everyone ping, cap and
 #   # once-per-code guard included) on demand. Meant for the private test

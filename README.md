@@ -86,6 +86,21 @@ take back:
   restricts the sweep to items that match those topics, the same
   confident/dedicated-source rule the digest itself uses — a Diablo IV
   patch note has never once contained a Borderlands SHiFT code.
+- **Who can trigger a ping.** Every new code still posts, but only a code
+  seen from a source whose trust is in `alerts.ping_trust` (default:
+  `official`, `press`) is enough to make its batch carry the `@everyone`.
+  A community-only code (a Reddit thread guessing at one, say) still
+  posts quietly — it just isn't, on its own, the reason a ping fires. A
+  batch mixing trusted and community-only codes pings once and puts the
+  trusted code(s) first in the message. A batch with nothing trusted in
+  it doesn't spend the daily cap either — there was nothing for the cap
+  to actually stop.
+- **Roundups don't alert.** An item naming more than
+  `alerts.max_codes_per_item` (default 5) distinct codes is a roundup or
+  megathread, not a genuine single-code announcement — its codes are
+  recorded silently and never alert. A code that also shows up in a
+  normal, non-roundup item in the same run is judged entirely by that
+  normal item instead.
 
 `/newsbot status` shows the last sweep's time and source summary, how many
 codes have ever posted, and today's ping spend against the cap (plus

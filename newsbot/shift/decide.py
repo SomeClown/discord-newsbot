@@ -31,7 +31,12 @@ _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
 @dataclass(frozen=True)
 class CodeSighting:
-    """One code, as seen in one item. A code mentioned in three items makes three of these."""
+    """One code, as seen in one item. A code mentioned in three items makes three of these.
+
+    `roundup` (owner decision, 2026-09-25) marks a sighting from an item
+    that named more than `cfg.alerts.max_codes_per_item` distinct codes --
+    a roundup or megathread post, not a genuine single-code announcement.
+    """
 
     code: str
     golden: bool
@@ -39,17 +44,30 @@ class CodeSighting:
     item_url: str
     trust: Trust
     published_at: datetime | None
+    roundup: bool = False
 
 
 @dataclass(frozen=True)
 class CodeCandidate:
-    """One code, aggregated across every sighting of it in this batch (`aggregate`)."""
+    """One code, aggregated across every sighting of it in this batch (`aggregate`).
+
+    `trusted` (owner decision, 2026-09-25, QA item 7 option A): whether
+    *any* sighting of this code came from a source whose trust is in
+    `cfg.alerts.ping_trust` -- a community-only code still posts, it just
+    doesn't get to be the reason a batch pings. `roundup` is true only
+    when *every* sighting of this code came from a roundup item (see
+    `CodeSighting.roundup`); a code seen in both a roundup and a normal
+    item is judged entirely by the normal one (`aggregate`), so this is
+    false for it.
+    """
 
     code: str
     golden: bool
     source_name: str
     item_url: str
     fresh: bool
+    trusted: bool = True
+    roundup: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,7 +89,11 @@ class AlertPlan:
 
 
 def sightings_from_items(
-    items: list[RawItem], *, topics: list[Topic], alert_topics: list[str]
+    items: list[RawItem],
+    *,
+    topics: list[Topic],
+    alert_topics: list[str],
+    max_codes_per_item: int = 5,
 ) -> list[CodeSighting]:
     """Every code found in `items`, restricted to `alert_topics` (A6).
 
@@ -86,6 +108,12 @@ def sightings_from_items(
     Borderlands-shaped SHiFT code sitting in an item that only mentioned
     "Gearbox" in passing has no business alerting a server scoped to a
     different Gearbox game.
+
+    An item naming more than `max_codes_per_item` distinct codes is a
+    roundup or megathread, not a genuine single-code announcement --
+    every sighting it produces is marked `roundup=True` (owner decision,
+    2026-09-25); `aggregate` is what actually decides what that means for
+    each code.
     """
     scoped_items = items
     if alert_topics:
@@ -108,6 +136,7 @@ def sightings_from_items(
         if not codes:
             continue
         golden = mentions_golden_key(text)
+        is_roundup = len(codes) > max_codes_per_item
         for code in codes:
             sightings.append(
                 CodeSighting(
@@ -117,6 +146,7 @@ def sightings_from_items(
                     item_url=item.url,
                     trust=item.trust,
                     published_at=item.published_at,
+                    roundup=is_roundup,
                 )
             )
     return sightings
@@ -140,17 +170,33 @@ def _is_fresh(sighting: CodeSighting, now: datetime, max_age: timedelta) -> bool
 
 
 def aggregate(
-    sightings: list[CodeSighting], *, now: datetime, max_age: timedelta
+    sightings: list[CodeSighting],
+    *,
+    now: datetime,
+    max_age: timedelta,
+    ping_trust: tuple[str, ...] = ("official", "press"),
 ) -> list[CodeCandidate]:
     """Collapse every sighting of the same code into one `CodeCandidate`.
 
     A code is `fresh` if *any* sighting of it is fresh (mixed ages -> fresh:
     one fresh mention is enough reason to alert). `golden` is likewise "any
-    sighting mentions it". The shown source is the best-trust, then
-    earliest-dated, then first-seen sighting -- ties keep first-seen order,
-    which is what makes this deterministic across runs of the same input.
-    Candidates come back in first-seen order (by code), matching A3's
-    "announce them in the order they turned up" rule.
+    sighting mentions it". `trusted` is "any sighting's trust is in
+    `ping_trust`" (owner decision, 2026-09-25) -- a code seen only from
+    community sources is never the reason a batch pings, even though it
+    still posts. The shown source is the best-trust, then earliest-dated,
+    then first-seen sighting -- ties keep first-seen order, which is what
+    makes this deterministic across runs of the same input. Candidates
+    come back in first-seen order (by code), matching A3's "announce them
+    in the order they turned up" rule.
+
+    A code with at least one non-`roundup` sighting is judged entirely by
+    those -- every `roundup` sighting of it is ignored outright for
+    `fresh`/`golden`/`trusted`/the shown source, and `CodeCandidate.roundup`
+    comes back `False` (owner decision, 2026-09-25: "a code seen in a
+    roundup and in a normal item is judged by the normal item"). Only a
+    code whose *every* sighting is `roundup` gets `roundup=True`; nothing
+    else on the candidate matters once that's true, since `plan_alerts`
+    never posts one.
     """
     order: list[str] = []
     by_code: dict[str, list[CodeSighting]] = {}
@@ -163,9 +209,12 @@ def aggregate(
     candidates = []
     for code in order:
         group = by_code[code]
-        fresh = any(_is_fresh(s, now, max_age) for s in group)
-        golden = any(s.golden for s in group)
-        best = min(group, key=_sighting_key)
+        normal = [s for s in group if not s.roundup]
+        effective = normal if normal else group
+        fresh = any(_is_fresh(s, now, max_age) for s in effective)
+        golden = any(s.golden for s in effective)
+        trusted = any(s.trust in ping_trust for s in effective)
+        best = min(effective, key=_sighting_key)
         candidates.append(
             CodeCandidate(
                 code=code,
@@ -173,6 +222,8 @@ def aggregate(
                 source_name=best.source_name,
                 item_url=best.item_url,
                 fresh=fresh,
+                trusted=trusted,
+                roundup=not normal,
             )
         )
     return candidates
@@ -215,25 +266,38 @@ def plan_alerts(
     """Turn this batch's candidates into what to record and what to post.
 
     Codes already in `known` (any status, ever) are dropped outright --
-    they're not this function's business anymore. What's left splits on
-    `seeded`:
+    they're not this function's business anymore. A roundup-only code
+    (owner decision, 2026-09-25 -- `CodeCandidate.roundup`) is recorded
+    silently as `"roundup"` regardless of `seeded`, and never reaches the
+    rest of this logic at all: it was never a genuine single-code
+    announcement, so there's nothing to seed, age out, or post. What's
+    left of `new_candidates` splits on `seeded`:
 
     - **Unseeded** (A1): every new code is recorded silently as `"seeded"`,
       nothing posts, and `mark_seeded` becomes `seeding_ok` -- the caller
       only gets to flip the marker on if this batch was healthy.
     - **Seeded**: stale codes (A11) are recorded silently as `"too_old"`
       and never get another chance; fresh codes are queued to post, in
-      first-seen order. One ping covers the whole batch (A4): `ping` is
-      true only if there's something to post and the day's budget isn't
-      spent; `cap_reached` says the budget is what stopped the ping, not
-      "nothing to post" -- a caller uses that to decide whether an admin
-      alert about the cap is warranted.
+      first-seen order with every `trusted` one moved ahead of every
+      untrusted one (still first-seen order within each group) so a
+      pinging batch's first message is guaranteed to carry a trusted
+      code. One ping covers the whole batch (A4), gated on trust (owner
+      decision, 2026-09-25, QA item 7 option A): `ping` is true only if
+      at least one candidate queued to post is `trusted` *and* the day's
+      budget isn't spent -- a batch made entirely of community-only codes
+      still posts every one of them, just never with a ping, and never
+      spends or reports against the cap for it. `cap_reached` says the
+      budget (not "nothing trusted to post") is what stopped the ping --
+      a caller uses that to decide whether an admin alert about the cap
+      is warranted.
     """
     new_candidates = [c for c in candidates if c.code not in known]
+    roundup_silent = [(c, "roundup") for c in new_candidates if c.roundup]
+    new_candidates = [c for c in new_candidates if not c.roundup]
 
     if not seeded:
         return AlertPlan(
-            silent=[(c, "seeded") for c in new_candidates],
+            silent=roundup_silent + [(c, "seeded") for c in new_candidates],
             to_post=[],
             ping=False,
             cap_reached=False,
@@ -242,11 +306,15 @@ def plan_alerts(
 
     stale = [c for c in new_candidates if not c.fresh]
     fresh = [c for c in new_candidates if c.fresh]
-    ping = bool(fresh) and pings_today < max_pings
-    cap_reached = bool(fresh) and not ping
+    # Stable sort: trusted (key False, sorts first) ahead of untrusted
+    # (key True), first-seen order preserved within each group.
+    fresh_ordered = sorted(fresh, key=lambda c: not c.trusted)
+    any_trusted = any(c.trusted for c in fresh_ordered)
+    ping = any_trusted and pings_today < max_pings
+    cap_reached = any_trusted and not ping
     return AlertPlan(
-        silent=[(c, "too_old") for c in stale],
-        to_post=fresh,
+        silent=roundup_silent + [(c, "too_old") for c in stale],
+        to_post=fresh_ordered,
         ping=ping,
         cap_reached=cap_reached,
         mark_seeded=False,

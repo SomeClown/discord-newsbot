@@ -166,7 +166,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `digests` | id, run_date (UNIQUE), status (pending/ok/partial/failed), posted_message_ids (JSON), error_notes, input_tokens, output_tokens, created_at, updated_at |
 | `source_health` | source_name (PK), last_success_at, last_error_at, last_error, consecutive_failures |
 | `stories_fts` | external-content FTS5 table over `stories(headline, summary)`, kept in sync by AFTER INSERT/DELETE/UPDATE triggers |
-| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`) -- added by migration 002 (v1.2, §12) |
+| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25) |
 | `alert_state` | key (PK), value -- a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
@@ -271,6 +271,8 @@ alerts:
   interval_minutes: 60
   max_item_age_hours: 48
   max_pings_per_day: 3
+  ping_trust: ["official", "press"]  # A16, QA item 7 -- who can trigger a ping
+  max_codes_per_item: 5              # A17, QA item 7 -- roundup/megathread threshold
 ```
 
 **Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code.
@@ -289,7 +291,8 @@ code without also reading the plan:
   daily run always assuming it's healthy. Losing the marker silently
   re-seeds (the safe direction: a missed alert, never a flood).
 - **A2 State column:** `alerted_codes.status TEXT CHECK IN ('seeded',
-  'too_old', 'pending', 'posted', 'failed')` -- see §5.
+  'too_old', 'pending', 'posted', 'failed', 'roundup')` -- see §5;
+  `'roundup'` added under QA item 7 (below).
 - **A3 Mixed batch wording:** all-golden batches say "New Golden Key
   code(s)"; a mixed batch keeps "New SHiFT code(s)" with a "Golden Key:"
   prefix on each golden entry.
@@ -349,3 +352,24 @@ message that Discord would reject outright (`bot/format.py`'s
   rule existed) or a hyphenated all-letter phrase essentially never is.
   A genuine all-letter SHiFT code would be missed by this rule -- judged
   vanishingly unlikely against the false-positive rate it closes off.
+- **A16 Trust-gated pings (QA item 7 option A, owner decision,
+  2026-09-25):** a new `alerts.ping_trust` config list (default
+  `["official", "press"]`) decides which sources' sightings can make a
+  batch ping -- not which codes get to post. Every new code in a batch
+  still posts, community-only included; `plan_alerts` only withholds the
+  `@everyone` when *none* of the batch's `to_post` candidates are
+  `trusted` (`decide.aggregate`'s "any sighting's trust is in
+  `ping_trust`"), and in that case the daily ping cap isn't spent and no
+  "cap reached" admin alert fires -- there was nothing the cap actually
+  stopped. Trusted candidates sort ahead of untrusted ones within
+  `to_post` (still first-seen order inside each group), so a pinging
+  batch's first (only ping-bearing) message is guaranteed to carry a
+  trusted code.
+- **A17 Silent roundups (QA item 7, owner decision, 2026-09-25):** a new
+  `alerts.max_codes_per_item` config int (default 5) marks an item naming
+  more distinct codes than that as a roundup or megathread, not a genuine
+  single-code announcement. Every sighting from a roundup item is ignored
+  for a code that also has at least one non-roundup sighting in the same
+  batch ("judged by the normal item"); a code whose *every* sighting is
+  from a roundup item is recorded silently as `'roundup'` (A2) and never
+  reaches the seeded/too_old/post logic at all, regardless of `seeded`.

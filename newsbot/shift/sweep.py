@@ -347,7 +347,10 @@ async def process_items(
     """
     canonical_items = canonicalize_items(items)
     sightings = sightings_from_items(
-        canonical_items, topics=deps.cfg.topics, alert_topics=deps.cfg.alerts.topics
+        canonical_items,
+        topics=deps.cfg.topics,
+        alert_topics=deps.cfg.alerts.topics,
+        max_codes_per_item=deps.cfg.alerts.max_codes_per_item,
     )
     if not sightings:
         if seeding_ok:
@@ -367,7 +370,9 @@ async def process_items(
         return _EMPTY_OUTCOME
 
     max_age = timedelta(hours=deps.cfg.alerts.max_item_age_hours)
-    candidates = aggregate(sightings, now=deps.now(), max_age=max_age)
+    candidates = aggregate(
+        sightings, now=deps.now(), max_age=max_age, ping_trust=tuple(deps.cfg.alerts.ping_trust)
+    )
 
     state, today = await _read_ping_state(deps)
     return await _apply_plan(
@@ -462,7 +467,12 @@ async def run_test_alert(deps: SweepDeps, code: str, golden: bool) -> CodeCheckO
             published_at=deps.now(),
         )
         max_age = timedelta(hours=deps.cfg.alerts.max_item_age_hours)
-        candidates = aggregate([sighting], now=deps.now(), max_age=max_age)
+        candidates = aggregate(
+            [sighting],
+            now=deps.now(),
+            max_age=max_age,
+            ping_trust=tuple(deps.cfg.alerts.ping_trust),
+        )
         _, today = await _read_ping_state(deps)
         return await _apply_plan(
             deps, candidates, seeded=True, seeding_ok=False, today=today, test=True

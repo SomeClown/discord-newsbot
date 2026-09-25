@@ -232,6 +232,16 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
         mark_seeded=True,
     )
 
+    # QA item 7: a roundup-only code recorded 'roundup' must not count
+    # toward codes_alerted either -- /newsbot status stays unaffected by
+    # this feature.
+    repo.record_silent_codes(
+        conn,
+        [("EEEE5-EEEEE-EEEEE-EEEEE-EEEEE", "Src", "https://e/e", "roundup")],
+        now=_now,
+        mark_seeded=False,
+    )
+
     status = repo.alert_status(conn, "2026-09-25", enabled=True, max_pings=3)
     assert status.codes_alerted == 1  # only the posted one
 

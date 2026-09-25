@@ -388,13 +388,15 @@ def record_silent_codes(
 ) -> None:
     """Record codes without posting them: `(code, source_name, item_url, status)`.
 
-    `status` is `'seeded'` (unseeded sweep, A1) or `'too_old'` (A11, a
-    fresh-vs-stale call `shift/decide.py` already made). `ON CONFLICT DO
-    NOTHING` because a code landing here twice across two sweeps should
-    just stay however it was first recorded. `mark_seeded=True` sets the
-    `seeded_at` marker -- but only if it isn't already set, since the
-    marker means "the first sweep after enabling has run", not "the most
-    recent healthy sweep ran".
+    `status` is `'seeded'` (unseeded sweep, A1), `'too_old'` (A11, a
+    fresh-vs-stale call `shift/decide.py` already made), or `'roundup'`
+    (QA item 7, owner decision 2026-09-25: a code whose every sighting
+    came from an item naming more than `max_codes_per_item` distinct
+    codes). `ON CONFLICT DO NOTHING` because a code landing here twice
+    across two sweeps should just stay however it was first recorded.
+    `mark_seeded=True` sets the `seeded_at` marker -- but only if it isn't
+    already set, since the marker means "the first sweep after enabling
+    has run", not "the most recent healthy sweep ran".
     """
     now_iso = _resolve_now(now)
     with conn:

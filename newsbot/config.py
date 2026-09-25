@@ -144,6 +144,17 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # doing nothing most topics ever need. Empty means "every topic",
     # checked against `cfg.topics` keys at load time (see load_config).
     topics: list[str] = []
+    # QA item 7 option A (owner decision, 2026-09-25): trust-gated pings.
+    # A community-only code (a Reddit thread guessing a code, say) still
+    # posts -- codes aren't gatekept by trust, only the @everyone ping is.
+    # A batch pings only if at least one code queued to post came from a
+    # source whose trust is in this list.
+    ping_trust: list[Trust] = ["official", "press"]
+    # QA item 7 (owner decision, 2026-09-25): an item naming more than
+    # this many distinct codes is a roundup/megathread, not a genuine
+    # single-code announcement -- its sightings don't count toward
+    # alerting (shift/decide.py's aggregate/sightings_from_items).
+    max_codes_per_item: int = Field(5, ge=1)
 
 
 class AppConfig(BaseModel):

@@ -383,6 +383,9 @@ def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(m
     assert f"max_item_age_hours: {defaults.max_item_age_hours}" in commented_block
     assert f"max_pings_per_day: {defaults.max_pings_per_day}" in commented_block
     assert f"allow_test_command: {str(defaults.allow_test_command).lower()}" in commented_block
+    ping_trust_yaml = "[" + ", ".join(defaults.ping_trust) + "]"
+    assert f"ping_trust: {ping_trust_yaml}" in commented_block
+    assert f"max_codes_per_item: {defaults.max_codes_per_item}" in commented_block
 
 
 def test_topic_search_queries_default_empty():
@@ -480,6 +483,8 @@ digest:
     assert cfg.alerts.max_item_age_hours == 48
     assert cfg.alerts.max_pings_per_day == 3
     assert cfg.alerts.allow_test_command is False
+    assert cfg.alerts.ping_trust == ["official", "press"]
+    assert cfg.alerts.max_codes_per_item == 5
 
 
 def test_alerts_full_block_parses(tmp_path):
@@ -496,6 +501,8 @@ alerts:
   max_item_age_hours: 24
   max_pings_per_day: 5
   allow_test_command: true
+  ping_trust: [official]
+  max_codes_per_item: 10
 """
     cfg = _load_with(tmp_path, text)
     assert cfg.alerts.enabled is True
@@ -503,6 +510,49 @@ alerts:
     assert cfg.alerts.max_item_age_hours == 24
     assert cfg.alerts.max_pings_per_day == 5
     assert cfg.alerts.allow_test_command is True
+    assert cfg.alerts.ping_trust == ["official"]
+    assert cfg.alerts.max_codes_per_item == 10
+
+
+def test_alerts_max_codes_per_item_must_be_at_least_one(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  max_codes_per_item: 0
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_ping_trust_rejects_unknown_trust_level(tmp_path):
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+{VALID_TAIL}
+alerts:
+  ping_trust: [official, rumor]
+"""
+    with pytest.raises(ConfigError):
+        _load_with(tmp_path, text)
+
+
+def test_alerts_ping_trust_empty_list_is_accepted():
+    # An owner who wants no ping ever, from any source, can set this to
+    # [] directly -- plan_alerts never finds a "trusted" candidate, so
+    # every batch posts without pinging, same as ping_trust never
+    # matching anything. Not the same as max_pings_per_day: 0 (that still
+    # spends nothing either way; this at least documents the intent).
+    from newsbot.config import AlertsCfg
+
+    assert AlertsCfg(ping_trust=[]).ping_trust == []
 
 
 def test_alerts_unknown_key_rejected(tmp_path):

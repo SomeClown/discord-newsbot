@@ -14,7 +14,9 @@ CREATE TABLE alerted_codes (
     item_url TEXT NOT NULL,
     message_id INTEGER,
     pinged INTEGER NOT NULL DEFAULT 0 CHECK (pinged IN (0, 1)),
-    status TEXT NOT NULL CHECK (status IN ('seeded', 'too_old', 'pending', 'posted', 'failed'))
+    status TEXT NOT NULL CHECK (
+        status IN ('seeded', 'too_old', 'pending', 'posted', 'failed', 'roundup')
+    )
 );
 
 CREATE TABLE alert_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);

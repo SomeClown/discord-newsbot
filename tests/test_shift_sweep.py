@@ -83,6 +83,19 @@ def _item(code: str, *, url: str | None = None, published_at=NOW, trust="officia
     )
 
 
+def _multi_code_item(codes: list[str], *, url: str, trust="official") -> RawItem:
+    return RawItem(
+        url=url,
+        title="Weekly SHiFT code roundup",
+        excerpt="",
+        full_text="All this week's codes: " + " ".join(codes),
+        source_name="Roundup Blog",
+        trust=trust,
+        published_at=NOW,
+        topics=None,
+    )
+
+
 class _FakePoster:
     def __init__(self, *, fail_times: int = 0, error_factory=None) -> None:
         self.sent: list = []
@@ -211,6 +224,139 @@ async def test_repeat_code_posts_nothing(db_path, http_client):
     assert outcome.posted == 0
     assert outcome.silent == 0
     assert len(poster.sent) == 1  # only the first call's post
+
+
+# --- trust-gated pings (QA item 7 option A, owner decision 2026-09-25) ---
+
+
+async def test_community_only_code_posts_without_ping_and_without_spending_cap(
+    db_path, http_client
+):
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    outcome = await process_items(deps, [_item(CODE_A, trust="community")], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is False
+    assert outcome.cap_reached is False  # nothing trusted, so nothing "reached" the cap
+    assert len(poster.sent) == 1
+    assert not poster.sent[0].content.startswith("@everyone ")
+    row = _row(db_path, CODE_A)
+    assert row["status"] == "posted"
+    assert row["pinged"] == 0
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).ping_count == 0  # the cap was never spent
+
+
+async def test_trusted_and_community_batch_pings_once(db_path, http_client):
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    items = [_item(CODE_A, trust="community"), _item(CODE_B, trust="official")]
+    outcome = await process_items(deps, items, seeding_ok=True)
+
+    assert outcome.posted == 2
+    assert outcome.ping is True
+    assert len(poster.sent) == 1  # one message, one ping, covering both codes
+    assert poster.sent[0].content.startswith("@everyone ")
+    with closing(connect(db_path)) as conn:
+        assert repo.get_alert_state(conn).ping_count == 1
+
+
+async def test_press_only_batch_pings(db_path, http_client):
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    outcome = await process_items(deps, [_item(CODE_A, trust="press")], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is True
+    assert poster.sent[0].content.startswith("@everyone ")
+
+
+async def test_trusted_candidates_ordered_first_in_the_batch(db_path, http_client):
+    # Community first, official second in collection order -- the
+    # rendered (and posted) batch should still put the trusted one first,
+    # so the one message that carries the ping carries a trusted code.
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    items = [_item(CODE_A, trust="community"), _item(CODE_B, trust="official")]
+    await process_items(deps, items, seeding_ok=True)
+
+    assert poster.sent[0].codes == [CODE_B, CODE_A]
+
+
+# --- silent roundups (QA item 7, owner decision 2026-09-25) ---
+
+
+async def test_roundup_item_with_six_codes_records_all_silently_no_post(db_path, http_client):
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    codes = [CODE_A, CODE_B, CODE_C, CODE_D, CODE_E, "F6666-FFFFF-FFFFF-FFFFF-FFFFF"]
+    item = _multi_code_item(codes, url="https://example.com/roundup")
+    outcome = await process_items(deps, [item], seeding_ok=True)
+
+    assert outcome.posted == 0
+    assert poster.sent == []
+    with closing(connect(db_path)) as conn:
+        rows = {
+            row["code"]: row["status"]
+            for row in conn.execute(
+                "SELECT code, status FROM alerted_codes WHERE code IN ({})".format(  # noqa: S608
+                    ",".join("?" for _ in codes)
+                ),
+                codes,
+            ).fetchall()
+        }
+    assert rows == {code: "roundup" for code in codes}
+
+
+async def test_code_in_roundup_and_dedicated_post_still_alerts_with_ping(db_path, http_client):
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    codes = [CODE_A, CODE_B, CODE_C, CODE_D, CODE_E, "F6666-FFFFF-FFFFF-FFFFF-FFFFF"]
+    roundup = _multi_code_item(codes, url="https://example.com/roundup")
+    dedicated = _item(CODE_A, url="https://example.com/dedicated-post")
+
+    outcome = await process_items(deps, [roundup, dedicated], seeding_ok=True)
+
+    assert outcome.posted == 1
+    assert outcome.ping is True
+    assert poster.sent[0].codes == [CODE_A]
+    row = _row(db_path, CODE_A)
+    assert row["status"] == "posted"
+    assert row["pinged"] == 1
+    # The other five roundup-only codes still recorded silently.
+    with closing(connect(db_path)) as conn:
+        others = [c for c in codes if c != CODE_A]
+        rows = {
+            row["code"]: row["status"]
+            for row in conn.execute(
+                "SELECT code, status FROM alerted_codes WHERE code IN ({})".format(  # noqa: S608
+                    ",".join("?" for _ in others)
+                ),
+                others,
+            ).fetchall()
+        }
+    assert rows == {code: "roundup" for code in others}
+
+
+async def test_roundup_threshold_is_configurable(db_path, http_client):
+    _seed(db_path)
+    cfg = _cfg(max_codes_per_item=10)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster, cfg=cfg)
+    codes = [CODE_A, CODE_B, CODE_C, CODE_D, CODE_E, "F6666-FFFFF-FFFFF-FFFFF-FFFFF"]
+    item = _multi_code_item(codes, url="https://example.com/roundup")
+
+    outcome = await process_items(deps, [item], seeding_ok=True)
+
+    # 6 codes no longer exceeds a raised threshold of 10 -- not a roundup.
+    assert outcome.posted == 6
 
 
 # --- daily ping cap ---

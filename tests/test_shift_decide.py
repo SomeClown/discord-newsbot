@@ -342,6 +342,144 @@ def test_aggregate_deterministic_first_seen_order():
     assert [c.code for c in candidates] == [CODE_B, CODE_A]
 
 
+# --- aggregate: trusted (QA item 7 option A) ---
+
+
+def test_aggregate_community_only_is_not_trusted():
+    candidates = aggregate([_sighting(trust="community")], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].trusted is False
+
+
+def test_aggregate_official_sighting_is_trusted_by_default():
+    candidates = aggregate([_sighting(trust="official")], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].trusted is True
+
+
+def test_aggregate_one_trusted_sighting_among_many_is_enough():
+    community = _sighting(trust="community", source_name="Reddit")
+    official = _sighting(trust="official", source_name="Gearbox")
+    candidates = aggregate([community, official], now=NOW, max_age=MAX_AGE)
+    assert len(candidates) == 1
+    assert candidates[0].trusted is True
+
+
+def test_aggregate_ping_trust_is_configurable():
+    candidates = aggregate(
+        [_sighting(trust="community")], now=NOW, max_age=MAX_AGE, ping_trust=("community",)
+    )
+    assert candidates[0].trusted is True
+
+
+def test_aggregate_empty_ping_trust_never_trusts_anything():
+    candidates = aggregate([_sighting(trust="official")], now=NOW, max_age=MAX_AGE, ping_trust=())
+    assert candidates[0].trusted is False
+
+
+# --- aggregate: roundup (QA item 7) ---
+
+
+def test_aggregate_roundup_only_sighting_is_marked_roundup():
+    candidates = aggregate([_sighting(roundup=True)], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].roundup is True
+
+
+def test_aggregate_normal_sighting_alongside_roundup_is_not_roundup():
+    roundup = _sighting(source_name="Roundup", roundup=True, trust="community")
+    normal = _sighting(source_name="Dedicated", roundup=False, trust="official")
+    candidates = aggregate([roundup, normal], now=NOW, max_age=MAX_AGE)
+    assert len(candidates) == 1
+    assert candidates[0].roundup is False
+    # "Judged by the normal item": the roundup sighting is ignored
+    # outright, not merely outvoted.
+    assert candidates[0].source_name == "Dedicated"
+    assert candidates[0].trusted is True
+
+
+def test_aggregate_roundup_sighting_ignored_for_freshness_when_normal_exists():
+    # The roundup sighting is fresher than the normal one -- "judged by
+    # the normal item" means the roundup sighting doesn't get to make a
+    # stale normal sighting read as fresh.
+    roundup = _sighting(roundup=True, published_at=NOW)
+    stale_normal = _sighting(roundup=False, published_at=NOW - timedelta(hours=200))
+    candidates = aggregate([roundup, stale_normal], now=NOW, max_age=MAX_AGE)
+    assert candidates[0].fresh is False
+
+
+# --- sightings_from_items: roundup marking (QA item 7) ---
+
+
+def test_sightings_from_items_marks_roundup_over_the_threshold():
+    codes = [f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(6)]
+    item = _item(title="Weekly roundup: " + " ".join(codes))
+    sightings = sightings_from_items([item], topics=[], alert_topics=[], max_codes_per_item=5)
+    assert len(sightings) == 6
+    assert all(s.roundup for s in sightings)
+
+
+def test_sightings_from_items_at_the_threshold_is_not_roundup():
+    codes = [f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(5)]
+    item = _item(title="Five codes: " + " ".join(codes))
+    sightings = sightings_from_items([item], topics=[], alert_topics=[], max_codes_per_item=5)
+    assert len(sightings) == 5
+    assert not any(s.roundup for s in sightings)
+
+
+# --- plan_alerts: roundup silent recording (QA item 7) ---
+
+
+def test_plan_alerts_roundup_candidate_recorded_silently_regardless_of_seeded():
+    roundup_candidate = _candidate(roundup=True)
+    plan_unseeded = plan_alerts(
+        [roundup_candidate], known=set(), seeded=False, seeding_ok=True, pings_today=0, max_pings=3
+    )
+    assert plan_unseeded.silent == [(roundup_candidate, "roundup")]
+    assert plan_unseeded.to_post == []
+
+    plan_seeded = plan_alerts(
+        [roundup_candidate], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
+    )
+    assert plan_seeded.silent == [(roundup_candidate, "roundup")]
+    assert plan_seeded.to_post == []
+    assert plan_seeded.ping is False
+
+
+# --- plan_alerts: trust-gated pings (QA item 7 option A) ---
+
+
+def test_plan_alerts_no_trusted_candidates_posts_without_ping_no_cap_reached():
+    community = _candidate(trusted=False)
+    plan = plan_alerts(
+        [community], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
+    )
+    assert plan.to_post == [community]
+    assert plan.ping is False
+    assert plan.cap_reached is False
+
+
+def test_plan_alerts_trusted_candidate_orders_first():
+    community = _candidate(code=CODE_A, trusted=False)
+    official = _candidate(code=CODE_B, trusted=True)
+    plan = plan_alerts(
+        [community, official],
+        known=set(),
+        seeded=True,
+        seeding_ok=True,
+        pings_today=0,
+        max_pings=3,
+    )
+    assert [c.code for c in plan.to_post] == [CODE_B, CODE_A]
+    assert plan.ping is True
+
+
+def test_plan_alerts_trusted_cap_reached_still_reported():
+    official = _candidate(trusted=True)
+    plan = plan_alerts(
+        [official], known=set(), seeded=True, seeding_ok=True, pings_today=3, max_pings=3
+    )
+    assert plan.ping is False
+    assert plan.cap_reached is True
+
+
 # --- seeding_healthy ---
 
 
