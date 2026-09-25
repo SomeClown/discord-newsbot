@@ -37,16 +37,31 @@ def is_run_in_progress() -> bool:
 
 @asynccontextmanager
 async def run_lock_or_skip() -> AsyncIterator[bool]:
-    """Acquire `_run_lock` without waiting, or say no.
+    """Acquire `_run_lock`, skipping instead of queuing up behind a long wait -- almost always.
 
-    Yields `True` (lock held) if it was free, or `False` (lock untouched)
-    if something else already had it -- a sweep uses this to skip its turn
-    entirely rather than queue up behind a digest run that could still be
-    going when the *next* sweep interval arrives too. The check-then-
-    acquire has no `await` between them, so nothing else on this event
-    loop can slip in and grab the lock in between; `asyncio.Lock.acquire`
-    only actually suspends when it has to wait, and this path only calls
-    it when it won't.
+    Yields `True` (lock held) if it looked free, or `False` (lock
+    untouched) if something else already had it -- a sweep uses this to
+    skip its turn entirely rather than queue up behind a digest run that
+    could still be going when the *next* sweep interval arrives too.
+
+    This is *not* a strict, always-non-blocking try-acquire, and it's
+    worth being honest about that rather than claiming otherwise:
+    `asyncio.Lock` is a fair lock, granting access to queued waiters in
+    FIFO order, and `.locked()` can read `False` for a moment after
+    `release()` while an already-queued waiter hasn't yet resumed and
+    re-locked it (`release()` flips the internal flag synchronously; the
+    woken waiter's own coroutine resumes on a later iteration of the
+    event loop). If this function's own `.locked()` check happens to land
+    in exactly that window, `_run_lock.acquire()` below still takes the
+    fast path only when *no* waiter is already queued -- otherwise it
+    waits its turn behind that waiter, same as any other `acquire()`
+    would. In practice that's a handful of event-loop iterations, not a
+    multi-minute digest run, so it doesn't change the shape of what this
+    function is for; it just means "no waiting, ever" was never quite
+    true, and reaching into `asyncio.Lock`'s private `_waiters` to make
+    it true would trade an honest, rare, sub-millisecond wait for a
+    dependency on an implementation detail this module doesn't otherwise
+    need.
     """
     if _run_lock.locked():
         yield False
