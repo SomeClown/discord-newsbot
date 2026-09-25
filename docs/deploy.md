@@ -694,3 +694,128 @@ Rolling this back out is just `alerts.enabled: false` (or removing the
 `alerts:` block entirely) and redeploying -- migration 002 stays applied
 (it's additive and harmless either way; see §8, Rollback, above), the
 sweep simply stops running.
+
+## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04)
+
+Ubuntu 20.04 left standard support in May 2025, and this Droplet is still
+on it, so it's getting fewer security fixes every month. Ubuntu only
+upgrades one LTS at a time, so this is two rounds: 20.04 → 22.04, then
+22.04 → 24.04. Budget two to three hours, most of it watching progress
+bars and answering the occasional prompt.
+
+The bot runs entirely in Docker, so the host OS mostly doesn't matter to
+it. The two things the upgrade *does* break are the ones that bit us last
+time: the upgrader switches off third-party apt repositories (Docker's
+included), and it can take Docker down with it until they're back.
+
+**When:** start well after 09:15 Pacific. If the bot is down at 09:00,
+it catches up and posts the digest when it comes back; SHiFT codes that
+appear while it's down are picked up by the first sweep afterward, as long
+as their posts are under 48 hours old.
+
+### Before you start
+
+1. **Snapshot the Droplet** in the DigitalOcean control panel
+   (Droplet → Backups & Snapshots → Take Snapshot). This is the whole
+   rollback plan, so wait for it to finish.
+2. **Take a fresh database backup and stop the bot:**
+
+   ```bash
+   cd /opt/newsbot
+   sudo ./scripts/backup.sh data/newsbot.db data/backups
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+   sudo systemctl stop newsbot-backup.timer
+   ```
+
+3. **Bring 20.04 fully up to date** (the release upgrader refuses to run
+   otherwise), and reboot if it asks:
+
+   ```bash
+   sudo apt update && sudo apt full-upgrade -y
+   [ -f /var/run/reboot-required ] && sudo reboot
+   ```
+
+4. Check `/etc/update-manager/release-upgrades` says `Prompt=lts`.
+
+### Round 1: 20.04 → 22.04
+
+```bash
+sudo do-release-upgrade
+```
+
+- It runs inside `screen` and opens a spare SSH daemon on port 1022, in
+  case your connection drops. If it does drop, SSH back in and run
+  `sudo screen -r` to reattach. (If the Droplet's firewall blocks 1022,
+  that backup door won't open; the `screen` reattach still works.)
+- When it asks about modified config files, **keep your current version**
+  (the default, `N`) unless you know you want the new one.
+- It will say third-party sources (Docker, and the old `azure-cli` and
+  WireGuard PPA entries) are disabled. That's expected; we re-add Docker
+  below and don't need the others.
+- When it offers to remove obsolete packages, skim the list; saying yes is
+  normally fine. The old Python `docker-compose` 1.x may go, and we don't
+  use it.
+- Let it reboot at the end, then SSH back in and confirm:
+
+  ```bash
+  lsb_release -ds    # Ubuntu 22.04.x LTS
+  ```
+
+**Re-add Docker's repository.** This line reads the release name from the
+OS, so the same command works after both rounds:
+
+```bash
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+(The key at `/etc/apt/keyrings/docker.asc` survives the upgrade. If apt
+complains about it, re-run the two `curl`/`chmod` lines from §1.)
+
+Check Docker, compose, and the thread test from §1 (the `clone3` problem
+that made us upgrade Docker in the first place):
+
+```bash
+docker version --format 'client {{.Client.Version}} / server {{.Server.Version}}'
+docker compose version
+docker run --rm python:3.14-slim python -c "import threading; t = threading.Thread(target=lambda: None); t.start(); t.join(); print('threads ok')"
+```
+
+### Round 2: 22.04 → 24.04
+
+Same routine, one release further:
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+[ -f /var/run/reboot-required ] && sudo reboot
+sudo do-release-upgrade
+```
+
+Same answers as round 1. After the reboot, `lsb_release -ds` should say
+24.04, and you re-run the same Docker repository block and the same three
+checks.
+
+### Bring the bot back
+
+```bash
+sudo systemctl enable --now newsbot-backup.timer
+systemctl list-timers newsbot-backup.timer --no-pager
+cd /opt/newsbot && ./scripts/deploy.sh
+```
+
+`deploy.sh` pulls the pinned image, starts the container, and waits for
+healthy. Then, in Discord, `/newsbot status` should show the scheduler
+alive and sources healthy; if it's past 09:00 Pacific and today's digest
+hadn't posted yet, it posts within a couple of minutes.
+
+`sqlite3` and the systemd unit files live outside the upgrade's blast
+radius and should still be there; if `sqlite3` somehow went missing,
+`sudo apt install -y sqlite3`.
+
+### If it goes wrong
+
+Restore the snapshot from the control panel, which puts the Droplet back
+exactly as it was before round 1, bot and all. Then `./scripts/deploy.sh`
+and carry on with your day, having learned something about Ubuntu that you
+will forget by the next upgrade.
