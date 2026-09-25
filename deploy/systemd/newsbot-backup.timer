@@ -1,0 +1,17 @@
+[Unit]
+Description=Run discord-newsbot's backup nightly, before the 09:00 digest
+
+[Timer]
+# 08:30 America/Los_Angeles, in America/Los_Angeles terms, regardless of
+# DST or the host's own timezone (the Droplet's clock is UTC -- see
+# docs/deploy.md's Prerequisites and Backups sections). systemd has
+# supported a timezone suffix on OnCalendar since v235; Ubuntu 20.04
+# focal ships systemd 245, so this works out of the box. Vixie cron (what
+# Ubuntu actually ships) has no equivalent -- that's why this timer is the
+# recommended path and the crontab line in docs/deploy.md is only a
+# fallback with a manual DST-adjustment caveat.
+OnCalendar=*-*-* 08:30:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

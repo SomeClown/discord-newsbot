@@ -1,0 +1,16 @@
+[Unit]
+Description=discord-newsbot: back up data/newsbot.db
+# Not "wants=newsbot's container"; sqlite3's .backup is online-safe (see
+# scripts/backup.sh), so this runs whether or not the bot container is up.
+ConditionPathExists=/opt/newsbot/data/newsbot.db
+
+[Service]
+Type=oneshot
+# data/ is owned by uid 10001 (the container's fixed uid -- see
+# docs/deploy.md). Running this unit as root sidesteps the permission
+# mismatch instead of fighting it with a second uid/group on the host.
+User=root
+WorkingDirectory=/opt/newsbot
+ExecStart=/opt/newsbot/scripts/backup.sh data/newsbot.db data/backups
+StandardOutput=append:/opt/newsbot/data/backups/backup.log
+StandardError=append:/opt/newsbot/data/backups/backup.log

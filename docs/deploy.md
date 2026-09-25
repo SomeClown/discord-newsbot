@@ -12,6 +12,12 @@ commands below are the same everywhere -- only the install step changes.
 
 ## 1. Prerequisites (one-time, on the Droplet)
 
+**Minimum Docker Engine: 20.10.10.** Older versions (19.03, notably --
+what shipped on this Droplet before its 2026-09-25 upgrade) predate a
+`clone3`/seccomp fix; without it, `python:3.14-slim`'s threading breaks
+in ways that look like a Python bug and aren't. If `docker version`
+reports anything older, upgrade before doing anything else below.
+
 Docker Engine plus the compose plugin (not the old standalone
 `docker-compose` binary -- this repo uses `docker compose`, two words):
 
@@ -26,7 +32,23 @@ Verify:
 
 ```bash
 docker compose version   # should print a v2.x version
+docker version --format '{{.Server.Version}}'   # should be >= 20.10.10
 ```
+
+**If a distro upgrade (or anything else) disabled Docker's apt repo,**
+re-add it before `apt upgrade` will find newer Docker packages:
+
+```bash
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+```
+
+Substitute the right codename for `$(lsb_release -cs)` if it's not
+detecting correctly (this Droplet is `focal`).
 
 `sqlite3` for the backup script:
 
@@ -36,32 +58,54 @@ sudo apt install -y sqlite3
 
 (Other distros: `dnf install sqlite`, `apk add sqlite`, etc. -- same idea.)
 
+**A note on the OS itself:** Ubuntu 20.04 (focal) left standard support
+in mid-2025 and is now on paid Extended Security Maintenance only.
+Nothing in this runbook requires an OS upgrade today, but planning one
+(to 22.04 or 24.04) is recommended as a separate, deliberate piece of
+work -- not bundled into a routine bot deploy.
+
+**The server's clock runs in UTC**, not America/Los_Angeles. This
+matters wherever a time-of-day schedule gets translated to a cron or
+timer expression below (see Backups, §9, and the deploy-window check in
+`scripts/deploy.sh`) -- `config.yaml`'s digest time is independent of
+the host clock (the bot converts it itself), but anything driven by the
+host's own scheduler is not.
+
 ## 2. Directory layout
 
-Everything lives under `/opt/newsbot`:
+`/opt/newsbot` **is a clone of this repo.** That's deliberate, not
+incidental: it means a routine update is `git pull` plus `docker compose
+pull && up -d` (see `scripts/deploy.sh`), with no separate step to keep
+`docker-compose.yml`/`docker-compose.prod.yml` in sync by hand, and no
+risk of drift between what's on the Droplet and what's in git.
 
 ```
-/opt/newsbot/
-├── docker-compose.yml        # copied from the repo, unmodified
-├── docker-compose.prod.yml   # copied from the repo, unmodified
-├── config.yaml                # real config -- not in git, not the example
-├── .env                       # real secrets -- not in git, chmod 600
-└── data/
-    ├── newsbot.db              # created by the container on first run
-    └── backups/                # created by scripts/backup.sh
+/opt/newsbot/                  # git clone of github.com/SomeClown/discord-newsbot
+├── docker-compose.yml         # tracked -- updated by `git pull`
+├── docker-compose.prod.yml    # tracked -- updated by `git pull`
+├── scripts/                   # tracked -- deploy.sh, backup.sh
+├── config.yaml                 # gitignored -- real config, not the example
+├── .env                        # gitignored -- real secrets, chmod 600
+└── data/                        # gitignored
+    ├── newsbot.db                # created by the container on first run
+    └── backups/                  # created by scripts/backup.sh
 ```
+
+`config.yaml`, `.env`, and `data/` are all covered by the repo's
+`.gitignore` (`config.yaml`, `.env*`, `data/`). That's what makes this
+safe: `git pull` only ever fast-forwards tracked files, and none of the
+three paths above are tracked, so a pull can neither overwrite nor
+delete them. (`git status` inside `/opt/newsbot` after any pull is a
+good habit anyway -- it should only ever show those three as untracked,
+never as modified-and-about-to-be-lost.)
 
 ```bash
-sudo mkdir -p /opt/newsbot/data
-sudo chown -R "$USER":"$USER" /opt/newsbot
+sudo mkdir -p /opt/newsbot
+sudo chown "$USER":"$USER" /opt/newsbot
+git clone https://github.com/SomeClown/discord-newsbot.git /opt/newsbot
 cd /opt/newsbot
+mkdir -p data
 ```
-
-Copy `docker-compose.yml` and `docker-compose.prod.yml` from the repo (a
-`git clone` into a scratch directory and `cp` is fine -- the Droplet
-doesn't need the full checkout, just those two files. `scripts/backup.sh`
-and `scripts/deploy.sh` are handy to have here too, so either copy them in
-or clone the repo properly if you'd rather not hand-copy files).
 
 **The container runs as uid 10001** (fixed in the `Dockerfile`, not "the
 next free uid," specifically so this step keeps working across rebuilds):
@@ -72,6 +116,44 @@ sudo chown -R 10001:10001 /opt/newsbot/data
 
 If you skip this, the first write to `/data` inside the container fails
 and the bot never gets past startup.
+
+`scripts/backup.sh` runs on the host (not in the container) and needs
+read access to `data/newsbot.db`, which is now owned by uid 10001, not
+your login user. Two ways to make that work, in order of how this
+runbook actually uses them:
+
+- **Run the backup as root** -- this is what the systemd service in §9
+  does (`User=root`), and it's the simplest option since root can always
+  read the file regardless of ownership.
+- **Or add yourself to a group that can read `data/`** if you want to
+  run `scripts/backup.sh` by hand without `sudo`: `sudo chown -R
+  10001:"$USER" data && chmod -R g+r data` gives your login group read
+  access without changing the uid the container writes as. Not required
+  if you're only ever running the backup via the systemd timer.
+
+### Migrating today's hand-copied `/opt/newsbot`
+
+As of 2026-09-25, `/opt/newsbot` on the Droplet exists with files
+copied in by hand, not a clone -- and no `config.yaml`/`.env`/`data/`
+have been created yet (this Droplet hasn't done its first deploy). That
+makes the fix a clean swap, not a merge:
+
+```bash
+sudo mv /opt/newsbot /opt/newsbot.pre-clone-2026-09-25
+sudo mkdir -p /opt/newsbot
+sudo chown "$USER":"$USER" /opt/newsbot
+git clone https://github.com/SomeClown/discord-newsbot.git /opt/newsbot
+cd /opt/newsbot
+mkdir -p data
+sudo chown -R 10001:10001 data
+```
+
+Then continue at §3 below (create the prod Discord app) as if this were
+a first deploy, because it is one -- nothing in the old directory needs
+to be carried forward. Once `/opt/newsbot` is confirmed working, `sudo
+rm -rf /opt/newsbot.pre-clone-2026-09-25` cleans up the old copy (leave
+it in place until then, in case something in the hand-copied version
+turns out to matter that this note missed).
 
 ### A file, not a directory
 
@@ -177,6 +259,10 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
+(`scripts/deploy.sh` also works here -- it'll print "no database yet,
+skipping backup" and continue, since there's nothing to back up on a
+first deploy.)
+
 Check it came up healthy:
 
 ```bash
@@ -194,7 +280,7 @@ Then, per plan Checkpoint H:
    without posting or recording anything.
 2. Run `/newsbot status` -- confirms source health and that the scheduler
    is running.
-3. Install the backup cron (§9 below).
+3. Install the backup timer (§9 below).
 4. The following morning, confirm the digest posted at 09:00
    America/Los_Angeles and that a backup file exists under
    `data/backups/`.
@@ -206,10 +292,38 @@ are the source of truth.
 
 ## 7. Routine updates
 
-Same two commands as first deploy (or `./scripts/deploy.sh`):
+```bash
+cd /opt/newsbot
+./scripts/deploy.sh
+```
+
+`scripts/deploy.sh` is the source of truth for a routine update now (not
+just a convenience wrapper around it, as it was before `/opt/newsbot`
+became a clone). In order, it:
+
+1. Refuses to run if the working tree has local changes to tracked
+   files (`git status --porcelain` isn't clean) -- a routine update
+   should never silently discard or merge over something someone edited
+   by hand on the Droplet.
+2. `git pull --ff-only` -- fails loudly on a diverged history rather
+   than creating a merge commit no one asked for.
+3. Runs `scripts/backup.sh` before touching the running container (skips
+   gracefully with a message if there's no database yet).
+4. Refuses to run between 09:00 and 09:15 America/Los_Angeles, computed
+   from the host's UTC clock (`TAG=... ./scripts/deploy.sh --force`
+   overrides this, for the rare case where you're certain it's safe --
+   e.g. confirmed today's digest already posted).
+5. `docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+   && up -d`, honoring `TAG` from `.env` or the environment.
+6. Waits for the container to report `healthy` (up to ~3 minutes) and
+   prints `ps` plus the last log lines.
+
+Equivalent by hand, if you want to see each step:
 
 ```bash
 cd /opt/newsbot
+git pull --ff-only
+./scripts/backup.sh
 docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail 50
@@ -218,7 +332,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail 50
 **Don't deploy between 09:00 and roughly 09:15 America/Los_Angeles.** The
 scheduled digest fires at 09:00; recreating the container in the middle of
 a run risks an interrupted post. Everything before 09:00 or after about
-09:15 is fine.
+09:15 is fine. `scripts/deploy.sh` enforces this itself (see above); doing
+it by hand, just check a clock.
 
 **Never test against prod with the dev token, or vice versa.** If you need
 to poke at the prod deployment by hand (e.g. testing a permission change),
@@ -241,19 +356,37 @@ short-lived.
 
 ## 8. Rollback
 
-Every image is tagged both `latest` and `sha-<short>` (see
-`.github/workflows/ci.yml`). To roll back to a known-good build:
+Every image is tagged `latest` (main branch), `sha-<short>` (every
+build), and, for tagged releases, semver (`1.1.0`, `1.1`) -- see
+`.github/workflows/ci.yml`. **The recommended way to run prod is to pin
+`TAG` to a specific release in `.env`** (e.g. `TAG=1.1.0`), not to float
+on `latest` -- that makes both "what's actually running" and "how do I
+undo this" a one-line answer:
 
 ```bash
 cd /opt/newsbot
+# edit .env: change TAG=1.1.0 to TAG=1.0.4 (the last known-good release)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+`scripts/deploy.sh --rollback <tag>` is a small convenience for the same
+thing: it sets `TAG` for that one run and reminds you to persist the
+change in `.env` yourself (it doesn't edit `.env` for you -- that file's
+contents shouldn't change from a script running unattended).
+
+If `.env` doesn't pin `TAG` at all, `docker-compose.prod.yml` defaults it
+to `latest`, and a one-off rollback works the same way with a `sha-`
+value:
+
+```bash
 TAG=sha-abc1234 docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
 TAG=sha-abc1234 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 Find the short sha from GitHub Actions' build logs or `git log --oneline`
-on `main`. `docker-compose.prod.yml` defaults `TAG` to `latest` when unset,
-so a plain `up -d` afterward goes back to the newest image -- no separate
-"undo the rollback" step needed, just redeploy without `TAG` set.
+on `main`; find a release's semver tag from GitHub's Releases page or
+`git tag`.
 
 If a rollback is needed because of bad data (not just bad code), see §10,
 Restore from backup, below -- rolling back the image doesn't undo anything
@@ -265,25 +398,71 @@ already written to the database.
 (safe to run against a live WAL-mode database -- unlike `cp`, it won't
 catch the file mid-write) and keeps the 7 newest, deleting older ones.
 
-Install the cron job (as the user that owns `/opt/newsbot`, not root,
-since the script just needs read access to `data/newsbot.db`):
+The Droplet's clock is UTC, but the schedule we care about ("08:30
+America/Los_Angeles, before the 09:00 digest") is expressed in wall-clock
+Pacific time, which shifts against UTC across DST. There are two ways to
+run it; **the systemd timer is the recommended one**, because it
+understands `America/Los_Angeles` natively and handles the DST shift
+without anyone touching the schedule twice a year.
+
+### Recommended: systemd timer
+
+Unit files live in the repo at `deploy/systemd/`. Install them:
+
+```bash
+sudo cp /opt/newsbot/deploy/systemd/newsbot-backup.service \
+        /opt/newsbot/deploy/systemd/newsbot-backup.timer \
+        /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now newsbot-backup.timer
+```
+
+Verify:
+
+```bash
+systemctl list-timers newsbot-backup.timer
+sudo systemctl start newsbot-backup.service   # run it once by hand
+journalctl -u newsbot-backup.service --since today
+```
+
+`newsbot-backup.timer` fires at `OnCalendar=*-*-* 08:30:00
+America/Los_Angeles` -- systemd resolves that to the correct UTC instant
+itself, DST included, because it evaluates the calendar expression in the
+named zone rather than the host's. systemd has supported the trailing
+timezone on `OnCalendar` since v235; Ubuntu 20.04 (focal) ships systemd
+245, so no extra setup is needed. `newsbot-backup.service` runs as root
+(see §2 on why, and the unit file's own comment), so it doesn't need the
+uid-10001 permission workaround that running the script as your login
+user would.
+
+If `/opt/newsbot` moves or the unit files change, re-run the `cp` and
+`daemon-reload` steps above -- systemd doesn't watch the source files in
+the repo, only its own copies under `/etc/systemd/system/`.
+
+### Fallback: cron
+
+Ubuntu's cron is Vixie cron, which has **no `CRON_TZ` support** (that's
+a cronie/Debian-cron feature this Droplet doesn't have) -- so a crontab
+entry has to be written in the host's own UTC time, and re-adjusted by
+hand across DST if you want the backup to stay pinned to 08:30 Pacific:
 
 ```bash
 crontab -e
 ```
 
-Add:
-
 ```cron
-# Nightly newsbot backup, 08:30 local time -- before the 09:00 digest,
-# so a mid-run crash never lands between "last backup" and "today's data."
-30 8 * * * cd /opt/newsbot && ./scripts/backup.sh data/newsbot.db data/backups >> data/backups/backup.log 2>&1
+# 08:30 America/Los_Angeles == 15:30 UTC during PDT (roughly
+# mid-March to early November) or 16:30 UTC during PST. This host's
+# clock is UTC -- see docs/deploy.md §1. Update the hour by hand at
+# each DST transition, or use the systemd timer instead (§9 above),
+# which does this automatically.
+30 15 * * * cd /opt/newsbot && ./scripts/backup.sh data/newsbot.db data/backups >> data/backups/backup.log 2>&1
 ```
 
-(Adjust the schedule time to the Droplet's own system timezone, which may
-not be America/Los_Angeles -- check with `timedatectl` or `date`. The
-digest time in `config.yaml` is independent of the host's timezone; the
-backup cron's time is not.)
+Install as the user that owns `/opt/newsbot`, not root, since the plain
+cron path needs read access to `data/newsbot.db` via the group-read
+workaround in §2 (root doesn't have this restriction, which is one more
+reason the systemd path, running as root, is simpler).
 
 Off-host copies (DigitalOcean snapshots, `rsync` to elsewhere) are a
 sensible follow-up but explicitly out of scope for v1 -- see
