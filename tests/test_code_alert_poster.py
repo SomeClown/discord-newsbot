@@ -122,6 +122,29 @@ async def test_post_with_ping_uses_ping_everyone_mentions():
     assert channel.sent[0][1].to_dict() == {"parse": ["everyone"]}
 
 
+async def test_literal_everyone_text_in_content_cannot_ping_when_ping_false():
+    # The content string itself can contain the literal text "@everyone"
+    # (e.g. baked into a collected URL's path by a hostile or just weird
+    # source, since `render_code_alerts` never scrubs URLs the way `esc()`
+    # scrubs headline text) -- Discord only turns that into a real mention
+    # if `allowed_mentions` says so. With ping=False, this must go out
+    # with AllowedMentions.none() regardless of what the text contains.
+    channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=True)
+    client = FakeClient(channel)
+    poster = DiscordCodeAlertPoster(client, channel_id=1)
+    alert = RenderedAlert(
+        content="**New SHiFT code**\n```\nAAAAA-AAAAA-AAAAA-AAAAA-AAAAA\n```\n"
+        "Some Source · <https://example.com/@everyone/path>",
+        codes=["AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"],
+        ping=False,
+    )
+
+    await poster.post(alert)
+
+    assert "@everyone" in channel.sent[0][0]  # the text is there...
+    assert channel.sent[0][1].to_dict() == discord.AllowedMentions.none().to_dict()  # ...but inert
+
+
 async def test_post_without_ping_uses_none_mentions():
     channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=True)
     client = FakeClient(channel)

@@ -444,7 +444,9 @@ def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
     return f"New SHiFT code{suffix}"
 
 
-def _alert_block(candidate: CodeCandidate, *, golden_prefix: bool) -> str:
+def _alert_block(
+    candidate: CodeCandidate, *, golden_prefix: bool, max_len: int | None = None
+) -> str:
     # Checked, not just trusted: this is the one place a code goes out to
     # Discord, and a code that somehow isn't shaped like a code (a bug
     # upstream, not a real scenario) is worth a loud failure here rather
@@ -453,9 +455,33 @@ def _alert_block(candidate: CodeCandidate, *, golden_prefix: bool) -> str:
     if not is_code(candidate.code):
         raise ValueError(f"not a SHiFT code: {candidate.code!r}")
     prefix = "Golden Key: " if golden_prefix and candidate.golden else ""
+    code_block = f"```\n{candidate.code}\n```"
     safe_url = _safe_link(candidate.item_url)
     link = f" · <{safe_url}>" if safe_url else ""
-    return f"```\n{candidate.code}\n```\n{prefix}{esc(candidate.source_name)}{link}"
+    block = f"{code_block}\n{prefix}{esc(candidate.source_name)}{link}"
+    if max_len is None or discord_len(block) <= max_len:
+        return block
+
+    # Long enough that even a message holding this one entry alone would
+    # bust Discord's 2000-unit cap (a hostile or just very long source
+    # name plus a long collected URL, most likely) -- shed the link
+    # first. The code itself is the whole point of the alert; the source
+    # name is the next thing worth keeping (it's what a reader checks
+    # against before trusting a code); the link is the part most likely
+    # to already be redundant with "click the code, go to shift.gearbox
+    # website" and the first thing worth losing.
+    block = f"{code_block}\n{prefix}{esc(candidate.source_name)}"
+    if discord_len(block) <= max_len:
+        return block
+
+    # Still too long -- hard-truncate the source name itself. The fenced
+    # code block (```\n<code>\n```) and any golden-key prefix are fixed
+    # and never truncated: a partial code would be actively wrong, not
+    # just abbreviated.
+    fixed_len = discord_len(code_block) + 1 + discord_len(prefix)  # +1 for the joining "\n"
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(candidate.source_name), name_budget, suffix="…")
+    return f"{code_block}\n{prefix}{truncated_name}"
 
 
 def render_code_alerts(
@@ -479,11 +505,27 @@ def render_code_alerts(
     test_prefix = "[TEST] " if test else ""
     first_header = ("@everyone " if ping else "") + f"**{test_prefix}{title}**"
 
-    entries = [(c.code, _alert_block(c, golden_prefix=mixed)) for c in candidates]
+    # The most room any one entry can ever count on: alone in its own
+    # message, under whichever header is longer (always the first
+    # message's, thanks to "@everyone " and the title, but the max is
+    # cheap insurance against that assumption changing later) plus the
+    # "\n\n" joining the header to the block.
+    solo_budget = (
+        _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER)) - 2
+    )
+    entries = []
+    for c in candidates:
+        block = _alert_block(c, golden_prefix=mixed)
+        if discord_len(block) > solo_budget:
+            block = _alert_block(c, golden_prefix=mixed, max_len=solo_budget)
+        entries.append((c.code, block))
 
     # Greedily pack entries into batches under Discord's 2000-char message
     # cap, counting each batch's own header (the first batch's is longer,
     # thanks to "@everyone " and the title) plus a "\n\n" joiner per entry.
+    # Every entry is already guaranteed to fit `solo_budget` on its own
+    # (see above), so this loop only ever has to decide when to start a
+    # *new* batch, never split one entry across two.
     batches: list[list[tuple[str, str]]] = []
     current: list[tuple[str, str]] = []
     current_len = 0
@@ -503,6 +545,16 @@ def render_code_alerts(
     for i, batch in enumerate(batches):
         header = first_header if i == 0 else _CONTINUATION_HEADER
         content = "\n\n".join([header, *(block for _, block in batch)])
+        # Belt-and-suspenders on the packing loop above: nothing should
+        # ever reach here over the cap, but a RenderedAlert that snuck
+        # past it would be silently rejected by Discord, losing a code
+        # nobody would notice was lost -- worth a loud failure instead of
+        # a plain `assert`, which strips out under `-O`.
+        if discord_len(content) > _ALERT_CONTENT_LIMIT:
+            raise ValueError(
+                f"rendered alert content exceeds {_ALERT_CONTENT_LIMIT} UTF-16 units "
+                f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
+            )
         rendered.append(
             RenderedAlert(content=content, codes=[code for code, _ in batch], ping=ping and i == 0)
         )

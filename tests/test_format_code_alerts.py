@@ -240,17 +240,6 @@ def test_batch_at_exactly_the_2000_unit_boundary_does_not_split():
     assert discord_len(rendered[0].content) == 2000
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: render_code_alerts only splits *between* entries, never "
-        "within one. A single candidate whose own block (long source name "
-        "+ long collected URL) exceeds 2000 UTF-16 units still comes back "
-        "as one RenderedAlert over the cap, which Discord will reject "
-        "outright -- see newsbot/bot/format.py's packing loop in "
-        "render_code_alerts."
-    ),
-)
 def test_single_entry_alone_exceeding_2000_units_is_not_split_further():
     # A single code's block (long source name + long URL) can, on its
     # own, exceed the 2000-unit message cap. render_code_alerts only
