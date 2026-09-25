@@ -184,10 +184,6 @@ sources:
     url: "https://www.gamesradar.com/rss/"
     trust: press
   - type: rss
-    name: "IGN"
-    url: "https://www.ign.com/rss/articles/feed"
-    trust: press
-  - type: rss
     name: "PCGamesN"
     url: "https://www.pcgamesn.com/mainrss.xml"
     trust: press

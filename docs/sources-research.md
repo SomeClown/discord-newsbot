@@ -57,7 +57,7 @@ Verified 2026-09-23 from a residential macOS connection. Every URL below was fet
 | PC Gamer | rss | https://www.pcgamer.com/rss/ | unscoped | press | OK, newest 2026-09-23 | Wide PC coverage; covers Palworld business news |
 | Eurogamer | rss | https://www.eurogamer.net/feed | unscoped | press | OK, 100 items, newest 2026-09-23 | Wide coverage |
 | GamesRadar+ | rss | https://www.gamesradar.com/rss/ | unscoped | press | OK, newest 2026-09-23 | Wide coverage |
-| IGN | rss | https://www.ign.com/rss/articles/feed | unscoped | press | OK, newest 2026-09-23 | Wide, but includes film/TV/deals, so noisier |
+| IGN | rss | https://www.ign.com/rss/articles/feed | unscoped | press | OK, newest 2026-09-23 | Wide, but includes film/TV/deals, so noisier. **Removed 2026-09-25:** returns 403 to the production Droplet's datacenter IP. |
 | PCGamesN | rss | https://www.pcgamesn.com/mainrss.xml | unscoped | press | OK, 75 items, newest 2026-09-23 | Strongest day-to-day Diablo 4 coverage |
 | *Optional:* Eurogamer Diablo IV tag | rss | https://www.eurogamer.net/feed/tag/games/diablo-iv | diablo4 (dedicated) | press | OK, newest 2026-09-23 | Some guides mixed in |
 | *Optional:* PCGamesN Diablo 4 tag | rss | https://www.pcgamesn.com/diablo-4/rss | diablo4 (dedicated) | press | OK, newest 2026-09-23 | Mostly duplicates the main feed |
