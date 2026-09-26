@@ -229,17 +229,6 @@ async def test_broken_alert_send_during_reporting_does_not_change_the_digest_out
 # --- a bug the report can't be allowed to have: CancelledError during reporting ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "bug: _maybe_send_run_report only catches `except Exception`, so a "
-        "CancelledError raised while building/sending the report escapes it, "
-        "hits _run_post's `except BaseException`, and that handler "
-        "unconditionally marks the digest_id row `failed` even though "
-        "save_run already committed it `ok` -- see newsbot/pipeline/run.py "
-        "_maybe_send_run_report and _run_post's outer except BaseException."
-    ),
-)
 async def test_cancelled_error_during_report_rendering_does_not_flip_a_saved_ok_digest_to_failed(
     db_path, http_client, monkeypatch
 ):

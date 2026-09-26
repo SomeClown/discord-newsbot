@@ -71,6 +71,7 @@ from newsbot.store.models import PriorStory, StoredItem, StoryToSave, Usage
 from newsbot.store.repo import (
     claim_digest,
     existing_urls,
+    get_digest,
     mark_digest_failed,
     recent_headlines,
     record_source_result,
@@ -408,6 +409,18 @@ async def _run_post(
         # didn't get far enough to post anything) and keep propagating:
         # this function isn't the place to decide whether the caller can
         # recover from it.
+        # ...unless the outcome was already saved. The admin report and the
+        # SHiFT code check both run after `save_run` commits, and a
+        # cancellation that lands in either of them used to reach this
+        # handler and relabel a digest that had posted perfectly well as
+        # "failed". Which is a lie, and the kind that makes the next
+        # run-now ask the wrong question. test-engineer caught it.
+        status = await asyncio.to_thread(_digest_status_sync, deps.db_path, run_date)
+        if status in ("ok", "partial"):
+            logger.warning(
+                "error after %s's digest was saved as %s; leaving it as is", run_date, status
+            )
+            raise
         posted_ids = list(getattr(exc, "posted_ids", None) or [])
         logger.exception("unhandled error after claiming %s; marking it failed", run_date)
         await asyncio.to_thread(
@@ -579,6 +592,12 @@ def _claim_sync(
 ) -> int | None:
     with closing(connect(db_path)) as conn:
         return claim_digest(conn, run_date, force=force, now=now)
+
+
+def _digest_status_sync(db_path: str, run_date: date) -> str | None:
+    with closing(connect(db_path)) as conn:
+        row = get_digest(conn, run_date)
+    return row.status if row is not None else None
 
 
 def _mark_failed_sync(
