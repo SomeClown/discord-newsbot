@@ -18,6 +18,14 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 - **Never run two bot processes with the same token.** Both receive every interaction and race; the loser logs `Unknown interaction (10062)`. Stop the local dev bot before starting the Droplet copy, and vice versa. On macOS the process shows as `Python -m newsbot` (capital P), so `pkill -f "python -m newsbot"` misses it.
 - **Content policy (owner, 2026-09-24):** guides and walkthroughs, deals and sales, and Shift/redeem codes are all wanted in the digest. Don't tune the prompt to drop them.
 
+## Future feature candidates (not yet investigated)
+
+Owner's list, added 2026-09-26. Each needs a level-of-effort and feasibility look before anything is built; some may never happen.
+
+1. **Admin-channel run reports:** post a status message to the admin channel whenever a digest (or other scheduled run) posts to the news channel, or fails, not only on failures as today.
+2. **One channel per game:** split the digest so Borderlands 4, Palworld, and Diablo IV news each post to their own channel.
+3. **Easier for others to deploy:** make channels, topics, and searches fully configurable so someone else can run the bot on their own server without code changes.
+
 ## Documentation voice (read this before writing a docstring)
 
 The owner wants the code documented thoughtfully, in their own voice: plain,
