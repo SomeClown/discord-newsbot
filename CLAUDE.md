@@ -25,6 +25,7 @@ Owner's list, added 2026-09-26. Each needs a level-of-effort and feasibility loo
 1. **Admin-channel run reports:** post a status message to the admin channel whenever a digest (or other scheduled run) posts to the news channel, or fails, not only on failures as today.
 2. **One channel per game:** split the digest so Borderlands 4, Palworld, and Diablo IV news each post to their own channel.
 3. **Easier for others to deploy:** make channels, topics, and searches fully configurable so someone else can run the bot on their own server without code changes.
+4. **List known SHiFT codes:** a command that lists the SHiFT codes the bot has accumulated. Open questions for the investigation: which codes to include (`alerted_codes` also holds silently recorded `seeded`/`too_old`/`roundup` codes, not just `posted` ones), how to show age given the bot never knows expiry, paging, and whether it's member-facing or admin-only.
 
 ## Documentation voice (read this before writing a docstring)
 
