@@ -42,7 +42,7 @@ from newsbot.bot.format import RenderedAlert, RenderedDigest
 from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
 from newsbot.pipeline.publisher import PublishError
-from newsbot.pipeline.run import Deps, RunMode, local_run_date, run_daily
+from newsbot.pipeline.run import Deps, RunKind, RunMode, local_run_date, run_daily
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
 from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store.db import connect
@@ -600,7 +600,7 @@ class NewsBot(discord.Client):
         existing = await asyncio.to_thread(self._get_digest_sync, run_date)
         if should_catch_up(now_local, digest_time, existing):
             logger.info("catch-up: running today's digest at startup")
-            await self._daily_job()
+            await self._daily_job(RunKind.CATCH_UP)
         elif existing is not None and existing.status == "pending":
             await self.alert(_PENDING_STARTUP_ALERT)
         elif existing is not None and existing.status == "failed" and existing.posted_message_ids:
@@ -610,7 +610,7 @@ class NewsBot(discord.Client):
         with closing(connect(self.db_path)) as conn:
             return get_digest(conn, run_date)
 
-    def build_deps(self) -> Deps:
+    def build_deps(self, run_kind: RunKind | None = None) -> Deps:
         """Assemble a fresh `Deps` for one pipeline run.
 
         Collectors are rebuilt each call rather than cached on `self`:
@@ -618,6 +618,12 @@ class NewsBot(discord.Client):
         rebuilding sidesteps any question of whether a collector instance
         is safe to reuse across concurrent-in-theory (but lock-serialized
         in practice) runs.
+
+        `run_kind` is `None` for `/newsbot preview` (which never reports
+        regardless -- see `_maybe_send_run_report`) and every caller that
+        predates the admin-channel run report (design.md §6); `_daily_job`
+        and `/newsbot run-now` pass their own so the report can say
+        `scheduled`/`catch-up`/`run-now` without saying who ran it.
         """
         if self.http_client is None or self.llm is None:
             raise RuntimeError("build_deps() called before setup_hook() finished")
@@ -631,6 +637,7 @@ class NewsBot(discord.Client):
             alert=self.alert,
             rate_limit_state=self._rate_limit_state,
             code_alert_poster=self.code_alert_poster,
+            run_kind=run_kind,
         )
 
     def build_sweep_deps(self) -> SweepDeps:
@@ -663,9 +670,9 @@ class NewsBot(discord.Client):
         run_date = local_run_date(datetime.now(UTC), self.cfg.digest.timezone)
         return DiscordPublisher(self, self.cfg.digest.channel_id, run_date)
 
-    async def _daily_job(self) -> None:
+    async def _daily_job(self, run_kind: RunKind = RunKind.SCHEDULED) -> None:
         try:
-            deps = self.build_deps()
+            deps = self.build_deps(run_kind)
             outcome = await run_daily(deps, self.publisher_for_today(), mode=RunMode.POST)
             logger.info(
                 "daily job finished",
