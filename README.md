@@ -58,6 +58,28 @@ Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
 only the person who ran the command can use.
 
+## Admin-channel run reports
+
+After every scheduled, catch-up, or `/newsbot run-now` digest that actually
+posts (`ok` or `partial`), the admin channel gets a one-message plain-text
+report — story counts per topic, that run's own source health, estimated
+Claude spend, how long it took, and a jump link to the digest:
+
+> ✅ **Digest posted** · Sat Sep 27 (scheduled)
+> 7 stories: Borderlands 4 2 · Palworld 1 · Diablo IV 4
+> Sources: 22 of 23 ok (r/diablo4: timed out)
+> Claude: ~$0.02 · took 1m52s · [jump to digest](<message link>)
+
+A `partial` run (a source skipped, or a topic fell back to a plain headline
+list) swaps the emoji for ⚠️ and adds a `Notes:` line. A `failed` or
+`skipped` run sends no report — those already get their own detailed admin
+alert (see below) — and `/newsbot preview` never reports at all, since
+nothing it does is real. `run-now`'s report never says who ran it: the
+privacy policy promises we don't keep user ids around.
+
+Controlled by `digest.report_to_admin` (default `true`), and only takes
+effect when `admin_channel_id` is set.
+
 ## SHiFT code alerts
 
 A separate, near-real-time path alongside the daily digest (`alerts:` in
