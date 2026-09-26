@@ -389,3 +389,36 @@ message that Discord would reject outright (`bot/format.py`'s
   batch ("judged by the normal item"); a code whose *every* sighting is
   from a roundup item is recorded silently as `'roundup'` (A2) and never
   reaches the seeded/too_old/post logic at all, regardless of `seeded`.
+
+## 13. Per-game channels and a SHiFT codes channel (v2.0, approved 2026-09-26)
+
+The combined digest channel goes away. Each game's daily digest posts to its own channel, and SHiFT code alerts move to a dedicated channel, which also gains an on-request list command. Owner decisions: no combined channel or index (A); one embed per game per day with no header or thread (A); nothing posted for a game with no news (A); keep `@everyone` for alerts (A, revisit later: the server is ~15 members, all playing Borderlands 4); roundup codes are now posted without a ping (B); channel IDs live in `config.yaml` next to what they configure (approach 1).
+
+**Config (breaking, hence v2.0.0).**
+- `topics[].channel_id: int` is required for every topic.
+- `digest.channel_id` is removed. If present, config validation fails with a message saying to move it to per-topic `channel_id`s. No silent fallback.
+- `alerts.channel_id: int` is required when `alerts.enabled` is true (validation error otherwise). All other `alerts` settings are unchanged.
+
+**Per-game digests.**
+- At the digest time, each topic with at least one story (or fallback headline) gets exactly one message in its channel: that topic's embed, rendered and trimmed as today (official → reported → rumor; "+N more, use /news" when over limits). No header message, no discussion thread. Topics with nothing post nothing. Topics post in config order.
+- Still one `digests` row per local day: the claim/publish/save guard, catch-up, `run-now` confirmation, and `failed`-with-posted-ids semantics are unchanged in meaning.
+- The resumable publisher's unit of progress becomes the topic: posted message ids are tracked per topic; a retry after a transient failure posts only topics not yet posted. A run where some topics posted and a later one failed is recorded `failed` with the posted ids, and `run-now` asks for confirmation before re-running.
+- Game channels need View Channel, Send Messages, Embed Links. Create Public Threads is no longer needed.
+
+**SHiFT codes channel.**
+- All code alert messages post to `alerts.channel_id`. Ping rules are unchanged: `@everyone` only when ≥1 code in the batch has a trusted (`ping_trust`) source, under `max_pings_per_day`, first message of a batch only.
+- Roundup change: a fresh (per `max_item_age_hours`) code whose only sightings are roundup items (more than `max_codes_per_item` codes) is now **posted without a ping** in a separate message headed "SHiFT codes from a roundup" with the source name and link; overflow continues in further unpinged messages. It no longer counts as silent. Once-per-code, seeding silence, and the age rule still apply; roundup posts never spend the ping budget.
+- Still never posted: codes first seen only in items older than the age limit, and everything recorded by the silent seeding sweep.
+- The SHiFT channel needs View Channel, Send Messages, and Mention @everyone.
+
+**`/shift codes` (member-facing).**
+- `/shift codes days:<1–90, default 14> public:<bool, default False>` lists every known code first seen within the window, newest first: code in a copyable block, first-seen date, source name with link, and a marker for roundup / old-post / seeded codes. Codes whose status is `pending` or `failed` are excluded.
+- Paged with the existing pager (buttons usable only by the requester); ephemeral unless `public:True`. Footer: the bot doesn't know expiry dates. Never pings (`AllowedMentions.none()`).
+
+**Startup permission check.** On first `on_ready`, the bot resolves every configured channel (each topic's, the SHiFT channel if alerts are on, the admin channel) and checks the permissions it needs there; anything missing produces one admin alert naming the channel and the missing permissions. A missing channel is reported the same way. The bot still starts.
+
+**Admin run report.** The stories line carries a jump link per topic that posted (`Borderlands 4 2 [jump] · Palworld 1 [jump] · Diablo IV 0`); topics with no post have no link.
+
+**Unchanged.** `/news recent`, `/news search`, `/newsbot status|run-now|preview` (preview shows what each channel would get), the 09:00 run's SHiFT code check, retention, backups.
+
+**Rollback.** No schema change is required by this design (the `alerted_codes` status set may gain nothing new: roundup-posted codes use `posted`); v1.3.0 runs against a v2 database. Rolling back means restoring a v1 `config.yaml` along with `TAG=1.3.0`. If implementation needs a schema change, it must stay additive and this note must be updated.
