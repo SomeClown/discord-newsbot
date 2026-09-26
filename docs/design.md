@@ -187,6 +187,16 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
   `🟢 OFFICIAL · headline`, summary, then up to 3 source links plus "+N more".
   Other markers: `🟡 REPORTED`, `🔴 RUMOR`, `🔁 UPDATE` (linking to the original story).
 - A topic with no stories shows "No new stories today."
+- **Admin-channel run report.** After a POST run that actually posts (`ok`
+  or `partial`) -- scheduled, catch-up, or `/newsbot run-now` -- one plain
+  text message goes to the admin channel: per-topic story counts, that
+  run's own source health, estimated Claude spend, duration, and a jump
+  link to the digest header. `failed`/`skipped` runs send no report (they
+  keep their existing detailed alerts, §8) and `/newsbot preview` never
+  reports. Controlled by `digest.report_to_admin` (default `true`),
+  effective only when `admin_channel_id` is set. `format.render_run_report`
+  builds the text; sent through the same `NewsBot.alert` path as every
+  other admin notification.
 - If an embed would go past Discord's limits (4096-character description, 6000 characters per message), the least important stories are cut and a "+N more, use /news" line is added. Limits are measured in **UTF-16 code units**, matching how Discord itself counts them — a plain codepoint count undercounts emoji and a good chunk of CJK, which are two UTF-16 units apiece, and would let content that's actually over the limit slip past a codepoint-based check.
 
 ### Member commands
@@ -221,6 +231,12 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | Invalid config at startup | Exit non-zero with a clear message |
 
 Admin alerts are sent only when `admin_channel_id` is set. Logs are structured JSON to stdout.
+
+The admin-channel run report (§6) is not an error alert -- it's the "everything's fine" case,
+sent only on a POST run that posted (`ok`/`partial`). Building or sending it is wrapped in its
+own try/except that only logs on failure: a bug in the report must never change the digest's
+already-recorded status, and a `failed`/`skipped` run never gets one at all (the alerts above
+already cover it).
 
 ## 9. Security
 

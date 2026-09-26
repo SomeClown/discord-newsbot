@@ -65,6 +65,13 @@ class DigestCfg(BaseModel):
     timezone: str
     lookback_hours: int = 24
     max_items_per_topic: int = 60
+    # design.md §6: a plain-text status message to the admin channel after
+    # every POST run that actually posts (ok or partial) -- so "the digest
+    # went out fine" doesn't require anyone to go look. Only takes effect
+    # when `admin_channel_id` is set; true by default because a run report
+    # is meant to be the normal, boring case, not something an owner has to
+    # discover and opt into.
+    report_to_admin: bool = True
 
     @field_validator("time")
     @classmethod

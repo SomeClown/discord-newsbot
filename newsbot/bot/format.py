@@ -21,17 +21,19 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from typing import Literal
 
 import discord
 
+from newsbot.collectors.base import CollectorResult
 from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
-from newsbot.pipeline.summarize import StoryDraft, TopicSummary
+from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
 from newsbot.shift.decide import CodeCandidate
 from newsbot.shift.match import is_code
-from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView
+from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView, Usage
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -616,6 +618,164 @@ def render_code_alerts(
     return rendered
 
 
+# --- Admin-channel run reports (design.md §6, §8) ---
+#
+# One plain-text message to the admin channel after every POST run that
+# actually posts -- scheduled, catch-up, or /newsbot run-now. Failed and
+# skipped runs keep their existing detailed alerts (pipeline/run.py) and
+# get no report; a preview never reports at all. Plain text, not an embed,
+# for the same reason the header is plain text: nobody needs a colored
+# sidebar to read "it worked."
+
+_REPORT_HEADER_EMOJI = {"ok": "✅", "partial": "⚠️"}
+_REPORT_HEADER_VERB = {"ok": "Digest posted", "partial": "Digest posted with gaps"}
+# How many failed/skipped sources get spelled out by name before the report
+# just says "+N more" -- three was picked as "enough to see a pattern
+# (every Reddit source timed out) without the report turning into its own
+# source_health dump."
+_MAX_REPORT_SOURCES_SHOWN = 3
+# Each failed/skipped source's own first-error-line snippet, so one source
+# with a paragraph-long traceback in `error` can't eat the whole report.
+_MAX_REPORT_ERROR_SNIPPET = 60
+
+
+def _report_date(run_date: date) -> str:
+    # "Sat Sep 27", not strftime's platform-dependent %-d/%e for the
+    # unpadded day -- Linux and macOS both accept %-d, but there's no
+    # reason to bet a plain-text status line on a glibc quirk.
+    return f"{run_date.strftime('%a %b')} {run_date.day}"
+
+
+def _report_story_counts_line(
+    topics: list[Topic],
+    summaries: dict[str, TopicSummary],
+    fallback_items: dict[str, list[TopicItem]],
+) -> str:
+    counts = [(topic.name, _story_count(topic, summaries, fallback_items)) for topic in topics]
+    total = sum(c for _, c in counts)
+    per_topic = " · ".join(f"{esc(name)} {c}" for name, c in counts)
+    return f"{total} stories: {per_topic}"
+
+
+def _report_sources_line(results: list[CollectorResult]) -> str:
+    total = len(results)
+    bad = [(r.source_name, r.error or r.skipped or "") for r in results if r.error or r.skipped]
+    ok = total - len(bad)
+    line = f"Sources: {ok} of {total} ok"
+    if not bad:
+        return line
+
+    shown = bad[:_MAX_REPORT_SOURCES_SHOWN]
+    parts = []
+    for name, message in shown:
+        first_line = message.splitlines()[0] if message else "unknown error"
+        snippet = _truncate_utf16(esc(first_line), _MAX_REPORT_ERROR_SNIPPET, suffix="…")
+        parts.append(f"{esc(name)}: {snippet}")
+    extra = len(bad) - len(shown)
+    if extra > 0:
+        parts.append(f"+{extra} more")
+    return line + " (" + "; ".join(parts) + ")"
+
+
+def _report_cost_str(spend_usd: float) -> str:
+    # "<$0.01" for anything that'd otherwise round to "$0.00" -- a
+    # summarization call that costs half a cent still cost something, and
+    # "$0.00" reads as free, which it isn't.
+    if spend_usd < 0.01:
+        return "<$0.01"
+    return f"~${spend_usd:.2f}"
+
+
+def _report_duration_str(duration: timedelta) -> str:
+    total_seconds = max(int(round(duration.total_seconds())), 0)
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _report_jump_link(guild_id: int, channel_id: int, header_message_id: int | None) -> str | None:
+    if header_message_id is None:
+        return None
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{header_message_id}"
+
+
+def _report_cost_line(
+    usage: Usage, duration: timedelta, guild_id: int, channel_id: int, header_message_id: int | None
+) -> str:
+    spend = estimate_spend_usd(usage.input_tokens, usage.output_tokens)
+    line = f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
+    link = _report_jump_link(guild_id, channel_id, header_message_id)
+    if link is not None:
+        line += f" · [jump to digest](<{link}>)"
+    return line
+
+
+def render_run_report(
+    *,
+    status: Literal["ok", "partial"],
+    run_date: date,
+    run_kind: Literal["scheduled", "catch-up", "run-now"],
+    topics: list[Topic],
+    summaries: dict[str, TopicSummary],
+    fallback_items: dict[str, list[TopicItem]],
+    results: list[CollectorResult],
+    usage: Usage,
+    duration: timedelta,
+    notes: list[str],
+    guild_id: int,
+    channel_id: int,
+    header_message_id: int | None,
+) -> str:
+    """Render the admin-channel run report (design.md §6): one plain-text message.
+
+    `results` is *this run's* collector results, not the cumulative
+    `source_health` table -- an admin reading this wants to know what just
+    happened, not the all-time record. `notes` is the same coverage-note
+    list `render_digest`'s header and `save_run`'s `error_notes` already
+    use; it only shows up here as a "Notes: ..." line when `status` is
+    `partial` and there's actually something to say.
+
+    Kept under `_ALERT_CONTENT_LIMIT` (Discord's plain-message cap, the
+    same 2000 UTF-16 units the SHiFT alert messages respect) by shedding
+    detail in priority order if it doesn't fit: the notes line first, then
+    the per-source failure detail, then -- a case that shouldn't be
+    reachable given how short every other line is -- a flat truncation of
+    the whole thing.
+    """
+    header_line = (
+        f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
+        f"{_report_date(run_date)} ({run_kind})"
+    )
+    story_line = _report_story_counts_line(topics, summaries, fallback_items)
+    sources_line = _report_sources_line(results)
+    cost_line = _report_cost_line(usage, duration, guild_id, channel_id, header_message_id)
+
+    notes_line = None
+    if status == "partial" and notes:
+        notes_line = "Notes: " + esc("; ".join(notes))
+
+    lines = [header_line, story_line, sources_line]
+    if notes_line:
+        lines.append(notes_line)
+    lines.append(cost_line)
+    content = "\n".join(lines)
+    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+        return content
+
+    if notes_line:
+        content = "\n".join([header_line, story_line, sources_line, cost_line])
+        if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+            return content
+
+    bare_sources_line = sources_line.split(" (", 1)[0]
+    content = "\n".join([header_line, story_line, bare_sources_line, cost_line])
+    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+        return content
+
+    return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
+
+
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
@@ -642,6 +802,7 @@ __all__ = [
     "esc",
     "render_code_alerts",
     "render_digest",
+    "render_run_report",
     "render_status",
     "render_story_page",
     "to_text",

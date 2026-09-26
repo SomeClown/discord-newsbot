@@ -21,6 +21,13 @@ digest:
   timezone: "America/Los_Angeles"
   lookback_hours: 24
   max_items_per_topic: 60
+  # After every scheduled/catch-up/run-now digest that actually posts (ok
+  # or partial), send a one-message plain-text status report to the admin
+  # channel -- story counts, source health for that run, estimated Claude
+  # cost, how long it took, and a jump link. Only takes effect when
+  # admin_channel_id (above) is set. Defaults to true; uncomment to turn
+  # it off if the admin channel would rather only hear about failures.
+  # report_to_admin: false
 
 topics:
   - key: borderlands4
