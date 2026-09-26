@@ -48,6 +48,23 @@ _BACKOFF_S = (1.0, 2.0, 4.0)
 _FALLBACK_NOTE = "Summary unavailable; showing headlines."
 
 
+def estimate_spend_usd(input_tokens: int, output_tokens: int) -> float:
+    """Rough running Claude spend from token counts, at Haiku 4.5 list pricing.
+
+    "Rough" is doing some work in that sentence: this is list price times
+    tokens, not an invoice. Good enough to notice "why is this $40" long
+    before the actual bill would tell you. Lives next to the price
+    constants it uses rather than in `bot/commands.py` (its original
+    home) because `bot/format.py`'s run-report rendering needs it too,
+    and `format.py` importing from `commands.py` would be a circular
+    import the other way around.
+    """
+    return (
+        input_tokens * PRICE_IN_PER_MTOK / 1_000_000
+        + output_tokens * PRICE_OUT_PER_MTOK / 1_000_000
+    )
+
+
 class StoryOut(BaseModel):
     # No `max_length` here on purpose: the Anthropic SDK's structured-
     # output mode strips length constraints out of the schema it actually
@@ -374,6 +391,7 @@ __all__ = [
     "StoryDraft",
     "StoryOut",
     "TopicSummary",
+    "estimate_spend_usd",
     "postprocess",
     "summarize_topic",
 ]

@@ -34,8 +34,8 @@ from newsbot.bot.client import DiscordPublisher, NewsBot, NullPublisher
 from newsbot.bot.format import render_status, render_story_page
 from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, Topic, configured_source_names
-from newsbot.pipeline.run import RunMode, is_run_in_progress, local_run_date, run_daily
-from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
+from newsbot.pipeline.run import RunKind, RunMode, is_run_in_progress, local_run_date, run_daily
+from newsbot.pipeline.summarize import estimate_spend_usd
 from newsbot.shift.match import is_code
 from newsbot.shift.sweep import CodeCheckOutcome, run_test_alert
 from newsbot.store.db import connect
@@ -130,19 +130,6 @@ def has_admin_permission(permissions: discord.Permissions, admin_permission: str
     return bool(
         getattr(permissions, "administrator", False)
         or getattr(permissions, admin_permission, False)
-    )
-
-
-def estimate_spend_usd(input_tokens: int, output_tokens: int) -> float:
-    """Rough running Claude spend from token counts, at Haiku 4.5 list pricing.
-
-    "Rough" is doing some work in that sentence: this is list price times
-    tokens, not an invoice. Good enough to notice "why is this $40" long
-    before the actual bill would tell you.
-    """
-    return (
-        input_tokens * PRICE_IN_PER_MTOK / 1_000_000
-        + output_tokens * PRICE_OUT_PER_MTOK / 1_000_000
     )
 
 
@@ -428,7 +415,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         else:
             await interaction.response.defer(ephemeral=True)
 
-        deps = bot.build_deps()
+        deps = bot.build_deps(RunKind.RUN_NOW)
         publisher = DiscordPublisher(bot, cfg.digest.channel_id, run_date)
         outcome = await run_daily(deps, publisher, mode=RunMode.POST, force=force)
         await interaction.followup.send(f"Run finished: {outcome.status}", ephemeral=True)
