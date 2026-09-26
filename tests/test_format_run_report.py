@@ -279,6 +279,127 @@ def test_many_failing_sources_and_long_notes_together_still_stay_under_the_cap()
     assert discord_len(text) <= 2000
 
 
+def test_masked_link_spoof_in_error_string_does_not_become_a_clickable_link():
+    # A source's error text is scraped/attacker-adjacent in the general
+    # case (some collectors echo remote response bodies into `.error`).
+    # `[free loot](https://evil.example/phish)` is the classic markdown
+    # masked-link spoof: if this rendered as real markdown, an admin
+    # reading the report would see "free loot" as clickable text pointing
+    # at a URL they never saw.
+    hostile_error = "[free loot](https://evil.example/phish)"
+    results = [CollectorResult("flaky", "rss", [], error=hostile_error)]
+    text = _render(results=results, status="partial")
+    # Never the live, clickable form: neither an intact masked link nor a
+    # working autolink underneath it.
+    assert "[free loot](https://evil.example/phish)" not in text
+    assert "\\[free loot]" in text  # markdown-link syntax defused with a backslash
+    assert "https://evil.example/phish" not in text  # scheme itself defused too
+
+
+def test_bare_url_in_error_string_does_not_autolink():
+    # `esc()` defuses any "scheme://" token wherever it appears -- an
+    # error string is no exception -- so a URL an attacker slipped into a
+    # collector's error text never becomes a live link at all, masked or
+    # otherwise.
+    hostile_error = "fetch failed: https://evil.example/free-vbucks timed out"
+    results = [CollectorResult("flaky", "rss", [], error=hostile_error)]
+    text = _render(results=results, status="partial")
+    assert "](https://evil.example/free-vbucks)" not in text
+    assert "https://evil.example/free-vbucks" not in text
+    assert "evil.example/free-vbucks" in text  # still readable, just not live
+
+
+def test_error_string_with_backticks_and_newlines_stays_on_one_escaped_line():
+    hostile_error = "boom `rm -rf /`\nsecond line with a [link](https://evil.example)"
+    results = [CollectorResult("flaky", "rss", [], error=hostile_error)]
+    text = _render(results=results, status="partial")
+    sources_line = next(line for line in text.splitlines() if line.startswith("Sources:"))
+    assert "second line" not in sources_line
+    assert "`rm -rf /`" not in sources_line  # backtick escaped, no live code span
+    assert "\\`" in sources_line
+
+
+def test_identical_topic_names_are_both_shown_with_their_own_counts():
+    a = Topic(key="dupe_a", name="Same Name", aliases=[], entities=[])
+    b = Topic(key="dupe_b", name="Same Name", aliases=[], entities=[])
+    summaries = {"dupe_a": _summary("dupe_a", 2), "dupe_b": _summary("dupe_b", 5)}
+    text = _render(topics=[a, b], summaries=summaries, fallback_items={})
+    assert "Same Name 2 · Same Name 5" in text
+
+
+def test_zero_topics_configured_still_renders_a_sane_zero_stories_line():
+    # config.py has no minimum-topics check -- an owner could ship a
+    # config with an empty topics list (everything filtered out by other
+    # means), so render_run_report must not crash on it.
+    text = _render(topics=[], summaries={}, fallback_items={})
+    assert "0 stories: " in text
+
+
+def test_all_sources_failed_shows_zero_of_n_ok():
+    results = [CollectorResult(f"src{i}", "rss", [], error="down") for i in range(4)]
+    text = _render(results=results, status="partial")
+    assert "Sources: 0 of 4 ok" in text
+
+
+def test_fifty_failed_sources_shows_first_three_and_a_count_of_the_rest():
+    results = [CollectorResult(f"bad{i}", "rss", [], error="down") for i in range(50)]
+    text = _render(results=results, status="partial")
+    sources_line = next(line for line in text.splitlines() if line.startswith("Sources:"))
+    assert sources_line.startswith("Sources: 0 of 50 ok (")
+    assert "+47 more" in sources_line
+    assert discord_len(text) <= 2000
+
+
+def test_huge_token_counts_render_a_plausible_dollar_figure_without_crashing():
+    text = _render(usage=Usage(input_tokens=5_000_000_000, output_tokens=1_000_000_000))
+    assert "Claude: ~$" in text
+    assert discord_len(text) <= 2000
+
+
+def test_zero_duration_shows_zero_seconds():
+    text = _render(duration=timedelta(seconds=0))
+    assert "took 0s" in text
+
+
+def test_duration_over_an_hour_shows_minutes_past_sixty():
+    text = _render(duration=timedelta(hours=1, minutes=17, seconds=3))
+    assert "took 77m03s" in text
+
+
+def test_content_exactly_at_the_2000_unit_boundary_with_astral_chars_is_not_truncated():
+    # 🤖 is astral (2 UTF-16 units); build a source name/error combo that
+    # lands the whole message exactly on the 2000-unit cap and check
+    # nothing gets clipped right at the edge.
+    base = _render(results=[_ok_result("src")], status="ok")
+    room = 2000 - discord_len(base)
+    pad_units = max(room, 0)
+    pad = "🤖" * (pad_units // 2)
+    hostile_topic = Topic(key="x", name="Pad" + pad, aliases=[], entities=[])
+    text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
+    assert discord_len(text) <= 2000
+
+
+def test_content_one_astral_char_over_the_boundary_truncates_without_a_lone_surrogate():
+    hostile_topic = Topic(key="x", name="🤖" * 1200, aliases=[], entities=[])
+    text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
+    assert discord_len(text) <= 2000
+    # A truncated lone surrogate encodes as a replacement char with
+    # 'surrogatepass'-style errors; round-tripping through UTF-16 without
+    # 'surrogatepass' is exactly the check that a half-clipped pair fails.
+    text.encode("utf-16-le").decode("utf-16-le")
+
+
+def test_format_module_uses_the_same_estimate_spend_usd_summarize_owns():
+    # a45548d relocated estimate_spend_usd next to its price constants in
+    # pipeline/summarize.py; format.py's run-report cost line must call
+    # that exact function, not a copy that could quietly drift from what
+    # /newsbot status shows.
+    import newsbot.bot.format as format_module
+    from newsbot.pipeline import summarize
+
+    assert format_module.estimate_spend_usd is summarize.estimate_spend_usd
+
+
 def test_notes_are_truncated_before_source_detail_is_dropped():
     # With a moderate number of bad sources (still fits) but an enormous
     # notes line, the notes line should shed detail (or vanish) before the

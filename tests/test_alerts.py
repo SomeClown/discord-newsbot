@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 
+import discord
+
 from newsbot.alerts import send_alert
 
 
@@ -17,11 +19,13 @@ class _FakeChannel:
     def __init__(self, *, raises: Exception | None = None) -> None:
         self._raises = raises
         self.sent: list[str] = []
+        self.sent_kwargs: list[dict] = []
 
-    async def send(self, text: str, **_kwargs) -> None:
+    async def send(self, text: str, **kwargs) -> None:
         if self._raises is not None:
             raise self._raises
         self.sent.append(text)
+        self.sent_kwargs.append(kwargs)
 
 
 class _FakeClient:
@@ -81,3 +85,22 @@ async def test_send_alert_logs_when_it_swallows_a_failure(caplog):
     with caplog.at_level(logging.ERROR, logger="newsbot.alerts"):
         await send_alert(client, 123, "hello")
     assert "failed to send admin alert" in caplog.text
+
+
+async def test_send_alert_never_lets_a_ping_through_even_with_hostile_text():
+    # Every run report and admin alert -- run reports included -- goes
+    # through this one send path. The behavioral check, not just the
+    # `test_mentions_tripwire.py` AST scan: the actual kwarg landing on
+    # `channel.send` disables every mention kind, on a message whose text
+    # (if `format.esc()` upstream ever had a hole) might contain a live
+    # @everyone.
+    channel = _FakeChannel()
+    client = _FakeClient(cached=channel)
+    await send_alert(client, 123, "newsbot: @everyone <@999999999999999999> <@&1> pretend ping")
+
+    assert len(channel.sent_kwargs) == 1
+    mentions = channel.sent_kwargs[0]["allowed_mentions"]
+    assert isinstance(mentions, discord.AllowedMentions)
+    assert mentions.everyone is False
+    assert mentions.users is False
+    assert mentions.roles is False

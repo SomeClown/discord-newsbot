@@ -168,3 +168,14 @@ def test_estimate_spend_usd_small_counts_round_via_plain_float_arithmetic():
     # value here so a future switch to Decimal, if it ever happens,
     # doesn't happen by accident.
     assert estimate_spend_usd(1, 1) == pytest.approx(0.000_006, abs=1e-12)
+
+
+def test_commands_reexports_the_same_function_object_summarize_owns():
+    # a45548d moved estimate_spend_usd from bot/commands.py to
+    # pipeline/summarize.py so format.py could use it too. `commands.py`
+    # importing the name back keeps `/newsbot status`'s spend figure
+    # wired to the exact same function -- not a copy that could drift --
+    # so this pins identity, not just equal output.
+    from newsbot.pipeline import summarize
+
+    assert estimate_spend_usd is summarize.estimate_spend_usd

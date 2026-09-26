@@ -8,6 +8,7 @@ those tests needed to change; these exercise the report path itself.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,10 +24,12 @@ from newsbot.pipeline.run import (
     RunMode,
     StubLLM,
     build_fixture_collectors,
+    local_run_date,
     run_daily,
 )
 from newsbot.pipeline.summarize import LLMError
 from newsbot.store.db import connect, migrate
+from newsbot.store.repo import get_digest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "integration"
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
@@ -221,3 +224,122 @@ async def test_broken_alert_send_during_reporting_does_not_change_the_digest_out
     outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
 
     assert outcome.status == "ok"  # unaffected by the broken alert path
+
+
+# --- a bug the report can't be allowed to have: CancelledError during reporting ---
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "bug: _maybe_send_run_report only catches `except Exception`, so a "
+        "CancelledError raised while building/sending the report escapes it, "
+        "hits _run_post's `except BaseException`, and that handler "
+        "unconditionally marks the digest_id row `failed` even though "
+        "save_run already committed it `ok` -- see newsbot/pipeline/run.py "
+        "_maybe_send_run_report and _run_post's outer except BaseException."
+    ),
+)
+async def test_cancelled_error_during_report_rendering_does_not_flip_a_saved_ok_digest_to_failed(
+    db_path, http_client, monkeypatch
+):
+    """Pins design.md §8's promise for the one exception `except Exception:` can't catch.
+
+    `_maybe_send_run_report` only wraps `render_run_report`/`deps.alert` in
+    `except Exception:` (pipeline/run.py). `asyncio.CancelledError` is a
+    `BaseException`, not an `Exception`, since Python 3.8 -- it sails
+    straight past that guard, out of `_run_claimed`, and into
+    `_run_post`'s own `except BaseException`, which unconditionally marks
+    the *already-saved* digest row `failed`. That's exactly the outcome
+    design.md §8 says must never happen: "a bug in the report must never
+    change the digest's already-recorded status." See
+    newsbot/pipeline/run.py's `_maybe_send_run_report` (needs `except
+    BaseException` or an explicit `except asyncio.CancelledError: raise`
+    placed *before* anything that could still mutate `digest_id`'s row).
+    """
+    monkeypatch.setattr(
+        "newsbot.pipeline.run.render_run_report",
+        lambda **kwargs: (_ for _ in ()).throw(asyncio.CancelledError()),
+    )
+    cfg = load_config(CONFIG_PATH)
+    deps = _make_deps(db_path, http_client)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    with closing(connect(db_path)) as conn:
+        row = get_digest(conn, local_run_date(NOW, cfg.digest.timezone))
+    assert row is not None
+    assert row.status == "ok"
+
+
+# --- ordering: the report is sent strictly after the digest row is saved ---
+
+
+async def test_report_is_sent_only_after_the_digest_row_is_already_saved(db_path, http_client):
+    cfg = load_config(CONFIG_PATH)
+    run_date = local_run_date(NOW, cfg.digest.timezone)
+    seen_statuses: list[str | None] = []
+
+    async def alert(text: str) -> None:
+        if "Digest posted" not in text:
+            return
+        # Read the DB from a *separate* connection at the moment the
+        # report fires -- if the report were ever sent before save_run's
+        # transaction committed, this would see `pending` (or nothing),
+        # not the finished row.
+        with closing(connect(db_path)) as conn:
+            row = get_digest(conn, run_date)
+        seen_statuses.append(row.status if row else None)
+
+    deps = Deps(
+        cfg=cfg,
+        db_path=db_path,
+        http=http_client,
+        llm=StubLLM(FIXTURES_DIR / "llm.json"),
+        collectors=build_fixture_collectors(FIXTURES_DIR),
+        now=lambda: NOW,
+        alert=alert,
+        run_kind=RunKind.SCHEDULED,
+    )
+
+    outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    assert outcome.status == "ok"
+    assert seen_statuses == ["ok"]
+
+
+# --- force re-run via run-now reports again with the new outcome ---
+
+
+async def test_force_rerun_sends_a_second_report_reflecting_the_new_outcome(
+    db_path, http_client, monkeypatch
+):
+    deps = _make_deps(db_path, http_client, run_kind=RunKind.RUN_NOW)
+    first = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+    assert first.status == "ok"
+    first_reports = [a for a in deps.alerts if "Digest posted" in a]  # type: ignore[attr-defined]
+    assert len(first_reports) == 1
+
+    # Second run: publish fails after retries this time (a different
+    # outcome from the first), forced past the existing `ok` row the way
+    # `/newsbot run-now`'s confirm dialog would.
+    monkeypatch.setattr("newsbot.pipeline.run._PUBLISH_BACKOFF_S", ())
+    second = await run_daily(
+        deps, _AlwaysFailsPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep
+    )
+
+    assert second.status == "failed"
+    second_reports = [a for a in deps.alerts if "Digest posted" in a]  # type: ignore[attr-defined]
+    # A failed run gets no report of its own (design.md: failed/skipped
+    # send no report) -- so forcing a re-run that turns out worse must
+    # *not* add a second "Digest posted" message on top of the first.
+    assert len(second_reports) == 1
+
+    # Now force a third run that succeeds again: this is the case the
+    # task actually asks about -- force re-run reporting again with a
+    # *new* ok outcome, not just re-showing the first one.
+    third = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep)
+    assert third.status == "ok"
+    third_reports = [a for a in deps.alerts if "Digest posted" in a]  # type: ignore[attr-defined]
+    assert len(third_reports) == 2  # the original ok report, plus this new one
