@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Literal
 
 import httpx
 
-from newsbot.bot.format import RenderedDigest, render_digest
+from newsbot.bot.format import RenderedDigest, render_digest, render_run_report
 from newsbot.collectors.base import (
     Collector,
     CollectorResult,
@@ -97,6 +97,19 @@ class RunMode(StrEnum):
     PREVIEW = "preview"
 
 
+class RunKind(StrEnum):
+    """Why this POST run happened, shown on the admin-channel run report (design.md §6).
+
+    Deliberately doesn't say *who* ran `/newsbot run-now` -- the privacy
+    policy promises we don't keep user ids around, and this is not the
+    place to start.
+    """
+
+    SCHEDULED = "scheduled"
+    CATCH_UP = "catch-up"
+    RUN_NOW = "run-now"
+
+
 @dataclass
 class Deps:
     cfg: AppConfig
@@ -116,6 +129,12 @@ class Deps:
     # configured", which is also every existing test's default -- the
     # daily POST hook (added in `_run_claimed`) is a no-op without one.
     code_alert_poster: CodeAlertPoster | None = None
+    # Why this POST run is happening -- scheduled cron, startup catch-up,
+    # or /newsbot run-now. `None` (the default, and every existing test's
+    # default) means "don't send an admin-channel run report" -- the
+    # report hook added in `_run_claimed` is a no-op without one, so every
+    # caller that predates this feature sees exactly today's behavior.
+    run_kind: RunKind | None = None
 
 
 @dataclass
@@ -167,6 +186,8 @@ async def build_digest(
     Usage,
     list[CollectorResult],
     list[RawItem],
+    dict[str, TopicSummary],
+    dict[str, list[TopicItem]],
 ]:
     """Run collect, normalize, filter and summarize. Writes nothing.
 
@@ -174,13 +195,16 @@ async def build_digest(
     POST mode, what to save: the rendered digest, the items and stories
     ready for `repo.save_run`, an overall status (`ok`/`partial`), header
     notes, token usage, the raw per-collector results (for source health
-    bookkeeping, which happens one level up), and the raw collected items
+    bookkeeping, which happens one level up), the raw collected items
     (before normalize's own store-dedupe and digest lookback window --
     SHiFT code alerts, design.md §12: the daily run's own code check
     runs against these, on its own `max_item_age_hours`/once-per-code
     rules rather than the digest's, since `StoredItem` -- what actually
     reaches `save_run` -- has no `full_text` field to find a code in
-    anyway).
+    anyway), and the per-topic summaries plus fallback items `render_digest`
+    already used to build `rendered` -- handed back out again so the
+    admin-channel run report (design.md §6) can build its own per-topic
+    story counts without re-deriving them from a rendered embed.
     """
     cfg = deps.cfg
     now = deps.now()
@@ -267,6 +291,8 @@ async def build_digest(
         usage,
         results,
         collected,
+        summaries,
+        fallback_items,
     )
 
 
@@ -338,6 +364,8 @@ async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
             usage,
             _results,
             _collected,
+            _summaries,
+            _fallback_items,
         ) = await build_digest(deps, run_date)
         await publisher.publish(rendered)
     except Exception as exc:  # a preview must never take the bot down with it
@@ -350,7 +378,8 @@ async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
 async def _run_post(
     deps: Deps, publisher: Publisher, *, force: bool, sleep: Callable[[float], Awaitable[None]]
 ) -> PipelineOutcome:
-    run_date = local_run_date(deps.now(), deps.cfg.digest.timezone)
+    run_started_at = deps.now()
+    run_date = local_run_date(run_started_at, deps.cfg.digest.timezone)
 
     digest_id = await asyncio.to_thread(_claim_sync, deps.db_path, run_date, force, deps.now)
     if digest_id is None:
@@ -362,7 +391,9 @@ async def _run_post(
         )
 
     try:
-        return await _run_claimed(deps, publisher, digest_id, run_date, sleep=sleep)
+        return await _run_claimed(
+            deps, publisher, digest_id, run_date, run_started_at=run_started_at, sleep=sleep
+        )
     except BaseException as exc:
         # build_digest failing and publish failing after retries both
         # already have their own handling below, and return a normal
@@ -396,6 +427,7 @@ async def _run_claimed(
     digest_id: int,
     run_date: date,
     *,
+    run_started_at: datetime,
     sleep: Callable[[float], Awaitable[None]],
 ) -> PipelineOutcome:
     """The part of `_run_post` that runs once the day is claimed.
@@ -408,9 +440,18 @@ async def _run_claimed(
     raising; anything that raises past here is `_run_post`'s problem.
     """
     try:
-        rendered, items, stories, status, notes, usage, results, collected = await build_digest(
-            deps, run_date
-        )
+        (
+            rendered,
+            items,
+            stories,
+            status,
+            notes,
+            usage,
+            results,
+            collected,
+            summaries,
+            fallback_items,
+        ) = await build_digest(deps, run_date)
     except Exception as exc:
         logger.exception("build_digest failed")
         await asyncio.to_thread(
@@ -422,6 +463,7 @@ async def _run_claimed(
     await _record_source_health(deps, results)
 
     message_ids, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
+    publish_finished_at = deps.now()
 
     if publish_error is not None:
         await asyncio.to_thread(
@@ -461,12 +503,75 @@ async def _run_claimed(
         usage,
         deps.now,
     )
+    await _maybe_send_run_report(
+        deps,
+        status=status,
+        run_date=run_date,
+        summaries=summaries,
+        fallback_items=fallback_items,
+        results=results,
+        usage=usage,
+        notes=notes,
+        message_ids=message_ids,
+        duration=publish_finished_at - run_started_at,
+    )
     # Same reasoning as the failure branch above, mirrored for success:
     # the code check runs only once today's digest is already saved `ok`/
     # `partial` with its real message ids, so a cancellation inside it has
     # nothing left to corrupt.
     await _maybe_check_codes(deps, collected, results)
     return PipelineOutcome(status=status, rendered=rendered, notes=notes, usage=usage)
+
+
+async def _maybe_send_run_report(
+    deps: Deps,
+    *,
+    status: str,
+    run_date: date,
+    summaries: dict[str, TopicSummary],
+    fallback_items: dict[str, list[TopicItem]],
+    results: list[CollectorResult],
+    usage: Usage,
+    notes: list[str],
+    message_ids: list[int],
+    duration: timedelta,
+) -> None:
+    """Send the admin-channel run report (design.md §6), if this run earns one.
+
+    A no-op whenever there's no `run_kind` (every caller that predates
+    this feature, and every test that doesn't set one up), `report_to_admin`
+    is off, or `status` isn't `ok`/`partial` -- a `failed` run already gets
+    a detailed alert of its own above, and a report on top of that would
+    just be noise about the same failure twice. Only ever called once
+    today's digest row is already durably saved (same ordering
+    `_maybe_check_codes` relies on, for the same reason): nothing in here
+    may change what already landed, so any exception -- a bug in
+    `render_run_report`, a Discord hiccup inside `deps.alert` (which
+    already swallows its own) -- is caught and logged, never re-raised.
+    """
+    if deps.run_kind is None or not deps.cfg.digest.report_to_admin:
+        return
+    if status not in ("ok", "partial"):
+        return
+    try:
+        text = render_run_report(
+            status=status,
+            run_date=run_date,
+            run_kind=deps.run_kind,
+            topics=deps.cfg.topics,
+            summaries=summaries,
+            fallback_items=fallback_items,
+            results=results,
+            usage=usage,
+            duration=duration,
+            notes=notes,
+            guild_id=deps.cfg.guild_id,
+            channel_id=deps.cfg.digest.channel_id,
+            header_message_id=message_ids[0] if message_ids else None,
+        )
+        await deps.alert(text)
+    except Exception:
+        logger.exception("failed to build or send the admin-channel run report")
 
 
 def _claim_sync(
@@ -870,6 +975,7 @@ __all__ = [
     "Deps",
     "FixtureCollector",
     "PipelineOutcome",
+    "RunKind",
     "RunMode",
     "StubLLM",
     "build_digest",
