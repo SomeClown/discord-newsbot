@@ -45,14 +45,14 @@ def _reject_bool_channel_id(v: object) -> object:
     """A `mode="before"` guard shared by every `channel_id` field.
 
     Pydantic's lax int coercion happily turns a quoted numeric string or a
-    whole-number float into an int -- both genuinely useful for a
-    hand-edited YAML file -- but `bool` is *also* an `int` subclass in
+    whole-number float into an int (both genuinely useful for a
+    hand-edited YAML file), but `bool` is *also* an `int` subclass in
     Python, so `channel_id: true` was silently loading as `1` instead of
     failing config validation, which is a considerably more confusing way
     to find out than a startup error (test-engineer caught it before a
     typo like that ever got the chance to). `strict=True` would close this
     the blunt way, but it also closes the string/float coercions this
-    module's own tests pin as intentional -- rejecting bool specifically,
+    module's own tests pin as intentional: rejecting bool specifically,
     ahead of pydantic's normal int coercion, is the one check that catches
     the typo without taking those away.
     """
@@ -66,7 +66,7 @@ class Topic(BaseModel):
     name: str
     # v2.0 (design.md §13): each game posts its own digest to its own
     # channel now, so there's no longer a shared fallback to inherit this
-    # from -- every topic has to name one.
+    # from; every topic has to name one.
     channel_id: int = Field(gt=0)
     aliases: list[str] = []
     entities: list[str] = []
@@ -89,7 +89,7 @@ class Topic(BaseModel):
 
 
 class DigestCfg(BaseModel):
-    # v2.0 (design.md §13): the combined digest channel is gone -- each
+    # v2.0 (design.md §13): the combined digest channel is gone; each
     # topic posts to its own Topic.channel_id instead. A leftover
     # digest.channel_id in an old v1 config.yaml is caught by
     # load_config's raw-YAML pre-check, before pydantic ever gets a
@@ -99,7 +99,7 @@ class DigestCfg(BaseModel):
     lookback_hours: int = 24
     max_items_per_topic: int = 60
     # design.md §6: a plain-text status message to the admin channel after
-    # every POST run that actually posts (ok or partial) -- so "the digest
+    # every POST run that actually posts (ok or partial), so "the digest
     # went out fine" doesn't require anyone to go look. Only takes effect
     # when `admin_channel_id` is set; true by default because a run report
     # is meant to be the normal, boring case, not something an owner has to
@@ -163,7 +163,7 @@ Source = Annotated[
 class AlertsCfg(BaseModel, extra="forbid"):
     """Settings for the SHiFT code alert sweep (design.md §12).
 
-    Absent entirely, `enabled` defaults to False -- an owner who never
+    Absent entirely, `enabled` defaults to False; an owner who never
     touches this block never gets an unannounced `@everyone` pinger
     bolted onto their digest bot. `config.example.yaml` ships it
     commented with `true`, so turning it on is a deliberate uncomment,
@@ -172,13 +172,13 @@ class AlertsCfg(BaseModel, extra="forbid"):
 
     enabled: bool = False
     # v2.0 (design.md §13): SHiFT alerts move off the shared digest channel
-    # onto their own -- required once `enabled` is true (checked in
+    # onto their own: required once `enabled` is true (checked in
     # load_config, where the friendly message lives), optional otherwise
     # so a disabled block doesn't need a channel it'll never post to.
     channel_id: int | None = Field(None, gt=0)
     interval_minutes: int = Field(60, ge=15, le=1440)
     max_item_age_hours: int = Field(48, ge=1, le=720)
-    # 0 disables pinging entirely without disabling the sweep -- codes
+    # 0 disables pinging entirely without disabling the sweep; codes
     # still get recorded and posted, just never with @everyone attached.
     max_pings_per_day: int = Field(3, ge=0)
     allow_test_command: bool = False
@@ -191,13 +191,13 @@ class AlertsCfg(BaseModel, extra="forbid"):
     topics: list[str] = []
     # QA item 7 option A (owner decision, 2026-09-25): trust-gated pings.
     # A community-only code (a Reddit thread guessing a code, say) still
-    # posts -- codes aren't gatekept by trust, only the @everyone ping is.
+    # posts; codes aren't gatekept by trust, only the @everyone ping is.
     # A batch pings only if at least one code queued to post came from a
     # source whose trust is in this list.
     ping_trust: list[Trust] = ["official", "press"]
     # QA item 7 (owner decision, 2026-09-25): an item naming more than
     # this many distinct codes is a roundup/megathread, not a genuine
-    # single-code announcement -- its sightings don't count toward
+    # single-code announcement; its sightings don't count toward
     # alerting (shift/decide.py's aggregate/sightings_from_items).
     max_codes_per_item: int = Field(5, ge=1)
 
@@ -271,7 +271,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     # A pre-check against the raw YAML, not a pydantic field: DigestCfg no
     # longer declares channel_id at all, and a plain BaseModel silently
-    # ignores fields it doesn't recognize -- an old v1 config.yaml that
+    # ignores fields it doesn't recognize: an old v1 config.yaml that
     # still sets digest.channel_id would otherwise load "successfully"
     # with that value quietly going nowhere, which is a worse outcome
     # than the field simply not existing. Collected ahead of pydantic's
@@ -294,7 +294,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     # admin_permission must name a real discord.Permissions flag, checked
     # against VALID_FLAGS (the actual name -> bit mapping), not hasattr()
-    # against the class -- discord.Permissions also has real attributes
+    # against the class: discord.Permissions also has real attributes
     # like `value` (a property) and `all`/`none` (classmethods) that
     # hasattr() would happily call a "flag" too, which is how "value"
     # used to sail through config validation as an admin_permission that
@@ -334,7 +334,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     if cfg.alerts.allow_test_command and not cfg.alerts.enabled:
         # A config that turns on the test command but not the feature it
-        # tests is almost certainly a copy-paste mistake, not intent -- it
+        # tests is almost certainly a copy-paste mistake, not intent; it
         # used to surface as a bare RuntimeError the first time someone
         # ran /newsbot test-alert, long after config load had already
         # said everything looked fine.
@@ -379,7 +379,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     if cfg.alerts.allow_test_command:
         # /newsbot test-alert lets anyone with admin_permission post a fake
-        # SHiFT code alert on demand -- exactly what the private test guild
+        # SHiFT code alert on demand: exactly what the private test guild
         # needs and exactly what a production config should never carry,
         # so a startup log line is the one place this gets said out loud.
         logging.getLogger(__name__).warning(
@@ -392,7 +392,7 @@ def load_config(path: str | Path) -> AppConfig:
 def configured_source_names(cfg: AppConfig) -> set[str]:
     """The `source_name` every currently-configured source records health under.
 
-    This has to match `build_collectors` exactly -- every `Collector` sets
+    This has to match `build_collectors` exactly: every `Collector` sets
     `self.name = source.name`, and `cfg.sources` already has Bluesky's
     default name filled in by the time `load_config` returns it (see
     above), so this is just "read `.name` off what's configured" with one
