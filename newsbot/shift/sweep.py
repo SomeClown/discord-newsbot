@@ -29,7 +29,7 @@ from typing import Protocol
 
 import httpx
 
-from newsbot.bot.format import RenderedAlert, render_code_alerts
+from newsbot.bot.format import RenderedAlert, render_code_alerts, render_roundup_alerts
 from newsbot.collectors.base import (
     Collector,
     CollectorResult,
@@ -42,6 +42,7 @@ from newsbot.pipeline.normalize import canonicalize_items
 from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import local_run_date
 from newsbot.shift.decide import (
+    MAX_ROUNDUP_CODES,
     CodeCandidate,
     CodeSighting,
     aggregate,
@@ -109,7 +110,14 @@ class SweepDeps:
 
 @dataclass(frozen=True)
 class CodeCheckOutcome:
-    """What one sweep or one daily code check actually did, for status and logging."""
+    """What one sweep or one daily code check actually did, for status and logging.
+
+    `roundup_posted` (design.md §13) is kept separate from `posted` --
+    the normal (possibly pinging) batch and the unpinged "from a roundup"
+    batch are two different Discord messages with two different stories
+    to tell, and folding them into one count would make "1 code posted"
+    ambiguous about which kind it was.
+    """
 
     new_candidates: int
     posted: int
@@ -117,6 +125,7 @@ class CodeCheckOutcome:
     failed: int
     ping: bool
     cap_reached: bool
+    roundup_posted: int = 0
 
 
 _EMPTY_OUTCOME = CodeCheckOutcome(
@@ -208,6 +217,51 @@ async def _post_with_retry(
     return None, last_error
 
 
+_ROUNDUP_CAP_ALERT = (
+    "newsbot: SHiFT roundup code cap reached ({count} per check); "
+    "{overflow} code(s) recorded silently, not posted this check."
+)
+
+
+async def _post_batch(deps: SweepDeps, rendered: list[RenderedAlert]) -> tuple[int, int, list[str]]:
+    """Post every message in `rendered`, in order; return (posted, failed, failed_codes).
+
+    Once one message in the batch fails permanently, every message after
+    it is marked `failed` without ever calling the poster -- Discord
+    messages within one batch are meant to read in order (a continuation
+    literally says "(continued)"), so posting message 3 after message 2
+    silently vanished would confuse more than it'd help. Shared between
+    the normal `to_post` batch and the unpinged roundup batch (design.md
+    §13, step 5) so neither has to duplicate this dance.
+    """
+    posted = 0
+    failed = 0
+    failed_codes: list[str] = []
+    failed_from_here = False
+    for alert in rendered:
+        if failed_from_here:
+            failed += len(alert.codes)
+            failed_codes.extend(alert.codes)
+            await asyncio.to_thread(_mark_failed_sync, deps.db_path, list(alert.codes))
+            continue
+
+        message_id, error = await _post_with_retry(deps, alert)
+        if error is not None:
+            failed_from_here = True
+            failed += len(alert.codes)
+            failed_codes.extend(alert.codes)
+            await asyncio.to_thread(_mark_failed_sync, deps.db_path, list(alert.codes))
+            logger.error(
+                "code alert post failed permanently",
+                extra={"codes": alert.codes, "error": str(error)},
+            )
+            continue
+
+        posted += len(alert.codes)
+        await asyncio.to_thread(_mark_posted_sync, deps.db_path, list(alert.codes), message_id)
+    return posted, failed, failed_codes
+
+
 async def _apply_plan(
     deps: SweepDeps,
     candidates: list[CodeCandidate],
@@ -239,9 +293,19 @@ async def _apply_plan(
         await asyncio.to_thread(_record_silent_sync)
 
     posted = 0
+    roundup_posted = 0
     failed = 0
+    all_failed_codes: list[str] = []
     cap_reached = plan.cap_reached
     final_ping = plan.ping
+
+    # Reset the poster's missing-permission dedupe once per sweep, before
+    # either batch below might post -- whichever batch happens to post
+    # first shouldn't matter to how often that alert can fire.
+    begin_batch = getattr(deps.poster, "begin_batch", None)
+    if begin_batch is not None and (plan.to_post or plan.roundup_to_post):
+        begin_batch()
+
     if plan.to_post:
         # claim_codes re-checks the ping cap itself, inside its own
         # BEGIN IMMEDIATE transaction, against whatever `pings_today`
@@ -267,40 +331,35 @@ async def _apply_plan(
         if plan.ping and not final_ping:
             cap_reached = True
         rendered = render_code_alerts(plan.to_post, ping=final_ping, test=test)
+        posted, batch_failed, batch_failed_codes = await _post_batch(deps, rendered)
+        failed += batch_failed
+        all_failed_codes.extend(batch_failed_codes)
 
-        begin_batch = getattr(deps.poster, "begin_batch", None)
-        if begin_batch is not None:
-            begin_batch()
-
-        failed_from_here = False
-        failed_codes: list[str] = []
-        for alert in rendered:
-            if failed_from_here:
-                failed += len(alert.codes)
-                failed_codes.extend(alert.codes)
-                await asyncio.to_thread(_mark_failed_sync, deps.db_path, list(alert.codes))
-                continue
-
-            message_id, error = await _post_with_retry(deps, alert)
-            if error is not None:
-                failed_from_here = True
-                failed += len(alert.codes)
-                failed_codes.extend(alert.codes)
-                await asyncio.to_thread(_mark_failed_sync, deps.db_path, list(alert.codes))
-                logger.error(
-                    "code alert post failed permanently",
-                    extra={"codes": alert.codes, "error": str(error)},
+    if plan.roundup_to_post:
+        # Its own claim (design.md §13, step 5): always `pinged=False`,
+        # `from_roundup=True`, and no `max_pings` re-check -- a roundup
+        # post never touches the ping budget, so there's nothing here for
+        # a concurrent caller to race.
+        def _claim_roundup_sync() -> None:
+            rows = [(c.code, c.source_name, c.item_url) for c in plan.roundup_to_post]
+            with closing(connect(deps.db_path)) as conn:
+                claim_codes(
+                    conn, rows, pinged=False, local_day=today, now=deps.now, from_roundup=True
                 )
-                continue
 
-            posted += len(alert.codes)
-            await asyncio.to_thread(_mark_posted_sync, deps.db_path, list(alert.codes), message_id)
+        await asyncio.to_thread(_claim_roundup_sync)
+        rendered_roundup = render_roundup_alerts(plan.roundup_to_post)
+        roundup_posted, roundup_failed, roundup_failed_codes = await _post_batch(
+            deps, rendered_roundup
+        )
+        failed += roundup_failed
+        all_failed_codes.extend(roundup_failed_codes)
 
-        if failed_codes:
-            await deps.alert(
-                "newsbot: SHiFT code alert post failed; codes never posted: "
-                + ", ".join(failed_codes)
-            )
+    if all_failed_codes:
+        await deps.alert(
+            "newsbot: SHiFT code alert post failed; codes never posted: "
+            + ", ".join(all_failed_codes)
+        )
 
     if cap_reached and deps.cfg.alerts.max_pings_per_day > 0:
         # Suppressed at max_pings_per_day == 0 (step 8): with the cap set
@@ -311,6 +370,16 @@ async def _apply_plan(
         # to be ignored.
         await deps.alert("newsbot: SHiFT code alert daily ping cap reached; posted without a ping")
 
+    roundup_overflow = sum(1 for _, status in plan.silent if status == "roundup")
+    if roundup_overflow:
+        # design.md §13, D3: one admin note per check that trimmed
+        # something, not one per trimmed code -- a 60-code megathread
+        # shouldn't produce 10 separate alerts about the 10 it couldn't
+        # fit.
+        await deps.alert(
+            _ROUNDUP_CAP_ALERT.format(count=MAX_ROUNDUP_CODES, overflow=roundup_overflow)
+        )
+
     return CodeCheckOutcome(
         new_candidates=len(candidates),
         posted=posted,
@@ -318,6 +387,7 @@ async def _apply_plan(
         failed=failed,
         ping=final_ping,
         cap_reached=cap_reached,
+        roundup_posted=roundup_posted,
     )
 
 

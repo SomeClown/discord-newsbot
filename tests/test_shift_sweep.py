@@ -143,6 +143,19 @@ def _row(db_path, code):
         ).fetchone()
 
 
+def _rows_for(conn, codes: list[str]) -> dict[str, tuple[str, int, int]]:
+    """code -> (status, pinged, from_roundup) for `codes`, for the roundup posting tests."""
+    placeholders = ",".join("?" for _ in codes)
+    # placeholders is a run of literal "?"s sized to `codes`, never
+    # interpolated user data; the actual codes are bound below.
+    select = "SELECT code, status, pinged, from_roundup FROM alerted_codes "
+    where = f"WHERE code IN ({placeholders})"  # noqa: S608
+    return {
+        row["code"]: (row["status"], row["pinged"], row["from_roundup"])
+        for row in conn.execute(select + where, codes).fetchall()
+    }
+
+
 # --- silent seeding ---
 
 
@@ -288,10 +301,12 @@ async def test_trusted_candidates_ordered_first_in_the_batch(db_path, http_clien
     assert poster.sent[0].codes == [CODE_B, CODE_A]
 
 
-# --- silent roundups (QA item 7, owner decision 2026-09-25) ---
+# --- roundups now post unpinged (design.md §13, D3; v1 recorded them all
+# silently forever -- these two tests are deliberately flipped from that
+# pinned behavior to the new one, same as the plan calls for) ---
 
 
-async def test_roundup_item_with_six_codes_records_all_silently_no_post(db_path, http_client):
+async def test_roundup_item_with_six_codes_posts_unpinged_from_roundup(db_path, http_client):
     _seed(db_path)
     poster = _FakePoster()
     deps = _deps(db_path, http_client, poster=poster)
@@ -299,19 +314,15 @@ async def test_roundup_item_with_six_codes_records_all_silently_no_post(db_path,
     item = _multi_code_item(codes, url="https://example.com/roundup")
     outcome = await process_items(deps, [item], seeding_ok=True)
 
-    assert outcome.posted == 0
-    assert poster.sent == []
+    assert outcome.posted == 0  # nothing in the normal (pinging) pipeline
+    assert outcome.roundup_posted == 6
+    assert len(poster.sent) == 1
+    assert poster.sent[0].ping is False
+    assert "@everyone" not in poster.sent[0].content
+    assert "SHiFT codes from a roundup" in poster.sent[0].content
     with closing(connect(db_path)) as conn:
-        rows = {
-            row["code"]: row["status"]
-            for row in conn.execute(
-                "SELECT code, status FROM alerted_codes WHERE code IN ({})".format(  # noqa: S608
-                    ",".join("?" for _ in codes)
-                ),
-                codes,
-            ).fetchall()
-        }
-    assert rows == {code: "roundup" for code in codes}
+        rows = _rows_for(conn, codes)
+    assert rows == {code: ("posted", 0, 1) for code in codes}
 
 
 async def test_code_in_roundup_and_dedicated_post_still_alerts_with_ping(db_path, http_client):
@@ -326,23 +337,60 @@ async def test_code_in_roundup_and_dedicated_post_still_alerts_with_ping(db_path
 
     assert outcome.posted == 1
     assert outcome.ping is True
-    assert poster.sent[0].codes == [CODE_A]
+    assert outcome.roundup_posted == 5  # the other five roundup-only codes
+    # Two separate messages: the normal pinging one for CODE_A, then the
+    # unpinged roundup one for the rest.
+    assert len(poster.sent) == 2
+    normal_message, roundup_message = poster.sent
+    assert normal_message.codes == [CODE_A]
+    assert normal_message.ping is True
+    assert roundup_message.ping is False
+    assert "@everyone" not in roundup_message.content
     row = _row(db_path, CODE_A)
     assert row["status"] == "posted"
     assert row["pinged"] == 1
-    # The other five roundup-only codes still recorded silently.
+    # The other five roundup-only codes posted unpinged, from_roundup.
     with closing(connect(db_path)) as conn:
         others = [c for c in codes if c != CODE_A]
-        rows = {
+        rows = _rows_for(conn, others)
+    assert rows == {code: ("posted", 0, 1) for code in others}
+
+
+async def test_roundup_cap_overflow_posts_fifty_records_rest_silently_with_admin_alert(
+    db_path, http_client
+):
+    # design.md §13, D3: MAX_ROUNDUP_CODES caps a check at 50 posted
+    # roundup codes; the other 10 (of 60) are recorded silently as
+    # 'roundup' and one admin alert notes the trim -- not one per code.
+    _seed(db_path)
+    alerts: list[str] = []
+    cfg = _cfg(max_codes_per_item=1)  # any item with >1 code counts as a roundup
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster, cfg=cfg, alerts=alerts)
+    codes = [f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(60)]
+    item = _multi_code_item(codes, url="https://example.com/big-roundup")
+
+    outcome = await process_items(deps, [item], seeding_ok=True)
+
+    assert outcome.roundup_posted == 50
+    assert outcome.silent == 10
+    with closing(connect(db_path)) as conn:
+        statuses = {
             row["code"]: row["status"]
             for row in conn.execute(
                 "SELECT code, status FROM alerted_codes WHERE code IN ({})".format(  # noqa: S608
-                    ",".join("?" for _ in others)
+                    ",".join("?" for _ in codes)
                 ),
-                others,
+                codes,
             ).fetchall()
         }
-    assert rows == {code: "roundup" for code in others}
+    posted_codes = [c for c, s in statuses.items() if s == "posted"]
+    silent_codes = [c for c, s in statuses.items() if s == "roundup"]
+    assert len(posted_codes) == 50
+    assert len(silent_codes) == 10
+    cap_alerts = [a for a in alerts if "roundup" in a.lower() and "cap" in a.lower()]
+    assert len(cap_alerts) == 1
+    assert "10" in cap_alerts[0]
 
 
 async def test_roundup_threshold_is_configurable(db_path, http_client):

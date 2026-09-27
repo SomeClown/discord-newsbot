@@ -32,7 +32,7 @@ from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
-from newsbot.shift.decide import CodeCandidate
+from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
 from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView, Usage
 
@@ -619,6 +619,103 @@ def render_code_alerts(
     return rendered
 
 
+_ROUNDUP_HEADER_PREFIX = "**SHiFT codes from a roundup**"
+
+
+def _roundup_header(source_name: str, item_url: str) -> str:
+    safe_url = _safe_link(item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    return f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}{link}"
+
+
+def _roundup_code_block(candidate: CodeCandidate) -> str:
+    # No source/link per entry (the header already carries the one
+    # source and link every code in this group shares) and no golden-key
+    # prefix (design.md §13 doesn't ask for one here) -- just the code
+    # itself, select-and-copy-able the same way a normal alert's code is.
+    if not is_code(candidate.code):
+        raise ValueError(f"not a SHiFT code: {candidate.code!r}")
+    return f"```\n{candidate.code}\n```"
+
+
+def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert]:
+    """Render fresh roundup-only codes into unpinged "from a roundup" messages (design.md §13).
+
+    v1 recorded every roundup-only code silently, forever; v2.0 posts the
+    fresh ones instead (`shift/decide.py`'s `AlertPlan.roundup_to_post`),
+    just without a ping and headed differently -- these are still "we're
+    not confident enough in this to wake anyone up for it" codes, they're
+    just not invisible anymore. `ping` is always `False` here (never
+    `True`, not even conditionally); this function is never the place a
+    future edit could accidentally reintroduce a second `@everyone` path.
+
+    `group_roundups` splits `candidates` by the post they came from
+    (`source_name`, `item_url`) -- design.md §13's "two roundup items ->
+    two headers" -- and each group renders independently, packing its own
+    codes into one or more messages under Discord's 2000-unit cap exactly
+    like `render_code_alerts` does for a normal batch: the first message
+    of a group carries that group's header, any continuation uses
+    `_CONTINUATION_HEADER`, and no group's codes ever share a message with
+    another group's (a header names one specific roundup post; mixing two
+    posts' codes under one header would misattribute them).
+    """
+    if not candidates:
+        return []
+
+    rendered: list[RenderedAlert] = []
+    for group in group_roundups(candidates):
+        first_header = _roundup_header(group[0].source_name, group[0].item_url)
+        solo_budget = (
+            _ALERT_CONTENT_LIMIT
+            - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER))
+            - 2
+        )
+        entries = [(c.code, _roundup_code_block(c)) for c in group]
+        # Every code block is short and fixed-shape (a 29-character code
+        # in a fenced block) -- nowhere near solo_budget in practice, but
+        # this is the same loud failure `render_code_alerts` has for the
+        # same "shouldn't be reachable, but 'shouldn't' isn't 'can't'"
+        # reason.
+        for code, block in entries:
+            if discord_len(block) > solo_budget:
+                raise ValueError(f"roundup code block for {code!r} exceeds the per-message budget")
+
+        batches: list[list[tuple[str, str]]] = []
+        current: list[tuple[str, str]] = []
+        current_len = 0
+        for code, block in entries:
+            header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+            block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
+            if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
+                batches.append(current)
+                current = []
+                current_len = 0
+            current.append((code, block))
+            current_len += block_len
+        if current:
+            batches.append(current)
+
+        for i, batch in enumerate(batches):
+            header = first_header if i == 0 else _CONTINUATION_HEADER
+            content = "\n\n".join([header, *(block for _, block in batch)])
+            if discord_len(content) > _ALERT_CONTENT_LIMIT:
+                raise ValueError(
+                    f"rendered roundup alert content exceeds {_ALERT_CONTENT_LIMIT} "
+                    f"UTF-16 units ({discord_len(content)})"
+                )
+            batch_codes = [code for code, _ in batch]
+            # Plan §5: sha256("roundup|" + codes + index) -- distinct from
+            # render_code_alerts' own nonce scheme (no "roundup|" prefix)
+            # so a normal and a roundup message for the same code (which
+            # can't actually happen, once-per-code, but nonces are cheap
+            # insurance) could never collide.
+            nonce = hashlib.sha256(f"roundup|{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+            rendered.append(
+                RenderedAlert(content=content, codes=batch_codes, ping=False, nonce=nonce)
+            )
+    return rendered
+
+
 # --- Admin-channel run reports (design.md §6, §8) ---
 #
 # One plain-text message to the admin channel after every POST run that
@@ -835,6 +932,7 @@ __all__ = [
     "esc",
     "render_code_alerts",
     "render_digest",
+    "render_roundup_alerts",
     "render_run_report",
     "render_status",
     "render_story_page",
