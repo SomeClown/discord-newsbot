@@ -2,14 +2,19 @@
 # sources, no SHiFT alerts. config.example.yaml is the full, three-game,
 # fifteen-source config this bot actually runs in production, which is a
 # great reference and a slightly overwhelming place to start. This is the
-# other end: copy it to config.yaml, swap the placeholder Discord IDs
-# below for real ones, and you have a bot that starts up and has one
-# game's worth of news to post while you decide whether you want more.
+# other end: copy it to config.yaml and start replacing placeholders.
 #
-# Every ID below that says "placeholder" is fake and must be replaced:
-# the bot will happily start up pointed at a channel that doesn't exist
-# and then fail confusingly later, which is a worse failure mode than a
-# config error at startup.
+# Three separate kinds of placeholder below all need real values before
+# this actually works, not just before it starts up:
+#   - Every Discord ID (`guild_id`, `admin_channel_id`, each topic's
+#     `channel_id`): the bot will happily start up pointed at a channel
+#     that doesn't exist and then fail confusingly later, which is a worse
+#     failure mode than a config error at startup.
+#   - The Steam source's `app_id` (1234567 is fake and returns a 403).
+#   - The RSS source's `url` (example.com isn't a feed and returns a 404).
+# Run `python -m newsbot.pipeline.run --config config.yaml --check-sources`
+# once you've replaced them, before spending a Discord post or a Claude
+# call on finding out the hard way; see docs/self-host.md step 6.
 
 guild_id: 123456789012345678          # placeholder: your server's ID
 admin_channel_id: 123456789012345679  # placeholder: optional; alerts go here
@@ -17,7 +22,7 @@ admin_permission: manage_guild
 
 digest:
   time: "09:00"
-  timezone: "America/Los_Angeles"     # any IANA zone; see /usr/share/zoneinfo or `timedatectl list-timezones`
+  timezone: "America/Los_Angeles"     # set this to your own timezone; any IANA zone, see /usr/share/zoneinfo or `timedatectl list-timezones`
   lookback_hours: 24
   max_items_per_topic: 60
 
@@ -49,15 +54,18 @@ sources:
     topics: [yourgame]
     trust: official
 
-  # An RSS feed, official or press: a developer blog, a YouTube channel
-  # (via feeds/videos.xml?channel_id=), a subreddit's /top/.rss?t=day, or
-  # a wide-coverage press feed with no `topics` at all (the keyword
-  # matcher decides what belongs where). docs/finding-sources.md has
-  # recipes for all of these.
+  # A general games-press RSS feed (a developer blog, a subreddit's
+  # /top/.rss?t=day, a site's own /feed): no `topics` here, on purpose.
+  # A source naming exactly one topic is a *dedicated source* (see
+  # config.example.yaml and docs/finding-sources.md's "dedicated-source
+  # rule"): every item it returns counts as a confident match for that
+  # topic even if the game's name never comes up, which is right for an
+  # official blog but wrong for a wide-coverage feed that covers other
+  # games too. Leaving `topics` off here means the keyword matcher (this
+  # topic's `name`/`aliases`) decides what actually belongs.
   - type: rss
     name: "Your Game News"
     url: "https://example.com/feed.xml"  # placeholder: a real feed URL
-    topics: [yourgame]
     trust: press
 
   # Brave News search, catching outlets not already covered by name
