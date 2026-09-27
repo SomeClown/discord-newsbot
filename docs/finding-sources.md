@@ -28,25 +28,21 @@ matters more than it looks: without that filter, some apps' announcement
 feeds fill up with SteamDB "top sellers" posts and unrelated press
 aggregators, not the developer's own patch notes.
 
-## YouTube channel feeds
+## YouTube channel feeds (currently not working)
 
-Every YouTube channel has a plain RSS feed, no API key needed:
+Every YouTube channel used to have a plain RSS feed, no API key needed:
 
 ```
 https://www.youtube.com/feeds/videos.xml?channel_id=<channel_id>
 ```
 
-The channel ID is not the same as the `@handle` in a channel's URL; it's the
-underlying `UC...` id, and it isn't always the one you'd guess. A handle
-page's "first channel that comes up" for a game's name can turn out to be a
-fan channel, an empty placeholder, or the wrong region's account. The
-reliable way to get it: open the channel's page, view source, and search for
-`"channelId"`. Verify by loading the feed URL and checking the newest entry's
-date; a feed that hasn't posted in years is a dead end, not a source.
-
-These feeds occasionally 404 or change ID with no warning; that's an upstream
-fact of life, not a bug in this bot (see the Limitations section of the
-README).
+This bot used four of them. In late September 2026 all four started
+returning 404, along with every other channel's feed we tried, while YouTube
+reported no outage; so they were dropped from the example config. If you
+want to try one anyway, get the channel's real `UC...` id (view the channel
+page's source and search for `"channelId"`; the `@handle` isn't it, and the
+first channel a search turns up is often a fan account), add it, and run
+`--check-sources` before you trust it.
 
 ## Bluesky: profile RSS by DID
 

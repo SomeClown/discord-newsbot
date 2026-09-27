@@ -117,28 +117,14 @@ sources:
   # thing to an official Borderlands press feed, at the cost of also
   # covering NBA, WWE and Civ; it's unscoped on purpose, so the keyword
   # matcher decides what's relevant.
+  # YouTube channel feeds (youtube.com/feeds/videos.xml?channel_id=...) used
+  # to live here, one per game plus Gearbox. Every one of them, and every
+  # other channel's feed we tried, started returning 404 in late September
+  # 2026 while YouTube itself reported nothing wrong, so they're out until
+  # `--check-sources` says otherwise.
   - type: rss
     name: "2K Newsroom"
     url: "https://newsroom.2k.com/feed/rss"
-    trust: official
-  - type: rss
-    name: "Borderlands YouTube"
-    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCHY2-UtRFv1WKf4o7cpEp3w"
-    topics: [borderlands4]
-    trust: official
-  - type: rss
-    name: "Gearbox YouTube"
-    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCSRO0JNUYTCjsk7VmMdNYKw"
-    trust: official
-  - type: rss
-    name: "Pocketpair YouTube"
-    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCz6cOlpF6os7JkAKnpMNriw"
-    topics: [palworld]
-    trust: official
-  - type: rss
-    name: "Diablo YouTube"
-    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UCxn8csYeZg6awRnZS-aqg0g"
-    topics: [diablo4]
     trust: official
   # The official Bluesky accounts work fine over plain RSS, no app password
   # needed; that's only required for *searching* Bluesky (see the

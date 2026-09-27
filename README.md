@@ -2,9 +2,8 @@
 
 A Discord bot, built for one particular ~50-person community server's three
 games: **Borderlands 4**, **Palworld**, and **Diablo IV**. Once a day it
-reads the internet — official blogs, Steam announcements, subreddits,
-YouTube channels, Bluesky, and a general web search — so the server doesn't
-have to, and posts an AI-summarized digest. Members can also ask it for
+reads the internet (official blogs, Steam announcements, subreddits,
+Bluesky, and a general web search) so the server doesn't have to, and posts an AI-summarized digest. Members can also ask it for
 recent news or search past stories on demand.
 
 It is not a general-purpose news bot, and it isn't one bot serving many
@@ -20,8 +19,8 @@ you here.
 
 Two documents cover this:
 
-- **[`docs/finding-sources.md`](docs/finding-sources.md)** — recipes for
-  finding Steam, YouTube, Bluesky, subreddit, and press sources for your own
+- **[`docs/finding-sources.md`](docs/finding-sources.md)**: recipes for
+  finding Steam, Bluesky, subreddit, and press sources for your own
   game, plus the aliasing lessons (some words match more than you'd think)
   that came out of doing this for the three games above.
 - **[`docs/self-host.md`](docs/self-host.md)** — the actual setup guide:
@@ -342,9 +341,10 @@ Rough running cost against `config.example.yaml`'s source list:
   and may reject requests outright from a hosting provider's IP range in
   production. If it happens, it shows up in `/newsbot status` as a source
   health failure, not a crash.
-- **YouTube channel feeds occasionally 404 or change ID.** These are plain
-  RSS reads (`youtube.com/feeds/videos.xml?channel_id=...`) with no official
-  guarantee of stability.
+- **YouTube channel feeds are out, for now.** They're plain RSS reads
+  (`youtube.com/feeds/videos.xml?channel_id=...`) with no official
+  guarantee of stability, and in late September 2026 every one of them
+  started returning 404, so the example config no longer includes any.
 - **Running `/newsbot run-now` a second time after today's digest already
   posted usually produces a mostly empty digest.** It re-runs the full
   pipeline; most items are already deduped against the store, and the model
