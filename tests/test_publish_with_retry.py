@@ -97,7 +97,7 @@ def _rendered(*messages: TopicMessage) -> RenderedDigest:
 
 async def test_transient_failure_on_middle_topic_then_success_sends_exactly_once_per_topic():
     # Three topics; the second one's channel blips once. The retry must
-    # resume from there -- topic 1 and topic 3 must never be sent twice.
+    # resume from there: topic 1 and topic 3 must never be sent twice.
     bl4 = FakeChannel()
     palworld = FakeChannel()
     palworld.fail_on_call = {0: aiohttp.ClientError("connection reset")}
@@ -122,7 +122,7 @@ async def test_transient_failure_on_middle_topic_then_success_sends_exactly_once
 async def test_transient_twice_on_first_topic_then_permanent_on_second_stops_and_keeps_first_id():
     # Attempt 1: topic 1 blips (transient). Attempt 2: topic 1 blips again
     # (transient). Attempt 3: topic 1 finally lands, but topic 2 comes
-    # back permanent (a 4xx) -- the loop must stop right there, never
+    # back permanent (a 4xx): the loop must stop right there, never
     # trying a 4th attempt, and must keep topic 1's id.
     bl4 = FakeChannel()
     bl4.fail_on_call = {0: aiohttp.ClientError("blip 1"), 1: aiohttp.ClientError("blip 2")}
@@ -179,7 +179,7 @@ async def test_two_topics_sharing_one_channel_both_post_and_are_both_tracked():
 
 async def test_topic_channel_id_equal_to_the_admin_channel_id_still_posts_normally():
     # design.md §13 doesn't forbid a topic sharing its channel_id with the
-    # admin channel -- DiscordPublisher has no concept of "the admin
+    # admin channel: DiscordPublisher has no concept of "the admin
     # channel" at all, so it should just post there like anywhere else.
     admin_and_topic_channel = FakeChannel()
     client = FakeClient({42: admin_and_topic_channel})

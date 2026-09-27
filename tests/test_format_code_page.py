@@ -41,7 +41,7 @@ def test_code_appears_in_a_fenced_block():
 
 
 def test_first_seen_date_shown_in_the_given_timezone():
-    # 2026-09-25 20:00 UTC is still 2026-09-25 13:00 PDT -- same calendar
+    # 2026-09-25 20:00 UTC is still 2026-09-25 13:00 PDT: same calendar
     # day either way here, so pick an instant near UTC midnight where the
     # two timezones actually disagree on the date.
     late_utc = datetime(2026, 9, 26, 3, 30, tzinfo=UTC)  # 2026-09-25 20:30 PDT
@@ -111,7 +111,7 @@ def test_seeded_marker_shown():
 
 def test_from_roundup_wins_over_too_old_status():
     # A roundup code that also went stale (both true at once) shows the
-    # roundup marker, not the too-old one -- the one D5 asks for.
+    # roundup marker, not the too-old one: the one D5 asks for.
     embed = render_code_page(
         [_view(status="too_old", from_roundup=True)],
         title="/shift codes",
@@ -173,7 +173,7 @@ def test_long_source_name_is_truncated():
 
 
 def test_a_full_page_of_ordinary_codes_stays_under_the_4096_cap():
-    # /shift codes pages 8 at a time (commands._SHIFT_PAGE_SIZE) -- a full
+    # /shift codes pages 8 at a time (commands._SHIFT_PAGE_SIZE): a full
     # page of ordinary-length entries is nowhere near the cap.
     codes = [
         _view(code=f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA", item_url=f"https://e.com/{i}")

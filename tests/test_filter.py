@@ -215,11 +215,11 @@ def test_max_per_topic_boundary_one_over_limit_drops_exactly_one():
 
 def test_cap_ordering_combines_match_trust_and_recency_together():
     items = [
-        # Uncertain, official, newest -- still loses to any confident match.
+        # Uncertain, official, newest: still loses to any confident match.
         _item(title="Blizzard quarterly earnings", trust="official", published_at=_at(23)),
-        # Confident, community, oldest -- beats the uncertain item on match rank alone.
+        # Confident, community, oldest: beats the uncertain item on match rank alone.
         _item(title="Diablo IV hotfix rolls out", trust="community", published_at=_at(0)),
-        # Confident, official, middle -- wins on trust over the community item above.
+        # Confident, official, middle: wins on trust over the community item above.
         _item(title="Diablo IV: official patch notes", trust="official", published_at=_at(12)),
     ]
     result = filter_items(items, TOPICS, max_per_topic=2)
