@@ -1,7 +1,7 @@
 """The discord.py client: gateway connection, scheduler wiring, and the heartbeat file.
 
 Everything before this module could be tested without a bot token, a guild,
-or an event loop discord.py owns. This is where that ends -- `NewsBot`
+or an event loop discord.py owns. This is where that ends: `NewsBot`
 holds the httpx client, the Anthropic client, the slash-command tree and
 the APScheduler instance that drives the daily job, and it has to bring
 all of them up in the right order relative to discord.py's own connection
@@ -13,7 +13,7 @@ first use. `setup_hook` runs after discord.py has created (but not yet
 started spinning) its event loop, which is the only point where "the loop
 APScheduler binds to" and "the loop discord.py's gateway actually runs on"
 are guaranteed to be the same loop. Get this wrong and the daily job fires
-into a loop nobody's listening on -- a mistake that is, by design, invisible
+into a loop nobody's listening on: a mistake that is, by design, invisible
 until 9 a.m. the first morning it matters.
 """
 
@@ -54,7 +54,7 @@ from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
 
 logger = logging.getLogger(__name__)
 
-# One id per process, generated at import time -- not persisted, not
+# One id per process, generated at import time: not persisted, not
 # configured, just enough to tell two log lines (or two admin alerts)
 # apart when they might be coming from two different processes holding
 # the same bot token (see CLAUDE.md's "never run two bot processes with
@@ -88,10 +88,10 @@ def _should_alert_two_instances(
 
 
 # The container healthcheck (see healthcheck.py) polls this file's mtime,
-# not the process directly -- there's no port to poll, since the gateway
+# not the process directly: there's no port to poll, since the gateway
 # is an outgoing connection. /tmp is fine for this: it's tmpfs in the
 # compose config, and the file's only job is to exist and be recent.
-HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 -- tmpfs in compose, not a real tempfile race
+HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not a real tempfile race)
 
 # Same string as pipeline/run.py's collector User-Agent (Reddit in
 # particular wants one that names the bot and a way to reach its
@@ -123,13 +123,13 @@ def should_catch_up(now_local: datetime, digest_time: dt_time, existing: DigestR
 
     True iff local time is past `digest_time` and there's no digest row
     for today, or today's row is `failed` with nothing posted (a clean
-    failure -- collection or summarizing blew up before anything reached
+    failure, collection or summarizing blew up before anything reached
     Discord, so a retry is safe). False before the scheduled time, if a
     row already exists as `ok`/`partial` (already posted), if it's
-    `pending` (ambiguous -- see `_PENDING_STARTUP_ALERT`; the caller
+    `pending` (ambiguous, see `_PENDING_STARTUP_ALERT`; the caller
     alerts instead of guessing), or if it's `failed` but
     `posted_message_ids` is non-empty (some of the digest made it to the
-    channel before publishing failed -- an unattended retry here would
+    channel before publishing failed: an unattended retry here would
     double-post the header or the parts that landed; the caller alerts
     instead, same as `pending`).
     """
@@ -152,7 +152,7 @@ def _parse_digest_time(time_str: str) -> dt_time:
 _TRANSIENT_ERRORS = (aiohttp.ClientError, OSError, TimeoutError)
 
 # The one and only place `AllowedMentions(everyone=True, ...)` is allowed to
-# appear in newsbot/ (design.md §12, A5) -- `tests/test_mentions_tripwire.py`
+# appear in newsbot/ (design.md §12, A5): `tests/test_mentions_tripwire.py`
 # scans the source tree to hold that line. Every other send in this file
 # (the client's own default, DiscordPublisher's digest sends) stays
 # `AllowedMentions.none()`; only a code alert that `decide.plan_alerts`
@@ -166,7 +166,7 @@ def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None)
     """Classify a send/fetch failure for `DiscordCodeAlertPoster`.
 
     Wraps as `PublishError` (worth retrying: a 5xx, a network blip, a
-    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else) -- a
+    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else): a
     permissions problem shouldn't burn a retry budget, and
     `shift/sweep.py` already has its own claim/post/record bookkeeping
     that doesn't lean on `PublishError.posted_by_topic` the way
@@ -200,7 +200,7 @@ def _classify_publish_error(
     `retryable=False`, since no amount of backoff fixes a permissions
     problem or a channel that's gone. v1 let a 4xx escape unwrapped
     instead, on the theory that `_publish_with_retry` only ever caught
-    `PublishError` anyway -- which worked, but meant whatever *did* post
+    `PublishError` anyway, which worked, but meant whatever *did* post
     before the 4xx only survived if the caller happened to stash it on the
     exception by hand. `posted_by_topic` carries `DiscordPublisher`'s own
     progress so far, so a permanent error on one topic's channel doesn't
@@ -229,13 +229,13 @@ class DiscordPublisher:
 
     Implements the same `Publisher` protocol `PrintPublisher` does, so
     `run_daily`'s guard, save and retry logic runs identically whether the
-    digest is heading to a terminal or a set of channels -- this class's
+    digest is heading to a terminal or a set of channels: this class's
     only job is turning a `RenderedDigest` into Discord API calls and
     topic -> message id results.
 
     One instance is built fresh per run (see `NewsBot.publisher_for_today`
     and the `/newsbot run-now` handler) and then reused across every
-    attempt `run.py`'s `_publish_with_retry` makes at it -- that's what
+    attempt `run.py`'s `_publish_with_retry` makes at it: that's what
     makes resumability possible. `self._posted` remembers which topics
     already got a message id back, so a retried `publish()` call skips
     straight past them instead of reposting a game's embed on every retry.
@@ -258,7 +258,7 @@ class DiscordPublisher:
         # salt and so reuses each topic's nonce, letting Discord's own
         # dedup catch a send that actually landed before the retry thought
         # it failed. A confirmed run-now builds a fresh `DiscordPublisher`,
-        # hence a fresh salt -- that repost is deliberate, not a dupe.
+        # hence a fresh salt: that repost is deliberate, not a dupe.
         self._nonce_salt = uuid.uuid4().hex
 
     @property
@@ -266,7 +266,7 @@ class DiscordPublisher:
         """Every message id posted so far, in topic-post order. Read-only on purpose.
 
         `_run_post`'s cancellation fallback reads this when an exception
-        escapes with no `posted_ids` of its own to report -- a plain list,
+        escapes with no `posted_ids` of its own to report: a plain list,
         matching what `digests.posted_message_ids` has always stored,
         derived from (never mutable alongside) `self._posted`.
         """
@@ -286,7 +286,7 @@ class DiscordPublisher:
                     allowed_mentions=discord.AllowedMentions.none(),
                     nonce=nonce,
                 )
-            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
                 self._reraise_or_wrap(exc)
             self._posted[message.topic_key] = sent.id
         return dict(self._posted)
@@ -299,11 +299,11 @@ class DiscordPublisher:
         if channel is None:
             try:
                 channel = await self._client.fetch_channel(channel_id)
-            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
                 self._reraise_or_wrap(exc)
         if not hasattr(channel, "send"):
             # A voice channel, a category, anything else that isn't
-            # actually sendable -- a misconfigured channel_id, not
+            # actually sendable: a misconfigured channel_id, not
             # something a retry ever fixes (design.md §13, D2).
             raise PublishError(
                 f"channel {channel_id} can't receive messages (not a text channel)",
@@ -316,8 +316,8 @@ class DiscordPublisher:
     def _reraise_or_wrap(self, exc: Exception) -> None:
         """Classify a send/fetch failure via the shared `_classify_send_error`.
 
-        Every path through here carries `self._posted` -- whatever this
-        publisher already has an id back for -- so a permanent error on
+        Every path through here carries `self._posted` (whatever this
+        publisher already has an id back for), so a permanent error on
         one topic's channel doesn't erase what already landed for the
         topics before it.
         """
@@ -328,7 +328,7 @@ class NullPublisher:
     """A `Publisher` that posts nowhere and returns no ids.
 
     `/newsbot preview` runs the real pipeline through `run_daily`, which
-    always calls `publisher.publish()` -- but a preview is only supposed
+    always calls `publisher.publish()`, but a preview is only supposed
     to go to the admin who asked, as a set of ephemeral followups, not to
     the game channels. This publisher lets `run_daily`'s machinery run
     unchanged while the actual sending happens afterwards, from
@@ -351,20 +351,20 @@ _MISSING_MENTION_PERMISSION_ALERT = (
 class DiscordCodeAlertPoster:
     """The `CodeAlertPoster` (`shift/sweep.py`) the real bot uses: one message per alert.
 
-    Structurally the small sibling of `DiscordPublisher` above -- same
+    Structurally the small sibling of `DiscordPublisher` above: same
     channel-resolution dance, same error classification (`_classify_send_error`,
     factored out of `DiscordPublisher._reraise_or_wrap` for exactly this
-    reuse) -- but with none of that class's resumability bookkeeping,
+    reuse), but with none of that class's resumability bookkeeping,
     since `shift/sweep.py` already tracks per-message claim/post state of
     its own (`claim_codes`/`mark_codes_posted`) and only ever asks this to
     post one message at a time.
 
-    `alert.ping` is `decide.plan_alerts`'s call, not this class's -- all
+    `alert.ping` is `decide.plan_alerts`'s call, not this class's: all
     this does is turn that into the one `AllowedMentions` that's actually
     allowed to set `everyone=True` anywhere in this codebase (`_PING_EVERYONE`,
     A5), or `AllowedMentions.none()` otherwise. Before honoring a ping, it
     checks whether the bot's own role can actually mention `@everyone` in
-    this channel -- missing that permission doesn't stop the alert from
+    this channel: missing that permission doesn't stop the alert from
     still posting (the code itself is the important part), it just gets
     an admin alert instead of a silent, permission-dropped ping nobody
     would otherwise notice.
@@ -376,8 +376,8 @@ class DiscordCodeAlertPoster:
         # Dedupes the missing-permission admin alert within one sweep
         # (design.md §12 step 8): `begin_batch()` resets this at the start
         # of every `shift/sweep.py._apply_plan` call, so a batch that
-        # spills into several messages -- or a single message that
-        # `_post_with_retry` retries several times -- alerts an admin once
+        # spills into several messages (or a single message that
+        # `_post_with_retry` retries several times) alerts an admin once
         # per sweep, not once per message and not once per retry.
         self._missing_permission_alerted = False
 
@@ -386,11 +386,29 @@ class DiscordCodeAlertPoster:
         self._missing_permission_alerted = False
 
     async def post(self, alert: RenderedAlert) -> int | None:
+        """Send one alert message to the SHiFT codes channel and return its message id.
+
+        Resolves and caches nothing (unlike `DiscordPublisher`, this class
+        posts to one fixed channel, so there's no per-topic channel cache
+        to keep); the channel is looked up fresh, then cached only on
+        `self._client`'s own get/fetch path. Before honoring `alert.ping`,
+        checks whether the bot's own role can actually mention `@everyone`
+        in this channel (`_can_mention_everyone`); if not, it still posts
+        with the ping's content intact (Discord silently drops the
+        notification rather than the message) and sends one admin alert
+        about the missing permission, deduped per sweep by
+        `self._missing_permission_alerted`. Any failure resolving the
+        channel or sending the message goes through `_classify_send_error`,
+        which raises `PublishError` for whatever's worth retrying (a 5xx, a
+        network blip, a timeout) and re-raises everything else (a 4xx, a
+        permissions problem) unwrapped, per `shift/sweep.py`'s own
+        claim/post/record bookkeeping rather than `PublishError`'s.
+        """
         channel = self._client.get_channel(self._channel_id)
         if channel is None:
             try:
                 channel = await self._client.fetch_channel(self._channel_id)
-            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
                 _classify_send_error(exc)
 
         mentions = discord.AllowedMentions.none()
@@ -398,7 +416,7 @@ class DiscordCodeAlertPoster:
             if self._can_mention_everyone(channel):
                 mentions = _PING_EVERYONE
             else:
-                # Still posts with _PING_EVERYONE's intent -- Discord just
+                # Still posts with _PING_EVERYONE's intent: Discord just
                 # drops the actual notification on its end when the role
                 # lacks the permission, same as the plan's owner checklist
                 # describes. Using .none() here instead would be strictly
@@ -414,7 +432,7 @@ class DiscordCodeAlertPoster:
             message = await channel.send(
                 alert.content, allowed_mentions=mentions, nonce=alert.nonce or None
             )
-        except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+        except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
             _classify_send_error(exc)
         return message.id
 
@@ -424,7 +442,7 @@ class DiscordCodeAlertPoster:
 
         `channel.guild.me` is `None` for a DM (not a real deployment
         shape here, but cheap to guard) or before the gateway has cached
-        the guild member -- either way, "can't tell" reads as "can't", the
+        the guild member: either way, "can't tell" reads as "can't", the
         safe direction: it still posts, it just also alerts.
         """
         guild = getattr(channel, "guild", None)
@@ -442,7 +460,7 @@ class NewsBot(discord.Client):
 
     Command registration is layered in by `bot/commands.py`'s factories
     (`make_news_group`, `make_admin_group`), called from `setup_hook` once
-    the httpx and Anthropic clients exist -- both groups need `self` (for
+    the httpx and Anthropic clients exist: both groups need `self` (for
     `build_deps`, and for the admin group's access to the client for
     `DiscordPublisher`).
     """
@@ -463,16 +481,16 @@ class NewsBot(discord.Client):
         self._last_two_instance_alert: datetime | None = None
 
         # Shared with build_sweep_deps() the same way build_deps() shares
-        # it with the daily job -- so Reddit's cross-call gap is honored
+        # it with the daily job, so Reddit's cross-call gap is honored
         # across the daily 09:00 run and every hourly sweep alike, not
         # reset fresh each time one or the other happens to run.
         self._rate_limit_state = RateLimitState()
         # Set below in setup_hook() when alerts.enabled; stays None
-        # otherwise, which is also build_deps()'s existing default -- an
+        # otherwise, which is also build_deps()'s existing default: an
         # alerts-off bot behaves exactly as it did before this feature.
         self.code_alert_poster: CodeAlertPoster | None = None
         # Codes fail_pending_codes() flips from 'pending' to 'failed' at
-        # startup (R4) -- a prior process claimed them and the ping
+        # startup (R4): a prior process claimed them and the ping
         # budget, then died before confirming the send landed. Reported
         # once on the first on_ready, then never referenced again.
         self._interrupted_codes: list[str] = []
@@ -514,8 +532,8 @@ class NewsBot(discord.Client):
         """Alert the admin channel that another process may be using this bot's token.
 
         Rate-limited to once an hour (`_should_alert_two_instances`) so a
-        genuine collision -- which shows up as a steady stream of 10062s
-        and 40060s, one per lost race, not a single one -- doesn't turn
+        genuine collision (which shows up as a steady stream of 10062s
+        and 40060s, one per lost race, not a single one) doesn't turn
         into an alert storm on top of the collision itself.
         """
         now = datetime.now(UTC)
@@ -537,6 +555,22 @@ class NewsBot(discord.Client):
         )
 
     async def setup_hook(self) -> None:
+        """Wire up everything that needs a live event loop, in the order that matters.
+
+        Runs after discord.py has created its event loop but before the
+        gateway connection starts spinning, which is the only window where
+        the scheduler started here binds to the same loop the gateway
+        actually runs on (see this module's own docstring). Order within
+        this function matters too: command groups (including the
+        conditional `/shift codes` and, gated separately, `test-alert`)
+        are registered and synced before the scheduler exists, since
+        there's no reason to hold up the ones that don't need it;
+        `fail_pending_codes` runs before the code-sweep job is added, so a
+        code a prior process claimed and never confirmed posting for is
+        already flipped back to `'failed'` before anything else can touch
+        `alerted_codes`; and `self.scheduler.start()` is the last line, so
+        nothing fires before the rest of setup has actually finished.
+        """
         # Imported here, not at module scope: commands.py imports NewsBot
         # (for type hints on the factories' `bot` argument), and importing
         # it back at module scope would make a circular import out of what
@@ -552,7 +586,7 @@ class NewsBot(discord.Client):
         self.tree.add_command(make_admin_group(self.cfg, self))
         if self.cfg.alerts.enabled:
             # D4 (design.md §13): a codes list from a feature that's off
-            # would always be empty -- no point registering a third
+            # would always be empty: no point registering a third
             # top-level group for it.
             self.tree.add_command(make_shift_group(self.cfg, self.db_path))
 
@@ -600,7 +634,7 @@ class NewsBot(discord.Client):
             self.code_alert_poster = DiscordCodeAlertPoster(self, self.cfg.alerts.channel_id)
             # A prior process may have died between claiming a code (and
             # spending the ping budget on it) and confirming the Discord
-            # send landed (R4) -- flip those back to 'failed' before
+            # send landed (R4): flip those back to 'failed' before
             # anything else can touch alerted_codes, and remember which
             # ones so the first on_ready can tell an admin.
             self._interrupted_codes = await asyncio.to_thread(self._fail_pending_codes_sync)
@@ -625,14 +659,27 @@ class NewsBot(discord.Client):
             return fail_pending_codes(conn)
 
     async def on_ready(self) -> None:
+        """First-connection-only startup work: interrupted-codes alert, permission check, catch-up.
+
+        Guarded by `self._ready_once`: discord.py fires `on_ready` on
+        every reconnect, and none of this should repeat just because a
+        network blip forced a new gateway session. On the genuine first
+        connection, order matters the same way it does in `setup_hook`: an
+        admin hears about SHiFT codes a prior crash may have left stuck
+        before anything else runs (so it doesn't get buried under later
+        noise), then the channel permission check runs (so a permission
+        problem is on record before a run that might hit it), and only
+        then does the startup catch-up check decide whether to run today's
+        digest right now.
+        """
         # discord.py fires on_ready on every reconnect, not just the first
-        # connection -- without this flag, a network blip a week into
+        # connection: without this flag, a network blip a week into
         # uptime would re-run the startup catch-up check.
         if self._ready_once:
             return
         self._ready_once = True
         if self._interrupted_codes:
-            # Reported once, before catch-up runs -- an admin reading this
+            # Reported once, before catch-up runs: an admin reading this
             # should see "these may be stuck" before anything else happens
             # that could distract from it, and it's a one-time read: this
             # list isn't re-checked on a later reconnect.
@@ -651,7 +698,7 @@ class NewsBot(discord.Client):
         interrupted-codes alert (an admin should hear about codes that may
         already be stuck before anything else) and before catch-up (so a
         permission problem is on record before a run that might hit it).
-        Wrapped in its own try/except that only logs -- a bug in the check
+        Wrapped in its own try/except that only logs: a bug in the check
         itself must never be the thing that stops the bot from starting or
         from running today's digest.
         """
@@ -691,7 +738,7 @@ class NewsBot(discord.Client):
         in practice) runs.
 
         `run_kind` is `None` for `/newsbot preview` (which never reports
-        regardless -- see `_maybe_send_run_report`) and every caller that
+        regardless; see `_maybe_send_run_report`) and every caller that
         predates the admin-channel run report (design.md §6); `_daily_job`
         and `/newsbot run-now` pass their own so the report can say
         `scheduled`/`catch-up`/`run-now` without saying who ran it.
@@ -757,7 +804,7 @@ class NewsBot(discord.Client):
 
         Same shape as `_daily_job`: nothing raised in here may take the
         process down. Unlike the two-instance alert, a crash here alerts
-        only the *first* time (`_sweep_crash_alerted`) -- a sweep that
+        only the *first* time (`_sweep_crash_alerted`): a sweep that
         fails every interval would otherwise page an admin channel once an
         hour for the same underlying problem, which teaches everyone to
         ignore the channel. The next *successful* sweep clears the flag,
