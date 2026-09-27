@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import discord
 
@@ -34,7 +35,7 @@ from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
 from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
-from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView, Usage
+from newsbot.store.models import AlertStatus, CodeView, StatusSnapshot, StoryView, Usage
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -373,6 +374,66 @@ def render_story_page(
         )
     embed.description = _truncate_description("\n\n".join(blocks))
     embed.set_footer(text=f"Page {page} of {pages}")
+    return embed
+
+
+# --- /shift codes (design.md §13) ---
+
+_CODE_PAGE_MAX_SOURCE = 100
+_CODE_PAGE_FOOTER_NOTE = "I don't know when codes expire; older ones may have stopped working."
+_CODE_PAGE_EMPTY = "No codes seen in that window."
+
+
+def _code_marker(view: CodeView) -> str | None:
+    """The D5 marker for one code, or None for a code that just... posted normally.
+
+    Checked in this order on purpose: `from_roundup` wins over `status`
+    (a roundup code that overflowed the cap is `status='roundup'`, not
+    `'posted'`, but it's still "from a roundup" to a member reading this,
+    not some fourth unexplained state) -- see `record_silent_codes`'s own
+    docstring for why `from_roundup` is a separate column instead of being
+    derived from `status`.
+    """
+    if view.from_roundup:
+        return "from a roundup"
+    if view.status == "too_old":
+        return "old post"
+    if view.status == "seeded":
+        return "already around when alerts started"
+    return None
+
+
+def _code_page_block(view: CodeView, timezone: str) -> str:
+    code_block = f"```\n{view.code}\n```"
+    first_seen = view.first_seen_at.astimezone(ZoneInfo(timezone)).date().isoformat()
+    source = _truncate_utf16(esc(view.source_name), _CODE_PAGE_MAX_SOURCE, suffix="…")
+    safe_url = _safe_link(view.item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    marker = _code_marker(view)
+    marker_suffix = f" · ({marker})" if marker else ""
+    return f"{code_block}\nFirst seen {first_seen} · {source}{link}{marker_suffix}"
+
+
+def render_code_page(
+    codes: list[CodeView], *, title: str, page: int, pages: int, timezone: str
+) -> discord.Embed:
+    """Render one page of `/shift codes`: every known code, newest-first, in copyable blocks.
+
+    `timezone` is `cfg.digest.timezone` -- the same local calendar the
+    daily digest and the ping cap already reason in, so "first seen" reads
+    against the clock a member already expects everything else in this
+    bot to use, not a UTC date nobody configured. `_code_marker` is what
+    turns `from_roundup`/`status` into D5's three markers; a plain
+    `'posted'`, non-roundup code gets none, since "posted normally" isn't
+    something a reader needs flagged.
+    """
+    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
+    if not codes:
+        embed.description = _CODE_PAGE_EMPTY
+    else:
+        blocks = [_code_page_block(c, timezone) for c in codes]
+        embed.description = _truncate_description("\n\n".join(blocks))
+    embed.set_footer(text=f"Page {page} of {pages} · {_CODE_PAGE_FOOTER_NOTE}")
     return embed
 
 
@@ -931,6 +992,7 @@ __all__ = [
     "TopicMessage",
     "esc",
     "render_code_alerts",
+    "render_code_page",
     "render_digest",
     "render_roundup_alerts",
     "render_run_report",

@@ -16,7 +16,7 @@ import pytest
 from pydantic import SecretStr
 
 from newsbot.bot.client import NewsBot
-from newsbot.bot.commands import make_admin_group, make_news_group
+from newsbot.bot.commands import make_admin_group, make_news_group, make_shift_group
 from newsbot.config import Secrets, load_config
 
 FIXTURE = "tests/fixtures/config_valid.yaml"
@@ -240,3 +240,34 @@ def test_test_alert_golden_option_defaults_false(tmp_path, monkeypatch):
     group = make_admin_group(cfg, _FakeBot())
     golden = _param(_command(group, "test-alert"), "golden")
     assert golden.default is False
+
+
+# --- /shift codes (design.md §13, plan step 6) ---
+#
+# `make_shift_group` itself doesn't check `cfg.alerts.enabled` -- that's
+# `NewsBot.setup_hook`'s call (D4), covered in
+# `test_client_scheduling_adversarial.py`. This file stays at the same
+# "cheap object-level checks" level as everything else here: option
+# bounds and defaults, given a group this factory always builds.
+
+
+def test_shift_group_has_one_codes_command(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=False)
+    group = make_shift_group(cfg, ":memory:")
+    assert {c.name for c in group.commands} == {"codes"}
+
+
+def test_shift_codes_days_option_bounds_are_one_to_ninety(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=False)
+    group = make_shift_group(cfg, ":memory:")
+    days = _param(_command(group, "codes"), "days")
+    assert days.min_value == 1
+    assert days.max_value == 90
+    assert days.default == 14
+
+
+def test_shift_codes_public_option_defaults_false(tmp_path, monkeypatch):
+    cfg = _cfg_with_test_alert(tmp_path, monkeypatch, allow_test_command=False)
+    group = make_shift_group(cfg, ":memory:")
+    public = _param(_command(group, "codes"), "public")
+    assert public.default is False

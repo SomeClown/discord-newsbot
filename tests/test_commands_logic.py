@@ -80,21 +80,27 @@ def test_resolve_query_args_out_of_range_days_pass_through_unclamped():
 
 
 def test_page_count_exact_multiple():
-    assert _page_count(12) == 2  # 12 stories / 6 per page
+    assert _page_count(12, 6) == 2  # 12 stories / 6 per page
 
 
 def test_page_count_rounds_up():
-    assert _page_count(13) == 3  # 13 stories needs a 3rd page for the leftover 1
+    assert _page_count(13, 6) == 3  # 13 stories needs a 3rd page for the leftover 1
 
 
 def test_page_count_zero_is_still_one_page():
     # A PagerView always needs at least one page to show "No stories
     # found." on, even when the query came back empty.
-    assert _page_count(0) == 1
+    assert _page_count(0, 6) == 1
 
 
 def test_page_count_single_page():
-    assert _page_count(3) == 1
+    assert _page_count(3, 6) == 1
+
+
+def test_page_count_respects_a_different_page_size():
+    # /shift codes uses 8, not /news' 6 -- _page_count takes page_size as
+    # its own argument now (design.md §13) precisely so both can share it.
+    assert _page_count(17, 8) == 3
 
 
 # --- PagerView button state ---
@@ -149,7 +155,7 @@ def test_pager_view_total_pages_at_zero_clamps_to_one():
 def test_pager_view_total_pages_exact_multiple_of_page_size():
     # 18 stories / 6 per page is exactly 3 pages, with the last page
     # full rather than a leftover partial page.
-    total_pages = _page_count(18)
+    total_pages = _page_count(18, 6)
     assert total_pages == 3
     view = PagerView(1, render_page=_render_page, total_pages=total_pages, page=total_pages)
     assert view.next_button.disabled is True

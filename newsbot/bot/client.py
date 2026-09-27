@@ -521,7 +521,7 @@ class NewsBot(discord.Client):
         # (for type hints on the factories' `bot` argument), and importing
         # it back at module scope would make a circular import out of what
         # is otherwise a plain layering.
-        from newsbot.bot.commands import make_admin_group, make_news_group
+        from newsbot.bot.commands import make_admin_group, make_news_group, make_shift_group
 
         logger.info("newsbot starting", extra={"instance_id": _INSTANCE_ID, "hostname": _HOSTNAME})
 
@@ -530,6 +530,11 @@ class NewsBot(discord.Client):
 
         self.tree.add_command(make_news_group(self.cfg, self.db_path))
         self.tree.add_command(make_admin_group(self.cfg, self))
+        if self.cfg.alerts.enabled:
+            # D4 (design.md §13): a codes list from a feature that's off
+            # would always be empty -- no point registering a third
+            # top-level group for it.
+            self.tree.add_command(make_shift_group(self.cfg, self.db_path))
 
         guild = discord.Object(id=self.cfg.guild_id)
         self.tree.copy_global_to(guild=guild)

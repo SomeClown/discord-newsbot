@@ -31,7 +31,7 @@ from discord import app_commands
 from discord.app_commands import Choice
 
 from newsbot.bot.client import DiscordPublisher, NewsBot, NullPublisher
-from newsbot.bot.format import render_status, render_story_page
+from newsbot.bot.format import render_code_page, render_status, render_story_page
 from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, Topic, configured_source_names
 from newsbot.pipeline.run import RunKind, RunMode, is_run_in_progress, local_run_date, run_daily
@@ -39,10 +39,11 @@ from newsbot.pipeline.summarize import estimate_spend_usd
 from newsbot.shift.match import is_code
 from newsbot.shift.sweep import CodeCheckOutcome, run_test_alert
 from newsbot.store.db import connect
-from newsbot.store.models import AlertStatus, DigestRow, StatusSnapshot, StoryView
+from newsbot.store.models import AlertStatus, CodeView, DigestRow, StatusSnapshot, StoryView
 from newsbot.store.repo import (
     alert_status,
     get_digest,
+    query_codes,
     query_stories,
     search_stories,
     status_snapshot,
@@ -51,6 +52,11 @@ from newsbot.store.repo import (
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 6
+# design.md §13: /shift codes' own page size -- a code's block is smaller
+# than a story's (no headline, no summary, just a code and a source line),
+# so a page holds a couple more of them before it'd risk the embed's
+# 4096-unit cap.
+_SHIFT_PAGE_SIZE = 8
 _GAME_ALL = "all"
 _LABEL_CHOICES = ("official", "reported", "rumor")
 # run-now, preview, and test-alert all block on the same _run_lock (a
@@ -133,8 +139,8 @@ def has_admin_permission(permissions: discord.Permissions, admin_permission: str
     )
 
 
-def _page_count(total: int) -> int:
-    return max((total + _PAGE_SIZE - 1) // _PAGE_SIZE, 1)
+def _page_count(total: int, page_size: int) -> int:
+    return max((total + page_size - 1) // page_size, 1)
 
 
 def summarize_test_alert(outcome: CodeCheckOutcome) -> str:
@@ -206,6 +212,13 @@ def _status_snapshot_sync(
         return status_snapshot(conn, now, month_start, configured_names)
 
 
+def _query_codes_sync(
+    db_path: str, since: datetime, limit: int, offset: int
+) -> tuple[list[CodeView], int]:
+    with closing(connect(db_path)) as conn:
+        return query_codes(conn, since, limit, offset)
+
+
 def _alert_status_sync(
     db_path: str, today: str, *, enabled: bool, max_pings: int, test_command_enabled: bool
 ) -> AlertStatus:
@@ -219,16 +232,17 @@ def _alert_status_sync(
         )
 
 
-# --- Paging glue shared by /news recent and /news search ---
+# --- Paging glue shared by /news recent, /news search, and /shift codes ---
 
-_Fetch = Callable[[int, int], tuple[list[StoryView], int]]
+_Fetch = Callable[[int, int], tuple[list, int]]
+_Render = Callable[[list, int, int], discord.Embed]
 
 
 async def _first_page_and_view(
     owner_id: int,
-    topics_by_key: dict[str, Topic],
-    title: str,
+    page_size: int,
     fetch: _Fetch,
+    render: _Render,
 ) -> tuple[discord.Embed, PagerView]:
     """Run `fetch` for page 1, then build the embed and a `PagerView` bound to it.
 
@@ -236,14 +250,19 @@ async def _first_page_and_view(
     db_path and the rest of a query's fixed arguments via
     `functools.partial`); every call, including this first one, goes
     through `asyncio.to_thread` so a slow query never blocks the gateway.
+    `render(items, page, pages)` turns one page's worth of rows into an
+    embed -- generalized (design.md §13) so `/shift codes` can share this
+    with `/news recent`/`/news search` instead of each command re-doing
+    the same "query, embed page 1, wire up Prev/Next" dance with its own
+    fixed call to `render_story_page`.
     """
-    stories, total = await asyncio.to_thread(fetch, _PAGE_SIZE, 0)
-    pages = _page_count(total)
-    embed = render_story_page(stories, topics_by_key, title, 1, pages)
+    items, total = await asyncio.to_thread(fetch, page_size, 0)
+    pages = _page_count(total, page_size)
+    embed = render(items, 1, pages)
 
     async def render_page(page: int) -> discord.Embed:
-        page_stories, _total = await asyncio.to_thread(fetch, _PAGE_SIZE, (page - 1) * _PAGE_SIZE)
-        return render_story_page(page_stories, topics_by_key, title, page, pages)
+        page_items, _total = await asyncio.to_thread(fetch, page_size, (page - 1) * page_size)
+        return render(page_items, page, pages)
 
     view = PagerView(owner_id, render_page=render_page, total_pages=pages)
     return embed, view
@@ -288,9 +307,12 @@ def make_news_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
             cfg.topics, game.value, days, label.value if label else None, datetime.now(UTC)
         )
         fetch = functools.partial(_query_stories_sync, db_path, topic_keys, since, label_value)
-        embed, view = await _first_page_and_view(
-            interaction.user.id, topics_by_key, f"/news recent — {game.name}", fetch
-        )
+        title = f"/news recent — {game.name}"
+
+        def render(stories: list[StoryView], page: int, pages: int) -> discord.Embed:
+            return render_story_page(stories, topics_by_key, title, page, pages)
+
+        embed, view = await _first_page_and_view(interaction.user.id, _PAGE_SIZE, fetch, render)
         await interaction.followup.send(embed=embed, view=view, ephemeral=not public)
 
     @group.command(name="search", description="Search story headlines and summaries.")
@@ -308,9 +330,12 @@ def make_news_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
         await interaction.response.defer(ephemeral=not public)
         since = datetime.now(UTC) - timedelta(days=days)
         fetch = functools.partial(_search_stories_sync, db_path, query, since)
-        embed, view = await _first_page_and_view(
-            interaction.user.id, topics_by_key, f"/news search — {query}", fetch
-        )
+        title = f"/news search — {query}"
+
+        def render(stories: list[StoryView], page: int, pages: int) -> discord.Embed:
+            return render_story_page(stories, topics_by_key, title, page, pages)
+
+        embed, view = await _first_page_and_view(interaction.user.id, _PAGE_SIZE, fetch, render)
         await interaction.followup.send(embed=embed, view=view, ephemeral=not public)
 
     return group
@@ -495,12 +520,65 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
     return group
 
 
+# --- /shift (design.md §13) ---
+
+
+def make_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
+    """Build `/shift codes` -- the member-facing list of known SHiFT codes.
+
+    `setup_hook` only ever calls this when `cfg.alerts.enabled` (D4): a
+    list of codes from a feature that's off would just be an empty list
+    forever, and a third top-level command group for that isn't worth the
+    clutter. This factory doesn't re-check `enabled` itself, same as
+    `make_news_group`/`make_admin_group` trust their own callers'
+    preconditions.
+    """
+    group = app_commands.Group(name="shift", description="SHiFT codes the bot has seen.")
+
+    @group.command(name="codes", description="List known SHiFT codes.")
+    @app_commands.describe(
+        days="How many days back to look (1-90)",
+        public="Show the result to the whole channel instead of just you",
+    )
+    async def codes(
+        interaction: discord.Interaction,
+        days: app_commands.Range[int, 1, 90] = 14,
+        public: bool = False,
+    ) -> None:
+        await interaction.response.defer(ephemeral=not public)
+        since = datetime.now(UTC) - timedelta(days=days)
+        fetch = functools.partial(_query_codes_sync, db_path, since)
+        title = "/shift codes"
+
+        def render(codes: list[CodeView], page: int, pages: int) -> discord.Embed:
+            return render_code_page(
+                codes, title=title, page=page, pages=pages, timezone=cfg.digest.timezone
+            )
+
+        embed, view = await _first_page_and_view(
+            interaction.user.id, _SHIFT_PAGE_SIZE, fetch, render
+        )
+        # Explicit (design.md §13): a member-facing list of codes should
+        # never be the send that reintroduces a ping, even though nothing
+        # here mentions anyone -- belt and suspenders next to NewsBot's
+        # own client-level default.
+        await interaction.followup.send(
+            embed=embed,
+            view=view,
+            ephemeral=not public,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    return group
+
+
 __all__ = [
     "estimate_spend_usd",
     "has_admin_permission",
     "invalid_test_alert_code_message",
     "make_admin_group",
     "make_news_group",
+    "make_shift_group",
     "needs_confirmation",
     "resolve_query_args",
     "summarize_test_alert",

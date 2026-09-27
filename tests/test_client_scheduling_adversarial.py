@@ -128,6 +128,23 @@ async def test_code_sweep_job_disabled_by_default_config(db_path):
     assert bot.code_alert_poster is None
 
 
+# --- /shift codes registration (design.md §13, D4) ---
+
+
+async def test_shift_group_absent_when_alerts_disabled(db_path):
+    bot = NewsBot(_cfg(alerts_enabled=False), _secrets(), db_path)
+    await _run_setup_hook(bot)
+    assert bot.tree.get_command("shift") is None
+
+
+async def test_shift_group_present_when_alerts_enabled(db_path):
+    bot = NewsBot(_cfg(alerts_enabled=True), _secrets(), db_path)
+    await _run_setup_hook(bot)
+    group = bot.tree.get_command("shift")
+    assert group is not None
+    assert {c.name for c in group.commands} == {"codes"}
+
+
 # --- build_sweep_deps / build_deps ---
 
 
