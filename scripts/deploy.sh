@@ -10,7 +10,7 @@
 #   ./scripts/deploy.sh --rollback TAG  deploy a specific image tag for this run
 #
 # TAG (for a pinned release, or a rollback) comes from .env or the shell
-# environment -- docker compose already reads .env in the project
+# environment: docker compose already reads .env in the project
 # directory for variable substitution, so nothing here needs to source it
 # by hand (and doing so would risk echoing secrets; see CLAUDE.md).
 set -euo pipefail

@@ -64,7 +64,7 @@ def test_should_catch_up_after_time_failed_row_is_true():
 
 def test_should_catch_up_after_time_pending_row_is_false():
     # A pending row means we don't know whether it already posted (the
-    # process may have crashed between publish and save) -- the caller is
+    # process may have crashed between publish and save): the caller is
     # responsible for alerting an admin in this case, not for guessing.
     now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
     assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("pending")) is False
@@ -72,7 +72,7 @@ def test_should_catch_up_after_time_pending_row_is_false():
 
 def test_should_catch_up_after_time_failed_row_with_posted_ids_is_false():
     # Some of the digest already landed in the channel before publishing
-    # died -- an unattended catch-up retry here would double-post the
+    # died: an unattended catch-up retry here would double-post the
     # header. This is the caller's cue to alert an admin instead (see
     # _PARTIAL_FAILURE_STARTUP_ALERT), the same as a pending row.
     now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
@@ -87,7 +87,7 @@ def test_should_catch_up_exactly_at_scheduled_time_is_true():
 
 def test_should_catch_up_restart_just_after_local_midnight_is_false():
     # A restart at 00:01 local is a new local day that hasn't reached its
-    # digest time yet -- there's no digest row for *today* to be confused
+    # digest time yet: there's no digest row for *today* to be confused
     # by, and 00:01 < 09:00 regardless.
     now_local = datetime(2026, 9, 24, 0, 1, tzinfo=_TZ)
     assert should_catch_up(now_local, _DIGEST_TIME, None) is False
@@ -119,7 +119,7 @@ def test_should_catch_up_on_fall_back_day_before_digest_time():
 def test_should_catch_up_digest_time_inside_dst_skipped_hour_before_the_jump():
     # A digest configured for 02:30 local names a wall-clock moment that
     # literally never happens on spring-forward day. should_catch_up
-    # doesn't know or care -- it's still just comparing two time-of-day
+    # doesn't know or care: it's still just comparing two time-of-day
     # values, so "real local clock hasn't reached 02:30 yet" still reads
     # as False even though the clock is about to skip past it entirely.
     digest_time = time(2, 30)
@@ -140,7 +140,7 @@ def test_should_catch_up_ambiguous_fall_back_time_agrees_on_both_occurrences():
     # 01:30 local happens twice on fall-back day (once at UTC-7, once at
     # UTC-8). should_catch_up only looks at .time(), so both occurrences
     # of "01:30 local" should get the same answer against a 09:00 digest
-    # time -- the ambiguity is real, but it doesn't matter here.
+    # time: the ambiguity is real, but it doesn't matter here.
     digest_time = _DIGEST_TIME
     first_occurrence = datetime(2026, 11, 1, 1, 30, tzinfo=_TZ, fold=0)
     second_occurrence = datetime(2026, 11, 1, 1, 30, tzinfo=_TZ, fold=1)
@@ -213,14 +213,14 @@ def test_local_run_date_matches_utc_date_at_midday():
 
 
 def test_local_run_date_differs_from_utc_date_near_midnight_utc():
-    # 02:00 UTC on the 24th is still 19:00 PDT on the 23rd -- one calendar
+    # 02:00 UTC on the 24th is still 19:00 PDT on the 23rd: one calendar
     # day earlier locally than UTC's date.
     now = datetime(2026, 9, 24, 2, 0, tzinfo=ZoneInfo("UTC"))
     assert local_run_date(now, "America/Los_Angeles") == date(2026, 9, 23)
 
 
 def test_local_run_date_at_utc_midnight_is_still_previous_day_in_la():
-    # UTC midnight isn't local midnight in a UTC-7 zone -- it's 17:00 the
+    # UTC midnight isn't local midnight in a UTC-7 zone: it's 17:00 the
     # evening before, so local_run_date should land on UTC's *previous*
     # calendar date, not the one UTC just rolled into.
     now = datetime(2026, 9, 24, 0, 0, tzinfo=ZoneInfo("UTC"))
@@ -228,14 +228,14 @@ def test_local_run_date_at_utc_midnight_is_still_previous_day_in_la():
 
 
 def test_local_run_date_one_minute_before_la_local_midnight():
-    # 06:59 UTC on the 24th is 23:59 PDT on the 23rd -- one minute shy of
+    # 06:59 UTC on the 24th is 23:59 PDT on the 23rd: one minute shy of
     # the local day actually turning over.
     now = datetime(2026, 9, 24, 6, 59, tzinfo=ZoneInfo("UTC"))
     assert local_run_date(now, "America/Los_Angeles") == date(2026, 9, 23)
 
 
 def test_local_run_date_exactly_at_la_local_midnight_rolls_over():
-    # 07:00 UTC on the 24th is exactly 00:00 PDT on the 24th -- the local
+    # 07:00 UTC on the 24th is exactly 00:00 PDT on the 24th: the local
     # date should flip right here, not a minute early or late.
     now = datetime(2026, 9, 24, 7, 0, tzinfo=ZoneInfo("UTC"))
     assert local_run_date(now, "America/Los_Angeles") == date(2026, 9, 24)
@@ -268,14 +268,14 @@ def test_healthcheck_boundary_just_under_limit_is_healthy(tmp_path):
 
 def test_healthcheck_boundary_exactly_at_limit_is_unhealthy(tmp_path):
     # The check is a strict `<`, so exactly 180s old already counts as
-    # stale -- "less than" doesn't include "equal to".
+    # stale: "less than" doesn't include "equal to".
     path = tmp_path / "heartbeat"
     path.write_text("1")
     assert is_healthy(path, now=path.stat().st_mtime + 180) is False
 
 
 def test_healthcheck_ignores_file_contents_garbage_is_still_healthy(tmp_path):
-    # is_healthy never reads the file -- only its mtime. Garbage bytes
+    # is_healthy never reads the file, only its mtime. Garbage bytes
     # (the heartbeat job only ever writes a timestamp string, but nothing
     # stops a stray `echo` from clobbering it) shouldn't matter.
     path = tmp_path / "heartbeat"
@@ -285,7 +285,7 @@ def test_healthcheck_ignores_file_contents_garbage_is_still_healthy(tmp_path):
 
 def test_healthcheck_unreadable_file_contents_still_healthy_via_mtime(tmp_path):
     # Even a file this process can't read the *contents* of is fine, as
-    # long as stat() can still see it -- is_healthy only ever calls
+    # long as stat() can still see it: is_healthy only ever calls
     # stat(), never open(). (Running as root defeats chmod-based
     # permission tests, so this only asserts what should hold regardless
     # of who's running it.)

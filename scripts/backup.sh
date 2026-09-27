@@ -11,7 +11,7 @@
 #   backup_dir  defaults to ./data/backups
 #
 # Keeps the 7 newest backups and deletes anything older. That's about a
-# week of "oh no" coverage, which is the point -- see docs/deploy.md for the
+# week of "oh no" coverage, which is the point: see docs/deploy.md for the
 # restore procedure and why off-host backups are a deliberate non-goal for
 # v1.
 set -euo pipefail
@@ -52,7 +52,7 @@ echo "backup.sh: wrote $DEST (integrity check: ok)"
 
 # Keep the newest KEEP backups, delete the rest. `ls -1t` sorts newest
 # first; skip the first KEEP lines, remove whatever's left. `xargs -r`
-# means "don't run rm at all if there's nothing to remove" -- without -r,
+# means "don't run rm at all if there's nothing to remove": without -r,
 # a directory with 7 or fewer backups would still invoke a bare `xargs
 # rm` with no arguments, and some rm implementations treat that as an
 # error rather than a no-op. Better to just not ask.
