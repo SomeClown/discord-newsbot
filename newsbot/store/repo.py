@@ -73,6 +73,22 @@ def existing_urls(conn: sqlite3.Connection, urls: Iterable[str]) -> set[str]:
     return found
 
 
+def _utc_iso(moment: datetime) -> str:
+    """ISO string for `moment` in UTC, for comparing against stored timestamps.
+
+    Every timestamp in the database is stored as UTC ISO text, and SQLite
+    compares that text as text. That works exactly as long as both sides
+    are UTC; hand it a Pacific-time boundary and "an hour later" can sort
+    earlier. test-engineer proved it with `/shift codes` in mind, which
+    computes its window in the digest's timezone. So every time boundary
+    goes through here first. A naive datetime is taken to already be UTC,
+    which is what the rest of this module assumes anyway.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
 def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) -> list[PriorStory]:
     """Headlines for `topic_key` since `since`, newest first.
 
@@ -82,7 +98,7 @@ def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) 
     rows = conn.execute(
         "SELECT id, headline, created_at FROM stories "
         "WHERE topic_key = ? AND created_at >= ? ORDER BY created_at DESC",
-        (topic_key, since.isoformat()),
+        (topic_key, _utc_iso(since)),
     ).fetchall()
     return [
         PriorStory(
@@ -314,7 +330,7 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
     the AFTER DELETE trigger, and any story pointing at a deleted one via
     `is_update_of` gets nulled rather than orphaned.
     """
-    cutoff_iso = cutoff.isoformat()
+    cutoff_iso = _utc_iso(cutoff)
     with conn:
         items_deleted = conn.execute(
             "DELETE FROM items WHERE collected_at < ?", (cutoff_iso,)
@@ -613,7 +629,7 @@ def query_codes(
     (plausible: a batch claimed together shares one timestamp) break on
     `rowid`, so paging never reorders rows between calls.
     """
-    since_iso = since.isoformat()
+    since_iso = _utc_iso(since)
     total = conn.execute(
         "SELECT COUNT(*) FROM alerted_codes "
         "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ?",
@@ -695,7 +711,7 @@ def query_stories(
 ) -> tuple[list[StoryView], int]:
     """Stories for `/news recent`, newest first. An empty `topic_keys` means "All"."""
     where = ["created_at >= ?"]
-    params: list[object] = [since.isoformat()]
+    params: list[object] = [_utc_iso(since)]
     if topic_keys:
         placeholders = ",".join("?" for _ in topic_keys)
         where.append(f"topic_key IN ({placeholders})")  # noqa: S608
@@ -751,7 +767,7 @@ def search_stories(
             "SELECT COUNT(*) FROM stories_fts "
             "JOIN stories ON stories.id = stories_fts.rowid "
             "WHERE stories_fts MATCH ? AND stories.created_at >= ?",
-            (escaped, since.isoformat()),
+            (escaped, _utc_iso(since)),
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT stories.id, stories.topic_key, stories.headline, stories.summary, "
@@ -761,7 +777,7 @@ def search_stories(
             "WHERE stories_fts MATCH ? AND stories.created_at >= ? "
             "ORDER BY bm25(stories_fts), stories.created_at DESC "
             "LIMIT ? OFFSET ?",
-            (escaped, since.isoformat(), limit, offset),
+            (escaped, _utc_iso(since), limit, offset),
         ).fetchall()
     except sqlite3.OperationalError:
         # fts_escape should make every query syntactically valid, but this

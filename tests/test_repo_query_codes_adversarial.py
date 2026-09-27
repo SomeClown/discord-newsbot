@@ -86,23 +86,6 @@ def test_naive_since_at_the_epoch_of_all_stored_rows_does_not_raise(conn):
     assert [c.code for c in codes] == ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "bug: query_codes compares `since.isoformat()` against first_seen_at as "
-        "plain strings, not as real datetimes -- first_seen_at is always stored "
-        "UTC ('+00:00'), so a `since` passed in any other timezone offset sorts "
-        "lexicographically wrong instead of chronologically. Here `since` is "
-        "2026-09-10T05:00-08:00 == 2026-09-10T13:00 UTC, one hour AFTER the "
-        "stored row (2026-09-10T12:00 UTC), so the row should be excluded; "
-        "instead it's included because '...12:00:00+00:00' > '...05:00:00-08:00' "
-        "as strings. This matters now: plan step 6's /shift codes computes "
-        "`since` from `days` in `digest.timezone` (not UTC), which is exactly "
-        "the shape that would trigger this. Fix: compare as datetimes (e.g. "
-        "normalize `since` to UTC before formatting, or store/compare via a "
-        "column type SQLite can order chronologically) rather than as strings."
-    ),
-)
 def test_since_in_a_non_utc_timezone_is_compared_chronologically_not_lexicographically(conn):
     pacific = timezone(timedelta(hours=-8))
     # 2026-09-10T12:00:00 UTC, stored the way _resolve_now always renders it.
