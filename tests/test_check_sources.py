@@ -144,6 +144,22 @@ def test_render_report_includes_web_search_note_when_given():
     assert "BRAVE_API_KEY is not set; skipped" in text
 
 
+def test_render_report_counts_unkeyed_web_search_in_the_summary():
+    # An unkeyed web_search source never becomes a CollectorResult (it's
+    # dropped before run_check_sources builds a collector at all), so the
+    # summary's "N skipped" has to be told about it separately, or it reads
+    # "0 skipped" right under a table note saying otherwise.
+    cfg = _cfg([])
+    report = CheckSourcesReport(results=[], topic_counts={"palworld": 0})
+    text = render_check_sources_report(
+        cfg,
+        report,
+        web_search_note="web_search: 1 source(s) configured but BRAVE_API_KEY is not set; skipped",
+        web_search_skipped=1,
+    )
+    assert "Summary: 0 source(s) ok, 0 failed, 1 skipped" in text
+
+
 def test_render_report_handles_no_sources_configured():
     cfg = _cfg([])
     report = CheckSourcesReport(results=[], topic_counts={"palworld": 0})
@@ -230,6 +246,24 @@ async def test_check_sources_cli_prints_report_for_a_config_with_no_sources(tmp_
     out = capsys.readouterr().out
     assert "(no sources configured)" in out
     assert "palworld (Palworld): 0 item(s)" in out
+
+
+async def test_check_sources_cli_counts_unkeyed_web_search_as_skipped(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _MINIMAL_CONFIG.replace("sources: []", "sources:\n  - type: web_search\n    trust: press")
+    )
+    from newsbot.config import load_config
+
+    cfg = load_config(config_path)
+    code = await _run_check_sources_cli(cfg, str(config_path))
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "web_search" in out and "skipped" in out
+    assert "Summary: 0 source(s) ok, 0 failed, 1 skipped" in out
 
 
 @pytest.mark.parametrize("flag", ["--fixtures", "--stub-llm"])

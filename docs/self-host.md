@@ -152,12 +152,20 @@ code works on your machine:
 
 ```bash
 python -m newsbot.pipeline.run --dry-run --config config.example.yaml \
-  --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json
+  --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json \
+  --now 2026-09-23T09:00:00+00:00
 ```
 
 This uses canned fixture data and a stubbed Claude client: no network, no
 real credentials, no Discord connection. It's mostly there to confirm your
-Python environment and dependencies are set up correctly.
+Python environment and dependencies are set up correctly. `--now` pins the
+pipeline's clock to the fixture data's own date; the fixture files'
+`published_at` values are frozen at 2026-09-23, and without `--now` this
+command's output quietly goes empty once "today" moves far enough past
+that date for `digest.lookback_hours` (24h, by default) to age every
+fixture item out. Drop `--now` (or point it at today) once you're running
+this against your own `config.yaml` and real collected items instead of
+the fixtures.
 
 Once your own `config.yaml` has real sources in it, check that they
 actually work, for real, before spending a Claude call or a Discord post on

@@ -33,7 +33,7 @@ import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -891,6 +891,36 @@ async def _stdout_alert(text: str) -> None:
     print(f"[alert] {text}", file=sys.stderr)
 
 
+class _DropWebSearchKeyWarning(logging.Filter):
+    """Filters out load_config's "BRAVE_API_KEY is not set" warning, and nothing else."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "web_search source configured but BRAVE_API_KEY is not set" not in message
+
+
+@contextmanager
+def _quiet_web_search_key_warning():
+    """Silence config.py's "web_search ... BRAVE_API_KEY is not set" warning for one call.
+
+    Only ever used around `load_config` when `--fixtures` is given:
+    `--fixtures` throws every real collector away, `web_search` included,
+    so a config that happens to have one configured has nothing to warn
+    about here: the warning exists to flag a real run that's about to
+    quietly lose a source, not an offline demo that was never going to
+    call out to Brave regardless. Scoped to this one message, on this one
+    call, so a real run (no --fixtures) still sees it, and so does
+    anything else `load_config` might have to say.
+    """
+    config_logger = logging.getLogger("newsbot.config")
+    warning_filter = _DropWebSearchKeyWarning()
+    config_logger.addFilter(warning_filter)
+    try:
+        yield
+    finally:
+        config_logger.removeFilter(warning_filter)
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m newsbot.pipeline.run`: the CLI front door for a run with no Discord.
 
@@ -938,6 +968,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--now",
+        help=(
+            "ISO 8601 timestamp to use as this run's clock instead of the real wall "
+            "clock (e.g. 2026-09-23T09:00:00Z); mainly for --fixtures, whose canned "
+            "published_at values are pinned to a fixed date and drift out of "
+            "digest.lookback_hours the moment 'today' moves on without them"
+        ),
+    )
+    parser.add_argument(
         "--sweep",
         action="store_true",
         help="run one SHiFT code alert sweep (design.md §12) instead of the daily pipeline",
@@ -959,10 +998,32 @@ def main(argv: list[str] | None = None) -> int:
         print("newsbot: --config (or $NEWSBOT_CONFIG) is required", file=sys.stderr)
         return 2
     try:
-        cfg = load_config(args.config)
+        with _quiet_web_search_key_warning() if args.fixtures else nullcontext():
+            cfg = load_config(args.config)
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    def _real_now() -> datetime:
+        return datetime.now(UTC)
+
+    now: Callable[[], datetime] = _real_now
+    if args.now:
+        try:
+            parsed_now = datetime.fromisoformat(args.now)
+        except ValueError as exc:
+            print(
+                f"newsbot: --now {args.now!r} is not a valid ISO 8601 timestamp: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        if parsed_now.tzinfo is None:
+            parsed_now = parsed_now.replace(tzinfo=UTC)
+
+        def _fixed_now() -> datetime:
+            return parsed_now
+
+        now = _fixed_now
 
     if args.check_sources:
         return asyncio.run(_run_check_sources_cli(cfg, args.config))
@@ -995,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
         collectors = build_collectors(cfg, secrets)
 
     if args.sweep:
-        return _run_sweep_cli(cfg, args.db, collectors)
+        return _run_sweep_cli(cfg, args.db, collectors, now=now)
 
     llm: LLMClient
     if args.stub_llm:
@@ -1013,7 +1074,7 @@ def main(argv: list[str] | None = None) -> int:
                 http=http,
                 llm=llm,
                 collectors=collectors,
-                now=lambda: datetime.now(UTC),
+                now=now,
                 alert=_stdout_alert,
             )
             return await run_daily(deps, PrintPublisher(), mode=mode, force=args.force)
@@ -1031,13 +1092,22 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if outcome.status in ("ok", "partial", "skipped") else 1
 
 
-def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) -> int:
+def _run_sweep_cli(
+    cfg: AppConfig,
+    db_path: str,
+    collectors: list[Collector],
+    *,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> int:
     """`python -m newsbot.pipeline.run --sweep`: one sweep, printed instead of posted.
 
     A thin CLI wrapper around `shift.sweep.run_code_sweep`, imported
     lazily for the same reason `pipeline/run.py`'s other code-alert entry
     point does (see `_maybe_check_codes`): it keeps a normal digest run
-    from ever needing to import `shift/sweep.py` at all.
+    from ever needing to import `shift/sweep.py` at all. `now` defaults to
+    the real wall clock; `main`'s `--now` overrides it the same way it
+    overrides the daily pipeline's, for the same reason (see that flag's
+    own help text).
     """
     from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, run_code_sweep
 
@@ -1048,7 +1118,7 @@ def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) ->
                 db_path=db_path,
                 http=http,
                 collectors=collectors,
-                now=lambda: datetime.now(UTC),
+                now=now,
                 alert=_stdout_alert,
                 poster=PrintCodeAlertPoster(),
             )
@@ -1114,7 +1184,11 @@ async def run_check_sources(
 
 
 def render_check_sources_report(
-    cfg: AppConfig, report: CheckSourcesReport, *, web_search_note: str | None
+    cfg: AppConfig,
+    report: CheckSourcesReport,
+    *,
+    web_search_note: str | None,
+    web_search_skipped: int = 0,
 ) -> str:
     """Turn a `CheckSourcesReport` into the table `--check-sources` prints.
 
@@ -1123,6 +1197,14 @@ def render_check_sources_report(
     an owner is running this to find out about, not a reason to make the
     command itself look like it failed. The summary line at the bottom
     is what carries that news instead.
+
+    `web_search_skipped` is how many *unkeyed* `web_search` sources
+    `web_search_note` is talking about. `load_config` drops those before
+    `run_check_sources` ever builds a collector, so they never become a
+    `CollectorResult` with `skipped` set, and the summary's own `skipped`
+    count (built from `report.results`) would otherwise read "0 skipped"
+    right above a table note saying web_search itself was skipped: true
+    of the results list, misleading about what actually happened.
     """
     lines = ["Sources:"]
     if report.results:
@@ -1150,7 +1232,7 @@ def render_check_sources_report(
 
     ok = sum(1 for r in report.results if r.error is None and r.skipped is None)
     failed = sum(1 for r in report.results if r.error is not None)
-    skipped = sum(1 for r in report.results if r.skipped is not None)
+    skipped = sum(1 for r in report.results if r.skipped is not None) + web_search_skipped
     total_items = sum(report.topic_counts.values())
     lines.append("")
     lines.append(
@@ -1190,7 +1272,12 @@ async def _run_check_sources_cli(cfg: AppConfig, config_path: str) -> int:
     async with httpx.AsyncClient(headers=user_agent_headers()) as http:
         report = await run_check_sources(cfg, secrets, http)
     web_search_note = _web_search_note(cfg, secrets, config_path)
-    print(render_check_sources_report(cfg, report, web_search_note=web_search_note))
+    web_search_skipped = count_configured_web_search_sources(config_path) if web_search_note else 0
+    print(
+        render_check_sources_report(
+            cfg, report, web_search_note=web_search_note, web_search_skipped=web_search_skipped
+        )
+    )
     return 0
 
 

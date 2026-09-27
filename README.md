@@ -23,7 +23,7 @@ Two documents cover this:
   finding Steam, Bluesky, subreddit, and press sources for your own
   game, plus the aliasing lessons (some words match more than you'd think)
   that came out of doing this for the three games above.
-- **[`docs/self-host.md`](docs/self-host.md)** — the actual setup guide:
+- **[`docs/self-host.md`](docs/self-host.md)**: the actual setup guide:
   prerequisites, creating your own Discord application, keys and costs,
   `config.yaml` and `.env`, choosing an image, and the first run.
 
@@ -250,11 +250,17 @@ Exercise the whole pipeline with no Discord and no network at all:
 
 ```bash
 python -m newsbot.pipeline.run --dry-run --config config.example.yaml \
-  --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json
+  --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json \
+  --now 2026-09-23T09:00:00+00:00
 ```
 
-Drop `--fixtures`/`--stub-llm` to hit real sources and Claude with a real
-config — that's how the source list and the summary prompt get tuned in
+This runs against `config.example.yaml` rather than a `config.yaml` you may
+or may not have yet, since it's the one config this repo commits and every
+fixture item's topic keys (`borderlands4`, `palworld`) match; `--now` pins
+the clock to the fixture data's own frozen date (2026-09-23) so this stays
+deterministic no matter when you happen to run it -- see `docs/self-host.md`
+step 6 for why. Drop `--fixtures`/`--stub-llm`/`--now` to hit real sources
+and Claude with a real config — that's how the source list and the summary prompt get tuned in
 practice; see `docs/sources-research.md` for how the seed sources here were
 verified.
 
