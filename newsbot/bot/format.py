@@ -22,7 +22,7 @@ import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -488,7 +488,27 @@ def render_code_page(
     return embed
 
 
-def _alerts_field_value(alerts: AlertStatus) -> str:
+def _local_timestamp(moment: datetime, timezone: str) -> str:
+    """`moment` as "Sep 26, 8:52 PM PDT" in the digest's own time zone.
+
+    `/newsbot status` used to print the raw ISO string, which is precise
+    and also exactly the kind of thing nobody reads at a glance, least of
+    all the person who wrote it. Hand-built instead of strftime's `%-I`/
+    `%-d` for the same reason as `_report_date`: no betting a status line
+    on a platform's strftime quirks. A naive `moment` is taken as UTC,
+    since that's what every timestamp in the database is.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    local = moment.astimezone(ZoneInfo(timezone))
+    hour = local.hour % 12 or 12
+    meridiem = "AM" if local.hour < 12 else "PM"
+    return (
+        f"{local.strftime('%b')} {local.day}, {hour}:{local.minute:02d} {meridiem} {local.tzname()}"
+    )
+
+
+def _alerts_field_value(alerts: AlertStatus, timezone: str = "UTC") -> str:
     """The `/newsbot status` "SHiFT alerts" field's value (plan step 10).
 
     `disabled` when the config block's off; otherwise the last sweep's
@@ -502,7 +522,7 @@ def _alerts_field_value(alerts: AlertStatus) -> str:
     if not alerts.enabled:
         return "disabled"
     if alerts.last_sweep_at is not None:
-        sweep_part = f"last sweep {alerts.last_sweep_at.isoformat()}"
+        sweep_part = f"last sweep {_local_timestamp(alerts.last_sweep_at, timezone)}"
         if alerts.last_sweep_summary:
             sweep_part += f" · {esc(alerts.last_sweep_summary)}"
     else:
@@ -519,7 +539,11 @@ def _alerts_field_value(alerts: AlertStatus) -> str:
 
 
 def render_status(
-    snap: StatusSnapshot, spend_usd: float, alerts: AlertStatus | None = None
+    snap: StatusSnapshot,
+    spend_usd: float,
+    alerts: AlertStatus | None = None,
+    *,
+    timezone: str = "UTC",
 ) -> discord.Embed:
     """Render `/newsbot status`: last run, source health, and the running spend estimate.
 
@@ -529,6 +553,9 @@ def render_status(
     `AlertStatus` to show, which `/newsbot status`'s handler always does
     in practice (design.md §12 wants this field shown even when the
     feature is off, so it computes one regardless of `cfg.alerts.enabled`).
+    `timezone` is `cfg.digest.timezone`, so the last sweep reads in the
+    same local clock as everything else the bot says; it defaults to UTC
+    for callers (mostly tests) that don't care.
     """
     embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
 
@@ -549,7 +576,9 @@ def render_status(
     embed.add_field(name="Est. spend this month", value=f"${spend_usd:.2f}")
 
     if alerts is not None:
-        embed.add_field(name="SHiFT alerts", value=_alerts_field_value(alerts), inline=False)
+        embed.add_field(
+            name="SHiFT alerts", value=_alerts_field_value(alerts, timezone), inline=False
+        )
 
     # One line per source in the description, not one field per source.
     # Discord caps an embed at 25 fields, and the first real config had 24

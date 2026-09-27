@@ -404,7 +404,8 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             test_command_enabled=cfg.alerts.allow_test_command,
         )
         await interaction.followup.send(
-            embed=render_status(snap, spend, alerts_status), ephemeral=True
+            embed=render_status(snap, spend, alerts_status, timezone=cfg.digest.timezone),
+            ephemeral=True,
         )
 
     @group.command(name="run-now", description="Run the pipeline and post the digest now.")

@@ -630,3 +630,48 @@ def test_render_status_alerts_field_value_is_truncated_to_the_field_limit():
     embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
     value = _alerts_field(embed).value
     assert discord_len(value) <= 1024
+
+
+# --- last sweep reads in local time, not raw ISO ---
+
+
+def _swept_at(moment: datetime) -> AlertStatus:
+    return AlertStatus(
+        enabled=True,
+        seeded=True,
+        last_sweep_at=moment,
+        last_sweep_summary="18/19 sources ok, 0 new codes",
+        codes_alerted=0,
+        pings_today=0,
+        max_pings=3,
+    )
+
+
+def test_render_status_last_sweep_in_digest_timezone():
+    # 03:52 UTC on Sep 27 is still the evening of Sep 26 in Los Angeles,
+    # the exact reading that prompted this fix.
+    alerts = _swept_at(datetime(2026, 9, 27, 3, 52, tzinfo=UTC))
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts, timezone="America/Los_Angeles")
+    value = _alerts_field(embed).value
+    assert value.startswith("last sweep Sep 26, 8:52 PM PDT · ")
+    assert "T03:52" not in value
+
+
+def test_render_status_last_sweep_standard_time_and_morning_hours():
+    # December: PST, not PDT; and 12-hour clock edges (midnight is 12 AM,
+    # single-digit hours aren't zero-padded).
+    midnight = _swept_at(datetime(2026, 12, 3, 8, 5, tzinfo=UTC))
+    embed = render_status(
+        _EMPTY_SNAP, spend_usd=0.0, alerts=midnight, timezone="America/Los_Angeles"
+    )
+    assert _alerts_field(embed).value.startswith("last sweep Dec 3, 12:05 AM PST")
+
+    noon = _swept_at(datetime(2026, 12, 3, 20, 0, tzinfo=UTC))
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=noon, timezone="America/Los_Angeles")
+    assert _alerts_field(embed).value.startswith("last sweep Dec 3, 12:00 PM PST")
+
+
+def test_render_status_last_sweep_defaults_to_utc_and_tolerates_naive():
+    alerts = _swept_at(datetime(2026, 9, 27, 3, 52))
+    embed = render_status(_EMPTY_SNAP, spend_usd=0.0, alerts=alerts)
+    assert _alerts_field(embed).value.startswith("last sweep Sep 27, 3:52 AM UTC")
