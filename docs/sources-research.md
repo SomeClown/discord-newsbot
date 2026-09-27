@@ -141,3 +141,7 @@ sources:
 3. **Bluesky**: no app password yet. The three `bluesky_search` sources stay in `config.example.yaml`, commented to explain they're skipped until `BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD` are both set; the official-account RSS feeds don't need a password and are in regardless.
 4. **Reddit**: keeping all three subreddits, on `/top/.rss?t=day` per finding 4, with a comment that Reddit may block datacenter IPs and that source health will show it if so.
 5. **Web search**: added the `search_queries` schema change. `config.example.yaml` sets it for all three topics; Borderlands 4 and Diablo IV use the phrasing this doc recommended above, Palworld stays plain.
+
+### Decided 2026-09-27
+
+- **YouTube channel feeds removed.** All four (`Borderlands YouTube`, `Gearbox YouTube`, `Pocketpair YouTube`, `Diablo YouTube`) returned 404 on every run for days, as did unrelated channels' feeds, with no reported YouTube outage. Removed from `config.example.yaml`, the dev config, and production (owner decision), after confirming with `--check-sources`.

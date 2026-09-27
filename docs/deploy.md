@@ -1,5 +1,11 @@
 # Deploy runbook: the Droplet
 
+The maintainer's own Droplet runbook; see `docs/self-host.md` if you're
+running your own copy on your own server. This document stays useful as a
+worked example (and is where the general backup/rollback/upgrade
+procedures self-host.md points back to live), but it assumes this specific
+Droplet's own path, timezone, and release habits throughout.
+
 This is the "what do I actually type" document for running discord-newsbot
 in production on the owner's existing DigitalOcean Droplet. It assumes
 you've read `docs/design.md` §7 for the why; this is the how.
@@ -8,25 +14,25 @@ Written for Ubuntu/Debian, since that's the likely OS on an existing
 Droplet. Differences for other distros are called out where they matter
 (mainly: package manager and default `docker` group behavior). If the
 Droplet turns out to be something else entirely, the Docker and sqlite3
-commands below are the same everywhere -- only the install step changes.
+commands below are the same everywhere; only the install step changes.
 
 By the time a change reaches this document, it should already have gone
-through the standard release flow -- feature branch, PR, merge to
+through the standard release flow (feature branch, PR, merge to
 `main`, tried against the test guild with the dev bot using the
-published image, then a version tag -- documented in the README's
+published image, then a version tag), documented in the README's
 [Releasing](../README.md#releasing) section. This document picks up
 from "there's a tag or image I want running on the Droplet."
 
 ## 1. Prerequisites (one-time, on the Droplet)
 
-**Minimum Docker Engine: 20.10.10.** Older versions (19.03, notably --
+**Minimum Docker Engine: 20.10.10.** Older versions (19.03, notably
 what shipped on this Droplet before its 2026-09-25 upgrade) predate a
 `clone3`/seccomp fix; without it, `python:3.14-slim`'s threading breaks
 in ways that look like a Python bug and aren't. If `docker version`
 reports anything older, upgrade before doing anything else below.
 
 Docker Engine plus the compose plugin (not the old standalone
-`docker-compose` binary -- this repo uses `docker compose`, two words):
+`docker-compose` binary; this repo uses `docker compose`, two words):
 
 ```bash
 # Ubuntu/Debian, per Docker's own install docs:
@@ -63,18 +69,18 @@ detecting correctly (this Droplet is `focal`).
 sudo apt install -y sqlite3
 ```
 
-(Other distros: `dnf install sqlite`, `apk add sqlite`, etc. -- same idea.)
+(Other distros: `dnf install sqlite`, `apk add sqlite`, etc.; same idea.)
 
 **A note on the OS itself:** Ubuntu 20.04 (focal) left standard support
 in mid-2025 and is now on paid Extended Security Maintenance only.
 Nothing in this runbook requires an OS upgrade today, but planning one
 (to 22.04 or 24.04) is recommended as a separate, deliberate piece of
-work -- not bundled into a routine bot deploy.
+work; not bundled into a routine bot deploy.
 
 **The server's clock runs in UTC**, not America/Los_Angeles. This
 matters wherever a time-of-day schedule gets translated to a cron or
 timer expression below (see Backups, §9, and the deploy-window check in
-`scripts/deploy.sh`) -- `config.yaml`'s digest time is independent of
+`scripts/deploy.sh`); `config.yaml`'s digest time is independent of
 the host clock (the bot converts it itself), but anything driven by the
 host's own scheduler is not.
 
@@ -88,11 +94,11 @@ risk of drift between what's on the Droplet and what's in git.
 
 ```
 /opt/newsbot/                  # git clone of github.com/SomeClown/discord-newsbot
-├── docker-compose.yml         # tracked -- updated by `git pull`
-├── docker-compose.prod.yml    # tracked -- updated by `git pull`
-├── scripts/                   # tracked -- deploy.sh, backup.sh
-├── config.yaml                 # gitignored -- real config, not the example
-├── .env                        # gitignored -- real secrets, chmod 600
+├── docker-compose.yml         # tracked: updated by `git pull`
+├── docker-compose.prod.yml    # tracked: updated by `git pull`
+├── scripts/                   # tracked: deploy.sh, backup.sh
+├── config.yaml                 # gitignored: real config, not the example
+├── .env                        # gitignored: real secrets, chmod 600
 └── data/                        # gitignored
     ├── newsbot.db                # created by the container on first run
     └── backups/                  # created by scripts/backup.sh
@@ -103,7 +109,7 @@ risk of drift between what's on the Droplet and what's in git.
 safe: `git pull` only ever fast-forwards tracked files, and none of the
 three paths above are tracked, so a pull can neither overwrite nor
 delete them. (`git status` inside `/opt/newsbot` after any pull is a
-good habit anyway -- it should only ever show those three as untracked,
+good habit anyway; it should only ever show those three as untracked,
 never as modified-and-about-to-be-lost.)
 
 ```bash
@@ -129,7 +135,7 @@ read access to `data/newsbot.db`, which is now owned by uid 10001, not
 your login user. Two ways to make that work, in order of how this
 runbook actually uses them:
 
-- **Run the backup as root** -- this is what the systemd service in §9
+- **Run the backup as root**: this is what the systemd service in §9
   does (`User=root`), and it's the simplest option since root can always
   read the file regardless of ownership.
 - **Or add yourself to a group that can read `data/`** if you want to
@@ -141,7 +147,7 @@ runbook actually uses them:
 ### Migrating today's hand-copied `/opt/newsbot`
 
 As of 2026-09-25, `/opt/newsbot` on the Droplet exists with files
-copied in by hand, not a clone -- and no `config.yaml`/`.env`/`data/`
+copied in by hand, not a clone; and no `config.yaml`/`.env`/`data/`
 have been created yet (this Droplet hasn't done its first deploy). That
 makes the fix a clean swap, not a merge:
 
@@ -156,7 +162,7 @@ sudo chown -R 10001:10001 data
 ```
 
 Then continue at §3 below (create the prod Discord app) as if this were
-a first deploy, because it is one -- nothing in the old directory needs
+a first deploy, because it is one; nothing in the old directory needs
 to be carried forward. Once `/opt/newsbot` is confirmed working, `sudo
 rm -rf /opt/newsbot.pre-clone-2026-09-25` cleans up the old copy (leave
 it in place until then, in case something in the hand-copied version
@@ -169,7 +175,7 @@ already exist as real files.** `docker-compose.prod.yml` bind-mounts
 `./config.yaml:/app/config.yaml:ro`, and Docker's bind-mount behavior is
 to silently create an empty directory at that path if nothing's there yet.
 An empty directory named `config.yaml` is not a config file, and the
-container will crash trying to read it -- a confusing failure that looks
+container will crash trying to read it; a confusing failure that looks
 like a config-parsing bug but is really just "the file didn't exist yet."
 (The same trap is called out in `docker-compose.dev.yml`'s comments for the
 dev override, which swaps the config mount for `config.dev.yaml` for the
@@ -177,7 +183,7 @@ same reason: get the real file in place *before* `up`, not after.)
 
 ## 3. First deploy: create the prod Discord app
 
-This is separate from the dev bot used in `.env.dev` during development --
+This is separate from the dev bot used in `.env.dev` during development;
 **dev and prod must use different tokens.** Running two processes on the
 same token means both receive every gateway interaction and race for it;
 the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
@@ -186,7 +192,7 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
    create a new application for prod. Do not reuse the dev application.
 2. Bot settings:
    - **Public Bot: OFF** (nobody outside this server should be able to add it).
-   - No privileged intents (Message Content, Server Members, Presence) --
+   - No privileged intents (Message Content, Server Members, Presence);
      the bot doesn't need them.
    - Copy the bot token into the Droplet's `.env` (see below), never into
      the repo, a chat log, or this document.
@@ -195,16 +201,16 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
    - Bot permissions: **View Channels, Send Messages, Embed Links**. As of
      v2.0 there's no combined digest channel and no discussion thread on
      it, so **Create Public Threads** and **Send Messages in Threads**
-     aren't needed anymore -- each game gets its own channel and its own
+     aren't needed anymore; each game gets its own channel and its own
      plain message, nothing more. **Read Message History** isn't needed
      either, for the same reason (it was only ever about threads).
    - **If you're enabling SHiFT code alerts (§15, "Enabling SHiFT code
      alerts," near the end of this document), also check "Mention
-     @everyone, @here, and All Roles"** -- without it, the bot still
+     @everyone, @here, and All Roles"**: without it, the bot still
      posts a new code, it just can't actually notify anyone; §15 also
      covers granting this to a bot that's already invited.
 4. Invite it to the community guild. The owner does this step in person
-   per plan Checkpoint H -- `devops` doesn't hold the prod token.
+   per plan Checkpoint H; `devops` doesn't hold the prod token.
 
 ## 4. Fill in `config.yaml` and `.env`
 
@@ -215,7 +221,7 @@ cp config.example.yaml /opt/newsbot/config.yaml
 Edit `config.yaml`: replace every placeholder ID (`guild_id`, each topic's
 `channel_id`, `admin_channel_id` if used, and `alerts.channel_id` if
 SHiFT alerts are enabled) with the real ones from the prod guild. There is
-no `digest.channel_id` as of v2.0 -- see §13 of `docs/design.md` and the
+no `digest.channel_id` as of v2.0; see §13 of `docs/design.md` and the
 "Upgrading to v2.0" section near the end of this document if you're
 coming from a v1 config. The example file's comments explain what each
 placeholder is for.
@@ -237,27 +243,27 @@ BLUESKY_APP_PASSWORD=<optional>
 
 `docker-compose.prod.yml` defaults `GHCR_OWNER` to `someclown`, so
 there's nothing to set for this repo's own Droplet. It's still a
-variable rather than hardcoded, in case that ever needs to change --
+variable rather than hardcoded, in case that ever needs to change;
 override it in `.env` or `export GHCR_OWNER=...` in the shell before
 running compose commands if so.
 
 **Pin `TAG` in `.env` for deliberate upgrades** (e.g. `TAG=1.1.0`)
 rather than leaving it unset (which floats on `latest`, the newest build
 off `main`). Pinning makes "what's running" explicit and makes a
-rollback a one-line `.env` edit -- see §8, Rollback, below.
+rollback a one-line `.env` edit; see §8, Rollback, below.
 
 **Never run `docker compose ... config` (or anything else that resolves
 `env_file`) against this real `.env`.** It prints every secret in plain
 text to your terminal (and probably your shell history and any logging
 around it). If you need to sanity-check the merged compose config, do it
 against a scratch `.env` with dummy values in a throwaway directory, the
-same way CI and local dev do it -- never the real file. (This one's
+same way CI and local dev do it; never the real file. (This one's
 learned-the-hard-way; see `CLAUDE.md`.)
 
 ## 5. GHCR image access
 
 `ghcr.io/someclown/discord-newsbot` is public, so `docker compose pull`
-works with no login on the Droplet -- nothing to do here.
+works with no login on the Droplet; nothing to do here.
 
 (If that ever changes to a private package, log in once from the
 Droplet with a classic Personal Access Token scoped to `read:packages`
@@ -276,7 +282,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-(`scripts/deploy.sh` also works here -- it'll print "no database yet,
+(`scripts/deploy.sh` also works here: it'll print "no database yet,
 skipping backup" and continue, since there's nothing to back up on a
 first deploy.)
 
@@ -292,10 +298,10 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail 100
 
 Then, per plan Checkpoint H:
 
-1. Run `/newsbot preview` in the guild -- confirms the pipeline, the
+1. Run `/newsbot preview` in the guild: confirms the pipeline, the
    Claude and Brave keys, and Discord permissions all actually work,
    without posting or recording anything.
-2. Run `/newsbot status` -- confirms source health and that the scheduler
+2. Run `/newsbot status`: confirms source health and that the scheduler
    is running.
 3. Install the backup timer (§9 below).
 4. The following morning, confirm the digest posted at 09:00
@@ -319,16 +325,16 @@ just a convenience wrapper around it, as it was before `/opt/newsbot`
 became a clone). In order, it:
 
 1. Refuses to run if the working tree has local changes to tracked
-   files (`git status --porcelain` isn't clean) -- a routine update
+   files (`git status --porcelain` isn't clean); a routine update
    should never silently discard or merge over something someone edited
    by hand on the Droplet.
-2. `git pull --ff-only` -- fails loudly on a diverged history rather
+2. `git pull --ff-only`: fails loudly on a diverged history rather
    than creating a merge commit no one asked for.
 3. Runs `scripts/backup.sh` before touching the running container (skips
    gracefully with a message if there's no database yet).
 4. Refuses to run between 09:00 and 09:15 America/Los_Angeles, computed
    from the host's UTC clock (`TAG=... ./scripts/deploy.sh --force`
-   overrides this, for the rare case where you're certain it's safe --
+   overrides this, for the rare case where you're certain it's safe,
    e.g. confirmed today's digest already posted).
 5. `docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
    && up -d`, honoring `TAG` from `.env` or the environment.
@@ -361,13 +367,13 @@ first stop whatever's running locally against the *same* token:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 
 # Stop a local (non-container) dev process:
-# on macOS the process name has a capital P -- `python -m newsbot` won't
+# on macOS the process name has a capital P; `python -m newsbot` won't
 # match it in pgrep/pkill, but `newsbot` (the module/package name) will:
 pkill -f newsbot
 ```
 
 Dev and prod use different tokens, so running both simultaneously is
-normally fine -- this only matters if you're deliberately pointing a local
+normally fine; this only matters if you're deliberately pointing a local
 process at the prod token for some reason, which should be rare and
 short-lived.
 
@@ -381,10 +387,10 @@ is done.
 ## 8. Rollback
 
 Every image is tagged `latest` (main branch), `sha-<short>` (every
-build), and, for tagged releases, semver (`1.1.0`, `1.1`) -- see
+build), and, for tagged releases, semver (`1.1.0`, `1.1`); see
 `.github/workflows/ci.yml`. **The recommended way to run prod is to pin
 `TAG` to a specific release in `.env`** (e.g. `TAG=1.1.0`), not to float
-on `latest` -- that makes both "what's actually running" and "how do I
+on `latest`; that makes both "what's actually running" and "how do I
 undo this" a one-line answer:
 
 ```bash
@@ -396,7 +402,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 `scripts/deploy.sh --rollback <tag>` is a small convenience for the same
 thing: it sets `TAG` for that one run and reminds you to persist the
-change in `.env` yourself (it doesn't edit `.env` for you -- that file's
+change in `.env` yourself (it doesn't edit `.env` for you; that file's
 contents shouldn't change from a script running unattended).
 
 If `.env` doesn't pin `TAG` at all, `docker-compose.prod.yml` defaults it
@@ -413,12 +419,12 @@ on `main`; find a release's semver tag from GitHub's Releases page or
 `git tag`.
 
 If a rollback is needed because of bad data (not just bad code), see §10,
-Restore from backup, below -- rolling back the image doesn't undo anything
+Restore from backup, below; rolling back the image doesn't undo anything
 already written to the database.
 
 **Rolling back past v1.2.0 (SHiFT code alerts) is safe.** Migration 002
-(`alerted_codes`, `alert_state`) is purely additive -- it only adds
-tables, never touches `items`/`stories`/`digests`/`source_health` -- and
+(`alerted_codes`, `alert_state`) is purely additive; it only adds
+tables, never touches `items`/`stories`/`digests`/`source_health`; and
 the migration runner never rolls a schema *back* down on its own. A v1.1.1
 image (pre-alerts) still starts up fine against a database already
 migrated to `user_version` 2: it just never reads or writes the two new
@@ -429,20 +435,20 @@ other config field a newer version added.
 
 **Rolling back past v2.0.0 (per-game channels) needs the v1 `config.yaml`
 back, not just the image.** Migration 003 (`alerted_codes.from_roundup`)
-is additive the same way 002 was -- a pre-2.0 binary starts up fine
+is additive the same way 002 was; a pre-2.0 binary starts up fine
 against a database already migrated to `user_version` 3, it just never
 reads or writes that column. The database needs no restore either way.
 What v1.3.0 *does* need is a v1-shaped `config.yaml`: it requires
 `digest.channel_id` (v2.0 removed the field pydantic validates against)
 and rejects any `alerts` key it doesn't recognize (`alerts.channel_id`
 didn't exist yet). Keep the pre-upgrade config around as `config.v1.yaml`
--- see "Upgrading to v2.0" below -- and swap it back in alongside the
+(see "Upgrading to v2.0" below), and swap it back in alongside the
 `TAG` rollback above.
 
 ## 9. Backups
 
 `scripts/backup.sh` takes an online-safe snapshot with `sqlite3 .backup`
-(safe to run against a live WAL-mode database -- unlike `cp`, it won't
+(safe to run against a live WAL-mode database; unlike `cp`, it won't
 catch the file mid-write) and keeps the 7 newest, deleting older ones.
 
 The Droplet's clock is UTC, but the schedule we care about ("08:30
@@ -473,7 +479,7 @@ journalctl -u newsbot-backup.service --since today
 ```
 
 `newsbot-backup.timer` fires at `OnCalendar=*-*-* 08:30:00
-America/Los_Angeles` -- systemd resolves that to the correct UTC instant
+America/Los_Angeles`; systemd resolves that to the correct UTC instant
 itself, DST included, because it evaluates the calendar expression in the
 named zone rather than the host's. systemd has supported the trailing
 timezone on `OnCalendar` since v235; Ubuntu 20.04 (focal) ships systemd
@@ -483,13 +489,13 @@ uid-10001 permission workaround that running the script as your login
 user would.
 
 If `/opt/newsbot` moves or the unit files change, re-run the `cp` and
-`daemon-reload` steps above -- systemd doesn't watch the source files in
+`daemon-reload` steps above; systemd doesn't watch the source files in
 the repo, only its own copies under `/etc/systemd/system/`.
 
 ### Fallback: cron
 
 Ubuntu's cron is Vixie cron, which has **no `CRON_TZ` support** (that's
-a cronie/Debian-cron feature this Droplet doesn't have) -- so a crontab
+a cronie/Debian-cron feature this Droplet doesn't have); so a crontab
 entry has to be written in the host's own UTC time, and re-adjusted by
 hand across DST if you want the backup to stay pinned to 08:30 Pacific:
 
@@ -500,7 +506,7 @@ sudo crontab -e
 ```cron
 # 08:30 America/Los_Angeles == 15:30 UTC during PDT (roughly
 # mid-March to early November) or 16:30 UTC during PST. This host's
-# clock is UTC -- see docs/deploy.md §1. Update the hour by hand at
+# clock is UTC; see docs/deploy.md §1. Update the hour by hand at
 # each DST transition, or use the systemd timer instead (§9 above),
 # which does this automatically.
 30 15 * * * cd /opt/newsbot && ./scripts/backup.sh data/newsbot.db data/backups >> data/backups/backup.log 2>&1
@@ -511,7 +517,7 @@ belongs to the container's uid 10001, and root is the simplest user that
 can read it and write `data/backups/`. Same reasoning as the systemd unit.
 
 Off-host copies (DigitalOcean snapshots, `rsync` to elsewhere) are a
-sensible follow-up but explicitly out of scope for v1 -- see
+sensible follow-up but explicitly out of scope for v1; see
 `docs/design.md` §6.
 
 ### Restore from backup
@@ -521,7 +527,7 @@ sensible follow-up but explicitly out of scope for v1 -- see
    docker compose -f docker-compose.yml -f docker-compose.prod.yml stop
    ```
 2. Move the current (possibly corrupt) database aside rather than deleting
-   it -- you may want to compare or recover something from it later:
+   it; you may want to compare or recover something from it later:
    ```bash
    mv data/newsbot.db data/newsbot.db.pre-restore-$(date +%F)
    rm -f data/newsbot.db-wal data/newsbot.db-shm
@@ -540,27 +546,27 @@ sensible follow-up but explicitly out of scope for v1 -- see
    ```
 6. Run `/newsbot status` to confirm it's reading the restored data
    sensibly (recent digest history will jump backward to whatever day the
-   backup was taken -- that's expected, not a bug).
+   backup was taken; that's expected, not a bug).
 
 A restore rolls the database back to the backup's point in time (up to 24h
 of digest history and dedupe state lost, worst case). It does not touch
-`config.yaml`, `.env`, or the image -- only `data/newsbot.db`.
+`config.yaml`, `.env`, or the image; only `data/newsbot.db`.
 
 **If SHiFT code alerts are enabled, a restore can cause a code to
-re-alert.** `alerted_codes` rolls back with everything else -- a code
+re-alert.** `alerted_codes` rolls back with everything else; a code
 first recorded *after* the backup was taken (posted or otherwise) is
 gone from the restored database, and the next sweep that finds it again
 treats it as new. This is bounded for a *dated* item, not open-ended:
 `max_item_age_hours` (default 48) still has to consider the item fresh,
 and `max_pings_per_day` still caps how many of those re-alerts can
 actually carry a ping in one day. It is **not** bounded at all for an
-*undated* item -- undated items are always treated as fresh (the same
+*undated* item; undated items are always treated as fresh (the same
 rule SPEC-DEV 4 and A11 apply everywhere else in this feature), so a
 code whose only sighting has no `published_at` can re-alert after a
 restore no matter how long ago the backup was taken; the daily ping cap
 is still the only thing limiting how loud that re-alert can be. Worth a
 heads-up in the channel after a restore if alerts are on, same as the
-"recent digest history jumps backward" note above -- it's the same
+"recent digest history jumps backward" note above; it's the same
 underlying rollback, just visible in a different table.
 
 ## 10. Recovering a stuck or failed digest
@@ -578,7 +584,7 @@ exact state. That confirmation is about *asking before it does anything*,
 not about avoiding duplicates: per-topic progress from a partial failure
 lives in memory on the publisher that hit it, not in the database, so a
 confirmed run-now after a partial failure reposts **every** game today,
-including the ones that already went out -- there's no "only repost what
+including the ones that already went out; there's no "only repost what
 didn't post" mode yet (a known limitation, not a bug). If the failure was
 a transient upstream issue (a source timing out, a Claude API hiccup),
 this is usually all that's needed anyway. If it fails again, check the
@@ -596,7 +602,7 @@ If a token or key leaks (or just on a routine schedule):
    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
    ```
    (`up -d` without `pull` is enough if only `.env` changed, not the
-   image -- compose recreates the container with the new env either way.)
+   image; compose recreates the container with the new env either way.)
 4. Revoke the old credential at the source, after confirming the bot is
    healthy on the new one.
 
@@ -606,7 +612,7 @@ runbook, a chat log, or an issue.
 ## 12. Where logs live
 
 `docker-compose.yml` sets `json-file` logging with `max-size: 10m,
-max-file: 3` (30MB cap per container, rotated automatically -- no logrotate
+max-file: 3` (30MB cap per container, rotated automatically; no logrotate
 setup needed). View them with:
 
 ```bash
@@ -627,7 +633,7 @@ Rough numbers, not a hard budget:
 
 - The image itself: under 300MB (slim Python base, no compiler in the
   final stage).
-- `data/newsbot.db`: grows slowly -- it's headlines, summaries and item
+- `data/newsbot.db`: grows slowly; it's headlines, summaries and item
   metadata for 3 topics, not full article bodies. Low tens of MB even
   after months of daily digests.
 - `data/backups/`: 7 × the database size, so proportionally small next to
@@ -641,7 +647,7 @@ time. If `df -h` ever looks tight, `data/backups/` and old Docker images
 ## 14. Troubleshooting
 
 **`Unknown interaction (10062)` in the logs.** Two instances of the bot
-are running on the same token and racing for interactions -- see §7 above
+are running on the same token and racing for interactions; see §7 above
 and `CLAUDE.md`. Find and stop the second one (a leftover local dev
 process is the usual culprit); don't touch the code, this isn't a bug in
 the bot.
@@ -649,7 +655,7 @@ the bot.
 **Reddit returns 403 or 429.** Expected from datacenter IPs and generic
 user agents; Reddit does this to a lot of cloud providers, not just this
 one. The collector already sends a descriptive User-Agent and prefers
-`/new/.rss`. Check `/newsbot status` -- after 3 consecutive daily
+`/new/.rss`. Check `/newsbot status`: after 3 consecutive daily
 failures it's flagged there as a source health issue, which is the
 designed behavior, not a fresh problem each time it happens. If it
 persists, that's an owner decision (drop Reddit as a source, or accept the
@@ -667,22 +673,22 @@ repeatedly across multiple days.
 last few healthcheck outputs, and the logs for whether the gateway
 connection is actually established. The healthcheck fails if the heartbeat
 file (`/tmp/newsbot-heartbeat` inside the container) is more than 3
-minutes old -- a Discord gateway outage or a stuck scheduler will show up
+minutes old; a Discord gateway outage or a stuck scheduler will show up
 this way before anyone notices the digest didn't post.
 
 **Container won't start / crashes immediately on a fresh deploy.** Check
 whether `config.yaml` or `.env` ended up as an empty directory instead of
-a file (see §2, "A file, not a directory") -- this is the single most
+a file (see §2, "A file, not a directory"); this is the single most
 likely cause of an otherwise-inexplicable startup crash on a brand new
 `/opt/newsbot` setup.
 
 ## 15. Enabling SHiFT code alerts
 
-New in v1.2.0 (`design.md` §12). Off by default -- nothing below changes
+New in v1.2.0 (`design.md` §12). Off by default; nothing below changes
 existing behavior until you do it.
 
 1. **Create the SHiFT codes channel** (as of v2.0, alerts no longer share
-   a channel with any game's digest -- see "Upgrading to v2.0" below if
+   a channel with any game's digest; see "Upgrading to v2.0" below if
    you're moving from a v1 config that still had alerts on the digest
    channel).
 2. **Grant the mention permission.** The bot's role needs **View
@@ -708,21 +714,21 @@ existing behavior until you do it.
    Everything else (`interval_minutes`, `max_item_age_hours`,
    `max_pings_per_day`) is fine at its default; see
    `config.example.yaml`'s commented block for what each one does. Leave
-   `allow_test_command` out (or `false`) in prod -- it registers
+   `allow_test_command` out (or `false`) in prod; it registers
    `/newsbot test-alert`, which is meant for the private test guild only.
 4. **Redeploy** the normal way (`./scripts/deploy.sh` or the by-hand
-   steps in §7) -- migration 002 (`alerted_codes`, `alert_state`) applies
+   steps in §7); migration 002 (`alerted_codes`, `alert_state`) applies
    itself at startup the same way every other migration does; nothing
    extra to run by hand.
 5. **Confirm it's live:** `/newsbot status` should show a "SHiFT alerts"
    field instead of "disabled", and startup shouldn't have sent a
    permission-check admin alert (§13 of `docs/design.md`) naming the new
    channel. The first real sweep seeds silently (shows `(seeding)`, posts
-   nothing) -- that's expected, not a bug; see `design.md` §12's
+   nothing); that's expected, not a bug; see `design.md` §12's
    silent-seeding safeguard.
 
 Rolling this back out is just `alerts.enabled: false` (or removing the
-`alerts:` block entirely) and redeploying -- migration 002 stays applied
+`alerts:` block entirely) and redeploying; migration 002 stays applied
 (it's additive and harmless either way; see §8, Rollback, above), the
 sweep simply stops running.
 
@@ -856,8 +862,8 @@ will forget by the next upgrade.
 v2.0.0 (`docs/design.md` §13) is a breaking config change: the combined
 digest channel is gone, each game posts to its own channel, and SHiFT code
 alerts move to a dedicated channel of their own. Nothing about the
-database changes in a way that needs a restore -- migration 003 is
-additive, same as every migration before it -- but `config.yaml` needs
+database changes in a way that needs a restore; migration 003 is
+additive, same as every migration before it, but `config.yaml` needs
 real edits before the new image will even start, so do this on purpose,
 not as a surprise the morning after a routine `deploy.sh`.
 
@@ -865,9 +871,9 @@ The config edit below happens on a *copy*, not on the live `config.yaml`,
 and the copy only becomes `config.yaml` in the last step, right before
 `deploy.sh` runs. That ordering matters: if something restarted the
 container in between (a host reboot, a manual `docker compose up`), the
-still-running `1.3.0` image would find a v2-shaped `config.yaml` --
-missing `digest.channel_id`, carrying an `alerts.channel_id` it doesn't
-recognize -- and crash-loop until someone noticed. Editing a copy means
+still-running `1.3.0` image would find a v2-shaped `config.yaml`
+(missing `digest.channel_id`, carrying an `alerts.channel_id` it doesn't
+recognize) and crash-loop until someone noticed. Editing a copy means
 `config.yaml` stays v1.3.0-valid right up until the moment the new image
 is actually the one that's going to read it.
 
@@ -878,7 +884,7 @@ is actually the one that's going to read it.
    cp config.yaml config.v1.yaml
    ```
    Note the currently-pinned `TAG` in `.env` too (it should read
-   `TAG=1.3.0` if you've kept up with releases) -- that, plus
+   `TAG=1.3.0` if you've kept up with releases), that, plus
    `config.v1.yaml`, is everything the rollback at the end of this section
    needs.
 2. **Create four channels:** one per game (`#borderlands4`, `#palworld`,
@@ -929,14 +935,14 @@ is actually the one that's going to read it.
    `topics[].channel_id` is required for every topic now (not just the
    ones with alerts); `alerts.channel_id` is required only if
    `alerts.enabled` is `true`.
-4. **Validate `config.v2.yaml` before touching prod's real config** --
+4. **Validate `config.v2.yaml` before touching prod's real config**:
    `load_config` is the same check the container runs at startup, and
    it's a lot cheaper to fail here than mid-deploy:
    ```bash
    python -c "from newsbot.config import load_config; load_config('config.v2.yaml')"
    ```
    (from a checked-out copy of this repo with the venv active, pointed at
-   a copy of the edited `config.v2.yaml` -- not the live file on the
+   a copy of the edited `config.v2.yaml`, not the live file on the
    Droplet, and never via `docker compose ... config` against the real
    `.env`; see §4 above and `CLAUDE.md` for why that command specifically
    is off the table.) A `ConfigError` here lists every problem at once,
@@ -944,7 +950,7 @@ is actually the one that's going to read it.
 5. **Wait for the `v2.0.0` tag's build**, same as any other release (§7):
    `gh run list --limit 3` shows when it's done, or watch for
    `manifest unknown` if you jump the gun.
-6. **Swap the config in and deploy in the same breath** -- pin `TAG=2.0.0`
+6. **Swap the config in and deploy in the same breath**: pin `TAG=2.0.0`
    in `.env`, then immediately:
    ```bash
    cd /opt/newsbot
@@ -955,10 +961,10 @@ is actually the one that's going to read it.
    doing it right before `deploy.sh` means the window where `config.yaml`
    is v2-shaped but the running container is still `1.3.0` is as close to
    zero as this process gets. `deploy.sh` takes a backup first (per §9)
-   and applies migration 003 at startup -- both automatic, nothing extra
+   and applies migration 003 at startup; both automatic, nothing extra
    to run by hand.
 7. **Check:** no startup permission-check admin alert (§13 of
-   `docs/design.md` -- one alert here would name exactly which channel and
+   `docs/design.md`: one alert here would name exactly which channel and
    permission is missing); `/newsbot status` healthy; `/shift codes`
    lists the codes that were already in `alerted_codes` before the
    upgrade, with any old roundup-only codes marked "from a roundup". The
@@ -967,5 +973,5 @@ is actually the one that's going to read it.
 8. **Rollback,** if needed: restore `config.v1.yaml` over `config.yaml`,
    set `TAG` back to `1.3.0` in `.env`, and deploy again (§8, Rollback,
    above, has the general form of this). No database restore is
-   necessary either direction -- migration 003 stays applied and
+   necessary either direction; migration 003 stays applied and
    harmless, the same as every additive migration before it.

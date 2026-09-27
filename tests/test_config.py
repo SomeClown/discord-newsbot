@@ -19,6 +19,7 @@ from newsbot.config import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
+MINIMAL = Path(__file__).parent.parent / "config.minimal.yaml"
 
 
 def test_valid_fixture_loads(monkeypatch):
@@ -341,6 +342,27 @@ def test_example_config_loads(monkeypatch):
     assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
 
 
+def test_minimal_config_loads(monkeypatch):
+    # config.minimal.yaml (self-host plan task 4) is the other end of
+    # config.example.yaml: the smallest starting point a fork copies to
+    # config.yaml. If this doesn't load, the setup guide it's meant to
+    # anchor is lying.
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(MINIMAL)
+    assert {t.key for t in cfg.topics} == {"yourgame"}
+    assert len(cfg.sources) == 3
+    assert cfg.alerts.enabled is False
+
+
+def test_minimal_config_loads_without_brave_key_too(monkeypatch):
+    # BRAVE_API_KEY is optional; a fork that never sets it should still
+    # get a working bot with the web_search source quietly disabled, not
+    # a config error.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    cfg = load_config(MINIMAL)
+    assert all(s.type != "web_search" for s in cfg.sources)
+
+
 def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):
     # The entire `alerts:` block in config.example.yaml is commented out
     # (plan step 11: shown, not enabled, since it names a real
@@ -417,6 +439,34 @@ sources:
 """
     with pytest.raises(ConfigError):
         _load_with(tmp_path, text)
+
+
+def test_digest_subject_defaults_to_video_games(monkeypatch):
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(FIXTURE)
+    assert cfg.digest.subject == "video games"
+
+
+def test_digest_subject_is_overridable(tmp_path):
+    text = """
+guild_id: 1
+digest:
+  time: "09:00"
+  timezone: "UTC"
+  subject: "tabletop RPGs"
+topics:
+  - key: palworld
+    name: "Palworld"
+    channel_id: 2
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.digest.subject == "tabletop RPGs"
 
 
 def test_load_secrets_reads_env():

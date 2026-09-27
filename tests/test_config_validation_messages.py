@@ -111,7 +111,7 @@ sources:
         _load_with(tmp_path, text)
     message = str(exc_info.value)
     assert (
-        "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+        "digest.channel_id was removed in v2.0: move it to a channel_id "
         "on each topic (topics[].channel_id); there is no fallback" in message
     )
 

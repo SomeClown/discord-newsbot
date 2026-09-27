@@ -64,8 +64,8 @@ _LABEL_CHOICES = ("official", "reported", "rumor")
 # same regardless of which of the three tripped over it.
 _BUSY_MESSAGE = "A run or code check is in progress."
 _NOT_A_CODE_MESSAGE = (
-    "That doesn't look like a SHiFT code -- expected five groups of five "
-    "letters or digits joined by hyphens (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)."
+    "That doesn't look like a SHiFT code (expected five groups of five "
+    "letters or digits joined by hyphens: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)."
 )
 
 
@@ -404,7 +404,8 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             test_command_enabled=cfg.alerts.allow_test_command,
         )
         await interaction.followup.send(
-            embed=render_status(snap, spend, alerts_status), ephemeral=True
+            embed=render_status(snap, spend, alerts_status, timezone=cfg.digest.timezone),
+            ephemeral=True,
         )
 
     @group.command(name="run-now", description="Run the pipeline and post the digest now.")

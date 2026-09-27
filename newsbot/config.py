@@ -105,6 +105,14 @@ class DigestCfg(BaseModel):
     # is meant to be the normal, boring case, not something an owner has to
     # discover and opt into.
     report_to_admin: bool = True
+    # Self-host plan task 2: what SYSTEM_PROMPT calls the things `topics`
+    # are ("the video games {games}"). Defaults to "video games" so an
+    # owner who never touches this keeps the exact prompt this bot has
+    # always shipped with, byte for byte; a fork tracking, say, tabletop
+    # RPG news instead can say so without editing prompts.py. Any change
+    # here still needs an owner-reviewed `/newsbot preview` before merge
+    # (CLAUDE.md), same as any other prompt edit.
+    subject: str = "video games"
 
     @field_validator("time")
     @classmethod
@@ -254,8 +262,8 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
             else "?"
         )
         return (
-            f"topics[{idx}] ({key}): channel_id is required -- each game "
-            "posts to its own channel as of v2.0"
+            f"topics[{idx}] ({key}): channel_id is required "
+            "(each game posts to its own channel as of v2.0)"
         )
     return f"{'.'.join(str(p) for p in loc)}: {error['msg']}"
 
@@ -280,7 +288,7 @@ def load_config(path: str | Path) -> AppConfig:
     digest_raw = raw.get("digest")
     if isinstance(digest_raw, dict) and "channel_id" in digest_raw:
         pre_errors.append(
-            "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+            "digest.channel_id was removed in v2.0: move it to a channel_id "
             "on each topic (topics[].channel_id); there is no fallback"
         )
 
@@ -339,7 +347,7 @@ def load_config(path: str | Path) -> AppConfig:
         # ran /newsbot test-alert, long after config load had already
         # said everything looked fine.
         errors.append(
-            "alerts.allow_test_command is true but alerts.enabled is false -- "
+            "alerts.allow_test_command is true but alerts.enabled is false: "
             "/newsbot test-alert has nothing to test with alerts disabled"
         )
 
@@ -402,6 +410,43 @@ def configured_source_names(cfg: AppConfig) -> set[str]:
     incident in CLAUDE.md).
     """
     return {source.name for source in cfg.sources}
+
+
+def count_configured_web_search_sources(path: str | Path) -> int:
+    """How many `web_search` sources `path` names, before `load_config` gets a chance to drop any.
+
+    `load_config` silently disables a `web_search` source (with its own
+    startup warning) when `BRAVE_API_KEY` isn't set, which is the right
+    call at boot but means `AppConfig.sources` can no longer answer "was
+    web_search ever configured at all": exactly the question
+    `--check-sources` needs answered, to tell "not configured" apart from
+    "configured, but skipped for lack of a key". Re-reads the raw YAML
+    rather than reusing `load_config`'s own parse, since that parse is
+    already past the point where the answer got thrown away.
+    """
+    raw = yaml.safe_load(Path(path).read_text()) or {}
+    sources = raw.get("sources") or []
+    return sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
+
+
+def load_check_sources_secrets(env: Mapping[str, str] = os.environ) -> Secrets:
+    """Just enough of `Secrets` for `--check-sources`: never reads ANTHROPIC_API_KEY/DISCORD_TOKEN.
+
+    `--check-sources` runs the real collectors to sanity-check
+    `config.yaml` before anything talks to Claude or Discord, so it has
+    no business demanding either credential. `Secrets` still needs a
+    value for `anthropic_api_key` (it isn't optional), so this gives it
+    an obvious placeholder instead of reading the environment for one --
+    the point isn't that the value is empty, it's that this function
+    never even looks.
+    """
+    return Secrets(
+        discord_token=None,
+        anthropic_api_key=SecretStr("unused (--check-sources never calls Claude)"),
+        brave_api_key=env.get("BRAVE_API_KEY") or None,
+        bluesky_handle=(env.get("BLUESKY_HANDLE") or "").strip().lstrip("@") or None,
+        bluesky_app_password=env.get("BLUESKY_APP_PASSWORD") or None,
+    )
 
 
 def load_secrets(env: Mapping[str, str] = os.environ, *, require_discord: bool = True) -> Secrets:

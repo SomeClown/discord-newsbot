@@ -25,9 +25,9 @@ import httpx
 from newsbot import text
 from newsbot.collectors.base import RawItem
 from newsbot.config import RssSource
+from newsbot.useragent import user_agent_headers
 
-_USER_AGENT = "discord-newsbot/1.0 (+contact)"
-_HEADERS = {"User-Agent": _USER_AGENT}
+_HEADERS = user_agent_headers()
 _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 
 # Reddit's 429 usually clears after a short pause; a couple of retries here

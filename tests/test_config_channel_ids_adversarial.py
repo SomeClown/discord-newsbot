@@ -224,7 +224,7 @@ topics:
     with pytest.raises(ConfigError) as exc_info:
         _load_with(tmp_path, text)
     assert (
-        "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+        "digest.channel_id was removed in v2.0: move it to a channel_id "
         "on each topic (topics[].channel_id); there is no fallback"
     ) in str(exc_info.value)
 

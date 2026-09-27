@@ -17,7 +17,7 @@ from newsbot.store.models import PriorStory
 
 SYSTEM_PROMPT = """\
 You are the news summarizer for a Discord bot that posts a daily digest \
-about the video games {games}. Your job is to read collected items about \
+about the {subject} {games}. Your job is to read collected items about \
 one topic and turn them into a short list of distinct stories.
 
 The items you are given were scraped from RSS feeds, Steam announcements, \
@@ -57,7 +57,7 @@ _PRIOR_HEADER = (
 )
 
 
-def _format_games_list(topics: list[Topic]) -> str:
+def _format_games_list(topics: list[Topic], subject: str) -> str:
     """ "A, B and C" from a list of topics, matching the old hardcoded string's shape.
 
     No Oxford comma, "and" before the last name, plain "A and B" for
@@ -68,7 +68,7 @@ def _format_games_list(topics: list[Topic]) -> str:
     names = [t.name for t in topics]
     if not names:
         # Shouldn't happen (config requires >= 1 topic); not worth crashing over.
-        return "these games"
+        return f"these {subject}"
     if len(names) == 1:
         return names[0]
     return ", ".join(names[:-1]) + " and " + names[-1]
@@ -93,6 +93,7 @@ def build_prompt(
     prior: list[PriorStory],
     *,
     all_topics: list[Topic] | None = None,
+    subject: str = "video games",
 ) -> tuple[str, str]:
     """Build the (system, user) prompt pair for one topic's summarize call.
 
@@ -106,8 +107,14 @@ def build_prompt(
     actually configured instead of a string someone has to remember to
     update by hand. Defaults to just `[topic]` for callers (mostly tests)
     that don't have the full list handy and don't care.
+
+    `subject` is what SYSTEM_PROMPT calls those things (normally
+    `cfg.digest.subject`); defaults to "video games" so a caller that
+    doesn't pass it gets this bot's original prompt, unchanged.
     """
-    system = SYSTEM_PROMPT.format(games=_format_games_list(all_topics or [topic]))
+    system = SYSTEM_PROMPT.format(
+        subject=subject, games=_format_games_list(all_topics or [topic], subject)
+    )
 
     lines = [f"Topic: {topic.name} (key: {topic.key})", ""]
     if prior:

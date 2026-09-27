@@ -33,7 +33,7 @@ import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -51,7 +51,15 @@ from newsbot.collectors.base import (
     build_collectors,
     run_collectors,
 )
-from newsbot.config import AppConfig, ConfigError, load_config, load_secrets
+from newsbot.config import (
+    AppConfig,
+    ConfigError,
+    Secrets,
+    count_configured_web_search_sources,
+    load_check_sources_secrets,
+    load_config,
+    load_secrets,
+)
 from newsbot.logging_setup import configure_logging
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import _run_lock, is_run_in_progress
@@ -77,16 +85,12 @@ from newsbot.store.repo import (
     record_source_result,
     save_run,
 )
+from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
 if TYPE_CHECKING:
     from newsbot.shift.sweep import CodeAlertPoster, CodeCheckOutcome
 
 logger = logging.getLogger(__name__)
-
-# Discord asks for a User-Agent that identifies the bot and a way to
-# reach its operator; Reddit in particular is unforgiving about generic
-# ones (see docs/sources-research.md).
-_USER_AGENT = "discord-newsbot/1.0 (+https://github.com/, contact: owner)"
 
 _PRIOR_HEADLINE_WINDOW = timedelta(days=3)
 _COLLECT_TIMEOUT_S = 20.0
@@ -250,6 +254,7 @@ async def build_digest(
             topic_items,
             prior_by_topic.get(topic.key, []),
             all_topics=cfg.topics,
+            subject=cfg.digest.subject,
         )
 
     stored_items = _build_stored_items(grouped)
@@ -680,9 +685,7 @@ def _render_publish_failure_alert(
     verb = "publish failed after retries" if publish_error.retryable else "publish failed"
     posted_part = ", ".join(posted) if posted else "none"
     missing_part = ", ".join(missing) if missing else "none"
-    return (
-        f"newsbot: {verb}: {publish_error} -- posted: {posted_part}; did not post: {missing_part}"
-    )
+    return f"newsbot: {verb}: {publish_error}; posted: {posted_part}; did not post: {missing_part}"
 
 
 async def _publish_with_retry(
@@ -888,6 +891,36 @@ async def _stdout_alert(text: str) -> None:
     print(f"[alert] {text}", file=sys.stderr)
 
 
+class _DropWebSearchKeyWarning(logging.Filter):
+    """Filters out load_config's "BRAVE_API_KEY is not set" warning, and nothing else."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return "web_search source configured but BRAVE_API_KEY is not set" not in message
+
+
+@contextmanager
+def _quiet_web_search_key_warning():
+    """Silence config.py's "web_search ... BRAVE_API_KEY is not set" warning for one call.
+
+    Only ever used around `load_config` when `--fixtures` is given:
+    `--fixtures` throws every real collector away, `web_search` included,
+    so a config that happens to have one configured has nothing to warn
+    about here: the warning exists to flag a real run that's about to
+    quietly lose a source, not an offline demo that was never going to
+    call out to Brave regardless. Scoped to this one message, on this one
+    call, so a real run (no --fixtures) still sees it, and so does
+    anything else `load_config` might have to say.
+    """
+    config_logger = logging.getLogger("newsbot.config")
+    warning_filter = _DropWebSearchKeyWarning()
+    config_logger.addFilter(warning_filter)
+    try:
+        yield
+    finally:
+        config_logger.removeFilter(warning_filter)
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m newsbot.pipeline.run`: the CLI front door for a run with no Discord.
 
@@ -906,6 +939,13 @@ def main(argv: list[str] | None = None) -> int:
     only loaded for whatever `--fixtures`/`--stub-llm`/`--sweep` didn't
     replace, so a fully offline run (`--fixtures` and `--stub-llm`
     together) needs none of them.
+
+    `--check-sources` is its own thing entirely, checked before any of
+    the above: it runs every real, configured collector once, prints a
+    per-source and per-topic report, and exits, without ever loading
+    `ANTHROPIC_API_KEY` or `DISCORD_TOKEN`. Meant for sanity-checking a
+    new `config.yaml` (self-host plan task 3) before spending an Anthropic
+    call or a Discord token on it.
     """
     parser = argparse.ArgumentParser(prog="python -m newsbot.pipeline.run")
     parser.add_argument("--config", default=os.environ.get("NEWSBOT_CONFIG"))
@@ -928,22 +968,65 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--now",
+        help=(
+            "ISO 8601 timestamp to use as this run's clock instead of the real wall "
+            "clock (e.g. 2026-09-23T09:00:00Z); mainly for --fixtures, whose canned "
+            "published_at values are pinned to a fixed date and drift out of "
+            "digest.lookback_hours the moment 'today' moves on without them"
+        ),
+    )
+    parser.add_argument(
         "--sweep",
         action="store_true",
         help="run one SHiFT code alert sweep (design.md §12) instead of the daily pipeline",
     )
+    parser.add_argument(
+        "--check-sources",
+        action="store_true",
+        help=(
+            "run every configured source for real and report items/errors per source and "
+            "topic, then exit; needs no Anthropic or Discord credential"
+        ),
+    )
     args = parser.parse_args(argv)
 
     configure_logging()
+    warn_if_contact_unset()
 
     if not args.config:
         print("newsbot: --config (or $NEWSBOT_CONFIG) is required", file=sys.stderr)
         return 2
     try:
-        cfg = load_config(args.config)
+        with _quiet_web_search_key_warning() if args.fixtures else nullcontext():
+            cfg = load_config(args.config)
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    def _real_now() -> datetime:
+        return datetime.now(UTC)
+
+    now: Callable[[], datetime] = _real_now
+    if args.now:
+        try:
+            parsed_now = datetime.fromisoformat(args.now)
+        except ValueError as exc:
+            print(
+                f"newsbot: --now {args.now!r} is not a valid ISO 8601 timestamp: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        if parsed_now.tzinfo is None:
+            parsed_now = parsed_now.replace(tzinfo=UTC)
+
+        def _fixed_now() -> datetime:
+            return parsed_now
+
+        now = _fixed_now
+
+    if args.check_sources:
+        return asyncio.run(_run_check_sources_cli(cfg, args.config))
 
     # Secrets are only needed for the pieces --fixtures/--stub-llm didn't
     # replace: real collectors want BRAVE_API_KEY (and Bluesky's, if
@@ -973,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
         collectors = build_collectors(cfg, secrets)
 
     if args.sweep:
-        return _run_sweep_cli(cfg, args.db, collectors)
+        return _run_sweep_cli(cfg, args.db, collectors, now=now)
 
     llm: LLMClient
     if args.stub_llm:
@@ -984,14 +1067,14 @@ def main(argv: list[str] | None = None) -> int:
     mode = RunMode.POST if args.post_to_stdout else RunMode.PREVIEW
 
     async def _run() -> PipelineOutcome:
-        async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as http:
+        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
             deps = Deps(
                 cfg=cfg,
                 db_path=args.db,
                 http=http,
                 llm=llm,
                 collectors=collectors,
-                now=lambda: datetime.now(UTC),
+                now=now,
                 alert=_stdout_alert,
             )
             return await run_daily(deps, PrintPublisher(), mode=mode, force=args.force)
@@ -1009,24 +1092,33 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if outcome.status in ("ok", "partial", "skipped") else 1
 
 
-def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) -> int:
+def _run_sweep_cli(
+    cfg: AppConfig,
+    db_path: str,
+    collectors: list[Collector],
+    *,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> int:
     """`python -m newsbot.pipeline.run --sweep`: one sweep, printed instead of posted.
 
     A thin CLI wrapper around `shift.sweep.run_code_sweep`, imported
     lazily for the same reason `pipeline/run.py`'s other code-alert entry
     point does (see `_maybe_check_codes`): it keeps a normal digest run
-    from ever needing to import `shift/sweep.py` at all.
+    from ever needing to import `shift/sweep.py` at all. `now` defaults to
+    the real wall clock; `main`'s `--now` overrides it the same way it
+    overrides the daily pipeline's, for the same reason (see that flag's
+    own help text).
     """
     from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, run_code_sweep
 
     async def _run() -> CodeCheckOutcome | None:
-        async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as http:
+        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
             deps = SweepDeps(
                 cfg=cfg,
                 db_path=db_path,
                 http=http,
                 collectors=collectors,
-                now=lambda: datetime.now(UTC),
+                now=now,
                 alert=_stdout_alert,
                 poster=PrintCodeAlertPoster(),
             )
@@ -1050,11 +1142,151 @@ def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) ->
     return 0 if outcome.failed == 0 else 1
 
 
+@dataclass
+class CheckSourcesReport:
+    """What `--check-sources` found: per-source results and per-topic match counts.
+
+    Deliberately holds nothing that touches a database or a wall clock
+    beyond what `run_check_sources` needs internally: this is meant to be
+    easy to build by hand in a test and easy to render without re-running
+    anything.
+    """
+
+    results: list[CollectorResult]
+    topic_counts: dict[str, int]
+
+
+async def run_check_sources(
+    cfg: AppConfig, secrets: Secrets, http: httpx.AsyncClient
+) -> CheckSourcesReport:
+    """Run every real, configured collector once and report what came back.
+
+    Same collect -> normalize -> filter shape `build_digest` uses, minus
+    everything downstream of "did this source have anything relevant to
+    say": no summarizing (no Anthropic call, ever), no store dedupe (the
+    `existing_urls` lookup is a no-op empty set, since this is a
+    stateless sanity check, not a real run and shouldn't need a writable
+    `--db` to work), and nothing saved anywhere. `build_collectors`
+    itself already declines to build a `web_search` collector without
+    `secrets.brave_api_key` (config.py's own load-time filtering usually
+    means it was never in `cfg.sources` to begin with); the CLI wrapper
+    is what turns that absence into a readable note instead of just
+    a source that silently isn't in the results.
+    """
+    collectors = build_collectors(cfg, secrets)
+    results = await run_collectors(collectors, http, timeout_s=_COLLECT_TIMEOUT_S)
+    collected = [item for result in results for item in result.items]
+    lookback = timedelta(hours=cfg.digest.lookback_hours)
+    normalized = normalize(collected, lambda _urls: set(), datetime.now(UTC), lookback)
+    grouped = filter_items(normalized, cfg.topics, cfg.digest.max_items_per_topic)
+    topic_counts = {topic.key: len(grouped.get(topic.key, [])) for topic in cfg.topics}
+    return CheckSourcesReport(results=results, topic_counts=topic_counts)
+
+
+def render_check_sources_report(
+    cfg: AppConfig,
+    report: CheckSourcesReport,
+    *,
+    web_search_note: str | None,
+    web_search_skipped: int = 0,
+) -> str:
+    """Turn a `CheckSourcesReport` into the table `--check-sources` prints.
+
+    Exit code 0 either way (`main` never looks at `report` to decide
+    that): a source that timed out or 404'd is exactly the kind of thing
+    an owner is running this to find out about, not a reason to make the
+    command itself look like it failed. The summary line at the bottom
+    is what carries that news instead.
+
+    `web_search_skipped` is how many *unkeyed* `web_search` sources
+    `web_search_note` is talking about. `load_config` drops those before
+    `run_check_sources` ever builds a collector, so they never become a
+    `CollectorResult` with `skipped` set, and the summary's own `skipped`
+    count (built from `report.results`) would otherwise read "0 skipped"
+    right above a table note saying web_search itself was skipped: true
+    of the results list, misleading about what actually happened.
+    """
+    lines = ["Sources:"]
+    if report.results:
+        name_w = max(len("SOURCE"), *(len(r.source_name) for r in report.results))
+        type_w = max(len("TYPE"), *(len(r.source_type) for r in report.results))
+        lines.append(f"  {'SOURCE':<{name_w}}  {'TYPE':<{type_w}}  {'ITEMS':>5}  FIRST ERROR")
+        for r in report.results:
+            first_line = (
+                (r.error or r.skipped or "").splitlines()[0] if (r.error or r.skipped) else ""
+            )
+            lines.append(
+                f"  {r.source_name:<{name_w}}  {r.source_type:<{type_w}}  "
+                f"{len(r.items):>5}  {first_line}"
+            )
+    else:
+        lines.append("  (no sources configured)")
+    if web_search_note:
+        lines.append(f"  {web_search_note}")
+
+    lines.append("")
+    lines.append("Topics matched:")
+    for topic in cfg.topics:
+        count = report.topic_counts.get(topic.key, 0)
+        lines.append(f"  {topic.key} ({topic.name}): {count} item(s)")
+
+    ok = sum(1 for r in report.results if r.error is None and r.skipped is None)
+    failed = sum(1 for r in report.results if r.error is not None)
+    skipped = sum(1 for r in report.results if r.skipped is not None) + web_search_skipped
+    total_items = sum(report.topic_counts.values())
+    lines.append("")
+    lines.append(
+        f"Summary: {ok} source(s) ok, {failed} failed, {skipped} skipped; "
+        f"{total_items} item(s) matched across {len(cfg.topics)} topic(s)."
+    )
+    return "\n".join(lines)
+
+
+def _web_search_note(cfg: AppConfig, secrets: Secrets, config_path: str) -> str | None:
+    """The one extra line `--check-sources` prints about `web_search`, or `None`.
+
+    `None` when web_search isn't configured at all (nothing to say) or
+    when it's configured *and* keyed (it ran, and shows up in the
+    ordinary source table like anything else): a note only earns its
+    place when there's a source in config.yaml that didn't get a chance
+    to run.
+    """
+    configured = count_configured_web_search_sources(config_path)
+    if configured == 0:
+        return None
+    if secrets.brave_api_key is None:
+        return (
+            f"web_search: {configured} source(s) configured but BRAVE_API_KEY is not set; skipped"
+        )
+    return None
+
+
+async def _run_check_sources_cli(cfg: AppConfig, config_path: str) -> int:
+    """`python -m newsbot.pipeline.run --check-sources`: the CLI wrapper around `run_check_sources`.
+
+    Never reads `ANTHROPIC_API_KEY` or `DISCORD_TOKEN`, directly or
+    indirectly: `load_check_sources_secrets` is the only secrets loader
+    this path calls, and it's built specifically to not need either.
+    """
+    secrets = load_check_sources_secrets()
+    async with httpx.AsyncClient(headers=user_agent_headers()) as http:
+        report = await run_check_sources(cfg, secrets, http)
+    web_search_note = _web_search_note(cfg, secrets, config_path)
+    web_search_skipped = count_configured_web_search_sources(config_path) if web_search_note else 0
+    print(
+        render_check_sources_report(
+            cfg, report, web_search_note=web_search_note, web_search_skipped=web_search_skipped
+        )
+    )
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
 __all__ = [
+    "CheckSourcesReport",
     "Deps",
     "FixtureCollector",
     "PipelineOutcome",
@@ -1066,5 +1298,7 @@ __all__ = [
     "is_run_in_progress",
     "local_run_date",
     "main",
+    "render_check_sources_report",
+    "run_check_sources",
     "run_daily",
 ]

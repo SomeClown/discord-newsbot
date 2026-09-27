@@ -51,6 +51,7 @@ from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store.db import connect
 from newsbot.store.models import DigestRow
 from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
+from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
 logger = logging.getLogger(__name__)
 
@@ -93,27 +94,19 @@ def _should_alert_two_instances(
 # compose config, and the file's only job is to exist and be recent.
 HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not a real tempfile race)
 
-# Same string as pipeline/run.py's collector User-Agent (Reddit in
-# particular wants one that names the bot and a way to reach its
-# operator). Duplicated rather than imported because run.py's copy is a
-# module-private constant for its own CLI's httpx client; this one is for
-# the bot's, and the two clients happen to want the same string, not a
-# shared one.
-_USER_AGENT = "discord-newsbot/1.0 (+https://github.com/, contact: owner)"
-
 _RETENTION_DAYS = 90
 _HEARTBEAT_INTERVAL_S = 60
 _PENDING_STARTUP_ALERT = (
     "newsbot: found a 'pending' digest row at startup. That usually means "
-    "the process crashed mid-run last time -- it may or may not have "
-    "already posted. Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "the process crashed mid-run last time (it may or may not have "
+    "already posted). Check the game channels and `/newsbot status`, then "
+    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
     "before posting again, since we can't tell whether today already went out."
 )
 _PARTIAL_FAILURE_STARTUP_ALERT = (
     "newsbot: today's digest row is 'failed' but some messages already "
     "posted before it died. Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
     "before posting again, since part of today's digest is already out there."
 )
 
@@ -342,7 +335,7 @@ class NullPublisher:
 _MISSING_MENTION_PERMISSION_ALERT = (
     "newsbot: a SHiFT code alert wanted to ping @everyone, but this bot's "
     "role is missing 'Mention @everyone, @here, and All Roles' in the "
-    "SHiFT codes channel -- Discord posts the message but silently drops "
+    "SHiFT codes channel: Discord posts the message but silently drops "
     "the ping. Posted anyway; grant the permission (docs/deploy.md) if you "
     "want the next one to actually notify anyone."
 )
@@ -578,8 +571,9 @@ class NewsBot(discord.Client):
         from newsbot.bot.commands import make_admin_group, make_news_group, make_shift_group
 
         logger.info("newsbot starting", extra={"instance_id": _INSTANCE_ID, "hostname": _HOSTNAME})
+        warn_if_contact_unset()
 
-        self.http_client = httpx.AsyncClient(headers={"User-Agent": _USER_AGENT})
+        self.http_client = httpx.AsyncClient(headers=user_agent_headers())
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())
 
         self.tree.add_command(make_news_group(self.cfg, self.db_path))

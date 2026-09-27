@@ -145,6 +145,24 @@ def test_prompt_games_list_with_four_topics_still_has_no_oxford_comma():
     assert "Diablo IV, and Some Fifth Game" not in system  # no Oxford comma
 
 
+def test_prompt_subject_defaults_to_video_games_byte_identical():
+    # Self-host plan task 2: digest.subject defaults to "video games" so a
+    # config that never sets it keeps this exact sentence, unchanged from
+    # before subject existed at all.
+    palworld = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
+    bl4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
+    system, _user = build_prompt(DIABLO4, [_topic_item()], [], all_topics=[bl4, palworld, DIABLO4])
+    assert (
+        "posts a daily digest about the video games Borderlands 4, Palworld and Diablo IV."
+        in system
+    )
+
+
+def test_prompt_subject_is_configurable():
+    system, _user = build_prompt(DIABLO4, [_topic_item()], [], subject="tabletop RPGs")
+    assert "about the tabletop RPGs Diablo IV." in system
+
+
 def test_prompt_games_list_defaults_to_the_single_topic_when_not_given():
     # A caller that doesn't pass all_topics (some of this file's own
     # tests, e.g.) still gets a sane games list: just the one topic it

@@ -10,6 +10,7 @@ SQLite itself. This is the same offline path `python -m newsbot.pipeline.run
 
 from __future__ import annotations
 
+import logging
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 from newsbot.bot.format import to_text
 from newsbot.config import load_config
 from newsbot.pipeline.publisher import PrintPublisher, PublishError
-from newsbot.pipeline.run import Deps, RunMode, build_fixture_collectors, run_daily
+from newsbot.pipeline.run import Deps, RunMode, build_fixture_collectors, main, run_daily
 from newsbot.pipeline.summarize import LLMError
 from newsbot.store.db import connect, migrate
 
@@ -246,6 +247,64 @@ async def test_fixture_collector_full_text_defaults_to_none():
         items = await borderlands.collect(http)
     thread_item = next(i for i in items if i.url == "https://example.com/bl4/community-thread")
     assert thread_item.full_text is None
+
+
+# --- the documented `--dry-run` command (docs/self-host.md, README.md) ---
+
+
+def test_documented_dry_run_command_produces_both_expected_stories(tmp_path, capsys):
+    # Exactly the command both docs tell a reader to run, byte for byte,
+    # short of a throwaway --db path: --now pins the clock to the fixture
+    # data's own frozen date (2026-09-23), which is what keeps this
+    # deterministic regardless of what day it actually is when this test
+    # (or the docs' own command) runs.
+    db_path = str(tmp_path / "nb.db")
+    code = main(
+        [
+            "--dry-run",
+            "--config",
+            str(Path(__file__).parent.parent / "config.example.yaml"),
+            "--db",
+            db_path,
+            "--fixtures",
+            str(FIXTURES_DIR),
+            "--stub-llm",
+            str(FIXTURES_DIR / "llm.json"),
+            "--now",
+            "2026-09-23T09:00:00+00:00",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Patch 1.2 fixes crashes and rebalances loot" in out
+    assert "Palworld 0.6.2 fixes crash bugs" in out
+
+
+def test_documented_dry_run_command_suppresses_brave_key_warning(tmp_path, capsys, caplog):
+    # config.example.yaml has a web_search source, and this environment
+    # (like a stranger's clean clone) has no BRAVE_API_KEY. --fixtures
+    # throws that source away along with every other real collector, so
+    # the "disabling it" warning load_config would otherwise log has
+    # nothing true left to say in this mode.
+    db_path = str(tmp_path / "nb.db")
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        code = main(
+            [
+                "--dry-run",
+                "--config",
+                str(Path(__file__).parent.parent / "config.example.yaml"),
+                "--db",
+                db_path,
+                "--fixtures",
+                str(FIXTURES_DIR),
+                "--stub-llm",
+                str(FIXTURES_DIR / "llm.json"),
+                "--now",
+                "2026-09-23T09:00:00+00:00",
+            ]
+        )
+    assert code == 0
+    assert "BRAVE_API_KEY is not set" not in caplog.text
 
 
 async def test_save_run_stores_no_full_text_column(db_path, http_client):
