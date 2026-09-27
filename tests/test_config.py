@@ -54,7 +54,7 @@ def test_configured_source_names_includes_every_source_type(monkeypatch):
 
 def test_configured_source_names_matches_what_collectors_actually_record(monkeypatch):
     # The whole point of this helper is that it can't drift from what
-    # build_collectors wires up -- every Collector sets `self.name =
+    # build_collectors wires up: every Collector sets `self.name =
     # source.name`, so these two sets have to be exactly equal.
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
@@ -180,7 +180,7 @@ digest:
 def test_admin_permission_value_is_rejected(tmp_path):
     # "value", "all", "none", etc. are real attributes on
     # discord.Permissions (a property and two classmethods), but none of
-    # them name an actual permission flag -- hasattr() alone can't tell
+    # them name an actual permission flag: hasattr() alone can't tell
     # the difference, which used to let "value" (and friends) sail
     # through as a configured admin_permission that then has no bit to
     # check against a real user's permissions.
@@ -198,7 +198,7 @@ digest:
 
 def test_admin_permission_all_classmethod_is_rejected(tmp_path):
     # "all" and "none" are classmethods on discord.Permissions, same
-    # shape of false-positive as "value" -- hasattr() would have called
+    # shape of false-positive as "value": hasattr() would have called
     # either "a real flag" too.
     text = f"""
 guild_id: 1
@@ -228,7 +228,7 @@ digest:
 def test_every_real_permission_flag_name_is_accepted(tmp_path):
     # The flip side of the "value"/"all"/"none" false-positive cases:
     # every name VALID_FLAGS actually considers a real permission bit
-    # must still load cleanly -- the fix shouldn't have narrowed the
+    # must still load cleanly: the fix shouldn't have narrowed the
     # accepted set to less than what it's supposed to be.
     import discord
 
@@ -344,7 +344,7 @@ def test_example_config_loads(monkeypatch):
 def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):
     # The entire `alerts:` block in config.example.yaml is commented out
     # (plan step 11: shown, not enabled, since it names a real
-    # @everyone-capable feature) -- loading the example file as-is should
+    # @everyone-capable feature): loading the example file as-is should
     # produce exactly AlertsCfg()'s untouched defaults, not whatever the
     # commented-out values happen to say.
     from newsbot.config import AlertsCfg
@@ -359,7 +359,7 @@ def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(m
     # The example file's comment block (interval_minutes: 60,
     # max_item_age_hours: 48, max_pings_per_day: 3, allow_test_command:
     # false) is meant to describe AlertsCfg's real defaults for an owner
-    # who's about to uncomment it -- if config.py's defaults ever drift
+    # who's about to uncomment it: if config.py's defaults ever drift
     # from that comment, this catches the documentation going stale
     # rather than an owner finding out by uncommenting a wrong number.
     from newsbot.config import AlertsCfg
@@ -542,7 +542,7 @@ alerts:
 
 def test_alerts_ping_trust_empty_list_is_accepted():
     # An owner who wants no ping ever, from any source, can set this to
-    # [] directly -- plan_alerts never finds a "trusted" candidate, so
+    # [] directly: plan_alerts never finds a "trusted" candidate, so
     # every batch posts without pinging, same as ping_trust never
     # matching anything. Not the same as max_pings_per_day: 0 (that still
     # spends nothing either way; this at least documents the intent).
