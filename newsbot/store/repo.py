@@ -81,7 +81,7 @@ def _utc_iso(moment: datetime) -> str:
     are UTC; hand it a Pacific-time boundary and "an hour later" can sort
     earlier. test-engineer proved it with a naive-datetime boundary in
     mind, so every time boundary goes through here first. (`/shift
-    codes`'s own window is already a rolling UTC one -- `now - days`, no
+    codes`'s own window is already a rolling UTC one: `now - days`, no
     timezone involved; it's only the *displayed* first-seen date that
     gets converted to the digest's timezone, in `format.py`, well after
     this function's job is done.) A naive datetime is taken to already be
@@ -287,7 +287,7 @@ def mark_digest_failed(
     (or an empty one, if this attempt didn't post anything before
     failing), and an unattended restart's catch-up check would then have
     no way to know those earlier messages exist and repost them. Order is
-    preserved -- whatever was already there, then any new id this attempt
+    preserved: whatever was already there, then any new id this attempt
     got that wasn't already in the list.
     """
     now_iso = _resolve_now(now)
@@ -365,7 +365,7 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
 # key/value scratchpad for the handful of cross-sweep facts that don't
 # deserve their own columns (the seeded marker, the last sweep's summary,
 # today's ping count). Retention (`purge_older_than` above) never touches
-# either table -- there's no lookback window on "have we ever alerted this
+# either table: there's no lookback window on "have we ever alerted this
 # code before".
 
 
@@ -380,7 +380,7 @@ def _set_alert_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_alert_state(conn: sqlite3.Connection) -> AlertState:
     """Read `alert_state` into one dataclass. Missing keys read as `None`/`0`.
 
-    `seeded` collapses the `seeded_at` timestamp into a bool -- nothing
+    `seeded` collapses the `seeded_at` timestamp into a bool: nothing
     downstream cares *when* the marker was set, only whether it's there
     (see A1 in the plan: losing the marker silently re-seeds, which is
     the safe direction to fail in).
@@ -428,13 +428,13 @@ def record_silent_codes(
     (QA item 7, owner decision 2026-09-25: a code whose every sighting
     came from an item naming more than `max_codes_per_item` distinct
     codes). `from_roundup` (migration 003) is `CodeCandidate.roundup`
-    passed straight through -- true exactly when `status == 'roundup'`
+    passed straight through: true exactly when `status == 'roundup'`
     today, but kept as its own column (not derived from `status`) because
     v2.0 (design.md §13) starts posting some roundup codes instead of
     silently recording them, at which point `status` alone can't carry
     the marker anymore. `ON CONFLICT DO NOTHING` because a code landing
     here twice across two sweeps should just stay however it was first
-    recorded. `mark_seeded=True` sets the `seeded_at` marker -- but only
+    recorded. `mark_seeded=True` sets the `seeded_at` marker, but only
     if it isn't already set, since the marker means "the first sweep
     after enabling has run", not "the most recent healthy sweep ran".
     """
@@ -468,22 +468,22 @@ def claim_codes(
     """Claim `codes` as `pending` and spend today's ping budget, in one transaction.
 
     `from_roundup` (migration 003) is stamped onto every row in this
-    claim -- one call always claims one kind of batch, never a mix, so
+    claim: one call always claims one kind of batch, never a mix, so
     a single bool per call (not per code) is enough. Defaults to False:
     every caller before v2.0 (design.md §13) claims a normal, non-roundup
     batch, and step 5's roundup posting is the first to pass True.
 
     `codes` is `(code, source_name, item_url)`. This is a plain `INSERT`,
-    not `ON CONFLICT DO NOTHING` -- record-then-post (plan §1) depends on
+    not `ON CONFLICT DO NOTHING`: record-then-post (plan §1) depends on
     a code that's somehow already claimed aborting the *whole* claim,
     ping spend included, rather than silently claiming its siblings and
     leaving the budget half-spent for a code that never got recorded.
     `local_day` resets `ping_count` to 0 first if it doesn't match the
     stored `ping_day` (a new day in `cfg.digest.timezone`, not UTC
-    midnight -- see A8), then spends one more if `pinged`.
+    midnight, see A8), then spends one more if `pinged`.
 
     Runs inside an explicit `BEGIN IMMEDIATE`, not sqlite3's default
-    deferred transaction -- it grabs SQLite's write lock before reading
+    deferred transaction: it grabs SQLite's write lock before reading
     `alert_state`, so a second caller doing the same thing at the same
     moment (a sweep and a `/newsbot test-alert` both landing in the same
     second, step 7) blocks on `busy_timeout` and sees this call's
@@ -494,14 +494,14 @@ def claim_codes(
     count: if `pinged` was asked for but the cap was already reached by
     the time this claim actually got the write lock, the claim still
     goes through, just without a ping (`actual_pinged` in the code below,
-    also this function's return value) -- a caller uses that to decide
+    also this function's return value): a caller uses that to decide
     whether to still render the message as pinging. `max_pings=None` (the
     default) skips the re-check and spends exactly what `pinged` asked
     for, unchanged from how this function worked before the cap re-check
     existed; every caller from before that keeps its exact prior
     behavior.
 
-    An empty `codes` is a no-op -- nothing to claim means nothing to spend
+    An empty `codes` is a no-op: nothing to claim means nothing to spend
     a ping on either, and a caller that got this far with `pinged=True`
     but no codes (shouldn't happen, but "shouldn't" isn't "can't") would
     otherwise burn a slot of today's budget for an alert that never posts.
@@ -512,7 +512,7 @@ def claim_codes(
     # sqlite3's own "begin a transaction on first DML" behavior only ever
     # issues a deferred BEGIN; to get an immediate write lock instead, the
     # module's automatic handling has to be turned off (isolation_level =
-    # None -- autocommit) so this can issue "BEGIN IMMEDIATE" itself.
+    # None, autocommit) so this can issue "BEGIN IMMEDIATE" itself.
     old_isolation = conn.isolation_level
     conn.isolation_level = None
     try:
@@ -547,7 +547,7 @@ def mark_codes_posted(
 ) -> None:
     """Flip `codes` (already `pending`) to `posted`, all sharing one `message_id`.
 
-    One call per Discord message -- a batch that split across several
+    One call per Discord message: a batch that split across several
     messages (`format.py`'s overflow handling) calls this once per
     message with that message's own id and its own slice of codes.
     """
@@ -608,10 +608,10 @@ def alert_status(
     """Everything `/newsbot status`'s SHiFT alerts field shows, in one place.
 
     `today` is the caller's `local_run_date` string (`cfg.digest.timezone`,
-    A8) -- `pings_today` only counts `ping_count` when it was spent on
+    A8): `pings_today` only counts `ping_count` when it was spent on
     that same local day; a stale `ping_day` from yesterday reads as 0
     without needing its own reset write. `test_command_enabled` is just
-    `cfg.alerts.allow_test_command` passed through -- it's config, not
+    `cfg.alerts.allow_test_command` passed through: it's config, not
     anything stored, but it lives on this dataclass because it's the one
     place `render_status` already reads the rest of this from.
     """
@@ -638,7 +638,7 @@ def query_codes(
     """Known SHiFT codes for `/shift codes`, newest first.
 
     Excludes `'pending'` (still being claimed/posted, not confirmed yet)
-    and `'failed'` (claimed but never actually landed in Discord) -- a
+    and `'failed'` (claimed but never actually landed in Discord): a
     member paging through known codes shouldn't see either half-state.
     Everything else (`'seeded'`, `'too_old'`, `'roundup'`, `'posted'`)
     is fair game; `format.render_code_page` is what turns `from_roundup`
