@@ -63,7 +63,7 @@ def test_resolve_query_args_days_upper_bound_thirty():
 
 
 def test_resolve_query_args_out_of_range_days_pass_through_unclamped():
-    # resolve_query_args does no bounds checking of its own -- 1-30 is
+    # resolve_query_args does no bounds checking of its own: 1-30 is
     # enforced by app_commands.Range on the `days` option before the
     # handler ever calls this function (see the command-registration
     # tests), so this documents that this function trusts its caller
@@ -98,7 +98,7 @@ def test_page_count_single_page():
 
 
 def test_page_count_respects_a_different_page_size():
-    # /shift codes uses 8, not /news' 6 -- _page_count takes page_size as
+    # /shift codes uses 8, not /news' 6: _page_count takes page_size as
     # its own argument now (design.md §13) precisely so both can share it.
     assert _page_count(17, 8) == 3
 
@@ -106,7 +106,7 @@ def test_page_count_respects_a_different_page_size():
 # --- PagerView button state ---
 #
 # Constructing a PagerView and reading its buttons' `.disabled` doesn't
-# need a live interaction or an event loop -- `_sync_buttons` runs
+# need a live interaction or an event loop: `_sync_buttons` runs
 # synchronously in `__init__`, so this checks the paging math actually
 # wired up to the UI without any gateway involved.
 
@@ -193,7 +193,7 @@ def test_invalid_test_alert_code_message_rejects_wrong_group_count():
 
 def test_invalid_test_alert_code_message_rejects_fullwidth_lookalikes():
     # Fullwidth Latin/digits (U+FF21 "Ａ" etc.) look right to a human eye
-    # but aren't in CODE_RE's ASCII-only character class -- exactly the
+    # but aren't in CODE_RE's ASCII-only character class: exactly the
     # kind of thing a copy-paste from a phone keyboard could produce.
     fullwidth = "ＡＡＡＡＡ-BBBBB-CCCCC-DDDDD-EEEEE"
     assert invalid_test_alert_code_message(fullwidth) is not None

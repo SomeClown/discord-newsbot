@@ -74,8 +74,8 @@ def test_row_one_microsecond_before_since_is_excluded(conn):
 
 
 def test_naive_since_at_the_epoch_of_all_stored_rows_does_not_raise(conn):
-    # query_codes doesn't require a tz-aware `since` at the Python level --
-    # it just calls .isoformat() and compares strings -- so a naive
+    # query_codes doesn't require a tz-aware `since` at the Python level
+    # (it just calls .isoformat() and compares strings), so a naive
     # datetime that predates everything stored still "works" by accident.
     _insert(conn, "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", first_seen_at="2026-09-10T00:00:00+00:00")
 
@@ -103,8 +103,8 @@ def test_since_as_a_non_datetime_raises_instead_of_silently_matching_everything(
     # query_codes has no runtime type check of its own; it just calls
     # `.isoformat()` on whatever it's given. A plain string blows up with
     # AttributeError rather than getting concatenated into SQL (the query
-    # is fully parameterized -- `since` is always a bound value, never
-    # spliced into the SQL text -- so there's no injection angle here, only
+    # is fully parameterized: `since` is always a bound value, never
+    # spliced into the SQL text, so there's no injection angle here, only
     # a duck-typed contract that fails loudly instead of quietly).
     malicious_since = "2026-09-01T00:00:00+00:00; DROP TABLE alerted_codes;--"
     with pytest.raises(AttributeError):

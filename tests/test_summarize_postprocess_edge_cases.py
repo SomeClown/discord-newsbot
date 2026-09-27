@@ -117,7 +117,7 @@ def test_empty_item_urls_to_start_with_drops_the_story():
 
 def test_duplicate_url_within_one_story_is_deduped_not_repeated():
     items = [_topic_item(url="https://real.example.com/a")]
-    # Same URL twice, once with tracking params -- both canonicalize to the
+    # Same URL twice, once with tracking params: both canonicalize to the
     # same string, and a story shouldn't cite its own source twice.
     story = _story(
         item_urls=["https://real.example.com/a", "https://real.example.com/a?utm_source=x"]
@@ -131,7 +131,7 @@ def test_duplicate_url_within_one_story_is_deduped_not_repeated():
 
 def test_official_label_downgraded_when_its_only_official_url_was_hallucinated():
     # The item backing the "official" claim doesn't exist in our collected
-    # set at all -- postprocess has to re-derive trust from what's left,
+    # set at all: postprocess has to re-derive trust from what's left,
     # not from what the model claimed before filtering.
     items = [_topic_item(url="https://real.example.com/a", trust="community")]
     story = _story(
@@ -233,7 +233,7 @@ def test_duplicate_stories_with_identical_headline_and_urls_both_survive():
 # --- length truncation (QA step 20, group 6b) ---
 #
 # StoryOut used to enforce headline/summary length with pydantic's
-# max_length -- but the SDK's structured-output mode strips schema-level
+# max_length, but the SDK's structured-output mode strips schema-level
 # length constraints before sending the schema to the model, so a model
 # response that actually ran long would fail pydantic validation with no
 # way to ever succeed (a whole StoriesOut response rejected over one
