@@ -27,7 +27,7 @@ Two documents cover this:
   prerequisites, creating your own Discord application, keys and costs,
   `config.yaml` and `.env`, choosing an image, and the first run.
 
-`docs/deploy.md` is a different document: it's the maintainer's own
+[`docs/deploy.md`](docs/deploy.md) is a different document: it's the maintainer's own
 Droplet-specific runbook (see [Maintainer notes](#maintainer-notes) below),
 useful as a worked example but not written for a general audience the way
 the two documents above are.
@@ -298,7 +298,7 @@ is mounted read-only into the container. Secrets live in `.env`, which is
 also git-ignored.
 
 Highlights of the schema — see `config.example.yaml` for a complete, real
-example, and `docs/design.md` section 3 for the full spec:
+example, and [`docs/design.md` section 3](docs/design.md#3-configuration) for the full spec:
 
 - **`topics`**: each has a `key`, display `name`, its own `channel_id` (as
   of v2.0 — every game posts to its own channel, no shared fallback),
@@ -371,7 +371,7 @@ Rough running cost against `config.example.yaml`'s source list:
   Brave indexes won't alert until the *daily* digest run's own check, if
   at all. A code split across an en dash or similar look-alike dash
   instead of a plain hyphen won't match the pattern (deliberately — see
-  `docs/design.md` §12's clarifications on the regex). A code with no
+  [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25)'s clarifications on the regex). A code with no
   digits anywhere in its 25 characters won't be detected either — real
   SHiFT codes are virtually always a mix of letters and digits, and
   requiring at least one is what keeps an all-letter URL slug
@@ -379,7 +379,7 @@ Rough running cost against `config.example.yaml`'s source list:
   (`AAAAA-BBBBB-CCCCC-DDDDD-EEEEE`) from matching as if it were a real
   code. Likewise, a code sitting directly against a `/` (a bare URL path
   segment, as opposed to a `?code=...` query value) won't match — see
-  `docs/design.md` §12's clarifications for both rules.
+  [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25)'s clarifications for both rules.
 
 ## Safety notes
 
@@ -399,7 +399,7 @@ Rough running cost against `config.example.yaml`'s source list:
   itself (not scraped text) has decided to ping. That's a fixed module
   constant used in exactly one place, pinned by a test that scans
   `newsbot/`'s source for any other `AllowedMentions(everyone=True, ...)`
-  call — see `docs/design.md` §12 and `newsbot/bot/client.py`.
+  call — see [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25) and `newsbot/bot/client.py`.
 
 ## Maintainer notes
 

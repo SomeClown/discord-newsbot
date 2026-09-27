@@ -5,7 +5,7 @@ finding a good one is mostly detective work: hunting down the right RSS URL,
 figuring out which subreddit sort actually surfaces good posts, and noticing
 when a keyword you thought was clever turns out to match a chess opening.
 This is the recipe book from doing that for Borderlands 4, Palworld, and
-Diablo IV (`docs/sources-research.md` has the full write-up, warts and all);
+Diablo IV ([`docs/sources-research.md`](sources-research.md) has the full write-up, warts and all);
 the lessons generalize to whatever game you're pointing this at.
 
 ## Steam: `steam_news`
