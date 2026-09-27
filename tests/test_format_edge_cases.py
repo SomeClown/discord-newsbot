@@ -68,7 +68,7 @@ def test_esc_neutralizes_role_mention():
 
 def test_esc_neutralizes_masked_link_spoofing():
     # A masked link is how a scraped title could render as clickable text
-    # pointing somewhere other than what it says -- the classic phishing
+    # pointing somewhere other than what it says: the classic phishing
     # trick, just wearing a headline's clothes.
     spoofed = "[Free V-Bucks, click here](https://totally-legit.example.com)"
     result = esc(spoofed)
@@ -128,7 +128,7 @@ def test_coverage_footer_is_truncated_well_under_the_embed_footer_limit():
 
 def test_coverage_footer_defuses_mentions_but_does_not_markdown_escape():
     # Embed footers never render markdown, so escaping it would just leave
-    # literal backslashes sitting in the text (QA follow-up) -- mentions
+    # literal backslashes sitting in the text (QA follow-up); mentions
     # still get defused (the one thing a footer *can* do something with),
     # but "**gotcha**" stays as plain, unescaped, still-inert text.
     rendered = render_digest(
@@ -177,7 +177,7 @@ def test_a_very_long_single_url_does_not_blow_the_description_limit():
 
 def test_multi_codepoint_emoji_headline_does_not_crash_and_respects_the_limit():
     # Family emoji is a ZWJ sequence of several codepoints per glyph, each
-    # one an astral character -- two UTF-16 units apiece, per discord_len().
+    # one an astral character: two UTF-16 units apiece, per discord_len().
     # QA step 20 group 5: the limit here is enforced in UTF-16 units, not
     # Python's codepoint-counting len(), so this asserts against
     # discord_len() (the real Discord-facing measure), not just len().
@@ -201,7 +201,7 @@ def test_discord_len_counts_astral_emoji_as_two_units():
 
 
 def test_description_truncation_never_splits_a_surrogate_pair_near_the_boundary():
-    # 2100 astral emoji is 4200 UTF-16 units -- comfortably past the 4096
+    # 2100 astral emoji is 4200 UTF-16 units: comfortably past the 4096
     # description limit, and landing mid-emoji if truncation were done in
     # raw UTF-16 units instead of by codepoint.
     stories = [_draft(headline="H", summary="🤖" * 2100)]
@@ -220,7 +220,7 @@ def test_description_truncation_never_splits_a_surrogate_pair_near_the_boundary(
 
 def test_topic_title_truncation_respects_utf16_units_not_codepoints():
     # 200 astral emoji is 400 UTF-16 units, well past the 256-unit title
-    # limit, but only 200 Python characters -- a codepoint-counting
+    # limit, but only 200 Python characters: a codepoint-counting
     # len()-based [:256] slice would let all 200 through untouched.
     long_name = "🤖" * 200
     topic = Topic(key="diablo4", name=long_name, channel_id=1, aliases=[], entities=[])

@@ -64,7 +64,7 @@ def test_esc_escapes_markdown_and_everyone_mention():
 
 def test_esc_defuses_a_url_scheme_that_slipped_through_layer_one():
     # postprocess() in summarize.py is layer one and should have already
-    # stripped this -- esc() is the belt-and-suspenders second layer for
+    # stripped this: esc() is the belt-and-suspenders second layer for
     # any text that reaches format.py by some other path (or a defusal
     # regex that layer one didn't quite cover). A defused scheme should
     # not survive as a live "scheme://" token.
@@ -88,7 +88,7 @@ def test_esc_defuses_an_uppercase_scheme():
 
 def test_esc_defuses_a_scheme_inside_a_markdown_masked_link():
     # "[legit-looking text](https://evil.example)" is the classic masked-
-    # link phishing shape -- the scheme inside the parens is what needs
+    # link phishing shape: the scheme inside the parens is what needs
     # defusing, same as bare prose.
     result = esc("[Official patch notes](https://evil.example/x)")
     assert "https://" not in result
@@ -200,7 +200,7 @@ def test_all_empty_topics_gives_no_messages_at_all():
 
 
 def test_message_order_follows_the_topics_argument_not_alphabetical_or_key_order():
-    # design.md §13: "Topics post in config order" -- render_digest must
+    # design.md §13: "Topics post in config order"; render_digest must
     # never impose an order of its own. Handed topics reversed from
     # TOPICS's usual borderlands4/palworld/diablo4 order (which also isn't
     # alphabetical, so a stray sort() on name or key would show up here).
@@ -433,7 +433,7 @@ def test_render_status_notes_never_run_source_without_counting_it_healthy():
     embed = render_status(snap, spend_usd=0.0)
     value = _healthy_field(embed).value
     assert value == "1 of 2 (1 not run yet)"
-    # A never-run source isn't a failure either -- it shouldn't show up in
+    # A never-run source isn't a failure either: it shouldn't show up in
     # the "recent failures" list.
     assert "Palworld Steam" not in (embed.description or "")
 
@@ -482,7 +482,7 @@ def _alerts_field(embed):
 
 def test_render_status_omits_alerts_field_when_not_given():
     # Every existing caller (and every test above this one) doesn't pass
-    # `alerts` at all -- the field must not appear, not appear as "disabled".
+    # `alerts` at all: the field must not appear, not appear as "disabled".
     embed = render_status(_EMPTY_SNAP, spend_usd=0.0)
     assert not any(f.name == "SHiFT alerts" for f in embed.fields)
 
