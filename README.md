@@ -1,16 +1,37 @@
 # discord-newsbot
 
-A Discord bot for a ~50-person community server built around **Borderlands 4**,
-**Palworld**, and **Diablo IV**. Once a day it reads the internet — official
-blogs, Steam announcements, subreddits, YouTube channels, Bluesky, and a
-general web search — so the server doesn't have to, and posts an
-AI-summarized digest. Members can also ask it for recent news or search past
-stories on demand.
+A Discord bot, built for one particular ~50-person community server's three
+games: **Borderlands 4**, **Palworld**, and **Diablo IV**. Once a day it
+reads the internet — official blogs, Steam announcements, subreddits,
+YouTube channels, Bluesky, and a general web search — so the server doesn't
+have to, and posts an AI-summarized digest. Members can also ask it for
+recent news or search past stories on demand.
 
-It is not a general-purpose news bot. The topics and sources are entirely
-config-driven (see [Configuration](#configuration) below), so pointing it at
-a different set of games is a config edit, not a code change, but out of the
-box it only knows about the three games above.
+It is not a general-purpose news bot, and it isn't one bot serving many
+Discord servers at once: each server that runs this bot runs its own copy,
+with its own token, config, and database. But the topics and sources are
+entirely config-driven (see [Configuration](#configuration) below), so
+pointing your own copy at a different game, or three different games
+entirely, is a config edit, not a code change. **[Run your own
+copy](#run-your-own-copy)** below is where to start if that's what brought
+you here.
+
+## Run your own copy
+
+Two documents cover this:
+
+- **[`docs/finding-sources.md`](docs/finding-sources.md)** — recipes for
+  finding Steam, YouTube, Bluesky, subreddit, and press sources for your own
+  game, plus the aliasing lessons (some words match more than you'd think)
+  that came out of doing this for the three games above.
+- **[`docs/self-host.md`](docs/self-host.md)** — the actual setup guide:
+  prerequisites, creating your own Discord application, keys and costs,
+  `config.yaml` and `.env`, choosing an image, and the first run.
+
+`docs/deploy.md` is a different document: it's the maintainer's own
+Droplet-specific runbook (see [Maintainer notes](#maintainer-notes) below),
+useful as a worked example but not written for a general audience the way
+the two documents above are.
 
 ## What a digest looks like
 
@@ -87,6 +108,15 @@ Controlled by `digest.report_to_admin` (default `true`), and only takes
 effect when `admin_channel_id` is set.
 
 ## SHiFT code alerts
+
+This is specifically for Borderlands-family games: it recognizes only
+Gearbox's own SHiFT/Golden Key redeem code format
+(`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) and nothing else, so it has nothing to do
+if your own game doesn't use that reward system. It's opt-in for a reason
+covered below (an `@everyone` ping is the one thing this bot does that's
+hard to take back); `max_pings_per_day: 0` gets you codes recorded and
+listable via `/shift codes` with no ping at all, a reasonable way to start
+quiet.
 
 A separate, near-real-time path alongside the daily digest (`alerts:` in
 `config.yaml`, off by default): an hourly sweep runs every collector except
@@ -176,7 +206,7 @@ newsbot/
     run.py          orchestrates one daily run; also the headless CLI entry point
     publisher.py    Publisher protocol (stdout for the CLI, Discord for the bot)
     lock.py         the one run lock, shared by the daily job and the code sweep
-  shift/            SHiFT code alerts (design.md §12) -- separate from the digest
+  shift/            SHiFT code alerts (design.md §12); separate from the digest
     match.py        pure code/Golden Key text matcher, no ReDoS surface
     decide.py       pure planner: what's new, fresh, worth a ping, worth seeding
     sweep.py        the I/O side: sweep collectors, claim/post/record, run lock
@@ -200,7 +230,7 @@ Requires **Python 3.14** and plain `venv` + `pip` — no `uv`, no Poetry.
 from; regenerate it with `scripts/lock.sh` after changing the dependency
 list in `pyproject.toml`, never by hand. Dependabot (`.github/dependabot.yml`)
 proposes weekly PRs bumping individual pins in `requirements.txt` directly,
-which is fine -- it's the same kind of edit `lock.sh` makes, just one
+which is fine; it's the same kind of edit `lock.sh` makes, just one
 dependency at a time; run `scripts/lock.sh` yourself afterward if you want
 to also pick up transitive-dependency updates Dependabot doesn't touch.
 
@@ -255,41 +285,6 @@ plain text to the terminal.
 Any change to the summarization prompt needs an owner-reviewed
 `/newsbot preview` before it merges — that's the whole point of the preview
 command existing.
-
-### Releasing
-
-The standard path from a change to a running production bot:
-
-1. **Feature branch, PR.** CI (`.github/workflows/ci.yml`) runs the gate
-   (lint, format check, tests) on every push and PR.
-2. **Merge to `main`.** CI publishes `ghcr.io/someclown/discord-newsbot:latest`
-   and a `sha-<short>` tag for that specific build.
-3. **Try the published image against the test guild**, with the dev bot,
-   before trusting it anywhere near prod:
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
-   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
-   ```
-   `docker-compose.staging.yml` is the same dev token/config/database as
-   `docker-compose.dev.yml` (`.env.dev`, `config.dev.yaml`, `data/dev.db`)
-   but pulls the GHCR image instead of building locally — the point is to
-   exercise the exact artifact that would get deployed, not a fresh local
-   build of the same source. Stop `docker-compose.dev.yml` (or a local
-   `python -m newsbot` against `.env.dev`) first; it's still the dev
-   token, so it's still one-instance-per-token (see `CLAUDE.md`), just
-   like running the dev bot any other way. It's unrelated to prod's
-   token, so prod can keep running the whole time regardless.
-4. **Tag a release** once the staging check looks good:
-   ```bash
-   git tag v1.1.0
-   git push origin v1.1.0
-   ```
-   CI additionally publishes semver tags (`1.1.0`, `1.1`) for a tagged
-   push.
-5. **Deploy** with `./scripts/deploy.sh` on the Droplet — see
-   [`docs/deploy.md`](docs/deploy.md). Pin `TAG=1.1.0` in the Droplet's
-   `.env` for a deliberate upgrade; rolling back is changing `TAG` back
-   to the previous value.
 
 ## Configuration
 
@@ -400,10 +395,54 @@ Rough running cost against `config.example.yaml`'s source list:
   `newsbot/`'s source for any other `AllowedMentions(everyone=True, ...)`
   call — see `docs/design.md` §12 and `newsbot/bot/client.py`.
 
-## Deployment
+## Maintainer notes
+
+This section is about running *this* deployment — the maintainer's own
+Droplet, for the maintainer's own server — not a general "how to self-host"
+guide. If you're setting up your own copy, [Run your own
+copy](#run-your-own-copy) above is the right starting point instead.
+
+### Releasing
+
+The standard path from a change to a running production bot:
+
+1. **Feature branch, PR.** CI (`.github/workflows/ci.yml`) runs the gate
+   (lint, format check, tests) on every push and PR.
+2. **Merge to `main`.** CI publishes `ghcr.io/someclown/discord-newsbot:latest`
+   and a `sha-<short>` tag for that specific build.
+3. **Try the published image against the test guild**, with the dev bot,
+   before trusting it anywhere near prod:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+   ```
+   `docker-compose.staging.yml` is the same dev token/config/database as
+   `docker-compose.dev.yml` (`.env.dev`, `config.dev.yaml`, `data/dev.db`)
+   but pulls the GHCR image instead of building locally — the point is to
+   exercise the exact artifact that would get deployed, not a fresh local
+   build of the same source. Stop `docker-compose.dev.yml` (or a local
+   `python -m newsbot` against `.env.dev`) first; it's still the dev
+   token, so it's still one-instance-per-token (see `CLAUDE.md`), just
+   like running the dev bot any other way. It's unrelated to prod's
+   token, so prod can keep running the whole time regardless.
+4. **Tag a release** once the staging check looks good:
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+   CI additionally publishes semver tags (`1.1.0`, `1.1`) for a tagged
+   push.
+5. **Deploy** with `./scripts/deploy.sh` on the Droplet — see
+   [`docs/deploy.md`](docs/deploy.md). Pin `TAG=1.1.0` in the Droplet's
+   `.env` for a deliberate upgrade; rolling back is changing `TAG` back
+   to the previous value.
+
+### The Droplet
 
 See [`docs/deploy.md`](docs/deploy.md) for the Droplet runbook (install,
-secrets, rollback, backups, log viewing).
+secrets, rollback, backups, log viewing). It's written for that specific
+server, but doubles as a worked example of most of what
+[`docs/self-host.md`](docs/self-host.md) describes in general terms.
 
 ## License
 
