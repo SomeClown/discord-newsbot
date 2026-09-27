@@ -5,7 +5,7 @@ isn't) but because it's the one place where a third party gets to hand us
 free-form text and we ask a language model to turn that into something we
 post to fifty people without a human looking at it first. So almost
 everything here is defense: the prompt says the items are untrusted data,
-and then the code doesn't take the model's word for it either -- URLs get
+and then the code doesn't take the model's word for it either: URLs get
 re-canonicalized and checked against what we actually collected, the
 `official` label gets re-derived instead of trusted, and three failed
 attempts get a plain headline list instead of nothing at all. Trust, but
@@ -31,7 +31,7 @@ from newsbot.pipeline.prompts import build_prompt
 from newsbot.store.models import Label, PriorStory, Usage
 
 # Model id per the current SDK docs, not the dated snapshot in the original
-# plan -- Anthropic's convention is to alias the undated name to whatever
+# plan: Anthropic's convention is to alias the undated name to whatever
 # the current Haiku 4.5 build is, so this stays current without a code
 # change every time they cut a new snapshot.
 MODEL = "claude-haiku-4-5"
@@ -70,7 +70,7 @@ class StoryOut(BaseModel):
     # output mode strips length constraints out of the schema it actually
     # sends the model (only `min_length` and the rest of the shape
     # survive), so a model response that ran long would fail pydantic
-    # validation here with absolutely no way to ever pass -- the model
+    # validation here with absolutely no way to ever pass: the model
     # was never told the limit it just got rejected for. Length is
     # enforced downstream instead, by truncating in postprocess()'s
     # `_truncate` calls.
@@ -132,7 +132,7 @@ class AnthropicLLM:
     `max_retries=0` on the SDK client is deliberate: `summarize_topic`
     below already retries three times with its own backoff, and the SDK's
     default retry behavior stacking on top of that would quietly turn
-    3 attempts into 9 -- a fun way to find out Anthropic's rate limits the
+    3 attempts into 9, a fun way to find out Anthropic's rate limits the
     hard way.
     """
 
@@ -141,6 +141,20 @@ class AnthropicLLM:
         self._model = model
 
     async def emit_stories(self, system: str, user: str) -> LLMResult:
+        """Call Claude once and return validated stories, or raise on failure.
+
+        Raises `LLMFatalError` for a non-5xx API error (a 4xx that will
+        still be a 4xx a moment from now, so retrying it is just a slower
+        way to reach the fallback) and `LLMError` for everything else worth
+        retrying: rate limits, 5xx server errors, connection problems, and
+        a response pydantic couldn't validate. Also raises `LLMError` (not
+        an exception from the SDK) when the call itself succeeded but the
+        response is unusable: `stop_reason` of `max_tokens` or `refusal`
+        means the model didn't finish or declined, and `parsed_output` can
+        come back `None` even then. Every `LLMError` carries whatever
+        token usage the attempt burned, successful or not, so a caller
+        that retries doesn't undercount the bill.
+        """
         try:
             response = await self._client.messages.parse(
                 model=self._model,
@@ -151,7 +165,7 @@ class AnthropicLLM:
                 # `temperature` isn't a `messages.parse()` kwarg anymore (SDK
                 # 1.x dropped sampling params from the method signatures
                 # entirely, not just for the newer models that reject them
-                # outright) -- `extra_body` is the escape hatch for a model,
+                # outright): `extra_body` is the escape hatch for a model,
                 # like Haiku 4.5, that still honors it.
                 extra_body={"temperature": _TEMPERATURE},
             )
@@ -203,7 +217,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 # Anything shaped like `scheme://...` (http, https, steam, discord, or any
 # other scheme a model could invent) or a bare `www.`-prefixed token. This
-# runs on `headline`/`summary` only -- `item_urls` already goes through
+# runs on `headline`/`summary` only: `item_urls` already goes through
 # `canonicalize()` against what we actually collected, which is a much
 # stricter check than "does this look like a URL". Shift codes (the thing
 # this exists to *not* remove; see CLAUDE.md's content policy) don't match
@@ -233,7 +247,7 @@ def _strip_urls(text: str) -> str:
 
     A model writing a headline or summary has no business handing back
     something a Discord client (or `format.py`'s own `<url>` markup) would
-    turn into a clickable link -- that's how a phishing link riding along
+    turn into a clickable link: that's how a phishing link riding along
     with a legitimate Shift code becomes one click instead of a copy-paste.
     Dropping the token outright (rather than, say, de-schemeing it) is the
     simpler of two reasonable choices and the one that reads cleanest in a
@@ -263,7 +277,7 @@ def _match_update_of(update_of_headline: str | None, prior: list[PriorStory]) ->
     if not target:
         return None
     # `prior` comes from repo.recent_headlines, newest first, so the first
-    # normalized match is also the newest one -- which is the tie-break
+    # normalized match is also the newest one, which is the tie-break
     # the plan asks for, for free.
     for story in prior:
         if _normalize_headline(story.headline) == target:
@@ -336,7 +350,7 @@ async def summarize_topic(
     `LLMFatalError` skips straight to the fallback without burning the
     rest of the budget on a request that's going to fail the same way
     again. Token usage accumulates across every attempt, successful or
-    not -- a response we can't use still cost money.
+    not; a response we can't use still cost money.
 
     `all_topics` just passes through to `build_prompt` (see its
     docstring); `build_digest` is the one real caller and always has

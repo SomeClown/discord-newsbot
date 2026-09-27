@@ -44,7 +44,7 @@ _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 # not re-splitting the path into segments) and `%` (so re-encoding an
 # already-canonical path is a no-op instead of double-escaping it).
 # Deliberately *not* in this set: `<>[]"` \``, space, and anything
-# non-ASCII -- those are exactly the characters that let a story's URL
+# non-ASCII: those are exactly the characters that let a story's URL
 # break out of format.py's `<url>` autolink and grow a markdown
 # `[text](url)` link next to it that points somewhere else entirely.
 _PATH_SAFE = "/%:@!$&'()*+,;=-._~"
@@ -60,7 +60,7 @@ def canonicalize(url: str) -> str | None:
     one; the spec doesn't ask for it, and future me is welcome to it.
 
     Rejects anything with userinfo in the netloc (`user:pass@host`, or
-    just `user@host`) outright rather than passing it through -- there's
+    just `user@host`) outright rather than passing it through: there's
     no legitimate reason a news URL needs credentials in it, and it's a
     classic way to make a link's *displayed* host and its *actual* host
     disagree. Also rejects a host that doesn't survive IDNA encoding: a
@@ -70,7 +70,7 @@ def canonicalize(url: str) -> str | None:
     ship the URL anyway.
 
     The path gets percent-re-encoded (`urllib.parse.quote`, idempotent)
-    rather than passed through -- angle brackets, square brackets, quotes,
+    rather than passed through: angle brackets, square brackets, quotes,
     backticks, raw spaces, control characters and non-ASCII (including
     bidi overrides) in a path are all things a member's client would
     happily treat as the end of a URL, which is exactly how a poisoned
@@ -139,12 +139,12 @@ def canonicalize(url: str) -> str | None:
 
 
 def canonicalize_items(items: list[RawItem]) -> list[RawItem]:
-    """Canonicalize URLs and dedupe within the batch -- the two phases `normalize`
+    """Canonicalize URLs and dedupe within the batch: the two phases `normalize`
     and the SHiFT code sweep (design.md §12) both need.
 
     The sweep runs every hour, never writes `items`, and only cares about
     codes it hasn't alerted before (`alerted_codes` is its own dedupe
-    guard) -- it has no use for `normalize`'s store lookup or 24-hour
+    guard); it has no use for `normalize`'s store lookup or 24-hour
     lookback, both of which exist for the digest's own reasons. This is
     those two shared phases split out on their own: canonicalize every URL
     (dropping anything that isn't http(s)), then dedupe within the batch,
@@ -177,7 +177,7 @@ def normalize(
     within this batch); ask the store which of the survivors it already
     has and drop those; then drop anything published before
     `now - lookback`. An item with no `published_at` (SPEC-DEV 4: Brave
-    doesn't always give us one) is kept -- URL dedupe against the store
+    doesn't always give us one) is kept: URL dedupe against the store
     already stops it from showing up twice.
     """
     deduped_items = canonicalize_items(items)

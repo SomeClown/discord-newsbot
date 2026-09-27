@@ -15,7 +15,7 @@ import re
 from html.parser import HTMLParser
 
 # Tags whose start or end implies a line break in the rendered text. This
-# list doesn't need to be exhaustive -- worst case a missed tag just joins
+# list doesn't need to be exhaustive: worst case a missed tag just joins
 # two sentences with a space instead of a newline, which `clean_text`
 # collapses away anyway.
 _BLOCK_TAGS = frozenset({"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"})
@@ -75,7 +75,7 @@ def _collapse(html_or_bbcode: str, *, separate_inline: bool = False) -> str:
 
     Line breaks carry no meaning once the text is headed into a one-line
     excerpt, an LLM prompt, or a code matcher that only cares whether two
-    tokens are separated by *some* whitespace -- so this collapses
+    tokens are separated by *some* whitespace, so this collapses
     everything (tags, newlines, runs of spaces) down to single spaces.
     Shared by `clean_text` and `plain_text`, which differ only in how much
     of the result they keep.
@@ -98,7 +98,7 @@ def plain_text(html_or_bbcode: str, limit: int = 100_000) -> str:
 
     `RawItem.full_text` exists so the SHiFT code matcher (design.md §12)
     can scan a source's *entire* post instead of the 500-character excerpt
-    stored for summaries -- a code five paragraphs into a patch-notes post
+    stored for summaries; a code five paragraphs into a patch-notes post
     would otherwise never be seen. 100,000 characters is a "this should
     never actually bind" ceiling, not a real limit; nothing we collect is
     that long, and untruncated text never gets persisted or sent to the
@@ -123,7 +123,7 @@ def plain_text(html_or_bbcode: str, limit: int = 100_000) -> str:
 def first_line(html_or_text: str, limit: int = 120) -> str:
     """The first non-blank line of `html_or_text`, cleaned and truncated.
 
-    Used when a source gives us a description and no title at all -- the
+    Used when a source gives us a description and no title at all: the
     official Bluesky accounts' RSS mirror does exactly this, since a post
     doesn't really have a headline.
     """

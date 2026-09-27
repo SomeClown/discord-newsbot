@@ -71,7 +71,7 @@ def configure_logging(level: str = "INFO") -> None:
     logging.getLogger("httpx2").setLevel(logging.WARNING)
     logging.getLogger("discord").setLevel(logging.WARNING)
     # apscheduler logs its heartbeat job at INFO every 60s (see
-    # bot/client.py's _heartbeat_job) -- left alone, that's a log line a
+    # bot/client.py's _heartbeat_job); left alone, that's a log line a
     # minute forever, which buries every other INFO line under noise. A
     # misfire or a scheduler shutdown still comes through at WARNING.
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
