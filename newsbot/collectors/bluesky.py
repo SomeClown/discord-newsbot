@@ -46,6 +46,12 @@ class BlueskySession:
         self._lock = asyncio.Lock()
 
     async def token(self, http: httpx.AsyncClient) -> str:
+        """Return the shared access token, logging in on the first call only.
+
+        Holds `self._lock` for the whole check-and-maybe-login, so the
+        second and third collector to ask while a login is in flight wait
+        for that same login instead of each starting their own.
+        """
         async with self._lock:
             if self._token is None:
                 response = await http.post(
