@@ -224,14 +224,14 @@ def test_canonicalize_out_of_range_port_returns_none_instead_of_raising():
 
 def test_canonicalize_at_sign_survives_unescaped_in_path():
     # "@" is a legitimate path character (a handle in a URL shape like
-    # "/users/@name") and is in _PATH_SAFE -- only netloc "@" (credentials)
+    # "/users/@name") and is in _PATH_SAFE: only netloc "@" (credentials)
     # is rejected. Pins the distinction the docstring draws between the two.
     assert canonicalize("https://example.com/users/@handle") == "https://example.com/users/@handle"
 
 
 def test_canonicalize_already_percent_encoded_path_is_left_as_is_not_double_escaped():
     # "%" is in _PATH_SAFE specifically so re-canonicalizing an
-    # already-canonical path is a no-op -- this is the idempotency
+    # already-canonical path is a no-op: this is the idempotency
     # guarantee _safe_link()'s render-time re-check depends on.
     assert canonicalize("https://example.com/a%20b") == "https://example.com/a%20b"
 
@@ -403,7 +403,7 @@ def test_canonicalize_items_in_batch_dedupe_prefers_higher_trust():
 
 def test_canonicalize_items_does_not_touch_the_store_or_apply_a_lookback():
     # Unlike normalize(), canonicalize_items has no known_urls callback and
-    # no lookback window -- a stale, previously-seen URL survives here.
+    # no lookback window: a stale, previously-seen URL survives here.
     items = [
         _item(
             "https://example.com/old",
@@ -425,7 +425,7 @@ def test_canonicalize_items_preserves_first_seen_order():
 
 def test_normalize_calls_canonicalize_items_under_the_hood():
     # Pins that normalize() didn't quietly diverge from canonicalize_items
-    # when the shared phases were split out -- same canonicalize+dedupe
+    # when the shared phases were split out: same canonicalize+dedupe
     # result either way, before normalize's own known_urls/lookback steps.
     items = [
         _item("https://example.com/a/?utm_source=feed", trust="community", title="first"),
