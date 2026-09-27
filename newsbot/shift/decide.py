@@ -4,14 +4,14 @@
 them, which is the part with all the actual judgment calls: is this code
 new, is it too old to bother anyone about, has today already spent its
 `@everyone` budget. Every one of those is a pure function of its inputs, on
-purpose -- `shift/sweep.py` is where a plan produced here actually turns
+purpose: `shift/sweep.py` is where a plan produced here actually turns
 into a database write or a Discord message, and keeping the deciding and
 the doing in separate modules is what let this file's tests run in
 milliseconds against a list of dataclasses instead of a temp SQLite file.
 
 Game scoping (A6, plan step 5b) lives here too: an item only counts toward
 a sighting if `pipeline.filter.filter_items` would have matched it to one
-of `cfg.alerts.topics` -- the same confident/dedicated-source rules the
+of `cfg.alerts.topics`: the same confident/dedicated-source rules the
 digest itself uses, not a separate keyword check invented for this module.
 """
 
@@ -34,7 +34,7 @@ _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 # separate announcements, and the SHiFT channel doesn't need to receive
 # all of them back to back just because none of them happened to ping.
 # Codes past the cap are recorded silently as `'roundup'` (same as v1's
-# "every roundup code is silent" behavior) rather than dropped -- they're
+# "every roundup code is silent" behavior) rather than dropped: they're
 # still known codes, `/shift codes` still lists them, they just didn't get
 # a message this check.
 MAX_ROUNDUP_CODES = 50
@@ -45,7 +45,7 @@ class CodeSighting:
     """One code, as seen in one item. A code mentioned in three items makes three of these.
 
     `roundup` (owner decision, 2026-09-25) marks a sighting from an item
-    that named more than `cfg.alerts.max_codes_per_item` distinct codes --
+    that named more than `cfg.alerts.max_codes_per_item` distinct codes:
     a roundup or megathread post, not a genuine single-code announcement.
     """
 
@@ -64,7 +64,7 @@ class CodeCandidate:
 
     `trusted` (owner decision, 2026-09-25, QA item 7 option A): whether
     *any* sighting of this code came from a source whose trust is in
-    `cfg.alerts.ping_trust` -- a community-only code still posts, it just
+    `cfg.alerts.ping_trust`: a community-only code still posts, it just
     doesn't get to be the reason a batch pings. `roundup` is true only
     when *every* sighting of this code came from a roundup item (see
     `CodeSighting.roundup`); a code seen in both a roundup and a normal
@@ -115,14 +115,14 @@ def sightings_from_items(
 ) -> list[CodeSighting]:
     """Every code found in `items`, restricted to `alert_topics` (A6).
 
-    An empty `alert_topics` scopes to nothing -- every item counts, same as
+    An empty `alert_topics` scopes to nothing: every item counts, same as
     the digest's own "no `topics` configured" default. Otherwise an item
     only contributes sightings if `filter_items` would have *confidently*
-    matched it to one of `alert_topics` -- dedicated sources included, but
+    matched it to one of `alert_topics`: dedicated sources included, but
     an `uncertain` (entity-only) match doesn't count. "Gearbox" showing up
     in an unrelated press item is exactly the kind of match that's good
     enough for the digest's lower bar (a human reads the headline right
-    next to it) and not good enough to scope a code alert by -- a
+    next to it) and not good enough to scope a code alert by: a
     Borderlands-shaped SHiFT code sitting in an item that only mentioned
     "Gearbox" in passing has no business alerting a server scoped to a
     different Gearbox game.
@@ -137,7 +137,7 @@ def sightings_from_items(
     if alert_topics:
         # max_per_topic is generous rather than exact: this call only cares
         # which items matched at all, never the cap that trims what the
-        # digest shows -- a code from item #61 in a busy topic still counts.
+        # digest shows: a code from item #61 in a busy topic still counts.
         grouped = filter_items(items, topics, max(len(items), 1))
         matched_urls = {
             topic_item.item.url
@@ -171,7 +171,7 @@ def sightings_from_items(
 
 
 def _sighting_key(sighting: CodeSighting) -> tuple[int, float]:
-    # Best trust first, then earliest published (undated last -- there's no
+    # Best trust first, then earliest published (undated last, there's no
     # date to prefer it on), used to pick which sighting's source_name/
     # item_url represents the code in an alert.
     published = sighting.published_at
@@ -181,7 +181,7 @@ def _sighting_key(sighting: CodeSighting) -> tuple[int, float]:
 
 def _is_fresh(sighting: CodeSighting, now: datetime, max_age: timedelta) -> bool:
     # Undated items are treated as fresh (SPEC-DEV 4's rule, carried over
-    # here per A11) -- there's no date to judge them stale by.
+    # here per A11): there's no date to judge them stale by.
     if sighting.published_at is None:
         return True
     return sighting.published_at >= now - max_age
@@ -199,16 +199,16 @@ def aggregate(
     A code is `fresh` if *any* sighting of it is fresh (mixed ages -> fresh:
     one fresh mention is enough reason to alert). `golden` is likewise "any
     sighting mentions it". `trusted` is "any sighting's trust is in
-    `ping_trust`" (owner decision, 2026-09-25) -- a code seen only from
+    `ping_trust`" (owner decision, 2026-09-25): a code seen only from
     community sources is never the reason a batch pings, even though it
     still posts. The shown source is the best-trust, then earliest-dated,
-    then first-seen sighting -- ties keep first-seen order, which is what
+    then first-seen sighting: ties keep first-seen order, which is what
     makes this deterministic across runs of the same input. Candidates
     come back in first-seen order (by code), matching A3's "announce them
     in the order they turned up" rule.
 
     A code with at least one non-`roundup` sighting is judged entirely by
-    those -- every `roundup` sighting of it is ignored outright for
+    those: every `roundup` sighting of it is ignored outright for
     `fresh`/`golden`/`trusted`/the shown source, and `CodeCandidate.roundup`
     comes back `False` (owner decision, 2026-09-25: "a code seen in a
     roundup and in a normal item is judged by the normal item"). Only a
@@ -251,7 +251,7 @@ def seeding_healthy(results: list[CollectorResult]) -> bool:
     """Whether this sweep is healthy enough to set the seeded marker (A1).
 
     "Healthy" means at least one non-skipped collector succeeded, and at
-    least half of the non-skipped collectors succeeded -- a sweep where
+    least half of the non-skipped collectors succeeded: a sweep where
     every real source timed out shouldn't get to declare "every code we
     saw (which is none) is the historical baseline" just because nothing
     technically errored on a source that was skipped for a missing API key.
@@ -265,7 +265,7 @@ def pings_used_today(state: AlertState, today: str) -> int:
     """How many pings the day named `today` (in `cfg.digest.timezone`) has already spent.
 
     `state.ping_count` only means anything alongside a matching
-    `state.ping_day` -- a `ping_day` from a prior local day has already
+    `state.ping_day`: a `ping_day` from a prior local day has already
     effectively reset to zero, it just hasn't been written back yet
     (`claim_codes` does that lazily, the next time it's asked to spend).
     """
@@ -279,7 +279,7 @@ def group_roundups(candidates: list[CodeCandidate]) -> list[list[CodeCandidate]]
     several codes, and design.md §13 wants one header (naming that post)
     per group, not one header per code. Groups come back in the order
     their first member first appeared in `candidates`; a group's own
-    members keep `candidates`' relative order too -- both first-seen,
+    members keep `candidates`' relative order too: both first-seen,
     matching every other ordering rule in this module.
     """
     order: list[tuple[str, str]] = []
@@ -309,12 +309,12 @@ def plan_alerts(
     they're not this function's business anymore. What's left splits into
     a roundup-only pipeline and a normal one (`CodeCandidate.roundup`);
     both then split the same way on `seeded`, but only the normal pipeline
-    ever contributes to `to_post`, `ping`, or `cap_reached` -- design.md
+    ever contributes to `to_post`, `ping`, or `cap_reached`: design.md
     §13's "roundup posts never spend the ping budget."
 
     - **Unseeded** (A1): every new code, roundup included, is recorded
       silently as `"seeded"`, nothing posts, and `mark_seeded` becomes
-      `seeding_ok` -- the caller only gets to flip the marker on if this
+      `seeding_ok`: the caller only gets to flip the marker on if this
       batch was healthy.
     - **Seeded**: stale codes (A11), roundup included, are recorded
       silently as `"too_old"` and never get another chance. Fresh normal
@@ -323,17 +323,17 @@ def plan_alerts(
       order within each group) so a pinging batch's first message is
       guaranteed to carry a trusted code. Fresh roundup codes are queued
       to `roundup_to_post`, first-seen order, capped at
-      `max_roundup_codes` (D3) -- anything past the cap is recorded
+      `max_roundup_codes` (D3): anything past the cap is recorded
       silently as `"roundup"` instead, the same status v1 gave every
       roundup code, unconditionally.
 
     One ping covers the whole normal batch (A4), gated on trust (owner
     decision, 2026-09-25, QA item 7 option A): `ping` is true only if at
     least one candidate queued to `to_post` is `trusted` *and* the day's
-    budget isn't spent -- a batch made entirely of community-only codes
+    budget isn't spent: a batch made entirely of community-only codes
     still posts every one of them, just never with a ping, and never
     spends or reports against the cap for it. `cap_reached` says the
-    budget (not "nothing trusted to post") is what stopped the ping -- a
+    budget (not "nothing trusted to post") is what stopped the ping: a
     caller uses that to decide whether an admin alert about the cap is
     warranted.
     """

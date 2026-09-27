@@ -6,7 +6,7 @@ call into the same core (`process_items`): the hourly sweep
 (`run_code_sweep`, which also runs its own collectors under the shared
 run lock) and the daily digest run's own post-publish check
 (`newsbot.pipeline.run._maybe_check_codes`, which already has its items
-and doesn't need the lock -- it's already holding it).
+and doesn't need the lock: it's already holding it).
 
 Record-then-post (plan §1) is the ordering this whole module protects:
 `claim_codes` reserves every code in a batch as `pending`, ping budget
@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 _SWEEP_COLLECT_TIMEOUT_S = 20.0
 # Same backoff the digest publisher retries against (pipeline/run.py's
-# _PUBLISH_BACKOFF_S) -- a code alert message is posted the same way a
+# _PUBLISH_BACKOFF_S): a code alert message is posted the same way a
 # digest embed batch is, so it gets the same "give Discord a few seconds
 # to recover from a blip" policy.
 _POST_BACKOFF_S = (2.0, 4.0, 8.0)
@@ -81,14 +81,14 @@ class CodeAlertPoster(Protocol):
         """Post one alert message and return its Discord message id (if any).
 
         Raises `PublishError` for a failure worth retrying (a 5xx, a
-        timeout); anything else raised is treated as final -- see
+        timeout); anything else raised is treated as final: see
         `_post_with_retry`.
         """
         ...
 
 
 class PrintCodeAlertPoster:
-    """Prints an alert to stdout instead of posting it -- the CLI's `--sweep` poster."""
+    """Prints an alert to stdout instead of posting it: the CLI's `--sweep` poster."""
 
     async def post(self, alert: RenderedAlert) -> int | None:
         print(alert.content)
@@ -157,17 +157,17 @@ _PING_PREFIX = "@everyone "
 
 
 def _strip_ping(alert: RenderedAlert) -> RenderedAlert:
-    """A copy of `alert` with the ping turned off -- same nonce, same codes.
+    """A copy of `alert` with the ping turned off: same nonce, same codes.
 
     Used by `_post_with_retry` when a ping-bearing send raised
     `PublishError`: our client gave up waiting for a response, but that's
     not proof Discord never got the message (the deterministic `nonce`
     handles that half). What it *doesn't* rule out is that Discord got it
-    and the ping already went out -- so a retry must never risk a second
+    and the ping already went out, so a retry must never risk a second
     live `@everyone` for the same batch. The content's "@everyone " prefix
     is stripped the same deterministic way `render_code_alerts` added it,
     rather than re-rendering from the candidates (which `_post_with_retry`
-    doesn't have -- only the already-rendered `RenderedAlert` does).
+    doesn't have; only the already-rendered `RenderedAlert` does).
     """
     content = alert.content
     if content.startswith(_PING_PREFIX):
@@ -180,7 +180,7 @@ async def _post_with_retry(
 ) -> tuple[int | None, Exception | None]:
     """Post one message, retrying only on `PublishError`, up to `_POST_BACKOFF_S`'s length.
 
-    Any other exception is treated as final without a retry -- a poster
+    Any other exception is treated as final without a retry: a poster
     bug or an auth failure isn't going to fix itself by waiting eight
     seconds. `asyncio.CancelledError` (a `BaseException`, not an
     `Exception`) is deliberately not caught here at all: a sweep cancelled
@@ -193,7 +193,7 @@ async def _post_with_retry(
     retry against a first attempt that actually landed but whose response
     we never saw. That covers a retried post landing twice in the
     channel; it says nothing about a retried *ping*, which Discord's
-    nonce dedup has no opinion on -- a duplicate message with the ping
+    nonce dedup has no opinion on: a duplicate message with the ping
     stripped is still a duplicate message, but a duplicate `@everyone` is
     the one failure mode worth refusing to risk even once. So a
     ping-bearing alert that fails once retries with the ping already
@@ -227,7 +227,7 @@ async def _post_batch(deps: SweepDeps, rendered: list[RenderedAlert]) -> tuple[i
     """Post every message in `rendered`, in order; return (posted, failed, failed_codes).
 
     Once one message in the batch fails permanently, every message after
-    it is marked `failed` without ever calling the poster -- Discord
+    it is marked `failed` without ever calling the poster: Discord
     messages within one batch are meant to read in order (a continuation
     literally says "(continued)"), so posting message 3 after message 2
     silently vanished would confuse more than it'd help. Shared between
@@ -300,7 +300,7 @@ async def _apply_plan(
     final_ping = plan.ping
 
     # Reset the poster's missing-permission dedupe once per sweep, before
-    # either batch below might post -- whichever batch happens to post
+    # either batch below might post: whichever batch happens to post
     # first shouldn't matter to how often that alert can fire.
     begin_batch = getattr(deps.poster, "begin_batch", None)
     if begin_batch is not None and (plan.to_post or plan.roundup_to_post):
@@ -310,7 +310,7 @@ async def _apply_plan(
         # Render *before* claiming. A row claimed `pending` and then
         # stranded there because rendering blew up afterwards (a hostile
         # source name plus a huge collected URL, say) sits unposted until
-        # the next startup's `fail_pending_codes` cleanup -- worth ruling
+        # the next startup's `fail_pending_codes` cleanup: worth ruling
         # out up front instead of discovering it live. `plan.ping` is the
         # worst case for header width: `claim_codes`' own cap re-check
         # below can only flip a ping True -> False, never the reverse
@@ -321,12 +321,12 @@ async def _apply_plan(
 
         # claim_codes re-checks the ping cap itself, inside its own
         # BEGIN IMMEDIATE transaction, against whatever `pings_today`
-        # looks like *right now* -- not the copy `plan_alerts` computed
+        # looks like *right now*: not the copy `plan_alerts` computed
         # a moment ago from a plain read (plan step 7). A sweep and a
         # concurrent `/newsbot test-alert` can both reach this point
         # having each seen "budget available"; only one of them actually
         # gets to spend it, and `final_ping` is that outcome, which is
-        # what actually gets rendered and posted -- not `plan.ping`.
+        # what actually gets rendered and posted: not `plan.ping`.
         def _claim_sync() -> bool:
             rows = [(c.code, c.source_name, c.item_url) for c in plan.to_post]
             with closing(connect(deps.db_path)) as conn:
@@ -343,7 +343,7 @@ async def _apply_plan(
         if plan.ping and not final_ping:
             cap_reached = True
             # The cap got spent by someone else between `plan_alerts` and
-            # here -- re-render with the shorter, unpinged header. Already
+            # here: re-render with the shorter, unpinged header. Already
             # proven safe above: the pinged render fit under the tighter
             # budget, so the looser unpinged one can't overflow either.
             rendered = render_code_alerts(plan.to_post, ping=final_ping, test=test)
@@ -359,7 +359,7 @@ async def _apply_plan(
         rendered_roundup = render_roundup_alerts(plan.roundup_to_post)
 
         # Its own claim (design.md §13, step 5): always `pinged=False`,
-        # `from_roundup=True`, and no `max_pings` re-check -- a roundup
+        # `from_roundup=True`, and no `max_pings` re-check: a roundup
         # post never touches the ping budget, so there's nothing here for
         # a concurrent caller to race.
         def _claim_roundup_sync() -> None:
@@ -385,7 +385,7 @@ async def _apply_plan(
     if cap_reached and deps.cfg.alerts.max_pings_per_day > 0:
         # Suppressed at max_pings_per_day == 0 (step 8): with the cap set
         # to zero, *every* batch with something fresh to post trivially
-        # "reaches" it -- that's the config working as intended (pinging
+        # "reaches" it: that's the config working as intended (pinging
         # is turned off on purpose), not an admin-worthy event, and
         # alerting on it every single sweep would just be noise trained
         # to be ignored.
@@ -394,7 +394,7 @@ async def _apply_plan(
     roundup_overflow = sum(1 for _, status in plan.silent if status == "roundup")
     if roundup_overflow:
         # design.md §13, D3: one admin note per check that trimmed
-        # something, not one per trimmed code -- a 60-code megathread
+        # something, not one per trimmed code: a 60-code megathread
         # shouldn't produce 10 separate alerts about the 10 it couldn't
         # fit.
         await deps.alert(
@@ -428,7 +428,7 @@ async def process_items(
     """The lock-free core: canonicalize -> sightings -> aggregate -> plan -> record/post.
 
     Neither the hourly sweep's own lock handling nor the daily run's
-    already-held lock live here -- this function only needs a batch of
+    already-held lock live here: this function only needs a batch of
     items and somewhere to record what it decides. `seeding_ok` is the
     caller's call on whether *this* batch is healthy enough to flip the
     seeded marker on if it isn't already (A1); both the hourly sweep and
@@ -446,7 +446,7 @@ async def process_items(
     if not sightings:
         if seeding_ok:
             # A healthy sweep that happened to find zero codes anywhere
-            # is still the first healthy sweep -- it has to get to flip
+            # is still the first healthy sweep: it has to get to flip
             # the seeded marker on (A1) the same as one that found
             # plenty, or the *next* sweep to find a real code treats an
             # already-seeded feed as brand new and silently seeds it
@@ -482,7 +482,7 @@ def _sweep_summary(results: list[CollectorResult], outcome: CodeCheckOutcome) ->
 async def run_code_sweep(deps: SweepDeps) -> CodeCheckOutcome | None:
     """Run one sweep: collect (minus web_search, already excluded by `deps.collectors`),
     check for codes, and record that it happened. Skips entirely (returns `None`,
-    no writes at all) if the run lock is already held (A10) -- the daily
+    no writes at all) if the run lock is already held (A10): the daily
     job doesn't wait on a sweep and a sweep doesn't wait on it either;
     it just tries again next interval.
     """
@@ -527,7 +527,7 @@ async def run_test_alert(deps: SweepDeps, code: str, golden: bool) -> CodeCheckO
     """Post (or explain why not) one synthetic code, for `/newsbot test-alert`.
 
     Treated as already seeded (so it always tries to post rather than
-    silently seed) without ever setting the marker itself -- a test alert
+    silently seed) without ever setting the marker itself: a test alert
     proves the pipeline works, it doesn't get to vouch for every other
     code already sitting in the feeds. Still recorded and still counted
     against the daily ping cap: a test that pinged for free wouldn't
