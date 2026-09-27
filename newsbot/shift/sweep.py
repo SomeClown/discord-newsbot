@@ -231,7 +231,7 @@ async def _apply_plan(
     )
 
     def _record_silent_sync() -> None:
-        rows = [(c.code, c.source_name, c.item_url, status) for c, status in plan.silent]
+        rows = [(c.code, c.source_name, c.item_url, status, c.roundup) for c, status in plan.silent]
         with closing(connect(deps.db_path)) as conn:
             record_silent_codes(conn, rows, now=deps.now, mark_seeded=plan.mark_seeded)
 

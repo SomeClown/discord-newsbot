@@ -134,6 +134,24 @@ class AlertStatus:
 
 
 @dataclass(frozen=True)
+class CodeView:
+    """A code as shown to a member through `/shift codes`.
+
+    `from_roundup` (migration 003) is the marker `/shift codes` needs to
+    show "from a roundup" that the `status` column alone can't give it
+    once a roundup post's status is just `posted` like everything else
+    (design.md §13) -- see `repo.query_codes`.
+    """
+
+    code: str
+    first_seen_at: datetime
+    source_name: str
+    item_url: str
+    status: str
+    from_roundup: bool
+
+
+@dataclass(frozen=True)
 class StatusSnapshot:
     """Everything `/newsbot status` needs, gathered in one query pass."""
 

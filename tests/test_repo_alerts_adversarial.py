@@ -227,7 +227,7 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
 
     repo.record_silent_codes(
         conn,
-        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d", "too_old")],
+        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d", "too_old", False)],
         now=_now,
         mark_seeded=True,
     )
@@ -237,7 +237,7 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
     # this feature.
     repo.record_silent_codes(
         conn,
-        [("EEEE5-EEEEE-EEEEE-EEEEE-EEEEE", "Src", "https://e/e", "roundup")],
+        [("EEEE5-EEEEE-EEEEE-EEEEE-EEEEE", "Src", "https://e/e", "roundup", True)],
         now=_now,
         mark_seeded=False,
     )
@@ -279,7 +279,7 @@ def test_migration_002_applies_on_real_v1_schema_with_related_data_and_fk_on(tmp
         conn.commit()
 
         version = migrate(conn)
-        assert version == 2
+        assert version == 3
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
         # Data survived the upgrade.

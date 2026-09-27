@@ -47,7 +47,7 @@ def test_get_alert_state_on_empty_db_is_all_falsy_defaults(conn):
 def test_known_codes_returns_only_recorded_subset(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False)],
         now=_now,
         mark_seeded=True,
     )
@@ -59,7 +59,7 @@ def test_known_codes_returns_only_recorded_subset(conn):
 
 def test_known_codes_chunks_past_sqlite_variable_limit(conn):
     codes = [f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(1200)]
-    rows = [(c, "Src", "https://e/x", "seeded") for c in codes]
+    rows = [(c, "Src", "https://e/x", "seeded", False) for c in codes]
     repo.record_silent_codes(conn, rows, now=_now, mark_seeded=False)
     assert repo.known_codes(conn, codes) == set(codes)
 
@@ -70,7 +70,7 @@ def test_known_codes_chunks_past_sqlite_variable_limit(conn):
 def test_record_silent_codes_sets_seeded_marker_when_requested(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False)],
         now=_now,
         mark_seeded=True,
     )
@@ -80,7 +80,7 @@ def test_record_silent_codes_sets_seeded_marker_when_requested(conn):
 def test_record_silent_codes_does_not_set_marker_when_unhealthy(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False)],
         now=_now,
         mark_seeded=False,
     )
@@ -101,7 +101,7 @@ def test_record_silent_codes_does_not_reset_marker_once_set(conn):
 def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
     repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False)],
         now=_now,
         mark_seeded=True,
     )
@@ -109,7 +109,7 @@ def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
     # this should be a no-op, not overwrite "seeded" with "too_old".
     repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "too_old")],
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "too_old", False)],
         now=_now,
         mark_seeded=False,
     )
@@ -272,8 +272,8 @@ def test_fail_pending_codes_flips_only_pending_rows(conn):
     repo.record_silent_codes(
         conn,
         [
-            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b", "seeded"),
-            ("CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c", "too_old"),
+            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b", "seeded", False),
+            ("CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", "Src", "https://e/c", "too_old", False),
         ],
         now=_now,
         mark_seeded=True,
@@ -388,3 +388,55 @@ def test_alerted_codes_rejects_invalid_pinged_value(conn):
                 "(code, first_seen_at, source_name, item_url, pinged, status) "
                 "VALUES ('AAAA1-AAAAA-AAAAA-AAAAA-AAAAA', 'now', 'Src', 'https://e/a', 2, 'seeded')"
             )
+
+
+# --- from_roundup plumbing (migration 003, plan step 2) ---
+
+
+def test_record_silent_codes_stores_from_roundup_flag(conn):
+    repo.record_silent_codes(
+        conn,
+        [
+            ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False),
+            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b", "roundup", True),
+        ],
+        now=_now,
+        mark_seeded=True,
+    )
+    rows = {
+        row["code"]: row["from_roundup"]
+        for row in conn.execute("SELECT code, from_roundup FROM alerted_codes")
+    }
+    assert rows == {
+        "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA": 0,
+        "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB": 1,
+    }
+
+
+def test_claim_codes_defaults_from_roundup_to_false(conn):
+    repo.claim_codes(
+        conn,
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        pinged=True,
+        local_day="2026-09-25",
+        now=_now,
+    )
+    row = conn.execute(
+        "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
+    ).fetchone()
+    assert row["from_roundup"] == 0
+
+
+def test_claim_codes_stores_from_roundup_true_when_asked(conn):
+    repo.claim_codes(
+        conn,
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
+        pinged=False,
+        local_day="2026-09-25",
+        now=_now,
+        from_roundup=True,
+    )
+    row = conn.execute(
+        "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
+    ).fetchone()
+    assert row["from_roundup"] == 1
