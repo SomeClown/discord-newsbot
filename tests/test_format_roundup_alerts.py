@@ -156,6 +156,46 @@ def test_two_items_each_needing_a_split_never_mix_codes_across_items():
         assert codes <= {c.code for c in item_a} or codes <= {c.code for c in item_b}
 
 
+# --- header shrinking (QA follow-up: a huge url/source must not blow the budget) ---
+
+
+def test_huge_url_and_source_name_do_not_raise_and_still_post_the_code():
+    huge_url = "https://example.com/" + "a" * 2010
+    huge_source = "Reddit Megathread " * 40
+    rendered = render_roundup_alerts([_candidate(item_url=huge_url, source_name=huge_source)])
+    assert len(rendered) == 1
+    content = rendered[0].content
+    assert discord_len(content) <= 2000
+    assert f"```\n{CODE_A}\n```" in content
+    assert rendered[0].codes == [CODE_A]
+
+
+def test_huge_url_is_dropped_before_source_name_is_truncated():
+    # A source name that comfortably fits without the link should survive
+    # intact once the link is dropped -- shedding order matters.
+    huge_url = "https://example.com/" + "a" * 2010
+    rendered = render_roundup_alerts([_candidate(item_url=huge_url, source_name="Short Name")])
+    content = rendered[0].content
+    assert "Short Name" in content
+    assert huge_url not in content
+
+
+def test_huge_url_and_huge_source_name_together_across_many_codes():
+    huge_url = "https://example.com/" + "a" * 2010
+    huge_source = "Reddit Megathread " * 40
+    candidates = [
+        _candidate(
+            code=f"A{i:04d}-AAAAA-AAAAA-AAAAA-AAAAA", item_url=huge_url, source_name=huge_source
+        )
+        for i in range(10)
+    ]
+    rendered = render_roundup_alerts(candidates)
+    for message in rendered:
+        assert discord_len(message.content) <= 2000
+    all_codes = [code for message in rendered for code in message.codes]
+    assert len(all_codes) == 10
+
+
 # --- nonces ---
 
 

@@ -683,10 +683,26 @@ def render_code_alerts(
 _ROUNDUP_HEADER_PREFIX = "**SHiFT codes from a roundup**"
 
 
-def _roundup_header(source_name: str, item_url: str) -> str:
+def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = None) -> str:
     safe_url = _safe_link(item_url)
     link = f" · <{safe_url}>" if safe_url else ""
-    return f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}{link}"
+    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}{link}"
+    if max_len is None or discord_len(header) <= max_len:
+        return header
+
+    # Same shedding order as `_alert_block`: the link is the first thing
+    # to go (it's redundant with "click the code" anyway), and if a
+    # hostile or just very long source name still doesn't fit, hard-
+    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks --
+    # it's what tells a reader this code didn't come with a ping.
+    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}"
+    if discord_len(header) <= max_len:
+        return header
+
+    fixed_len = discord_len(_ROUNDUP_HEADER_PREFIX) + 3  # " · " joining prefix to the name
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(source_name), name_budget, suffix="…")
+    return f"{_ROUNDUP_HEADER_PREFIX} · {truncated_name}"
 
 
 def _roundup_code_block(candidate: CodeCandidate) -> str:
@@ -725,18 +741,29 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 
     rendered: list[RenderedAlert] = []
     for group in group_roundups(candidates):
-        first_header = _roundup_header(group[0].source_name, group[0].item_url)
+        entries = [(c.code, _roundup_code_block(c)) for c in group]
+        # Every code block is short and fixed-shape (a 29-character code
+        # in a fenced block), so it's always the header -- not the block --
+        # that's at risk of busting the cap (a ~2000-char URL, a hostile
+        # source name). Give `_roundup_header` a budget that guarantees it
+        # fits alongside this group's first block before measuring anything
+        # else, instead of discovering the overflow after the fact.
+        first_block_len = discord_len(entries[0][1]) + 2  # "\n\n" joining header to block
+        first_header = _roundup_header(
+            group[0].source_name,
+            group[0].item_url,
+            max_len=_ALERT_CONTENT_LIMIT - first_block_len,
+        )
         solo_budget = (
             _ALERT_CONTENT_LIMIT
             - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER))
             - 2
         )
-        entries = [(c.code, _roundup_code_block(c)) for c in group]
-        # Every code block is short and fixed-shape (a 29-character code
-        # in a fenced block) -- nowhere near solo_budget in practice, but
-        # this is the same loud failure `render_code_alerts` has for the
-        # same "shouldn't be reachable, but 'shouldn't' isn't 'can't'"
-        # reason.
+        # This is now a belt-and-suspenders check, not the mechanism that
+        # keeps things under budget -- `_roundup_header`'s own shrinking
+        # already guarantees the first block fits under `first_header`;
+        # this still catches a code block busting the *continuation*
+        # header's budget, which never shrinks.
         for code, block in entries:
             if discord_len(block) > solo_budget:
                 raise ValueError(f"roundup code block for {code!r} exceeds the per-message budget")

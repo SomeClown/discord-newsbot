@@ -313,6 +313,32 @@ async def test_stale_roundup_only_code_is_recorded_too_old_with_from_roundup_set
     assert all(from_roundup == 1 for _status, _pinged, from_roundup in rows.values())
 
 
+async def test_huge_url_and_source_name_never_strand_claimed_rows_pending(db_path, http_client):
+    # QA follow-up: `_roundup_header` used to be unable to shrink, so a
+    # ~2010-char url plus a very long source name could blow the 2000-unit
+    # cap and raise *after* `claim_codes` had already marked the rows
+    # pending -- stranding them there with nothing posted. Render-before-
+    # claim plus the header's own shrinking should mean this just works.
+    _seed(db_path)
+    poster = _FakePoster()
+    deps = _deps(db_path, http_client, poster=poster)
+    codes = _codes(6)
+    huge_url = "https://example.com/" + "a" * 2010
+    huge_source = "Reddit Megathread " * 40
+    item = _multi_code_item(codes, url=huge_url)
+    item = dataclasses.replace(item, source_name=huge_source)
+
+    outcome = await process_items(deps, [item], seeding_ok=True)
+
+    assert outcome.roundup_posted == 6
+    with closing(connect(db_path)) as conn:
+        rows = _rows_for(conn, codes)
+        pending = conn.execute("SELECT COUNT(*) AS n FROM alerted_codes WHERE status = 'pending'")
+        assert pending.fetchone()["n"] == 0
+    assert all(status == "posted" for status, _pinged, _roundup in rows.values())
+    assert all(from_roundup == 1 for _status, _pinged, from_roundup in rows.values())
+
+
 async def test_stale_roundup_code_never_alerts_even_on_a_later_fresh_sighting(db_path, http_client):
     # Once a code is recorded 'too_old' it's in `known`, so a later batch
     # that sees the *same* code again (fresh this time) must never post

@@ -307,13 +307,25 @@ async def _apply_plan(
         begin_batch()
 
     if plan.to_post:
+        # Render *before* claiming. A row claimed `pending` and then
+        # stranded there because rendering blew up afterwards (a hostile
+        # source name plus a huge collected URL, say) sits unposted until
+        # the next startup's `fail_pending_codes` cleanup -- worth ruling
+        # out up front instead of discovering it live. `plan.ping` is the
+        # worst case for header width: `claim_codes`' own cap re-check
+        # below can only flip a ping True -> False, never the reverse
+        # (see its comment), so a render that fits under the *longer*,
+        # pinged header is guaranteed to still fit if the header ends up
+        # shorter.
+        rendered = render_code_alerts(plan.to_post, ping=plan.ping, test=test)
+
         # claim_codes re-checks the ping cap itself, inside its own
         # BEGIN IMMEDIATE transaction, against whatever `pings_today`
         # looks like *right now* -- not the copy `plan_alerts` computed
         # a moment ago from a plain read (plan step 7). A sweep and a
         # concurrent `/newsbot test-alert` can both reach this point
         # having each seen "budget available"; only one of them actually
-        # gets to spend it, and `actual_ping` is that outcome, which is
+        # gets to spend it, and `final_ping` is that outcome, which is
         # what actually gets rendered and posted -- not `plan.ping`.
         def _claim_sync() -> bool:
             rows = [(c.code, c.source_name, c.item_url) for c in plan.to_post]
@@ -330,12 +342,22 @@ async def _apply_plan(
         final_ping = await asyncio.to_thread(_claim_sync)
         if plan.ping and not final_ping:
             cap_reached = True
-        rendered = render_code_alerts(plan.to_post, ping=final_ping, test=test)
+            # The cap got spent by someone else between `plan_alerts` and
+            # here -- re-render with the shorter, unpinged header. Already
+            # proven safe above: the pinged render fit under the tighter
+            # budget, so the looser unpinged one can't overflow either.
+            rendered = render_code_alerts(plan.to_post, ping=final_ping, test=test)
         posted, batch_failed, batch_failed_codes = await _post_batch(deps, rendered)
         failed += batch_failed
         all_failed_codes.extend(batch_failed_codes)
 
     if plan.roundup_to_post:
+        # Same render-before-claim ordering as above, and for the same
+        # reason: nothing here depends on a DB round-trip first, so
+        # there's no excuse for claiming a row before knowing the message
+        # it belongs to can actually be built.
+        rendered_roundup = render_roundup_alerts(plan.roundup_to_post)
+
         # Its own claim (design.md §13, step 5): always `pinged=False`,
         # `from_roundup=True`, and no `max_pings` re-check -- a roundup
         # post never touches the ping budget, so there's nothing here for
@@ -348,7 +370,6 @@ async def _apply_plan(
                 )
 
         await asyncio.to_thread(_claim_roundup_sync)
-        rendered_roundup = render_roundup_alerts(plan.roundup_to_post)
         roundup_posted, roundup_failed, roundup_failed_codes = await _post_batch(
             deps, rendered_roundup
         )
