@@ -734,8 +734,12 @@ sweep simply stops running.
 
 ## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04)
 
-Ubuntu 20.04 left standard support in May 2025, and this Droplet is still
-on it, so it's getting fewer security fixes every month. Ubuntu only
+**Done 2026-09-27:** `cockwomble` is on 24.04. This section is kept as
+the record of how, including the three things that went sideways (the
+mirror, DNS, and IPv6), in case another Droplet ever needs the same trip.
+
+Ubuntu 20.04 left standard support in May 2025, and this Droplet was still
+on it, getting fewer security fixes every month. Ubuntu only
 upgrades one LTS at a time, so this is two rounds: 20.04 → 22.04, then
 22.04 → 24.04. Budget two to three hours, most of it watching progress
 bars and answering the occasional prompt.
@@ -773,6 +777,18 @@ as their posts are under 48 hours old.
    ```
 
 4. Check `/etc/update-manager/release-upgrades` says `Prompt=lts`.
+5. **Point apt at Ubuntu's official archive** instead of DigitalOcean's
+   mirror. The upgrader doesn't recognize `mirrors.digitalocean.com`, asks
+   whether to rewrite it anyway ("No valid mirror found"), and then, at
+   least on 2026-09-27, aborted with "the essential package
+   'ubuntu-minimal' could not be located." It rolls itself back cleanly,
+   but it's an hour you don't need to spend:
+
+   ```bash
+   sudo cp /etc/apt/sources.list /etc/apt/sources.list.pre-upgrade
+   sudo sed -i 's#http://mirrors.digitalocean.com/ubuntu/#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list
+   sudo apt update
+   ```
 
 ### Round 1: 20.04 → 22.04
 
@@ -829,9 +845,41 @@ sudo apt update && sudo apt full-upgrade -y
 sudo do-release-upgrade
 ```
 
-Same answers as round 1. After the reboot, `lsb_release -ds` should say
-24.04, and you re-run the same Docker repository block and the same three
-checks.
+Same answers as round 1; 24.04's `needrestart` may show a "which services
+should be restarted?" screen, and the defaults are fine. After the reboot,
+`lsb_release -ds` should say 24.04. The upgrade converts apt sources to the
+new `.sources` format: `docker.list` disappears, and third-party entries
+land in files like `third-party.sources` with `Enabled: no`. Disabled
+entries don't conflict with a fresh one, so re-run the same Docker
+repository block (it writes `noble` this time) and the same three checks.
+
+**Then check DNS before anything else.** On this Droplet it was broken
+after round 2, and nothing complains until you try to reach a hostname:
+
+```bash
+for h in archive.ubuntu.com discord.com api.anthropic.com ghcr.io; do getent hosts $h >/dev/null && echo "ok   $h" || echo "FAIL $h"; done
+```
+
+If they all fail, it's almost certainly this: an older Droplet configures
+its network through `/etc/network/interfaces` (ifupdown), not netplan, and
+its DNS servers sit on a `dns-nameservers` line that the old `resolvconf`
+helper used to pass along. 24.04 has no such helper, so `systemd-resolved`
+runs with no upstream servers at all (`resolvectl status` shows no "DNS
+Servers" line; `ls /etc/netplan/` is empty; `systemd-networkd` is
+inactive). Give `systemd-resolved` the servers directly, using whatever
+`grep -rh dns-nameservers /etc/network/` lists (Google's, here):
+
+```bash
+sudo mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNS=8.8.8.8 8.8.4.4\nFallbackDNS=1.1.1.1 1.0.0.1\n' | sudo tee /etc/systemd/resolved.conf.d/droplet-dns.conf
+sudo systemctl restart systemd-resolved
+sudo systemctl restart docker   # so containers pick up the working resolver
+```
+
+The same setup also lost IPv6 (no global `inet6` address; `ping -6`
+says "Network is unreachable"). The bot only needs IPv4, so that's a
+separate job: moving the Droplet onto netplan, see the to-do list in
+`CLAUDE.md`.
 
 ### Bring the bot back
 
