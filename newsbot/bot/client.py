@@ -40,6 +40,7 @@ from discord import app_commands
 
 from newsbot.alerts import send_alert
 from newsbot.bot.format import RenderedAlert, RenderedDigest
+from newsbot.bot.permissions import check_channels, render_permission_alert
 from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
 from newsbot.pipeline.publisher import PublishError
@@ -621,7 +622,26 @@ class NewsBot(discord.Client):
                 + ", ".join(self._interrupted_codes)
                 + ". They were never confirmed posted; check the digest channel."
             )
+        await self._check_permissions()
         await self._catch_up()
+
+    async def _check_permissions(self) -> None:
+        """One admin alert naming every channel permission problem, or none if clean.
+
+        design.md §13: this runs once, on the first `on_ready`, after the
+        interrupted-codes alert (an admin should hear about codes that may
+        already be stuck before anything else) and before catch-up (so a
+        permission problem is on record before a run that might hit it).
+        Wrapped in its own try/except that only logs -- a bug in the check
+        itself must never be the thing that stops the bot from starting or
+        from running today's digest.
+        """
+        try:
+            problems = await check_channels(self, self.cfg)
+            if problems:
+                await self.alert(render_permission_alert(problems))
+        except Exception:
+            logger.exception("startup permission check crashed")
 
     async def _catch_up(self) -> None:
         now = datetime.now(UTC)

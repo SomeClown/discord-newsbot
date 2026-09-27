@@ -259,12 +259,19 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
 
     monkeypatch.setattr(bot, "alert", fake_alert)
 
-    # _catch_up would otherwise try a real pipeline run; short-circuit it
-    # since only the interrupted-codes reporting is under test here.
+    # _catch_up would otherwise try a real pipeline run, and
+    # _check_permissions would try real Discord HTTP calls this fake bot
+    # was never connected for -- short-circuit both, since only the
+    # interrupted-codes reporting is under test here (see
+    # test_permissions.py for the permission check itself).
     async def fake_catch_up() -> None:
         return None
 
+    async def fake_check_permissions() -> None:
+        return None
+
     monkeypatch.setattr(bot, "_catch_up", fake_catch_up)
+    monkeypatch.setattr(bot, "_check_permissions", fake_check_permissions)
 
     await bot.on_ready()
     assert len(alerts) == 1
@@ -290,8 +297,12 @@ async def test_no_interrupted_codes_means_no_startup_alert(db_path, monkeypatch)
     async def fake_catch_up() -> None:
         return None
 
+    async def fake_check_permissions() -> None:
+        return None
+
     monkeypatch.setattr(bot, "alert", fake_alert)
     monkeypatch.setattr(bot, "_catch_up", fake_catch_up)
+    monkeypatch.setattr(bot, "_check_permissions", fake_check_permissions)
     await bot.on_ready()
     assert alerts == []
 
