@@ -1,8 +1,10 @@
-"""Tests for `render_run_report` (design.md §6): the admin-channel run report.
+"""Tests for `render_run_report` (design.md §6, §13): the admin-channel run report.
 
 Same fixture-building style as test_format.py -- plain dataclasses, no
 Discord connection needed, since `render_run_report` (like the rest of
-`format.py`) only ever builds a string.
+`format.py`) only ever builds a string. v2.0 replaced the single shared
+header's jump link with one `[jump]` per topic that actually posted
+(`posted_by_topic`, keyed by topic key -> message id).
 """
 
 from __future__ import annotations
@@ -16,9 +18,9 @@ from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import Usage
 
 RUN_DATE = date(2026, 9, 27)  # a Sunday
-BL4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
-PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", channel_id=1, aliases=[], entities=[])
+BL4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=101, aliases=[], entities=[])
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=102, aliases=[], entities=[])
+DIABLO4 = Topic(key="diablo4", name="Diablo IV", channel_id=103, aliases=[], entities=[])
 TOPICS = [BL4, PALWORLD, DIABLO4]
 
 _EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)
@@ -68,8 +70,7 @@ def _render(**overrides):
         "duration": timedelta(minutes=1, seconds=52),
         "notes": [],
         "guild_id": 123456789012345678,
-        "channel_id": 123456789012345680,
-        "header_message_id": 555,
+        "posted_by_topic": {"borderlands4": 555, "palworld": 556, "diablo4": 557},
     }
     kwargs.update(overrides)
     return render_run_report(**kwargs)
@@ -82,11 +83,24 @@ def test_ok_report_matches_the_design_doc_example_shape():
     text = _render()
     lines = text.splitlines()
     assert lines[0] == "✅ **Digest posted** · Sun Sep 27 (scheduled)"
-    assert lines[1] == "7 stories: Borderlands 4 2 · Palworld 1 · Diablo IV 4"
+    assert lines[1].startswith("7 stories: Borderlands 4 2 [jump]")
+    assert "Palworld 1 [jump]" in lines[1]
+    assert "Diablo IV 4 [jump]" in lines[1]
     assert lines[2] == "Sources: 3 of 3 ok"
-    assert lines[3].startswith("Claude: ~$0.02 · took 1m52s")
-    assert "[jump to digest](<https://discord.com/channels/" in lines[3]
-    assert "/555>)" in lines[3]
+    assert lines[3] == "Claude: ~$0.02 · took 1m52s"
+
+
+def test_jump_link_points_at_the_topics_own_channel_and_message():
+    text = _render()
+    assert "https://discord.com/channels/123456789012345678/101/555" in text
+    assert "https://discord.com/channels/123456789012345678/102/556" in text
+
+
+def test_topic_with_no_post_has_no_jump_link():
+    text = _render(posted_by_topic={"borderlands4": 555})
+    story_line = text.splitlines()[1]
+    assert "Palworld 1 ·" in story_line or story_line.endswith("Palworld 1")
+    assert "Palworld 1 [jump]" not in story_line
 
 
 def test_partial_report_uses_the_gaps_emoji_and_wording():
@@ -131,23 +145,32 @@ def test_run_now_report_never_mentions_a_user_id():
 
 def test_story_counts_are_per_topic_in_config_order_including_zero():
     summaries = {"borderlands4": _summary("borderlands4", 3)}
-    text = _render(summaries=summaries, fallback_items={})
-    assert "3 stories: Borderlands 4 3 · Palworld 0 · Diablo IV 0" in text
+    text = _render(summaries=summaries, fallback_items={}, posted_by_topic={"borderlands4": 1})
+    story_line = text.splitlines()[1]
+    assert story_line.startswith("3 stories: Borderlands 4 3 [jump]")
+    assert "Palworld 0 · Diablo IV 0" in story_line
 
 
 def test_zero_story_day_reports_zero_for_every_topic():
-    text = _render(summaries={}, fallback_items={})
+    text = _render(summaries={}, fallback_items={}, posted_by_topic={})
     assert "0 stories: Borderlands 4 0 · Palworld 0 · Diablo IV 0" in text
 
 
 def test_fallback_topic_counts_its_fallback_headlines():
     # design.md: a topic that fell back to a plain headline list counts
     # those headlines, not "0" and not the (nonexistent) story count --
-    # matching the digest header's own _story_count behavior.
+    # matching render_digest's own _story_count behavior.
     summaries = {"borderlands4": _summary("borderlands4", 0, fallback=True, note="unavailable")}
     fallback_items = {"borderlands4": ["item1", "item2", "item3"]}
-    text = _render(summaries=summaries, fallback_items=fallback_items, status="partial")
-    assert "3 stories: Borderlands 4 3 · Palworld 0 · Diablo IV 0" in text
+    text = _render(
+        summaries=summaries,
+        fallback_items=fallback_items,
+        status="partial",
+        posted_by_topic={"borderlands4": 1},
+    )
+    story_line = next(line for line in text.splitlines() if line.startswith("3 stories:"))
+    assert "Borderlands 4 3 [jump]" in story_line
+    assert "Palworld 0 · Diablo IV 0" in story_line
 
 
 # --- sources line ---
@@ -218,19 +241,19 @@ def test_duration_over_a_minute_shows_minutes_and_seconds():
     assert "took 1m52s" in text
 
 
-# --- jump link ---
+# --- jump links ---
 
 
-def test_missing_header_message_id_omits_the_jump_link_entirely():
-    text = _render(header_message_id=None)
-    assert "jump to digest" not in text
+def test_no_posts_at_all_omits_every_jump_link():
+    text = _render(posted_by_topic={})
+    assert "jump" not in text
     # the rest of the cost line should still be there
     assert "Claude:" in text and "took" in text
 
 
-def test_jump_link_uses_guild_channel_and_message_id():
-    text = _render(guild_id=111, channel_id=222, header_message_id=333)
-    assert "https://discord.com/channels/111/222/333" in text
+def test_jump_link_uses_guild_topic_channel_and_message_id():
+    text = _render(guild_id=111, posted_by_topic={"borderlands4": 333})
+    assert "https://discord.com/channels/111/101/333" in text
 
 
 # --- escaping hostile input ---
@@ -238,7 +261,7 @@ def test_jump_link_uses_guild_channel_and_message_id():
 
 def test_hostile_topic_name_is_escaped():
     hostile = Topic(key="x", name="@everyone **x**", channel_id=1, aliases=[], entities=[])
-    text = _render(topics=[hostile], summaries={}, fallback_items={})
+    text = _render(topics=[hostile], summaries={}, fallback_items={}, posted_by_topic={})
     assert "@everyone" not in text
     assert "**x**" not in text
 
@@ -268,6 +291,7 @@ def test_astral_emoji_and_long_names_stay_under_the_cap():
         fallback_items={},
         results=results,
         status="partial",
+        posted_by_topic={},
     )
     assert discord_len(text) <= 2000
 
@@ -321,9 +345,9 @@ def test_error_string_with_backticks_and_newlines_stays_on_one_escaped_line():
 
 def test_identical_topic_names_are_both_shown_with_their_own_counts():
     a = Topic(key="dupe_a", name="Same Name", channel_id=1, aliases=[], entities=[])
-    b = Topic(key="dupe_b", name="Same Name", channel_id=1, aliases=[], entities=[])
+    b = Topic(key="dupe_b", name="Same Name", channel_id=2, aliases=[], entities=[])
     summaries = {"dupe_a": _summary("dupe_a", 2), "dupe_b": _summary("dupe_b", 5)}
-    text = _render(topics=[a, b], summaries=summaries, fallback_items={})
+    text = _render(topics=[a, b], summaries=summaries, fallback_items={}, posted_by_topic={})
     assert "Same Name 2 · Same Name 5" in text
 
 
@@ -331,7 +355,7 @@ def test_zero_topics_configured_still_renders_a_sane_zero_stories_line():
     # config.py has no minimum-topics check -- an owner could ship a
     # config with an empty topics list (everything filtered out by other
     # means), so render_run_report must not crash on it.
-    text = _render(topics=[], summaries={}, fallback_items={})
+    text = _render(topics=[], summaries={}, fallback_items={}, posted_by_topic={})
     assert "0 stories: " in text
 
 
@@ -375,13 +399,17 @@ def test_content_exactly_at_the_2000_unit_boundary_with_astral_chars_is_not_trun
     pad_units = max(room, 0)
     pad = "🤖" * (pad_units // 2)
     hostile_topic = Topic(key="x", name="Pad" + pad, channel_id=1, aliases=[], entities=[])
-    text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
+    text = _render(
+        topics=[hostile_topic], summaries={}, fallback_items={}, status="ok", posted_by_topic={}
+    )
     assert discord_len(text) <= 2000
 
 
 def test_content_one_astral_char_over_the_boundary_truncates_without_a_lone_surrogate():
     hostile_topic = Topic(key="x", name="🤖" * 1200, channel_id=1, aliases=[], entities=[])
-    text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
+    text = _render(
+        topics=[hostile_topic], summaries={}, fallback_items={}, status="ok", posted_by_topic={}
+    )
     assert discord_len(text) <= 2000
     # A truncated lone surrogate encodes as a replacement char with
     # 'surrogatepass'-style errors; round-tripping through UTF-16 without
@@ -409,3 +437,31 @@ def test_notes_are_truncated_before_source_detail_is_dropped():
     text = _render(results=results, notes=notes, status="partial")
     assert discord_len(text) <= 2000
     assert "only-bad-source: short error" in text
+
+
+def test_jump_links_are_shed_before_the_report_falls_back_to_flat_truncation():
+    # Plan step 3's shedding order: notes, then source detail, then the
+    # per-topic jump links, then flat truncation. Many topics with long
+    # names, each carrying its own jump link, is what actually overflows
+    # even the bare (no-per-source-detail) sources line -- check the
+    # links vanish (but the story counts don't) before content starts
+    # getting clipped mid-line.
+    topics = [
+        Topic(key=f"t{i}", name=f"Topic Number {i} " + "x" * 20, channel_id=i + 1)
+        for i in range(20)
+    ]
+    summaries = {t.key: _summary(t.key, 1) for t in topics}
+    posted_by_topic = {t.key: 1000 + i for i, t in enumerate(topics)}
+    results = [CollectorResult(f"bad{i}", "rss", [], error="x" * 50) for i in range(10)]
+    text = _render(
+        topics=topics,
+        summaries=summaries,
+        fallback_items={},
+        results=results,
+        status="partial",
+        posted_by_topic=posted_by_topic,
+    )
+    assert discord_len(text) <= 2000
+    story_line = next(line for line in text.splitlines() if "stories:" in line)
+    assert "[jump]" not in story_line
+    assert "Topic Number 0" in story_line

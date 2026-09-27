@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
@@ -37,11 +38,14 @@ from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView, Usage
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
-_MESSAGE_TOTAL_LIMIT = 6000
-_MAX_EMBEDS_PER_MESSAGE = 10
-_HEADER_LIMIT = 2000
 _MAX_LINKS_SHOWN = 3
 _MAX_FIELD_VALUE = 1024
+# design.md §13, D1: a coverage note ("Brave search skipped: quota exceeded")
+# now rides along in the footer of every topic embed that actually posts,
+# since there's no shared header message left for it to live in. Capped well
+# under an embed footer's real 2048-unit limit -- a footer is meant to be a
+# quiet aside, not a second description.
+_COVERAGE_FOOTER_LIMIT = 512
 # Discord's plain-message content cap (as opposed to an embed's much bigger
 # limits above) -- code alerts are plain messages, not embeds, since a code
 # is meant to be select-and-copy-able, and an embed's description puts a
@@ -195,6 +199,12 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
 
 
 def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
+    # By the time this is called, render_digest has already decided this
+    # topic has something to say (design.md §13: a topic with nothing posts
+    # nothing, rather than an embed reading "No new stories today.") -- this
+    # still handles an empty list defensively, since a caller outside
+    # render_digest (a future one, or a test) shouldn't get a crash instead
+    # of a sane-looking embed for the case that's genuinely rare now.
     color = _topic_color(topic.key)
     title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
     if not stories:
@@ -245,45 +255,6 @@ def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> d
     )
 
 
-def _embed_len(embed: discord.Embed) -> int:
-    """`discord.Embed.__len__`, but counted in UTF-16 units instead of codepoints.
-
-    Mirrors discord.py's own `__len__` (title + description + every
-    field's name and value + footer text + author name) field for field,
-    since that total -- not any individual piece -- is what
-    `_MESSAGE_TOTAL_LIMIT` (Discord's 6000-per-message cap) is measured
-    against.
-    """
-    total = discord_len(embed.title or "") + discord_len(embed.description or "")
-    for field in embed.fields:
-        total += discord_len(field.name or "") + discord_len(field.value or "")
-    if embed.footer and embed.footer.text:
-        total += discord_len(embed.footer.text)
-    if embed.author and embed.author.name:
-        total += discord_len(embed.author.name)
-    return total
-
-
-def _pack_messages(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
-    """Greedily pack embeds into messages, respecting the 10-embed and 6000-char caps."""
-    messages: list[list[discord.Embed]] = []
-    current: list[discord.Embed] = []
-    current_total = 0
-    for embed in embeds:
-        embed_len = _embed_len(embed)
-        if current and (
-            len(current) >= _MAX_EMBEDS_PER_MESSAGE
-            or current_total + embed_len > _MESSAGE_TOTAL_LIMIT
-        ):
-            messages.append(current)
-            current, current_total = [], 0
-        current.append(embed)
-        current_total += embed_len
-    if current:
-        messages.append(current)
-    return messages
-
-
 def _story_count(
     topic: Topic, summaries: dict[str, TopicSummary], fallback_items: dict[str, list[TopicItem]]
 ) -> int:
@@ -295,26 +266,43 @@ def _story_count(
     return len(summary.stories)
 
 
-def _header(
-    run_date: date,
-    topics: list[Topic],
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    coverage_notes: list[str],
-) -> str:
-    counts = " · ".join(
-        f"{esc(topic.name)}: {_story_count(topic, summaries, fallback_items)}" for topic in topics
-    )
-    lines = [f"**News digest — {run_date.isoformat()}**", counts]
-    if coverage_notes:
-        lines.append("\n".join(f"- {esc(note)}" for note in coverage_notes))
-    return _truncate_description("\n".join(lines), _HEADER_LIMIT)
+def _coverage_footer(coverage_notes: list[str]) -> str | None:
+    """The footer text every posted topic embed carries today's coverage notes in (D1).
+
+    v1 put these in the header, under a shared message every topic's
+    embeds rode along with; v2 has no header left, so each embed that
+    actually posts gets its own copy in the footer instead -- a reader
+    looking at just the Palworld channel still gets to know Brave search
+    was skipped today, without needing a digest-wide message that no
+    longer exists to tell them.
+    """
+    if not coverage_notes:
+        return None
+    text = "Reduced coverage today: " + "; ".join(coverage_notes)
+    return _truncate_utf16(esc(text), _COVERAGE_FOOTER_LIMIT, suffix="…")
+
+
+@dataclass
+class TopicMessage:
+    """One topic's own digest post: one embed, to one channel (design.md §13).
+
+    v1 packed every topic's embed under a shared header message in one
+    channel; v2 gives each game its own channel and drops the header and
+    the discussion thread entirely, so there's no longer anything to pack
+    -- one topic, one embed, one message, one channel.
+    """
+
+    topic_key: str
+    topic_name: str
+    channel_id: int
+    embed: discord.Embed
 
 
 @dataclass
 class RenderedDigest:
-    header: str
-    embed_messages: list[list[discord.Embed]]  # each inner list is one Discord message
+    run_date: date
+    messages: list[TopicMessage]
+    coverage_notes: list[str]
 
 
 def render_digest(
@@ -324,23 +312,36 @@ def render_digest(
     fallback_items: dict[str, list[TopicItem]],
     coverage_notes: list[str],
 ) -> RenderedDigest:
-    """Render one day's digest: a header plus embeds packed into messages.
+    """Render one day's digest: one `TopicMessage` per topic that actually has something to say.
 
     A topic with no `TopicSummary` at all (nothing was collected for it
-    today) renders the same empty state as one that got items but no
-    stories -- from a reader's chair, "nothing happened" and "we found
-    nothing worth a story" look identical, and should.
+    today), an empty stories list, or a fallback with no items to list
+    gets no message at all -- design.md §13's "nothing posted for a game
+    with no news" (owner decision A). Topics post in config order,
+    matching the order `topics` was handed in.
     """
-    embeds = []
+    footer = _coverage_footer(coverage_notes)
+    messages = []
     for topic in topics:
         summary = summaries.get(topic.key)
         if summary is not None and summary.fallback:
-            embeds.append(_fallback_embed(topic, fallback_items.get(topic.key, []), summary.note))
+            items = fallback_items.get(topic.key, [])
+            if not items:
+                continue
+            embed = _fallback_embed(topic, items, summary.note)
         else:
-            embeds.append(_topic_embed(topic, summary.stories if summary else []))
-
-    header = _header(run_date, topics, summaries, fallback_items, coverage_notes)
-    return RenderedDigest(header=header, embed_messages=_pack_messages(embeds))
+            stories = summary.stories if summary else []
+            if not stories:
+                continue
+            embed = _topic_embed(topic, stories)
+        if footer:
+            embed.set_footer(text=footer)
+        messages.append(
+            TopicMessage(
+                topic_key=topic.key, topic_name=topic.name, channel_id=topic.channel_id, embed=embed
+            )
+        )
+    return RenderedDigest(run_date=run_date, messages=messages, coverage_notes=coverage_notes)
 
 
 def render_story_page(
@@ -646,15 +647,40 @@ def _report_date(run_date: date) -> str:
     return f"{run_date.strftime('%a %b')} {run_date.day}"
 
 
+def _report_jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
 def _report_story_counts_line(
     topics: list[Topic],
     summaries: dict[str, TopicSummary],
     fallback_items: dict[str, list[TopicItem]],
+    guild_id: int,
+    posted_by_topic: Mapping[str, int],
+    *,
+    with_links: bool = True,
 ) -> str:
-    counts = [(topic.name, _story_count(topic, summaries, fallback_items)) for topic in topics]
-    total = sum(c for _, c in counts)
-    per_topic = " · ".join(f"{esc(name)} {c}" for name, c in counts)
-    return f"{total} stories: {per_topic}"
+    """The run report's "N stories: ..." line, with a `[jump]` link per topic that posted.
+
+    design.md §13: each game now has its own channel and its own message,
+    so the one jump link v1's header carried becomes one *per topic* --
+    `posted_by_topic` (topic_key -> the message id `DiscordPublisher.publish`
+    actually got back) is empty for a topic that had nothing to post, and
+    `with_links=False` is `render_run_report`'s own shedding step when the
+    whole report doesn't fit under the cap otherwise.
+    """
+    parts = []
+    total = 0
+    for topic in topics:
+        count = _story_count(topic, summaries, fallback_items)
+        total += count
+        part = f"{esc(topic.name)} {count}"
+        message_id = posted_by_topic.get(topic.key) if with_links else None
+        if message_id is not None:
+            link = _report_jump_link(guild_id, topic.channel_id, message_id)
+            part += f" [jump](<{link}>)"
+        parts.append(part)
+    return f"{total} stories: " + " · ".join(parts)
 
 
 def _report_sources_line(results: list[CollectorResult]) -> str:
@@ -694,21 +720,9 @@ def _report_duration_str(duration: timedelta) -> str:
     return f"{seconds}s"
 
 
-def _report_jump_link(guild_id: int, channel_id: int, header_message_id: int | None) -> str | None:
-    if header_message_id is None:
-        return None
-    return f"https://discord.com/channels/{guild_id}/{channel_id}/{header_message_id}"
-
-
-def _report_cost_line(
-    usage: Usage, duration: timedelta, guild_id: int, channel_id: int, header_message_id: int | None
-) -> str:
+def _report_cost_line(usage: Usage, duration: timedelta) -> str:
     spend = estimate_spend_usd(usage.input_tokens, usage.output_tokens)
-    line = f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
-    link = _report_jump_link(guild_id, channel_id, header_message_id)
-    if link is not None:
-        line += f" · [jump to digest](<{link}>)"
-    return line
+    return f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
 
 
 def render_run_report(
@@ -724,32 +738,39 @@ def render_run_report(
     duration: timedelta,
     notes: list[str],
     guild_id: int,
-    channel_id: int,
-    header_message_id: int | None,
+    posted_by_topic: Mapping[str, int],
 ) -> str:
-    """Render the admin-channel run report (design.md §6): one plain-text message.
+    """Render the admin-channel run report (design.md §6, §13): one plain-text message.
 
     `results` is *this run's* collector results, not the cumulative
     `source_health` table -- an admin reading this wants to know what just
     happened, not the all-time record. `notes` is the same coverage-note
-    list `render_digest`'s header and `save_run`'s `error_notes` already
+    list `render_digest`'s footer and `save_run`'s `error_notes` already
     use; it only shows up here as a "Notes: ..." line when `status` is
-    `partial` and there's actually something to say.
+    `partial` and there's actually something to say. `posted_by_topic` is
+    `DiscordPublisher.publish`'s own return value: topic key -> the message
+    id that topic's embed actually landed with, missing for any topic that
+    had nothing to post -- that's what lets the stories line's `[jump]`
+    links point at the right message in the right channel per game
+    (design.md §13), instead of v1's one link to a header that no longer
+    exists.
 
     Kept under `_ALERT_CONTENT_LIMIT` (Discord's plain-message cap, the
     same 2000 UTF-16 units the SHiFT alert messages respect) by shedding
     detail in priority order if it doesn't fit: the notes line first, then
-    the per-source failure detail, then -- a case that shouldn't be
-    reachable given how short every other line is -- a flat truncation of
-    the whole thing.
+    the per-source failure detail, then the per-topic jump links, then --
+    a case that shouldn't be reachable given how short every other line
+    is -- a flat truncation of the whole thing.
     """
     header_line = (
         f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
         f"{_report_date(run_date)} ({run_kind})"
     )
-    story_line = _report_story_counts_line(topics, summaries, fallback_items)
+    story_line = _report_story_counts_line(
+        topics, summaries, fallback_items, guild_id, posted_by_topic
+    )
     sources_line = _report_sources_line(results)
-    cost_line = _report_cost_line(usage, duration, guild_id, channel_id, header_message_id)
+    cost_line = _report_cost_line(usage, duration)
 
     notes_line = None
     if status == "partial" and notes:
@@ -773,32 +794,44 @@ def render_run_report(
     if discord_len(content) <= _ALERT_CONTENT_LIMIT:
         return content
 
+    story_line_no_links = _report_story_counts_line(
+        topics, summaries, fallback_items, guild_id, posted_by_topic, with_links=False
+    )
+    content = "\n".join([header_line, story_line_no_links, bare_sources_line, cost_line])
+    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+        return content
+
     return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
 
 
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
-    Nobody's Discord client is involved in `--dry-run`, so the embeds'
-    structure (title, description, footer) gets flattened into something
-    readable on a terminal instead.
+    Nobody's Discord client is involved in `--dry-run`, so each topic's
+    embed gets flattened into something readable on a terminal instead,
+    headed by which channel it would have gone to (there's no header
+    message left to print ahead of it).
     """
-    parts = [r.header]
-    for message in r.embed_messages:
-        for embed in message:
-            parts.append(f"\n--- {embed.title or ''} ---")
-            if embed.description:
-                parts.append(str(embed.description))
-            for field in embed.fields:
-                parts.append(f"{field.name}: {field.value}")
-            if embed.footer and embed.footer.text:
-                parts.append(f"({embed.footer.text})")
-    return "\n".join(parts)
+    if not r.messages:
+        return "Nothing would post today: no game has news."
+    parts = []
+    for message in r.messages:
+        embed = message.embed
+        parts.append(f"--- #{message.channel_id} · {embed.title or ''} ---")
+        if embed.description:
+            parts.append(str(embed.description))
+        for field in embed.fields:
+            parts.append(f"{field.name}: {field.value}")
+        if embed.footer and embed.footer.text:
+            parts.append(f"({embed.footer.text})")
+        parts.append("")
+    return "\n".join(parts).rstrip()
 
 
 __all__ = [
     "RenderedAlert",
     "RenderedDigest",
+    "TopicMessage",
     "esc",
     "render_code_alerts",
     "render_digest",
