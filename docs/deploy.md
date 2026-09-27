@@ -822,104 +822,6 @@ Same answers as round 1. After the reboot, `lsb_release -ds` should say
 24.04, and you re-run the same Docker repository block and the same three
 checks.
 
-## 17. Upgrading to v2.0
-
-v2.0.0 (`docs/design.md` §13) is a breaking config change: the combined
-digest channel is gone, each game posts to its own channel, and SHiFT code
-alerts move to a dedicated channel of their own. Nothing about the
-database changes in a way that needs a restore -- migration 003 is
-additive, same as every migration before it -- but `config.yaml` needs
-real edits before the new image will even start, so do this on purpose,
-not as a surprise the morning after a routine `deploy.sh`.
-
-1. **Pick a quiet moment and back up the old config.** Right after that
-   day's 09:00 digest has posted, and well before the next one:
-   ```bash
-   cd /opt/newsbot
-   cp config.yaml config.v1.yaml
-   ```
-   Note the currently-pinned `TAG` in `.env` too (it should read
-   `TAG=1.3.0` if you've kept up with releases) -- that, plus
-   `config.v1.yaml`, is everything the rollback at the end of this section
-   needs.
-2. **Create four channels:** one per game (`#borderlands4`, `#palworld`,
-   `#diablo4`, or whatever names fit your server) and one for SHiFT codes
-   (`#shift-codes`). Set the bot role's permissions per channel:
-   - Each game channel: **View Channel, Send Messages, Embed Links**.
-   - The SHiFT codes channel: **View Channel, Send Messages, Mention
-     @everyone, @here, and All Roles**.
-   Copy each channel's id (right-click → Copy Channel ID; Developer Mode
-   has to be on in Discord's own settings for that option to show up).
-3. **Edit `config.yaml`:** remove `digest.channel_id` entirely, give every
-   topic its own `channel_id`, and add `alerts.channel_id` if SHiFT alerts
-   are on. For example, going from a v1 shape to v2:
-   ```yaml
-   # before (v1)
-   digest:
-     channel_id: 100000000000000001
-     time: "09:00"
-     timezone: "America/Los_Angeles"
-   alerts:
-     enabled: true
-   ```
-   ```yaml
-   # after (v2.0)
-   digest:
-     time: "09:00"
-     timezone: "America/Los_Angeles"
-   topics:
-     - key: borderlands4
-       name: "Borderlands 4"
-       channel_id: 100000000000000010   # #borderlands4
-       # ...aliases, entities, search_queries unchanged...
-     - key: palworld
-       name: "Palworld"
-       channel_id: 100000000000000011   # #palworld
-     - key: diablo4
-       name: "Diablo IV"
-       channel_id: 100000000000000012   # #diablo4
-   alerts:
-     enabled: true
-     channel_id: 100000000000000013     # #shift-codes
-   ```
-   `topics[].channel_id` is required for every topic now (not just the
-   ones with alerts); `alerts.channel_id` is required only if
-   `alerts.enabled` is `true`.
-4. **Validate the edit locally before touching prod** -- `load_config`
-   is the same check the container runs at startup, and it's a lot
-   cheaper to fail here than mid-deploy:
-   ```bash
-   python -c "from newsbot.config import load_config; load_config('config.yaml')"
-   ```
-   (from a checked-out copy of this repo with the venv active, pointed at
-   a copy of the edited prod `config.yaml` -- not the live file on the
-   Droplet, and never via `docker compose ... config` against the real
-   `.env`; see §4 above and `CLAUDE.md` for why that command specifically
-   is off the table.) A `ConfigError` here lists every problem at once,
-   same as it would on a real startup crash.
-5. **Wait for the `v2.0.0` tag's build**, same as any other release (§7):
-   `gh run list --limit 3` shows when it's done, or watch for
-   `manifest unknown` if you jump the gun.
-6. **Pin `TAG=2.0.0`** in `.env` and deploy the normal way:
-   ```bash
-   cd /opt/newsbot
-   ./scripts/deploy.sh
-   ```
-   This takes a backup first (per §9) and applies migration 003 at
-   startup -- both automatic, nothing extra to run by hand.
-7. **Check:** no startup permission-check admin alert (§13 of
-   `docs/design.md` -- one alert here would name exactly which channel and
-   permission is missing); `/newsbot status` healthy; `/shift codes`
-   lists the codes that were already in `alerted_codes` before the
-   upgrade, with any old roundup-only codes marked "from a roundup". The
-   next morning, check that each game channel got its own message and
-   that the admin run report's jump links point at the right channels.
-8. **Rollback,** if needed: restore `config.v1.yaml` over `config.yaml`,
-   set `TAG` back to `1.3.0` in `.env`, and deploy again (§8, Rollback,
-   above, has the general form of this). No database restore is
-   necessary either direction -- migration 003 stays applied and
-   harmless, the same as every additive migration before it.
-
 ### Bring the bot back
 
 ```bash
@@ -943,3 +845,122 @@ Restore the snapshot from the control panel, which puts the Droplet back
 exactly as it was before round 1, bot and all. Then `./scripts/deploy.sh`
 and carry on with your day, having learned something about Ubuntu that you
 will forget by the next upgrade.
+
+## 17. Upgrading to v2.0
+
+v2.0.0 (`docs/design.md` §13) is a breaking config change: the combined
+digest channel is gone, each game posts to its own channel, and SHiFT code
+alerts move to a dedicated channel of their own. Nothing about the
+database changes in a way that needs a restore -- migration 003 is
+additive, same as every migration before it -- but `config.yaml` needs
+real edits before the new image will even start, so do this on purpose,
+not as a surprise the morning after a routine `deploy.sh`.
+
+The config edit below happens on a *copy*, not on the live `config.yaml`,
+and the copy only becomes `config.yaml` in the last step, right before
+`deploy.sh` runs. That ordering matters: if something restarted the
+container in between (a host reboot, a manual `docker compose up`), the
+still-running `1.3.0` image would find a v2-shaped `config.yaml` --
+missing `digest.channel_id`, carrying an `alerts.channel_id` it doesn't
+recognize -- and crash-loop until someone noticed. Editing a copy means
+`config.yaml` stays v1.3.0-valid right up until the moment the new image
+is actually the one that's going to read it.
+
+1. **Pick a quiet moment and back up the old config.** Right after that
+   day's 09:00 digest has posted, and well before the next one:
+   ```bash
+   cd /opt/newsbot
+   cp config.yaml config.v1.yaml
+   ```
+   Note the currently-pinned `TAG` in `.env` too (it should read
+   `TAG=1.3.0` if you've kept up with releases) -- that, plus
+   `config.v1.yaml`, is everything the rollback at the end of this section
+   needs.
+2. **Create four channels:** one per game (`#borderlands4`, `#palworld`,
+   `#diablo4`, or whatever names fit your server) and one for SHiFT codes
+   (`#shift-codes`). Set the bot role's permissions per channel:
+   - Each game channel: **View Channel, Send Messages, Embed Links**.
+   - The SHiFT codes channel: **View Channel, Send Messages, Mention
+     @everyone, @here, and All Roles**.
+   Copy each channel's id (right-click → Copy Channel ID; Developer Mode
+   has to be on in Discord's own settings for that option to show up).
+3. **Copy `config.yaml` to `config.v2.yaml` and edit the copy:** remove
+   `digest.channel_id` entirely, give every topic its own `channel_id`,
+   and add `alerts.channel_id` if SHiFT alerts are on. `config.yaml`
+   itself stays untouched here.
+   ```bash
+   cp config.yaml config.v2.yaml
+   ```
+   For example, going from a v1 shape to v2:
+   ```yaml
+   # before (v1, config.v2.yaml starts as a copy of this)
+   digest:
+     channel_id: 100000000000000001
+     time: "09:00"
+     timezone: "America/Los_Angeles"
+   alerts:
+     enabled: true
+   ```
+   ```yaml
+   # after (v2.0, what config.v2.yaml should look like once edited)
+   digest:
+     time: "09:00"
+     timezone: "America/Los_Angeles"
+   topics:
+     - key: borderlands4
+       name: "Borderlands 4"
+       channel_id: 100000000000000010   # #borderlands4
+       # ...aliases, entities, search_queries unchanged...
+     - key: palworld
+       name: "Palworld"
+       channel_id: 100000000000000011   # #palworld
+     - key: diablo4
+       name: "Diablo IV"
+       channel_id: 100000000000000012   # #diablo4
+   alerts:
+     enabled: true
+     channel_id: 100000000000000013     # #shift-codes
+   ```
+   `topics[].channel_id` is required for every topic now (not just the
+   ones with alerts); `alerts.channel_id` is required only if
+   `alerts.enabled` is `true`.
+4. **Validate `config.v2.yaml` before touching prod's real config** --
+   `load_config` is the same check the container runs at startup, and
+   it's a lot cheaper to fail here than mid-deploy:
+   ```bash
+   python -c "from newsbot.config import load_config; load_config('config.v2.yaml')"
+   ```
+   (from a checked-out copy of this repo with the venv active, pointed at
+   a copy of the edited `config.v2.yaml` -- not the live file on the
+   Droplet, and never via `docker compose ... config` against the real
+   `.env`; see §4 above and `CLAUDE.md` for why that command specifically
+   is off the table.) A `ConfigError` here lists every problem at once,
+   same as it would on a real startup crash.
+5. **Wait for the `v2.0.0` tag's build**, same as any other release (§7):
+   `gh run list --limit 3` shows when it's done, or watch for
+   `manifest unknown` if you jump the gun.
+6. **Swap the config in and deploy in the same breath** -- pin `TAG=2.0.0`
+   in `.env`, then immediately:
+   ```bash
+   cd /opt/newsbot
+   mv config.v2.yaml config.yaml
+   ./scripts/deploy.sh
+   ```
+   Doing the `mv` any earlier is what step 3's warning above is about;
+   doing it right before `deploy.sh` means the window where `config.yaml`
+   is v2-shaped but the running container is still `1.3.0` is as close to
+   zero as this process gets. `deploy.sh` takes a backup first (per §9)
+   and applies migration 003 at startup -- both automatic, nothing extra
+   to run by hand.
+7. **Check:** no startup permission-check admin alert (§13 of
+   `docs/design.md` -- one alert here would name exactly which channel and
+   permission is missing); `/newsbot status` healthy; `/shift codes`
+   lists the codes that were already in `alerted_codes` before the
+   upgrade, with any old roundup-only codes marked "from a roundup". The
+   next morning, check that each game channel got its own message and
+   that the admin run report's jump links point at the right channels.
+8. **Rollback,** if needed: restore `config.v1.yaml` over `config.yaml`,
+   set `TAG` back to `1.3.0` in `.env`, and deploy again (§8, Rollback,
+   above, has the general form of this). No database restore is
+   necessary either direction -- migration 003 stays applied and
+   harmless, the same as every additive migration before it.
