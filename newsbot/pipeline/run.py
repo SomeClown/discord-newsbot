@@ -77,16 +77,12 @@ from newsbot.store.repo import (
     record_source_result,
     save_run,
 )
+from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
 if TYPE_CHECKING:
     from newsbot.shift.sweep import CodeAlertPoster, CodeCheckOutcome
 
 logger = logging.getLogger(__name__)
-
-# Discord asks for a User-Agent that identifies the bot and a way to
-# reach its operator; Reddit in particular is unforgiving about generic
-# ones (see docs/sources-research.md).
-_USER_AGENT = "discord-newsbot/1.0 (+https://github.com/, contact: owner)"
 
 _PRIOR_HEADLINE_WINDOW = timedelta(days=3)
 _COLLECT_TIMEOUT_S = 20.0
@@ -935,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging()
+    warn_if_contact_unset()
 
     if not args.config:
         print("newsbot: --config (or $NEWSBOT_CONFIG) is required", file=sys.stderr)
@@ -984,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = RunMode.POST if args.post_to_stdout else RunMode.PREVIEW
 
     async def _run() -> PipelineOutcome:
-        async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as http:
+        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
             deps = Deps(
                 cfg=cfg,
                 db_path=args.db,
@@ -1020,7 +1017,7 @@ def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) ->
     from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, run_code_sweep
 
     async def _run() -> CodeCheckOutcome | None:
-        async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as http:
+        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
             deps = SweepDeps(
                 cfg=cfg,
                 db_path=db_path,

@@ -51,6 +51,7 @@ from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store.db import connect
 from newsbot.store.models import DigestRow
 from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
+from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +93,6 @@ def _should_alert_two_instances(
 # is an outgoing connection. /tmp is fine for this: it's tmpfs in the
 # compose config, and the file's only job is to exist and be recent.
 HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not a real tempfile race)
-
-# Same string as pipeline/run.py's collector User-Agent (Reddit in
-# particular wants one that names the bot and a way to reach its
-# operator). Duplicated rather than imported because run.py's copy is a
-# module-private constant for its own CLI's httpx client; this one is for
-# the bot's, and the two clients happen to want the same string, not a
-# shared one.
-_USER_AGENT = "discord-newsbot/1.0 (+https://github.com/, contact: owner)"
 
 _RETENTION_DAYS = 90
 _HEARTBEAT_INTERVAL_S = 60
@@ -578,8 +571,9 @@ class NewsBot(discord.Client):
         from newsbot.bot.commands import make_admin_group, make_news_group, make_shift_group
 
         logger.info("newsbot starting", extra={"instance_id": _INSTANCE_ID, "hostname": _HOSTNAME})
+        warn_if_contact_unset()
 
-        self.http_client = httpx.AsyncClient(headers={"User-Agent": _USER_AGENT})
+        self.http_client = httpx.AsyncClient(headers=user_agent_headers())
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())
 
         self.tree.add_command(make_news_group(self.cfg, self.db_path))
