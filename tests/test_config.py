@@ -19,6 +19,7 @@ from newsbot.config import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
+MINIMAL = Path(__file__).parent.parent / "config.minimal.yaml"
 
 
 def test_valid_fixture_loads(monkeypatch):
@@ -339,6 +340,27 @@ def test_example_config_loads(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(EXAMPLE)
     assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
+
+
+def test_minimal_config_loads(monkeypatch):
+    # config.minimal.yaml (self-host plan task 4) is the other end of
+    # config.example.yaml: the smallest starting point a fork copies to
+    # config.yaml. If this doesn't load, the setup guide it's meant to
+    # anchor is lying.
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(MINIMAL)
+    assert {t.key for t in cfg.topics} == {"yourgame"}
+    assert len(cfg.sources) == 3
+    assert cfg.alerts.enabled is False
+
+
+def test_minimal_config_loads_without_brave_key_too(monkeypatch):
+    # BRAVE_API_KEY is optional; a fork that never sets it should still
+    # get a working bot with the web_search source quietly disabled, not
+    # a config error.
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    cfg = load_config(MINIMAL)
+    assert all(s.type != "web_search" for s in cfg.sources)
 
 
 def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):

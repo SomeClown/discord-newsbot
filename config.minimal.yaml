@@ -1,0 +1,76 @@
+# The smallest config.yaml that actually does something: one game, three
+# sources, no SHiFT alerts. config.example.yaml is the full, three-game,
+# fifteen-source config this bot actually runs in production, which is a
+# great reference and a slightly overwhelming place to start. This is the
+# other end: copy it to config.yaml, swap the placeholder Discord IDs
+# below for real ones, and you have a bot that starts up and has one
+# game's worth of news to post while you decide whether you want more.
+#
+# Every ID below that says "placeholder" is fake and must be replaced --
+# the bot will happily start up pointed at a channel that doesn't exist
+# and then fail confusingly later, which is a worse failure mode than a
+# config error at startup.
+
+guild_id: 123456789012345678          # placeholder -- your server's ID
+admin_channel_id: 123456789012345679  # placeholder -- optional; alerts go here
+admin_permission: manage_guild
+
+digest:
+  time: "09:00"
+  timezone: "America/Los_Angeles"     # any IANA zone; see /usr/share/zoneinfo or `timedatectl list-timezones`
+  lookback_hours: 24
+  max_items_per_topic: 60
+
+topics:
+  # One game to start. `key` has to be lowercase letters/digits/underscore
+  # and is what shows up in the database and slash-command choices;
+  # `name` is what actually gets posted and said to the model. Copy this
+  # block for a second game once you're happy with the first -- each one
+  # needs its own channel_id (v2.0: there's no shared digest channel
+  # anymore, every game posts to its own).
+  - key: yourgame
+    name: "Your Game"
+    channel_id: 111111111111111111  # placeholder -- this game's own channel
+    aliases: []          # alternate names/abbreviations worth matching, if the name alone is ambiguous
+    entities: []          # a studio/publisher name worth a looser (marked "uncertain") match
+    search_queries:       # literal Brave News queries for this topic; see docs/finding-sources.md
+      - "Your Game news"
+      - "Your Game update OR patch OR DLC"
+
+sources:
+  # A dedicated source: it names exactly one topic, so every item it
+  # returns counts as a confident match for that topic even if the text
+  # never says the game's name (design.md §4). Steam announcements are the
+  # easiest of these to find -- see docs/finding-sources.md for how to get
+  # the app_id.
+  - type: steam_news
+    name: "Your Game Steam"
+    app_id: 1234567  # placeholder -- steamdb.info or the store URL has this
+    topics: [yourgame]
+    trust: official
+
+  # An RSS feed, official or press: a developer blog, a YouTube channel
+  # (via feeds/videos.xml?channel_id=), a subreddit's /top/.rss?t=day, or
+  # a wide-coverage press feed with no `topics` at all (the keyword
+  # matcher decides what belongs where). docs/finding-sources.md has
+  # recipes for all of these.
+  - type: rss
+    name: "Your Game News"
+    url: "https://example.com/feed.xml"  # placeholder -- a real feed URL
+    topics: [yourgame]
+    trust: press
+
+  # Brave News search, catching outlets not already covered by name
+  # above. Needs BRAVE_API_KEY in .env to actually run; without it,
+  # load_config disables this source with a startup warning instead of
+  # failing, and --check-sources will say the same thing plainly.
+  - type: web_search
+    queries_per_topic: 2
+    trust: press
+
+# SHiFT code alerts (design.md §12) are Borderlands-family only and stay
+# off by default (AlertsCfg.enabled defaults to False even with this
+# whole block absent, same as here) -- there's nothing to uncomment for a
+# minimal single-topic start. See config.example.yaml's own alerts: block
+# and README.md's "SHiFT code alerts" section if your game actually has
+# redeem codes and you want the hourly sweep.
