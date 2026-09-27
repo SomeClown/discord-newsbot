@@ -465,3 +465,21 @@ def test_jump_links_are_shed_before_the_report_falls_back_to_flat_truncation():
     story_line = next(line for line in text.splitlines() if "stories:" in line)
     assert "[jump]" not in story_line
     assert "Topic Number 0" in story_line
+
+
+def test_http_status_error_keeps_the_whole_url_readable():
+    # The real 2026-09-27 report cut this off at "for url 'https://www.…",
+    # which is precisely the part an admin needs. The URL still comes out
+    # defused (not clickable), just complete.
+    error = (
+        "Client error '429 Too Many Requests' for url "
+        "'https://www.reddit.com/r/Palworld/new/.rss?limit=50'\n"
+        "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"
+    )
+    results = [_ok_result("a"), CollectorResult("r/Palworld", "rss", [], error=error)]
+    text = _render(results=results, status="partial")
+    sources_line = next(line for line in text.splitlines() if line.startswith("Sources:"))
+    assert "www.reddit.com/r/Palworld/new/.rss?limit=50'" in sources_line
+    assert "…" not in sources_line
+    assert "For more information" not in sources_line
+    assert "https://www.reddit.com" not in sources_line  # still defused

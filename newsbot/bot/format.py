@@ -902,7 +902,14 @@ _REPORT_HEADER_VERB = {"ok": "Digest posted", "partial": "Digest posted with gap
 _MAX_REPORT_SOURCES_SHOWN = 3
 # Each failed/skipped source's own first-error-line snippet, so one source
 # with a paragraph-long traceback in `error` can't eat the whole report.
-_MAX_REPORT_ERROR_SNIPPET = 60
+# This was 60, which sounded generous right up until the first real
+# failure: httpx's "Client error '429 Too Many Requests' for url '...'"
+# spends 50 of those before the URL even starts, so the one part you'd
+# actually want for troubleshooting was the part that got cut. 250 fits a
+# long feed URL with room to spare; three of them still leave the report
+# well under Discord's 2000-unit cap, and the shedding in
+# `render_run_report` covers anything stranger than that.
+_MAX_REPORT_ERROR_SNIPPET = 250
 
 
 def _report_date(run_date: date) -> str:

@@ -14,16 +14,12 @@ feature.
 
 **This guide describes v2.1.0 and later.** `--check-sources`,
 `NEWSBOT_CONTACT`, and multi-arch (amd64 + arm64) published images all
-arrive at v2.1.0; nothing below works against an older tag. As of this
-writing, `2.1.0` hasn't been tagged yet; check the
+arrive at v2.1.0; nothing below works against an older tag. The examples
+say `TAG=2.1.0`, but check the
 [Releases page](https://github.com/someclown/discord-newsbot/releases)
-before pinning `TAG=2.1.0` anywhere below, and use whatever the actual
-latest tag is once it exists. Until then, running from `main` (`TAG=latest`,
-or a fork's own CI build) gets you the same `--check-sources`/
-`NEWSBOT_CONTACT` support, just not yet under a stable version number, and
-**not yet as an arm64 image**: a Raspberry Pi or Apple Silicon Mac needs to
-build the image locally (§5 below) rather than pulling one, until the
-v2.1.0 tag's multi-arch build exists.
+and pin whatever the latest tag actually is; this guide won't be updated
+for every patch release, and I'd rather admit that now than have you
+find out.
 
 ## 1. Prerequisites
 
@@ -37,8 +33,7 @@ v2.1.0 tag's multi-arch build exists.
   both, so it runs unmodified on a typical cloud VM, a Raspberry Pi, or an
   Apple Silicon Mac. Builds before v2.1.0 are amd64-only; on arm64
   hardware, pinning one of those older tags means building locally instead
-  (§5 below); same as running against `main` before v2.1.0 is tagged (see
-  the version note above).
+  (§5 below).
 - **Python 3.14, if you want to run the CLI locally** (`--check-sources`,
   the offline `--dry-run`) instead of only through Docker. Entirely
   optional: §6 below has a Docker-only path for both. Setup, the same as
@@ -218,8 +213,8 @@ Three options, in order of least to most effort:
   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
   ```
   `docker-compose.prod.yml` defaults to `ghcr.io/someclown/discord-newsbot`
-  at `${TAG:-latest}`. Pin `TAG` in `.env` (e.g. `TAG=2.1.0`, once that tag
-  exists; see the version note near the top of this document) rather than
+  at `${TAG:-latest}`. Pin `TAG` in `.env` (e.g. `TAG=2.1.0`, or whatever the
+  latest release is; see the version note near the top of this document) rather than
   floating on `latest`, the same reasoning as [`docs/deploy.md`](deploy.md)'s own
   rollback section: knowing exactly what's running, and being able to undo
   an upgrade with a one-line `.env` edit, is worth the extra step.
