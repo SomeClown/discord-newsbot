@@ -215,7 +215,15 @@ async def test_web_search_collector_parses_fixture():
         assert request.headers["X-Subscription-Token"] == "brave-key"
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4"], entities=["Blizzard"])]
+    topics = [
+        Topic(
+            key="diablo4",
+            name="Diablo IV",
+            channel_id=1,
+            aliases=["Diablo 4"],
+            entities=["Blizzard"],
+        )
+    ]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -245,7 +253,7 @@ async def test_web_search_collector_full_text_is_none_for_null_description():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -264,8 +272,8 @@ async def test_web_search_collector_query_expansion_equals_topics_times_queries_
         return httpx.Response(200, content=body)
 
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[]),
-        Topic(key="palworld", name="Palworld", aliases=[], entities=[]),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[]),
+        Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[]),
     ]
     source = WebSearchSource(
         type="web_search",
@@ -292,7 +300,7 @@ async def test_web_search_collector_paces_queries_with_injected_sleep():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=2, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -305,7 +313,7 @@ async def test_web_search_collector_429_raises_quota_exceeded():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -317,7 +325,7 @@ async def test_web_search_collector_429_becomes_skipped_via_run_collectors():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     collector = WebSearchCollector(source, topics, "brave-key", sleep=_noop_sleep)
@@ -332,7 +340,7 @@ async def test_web_search_collector_402_also_raises_quota_exceeded():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(402)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -349,7 +357,7 @@ async def test_web_search_collector_queries_per_topic_larger_than_templates_uses
         calls.append(request.url.params["q"])
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=5, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -370,9 +378,12 @@ async def test_web_search_collector_uses_topic_search_queries_when_present():
         Topic(
             key="borderlands4",
             name="Borderlands 4",
+            channel_id=1,
             search_queries=["Borderlands 4 news", "Borderlands 4 update OR DLC OR patch"],
         ),
-        Topic(key="palworld", name="Palworld"),  # no search_queries: falls back to templates
+        Topic(
+            key="palworld", name="Palworld", channel_id=1
+        ),  # no search_queries: falls back to templates
     ]
     source = WebSearchSource(type="web_search", queries_per_topic=2, trust="press")
     transport = httpx.MockTransport(handler)
@@ -399,6 +410,7 @@ async def test_web_search_collector_topic_search_queries_still_capped_by_queries
         Topic(
             key="borderlands4",
             name="Borderlands 4",
+            channel_id=1,
             search_queries=["query one", "query two", "query three"],
         )
     ]
@@ -424,7 +436,7 @@ async def test_web_search_collector_skips_results_missing_url_or_title():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
@@ -453,7 +465,7 @@ async def test_web_search_collector_tolerates_a_null_description():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body)
 
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     source = WebSearchSource(type="web_search", queries_per_topic=1, trust="press")
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:

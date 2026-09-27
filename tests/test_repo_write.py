@@ -144,6 +144,40 @@ def test_mark_digest_failed(conn):
     assert row.error_notes == "boom"
 
 
+def test_mark_digest_failed_unions_with_ids_already_recorded(conn):
+    # A forced run-now that fails again after an earlier failure already
+    # recorded some ids must not overwrite them -- an unattended restart's
+    # catch-up check relies on posted_message_ids to know those messages
+    # exist and skip reposting them.
+    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
+    repo.mark_digest_failed(conn, digest_id, "first failure", [100, 200])
+
+    repo.mark_digest_failed(conn, digest_id, "second failure", [300])
+
+    row = repo.get_digest(conn, date(2026, 9, 23))
+    assert row.posted_message_ids == [100, 200, 300]
+    assert row.error_notes == "second failure"
+
+
+def test_mark_digest_failed_does_not_duplicate_ids(conn):
+    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
+    repo.mark_digest_failed(conn, digest_id, "first failure", [100, 200])
+
+    # Second attempt's own posted_by_topic includes 100 again (borderlands4
+    # never got recorded as skipped) plus a genuinely new id.
+    repo.mark_digest_failed(conn, digest_id, "second failure", [100, 300])
+
+    row = repo.get_digest(conn, date(2026, 9, 23))
+    assert row.posted_message_ids == [100, 200, 300]
+
+
+def test_mark_digest_failed_with_no_prior_ids_behaves_as_before(conn):
+    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
+    repo.mark_digest_failed(conn, digest_id, "boom", [100, 200])
+    row = repo.get_digest(conn, date(2026, 9, 23))
+    assert row.posted_message_ids == [100, 200]
+
+
 # --- record_source_result ---
 
 

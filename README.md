@@ -14,13 +14,12 @@ box it only knows about the three games above.
 
 ## What a digest looks like
 
-A digest is a header message (date, story counts per game, any coverage
-caveats) with a public thread attached for discussion, followed by one embed
-per game. Something like this (illustrative only — not real scraped
-content):
+As of v2.0, each game gets its own channel (`topics[].channel_id`) and its
+own message — no combined channel, no header, no discussion thread. A game
+with nothing new that day posts nothing at all. Something like this
+(illustrative only — not real scraped content), posted to that game's own
+`#borderlands4`:
 
-> **News for 2026-09-24** — Borderlands 4: 2 stories · Palworld: 0 · Diablo IV: 1
->
 > 🟢 **OFFICIAL · Hotfix 5 now live**
 > Fixes a crash on the Vault of the Traveler boss fight and adjusts loot drop
 > rates on Mayhem 6+.
@@ -32,8 +31,10 @@ content):
 > [PC Gamer](https://example.com) +2 more
 
 Stories are sorted official, then reported, then rumor, each labeled so
-nobody mistakes a leak for a patch note. A topic with nothing new just says
-"No new stories today."
+nobody mistakes a leak for a patch note. A coverage caveat ("Brave search
+skipped: quota exceeded"), if there is one that day, rides along in that
+game's own embed footer instead of a shared header — there's no longer a
+shared message for it to live in.
 
 ## Commands
 
@@ -53,6 +54,11 @@ nobody mistakes a leak for a patch note. A topic with nothing new just says
   sweep end to end, without waiting for a real code to show up. Only
   registered when `alerts.allow_test_command: true`; see
   [SHiFT code alerts](#shift-code-alerts) below.
+- **`/shift codes days:<1-90, default 14> public:<bool, default false>`** —
+  lists every SHiFT code the bot has ever seen and posted (or would have
+  posted) within the window, newest first, each with a copyable code block,
+  first-seen date, and source link. Only registered when `alerts.enabled:
+  true`; see [SHiFT code alerts](#shift-code-alerts) below.
 
 Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
@@ -87,7 +93,8 @@ A separate, near-real-time path alongside the daily digest (`alerts:` in
 `web_search` (no Claude call, no `items`/`stories` writes), and the daily
 09:00 run also checks its own collected items, looking for a SHiFT/Golden
 Key redeem code (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) in the item's full text.
-A new code posts to the digest channel with an `@everyone` ping.
+A new code posts to its own dedicated channel (`alerts.channel_id`, as of
+v2.0 — no more sharing the digest channel) with an `@everyone` ping.
 
 Safeguards, since a ping is the one thing this bot can do that's hard to
 take back:
@@ -117,26 +124,35 @@ take back:
   trusted code(s) first in the message. A batch with nothing trusted in
   it doesn't spend the daily cap either — there was nothing for the cap
   to actually stop.
-- **Roundups don't alert.** An item naming more than
+- **Roundups post, but without a ping.** An item naming more than
   `alerts.max_codes_per_item` (default 5) distinct codes is a roundup or
-  megathread, not a genuine single-code announcement — its codes are
-  recorded silently and never alert. A code that also shows up in a
-  normal, non-roundup item in the same run is judged entirely by that
-  normal item instead.
+  megathread, not a genuine single-code announcement. As of v2.0, a fresh
+  code whose only sightings are roundup items still posts to the SHiFT
+  channel — under a separate "SHiFT codes from a roundup" header naming
+  the source, never with `@everyone`, and never spending the daily ping
+  cap — capped at 50 fresh roundup codes per check; anything past that is
+  recorded silently instead, with an admin note. A code that also shows up
+  in a normal, non-roundup item in the same run is judged entirely by that
+  normal item instead, same as before.
 
 `/newsbot status` shows the last sweep's time and source summary, how many
 codes have ever posted, and today's ping spend against the cap (plus
-`(seeding)` while the marker's still unset). `/newsbot test-alert` — dev
+`(seeding)` while the marker's still unset). `/shift codes` (see
+[Commands](#commands) above) lists every code the bot knows about,
+including roundup ones, marked as such. `/newsbot test-alert` — dev
 only, gated behind `alerts.allow_test_command` — posts one fake code
 through the exact same claim/post/cap machinery a real one would use,
 which is how the private test guild verifies the whole path (including the
 Discord permission below) without waiting for Gearbox to hand out a code.
 
-**Discord permission required:** the bot's role needs **Mention @everyone,
-@here, and All Roles** in the digest channel. Without it, Discord still
-posts the alert message, it just silently drops the notification — the bot
+**Discord permission required:** the bot's role needs **View Channel**,
+**Send Messages**, and **Mention @everyone, @here, and All Roles** in the
+SHiFT codes channel. Without the mention permission, Discord still posts
+the alert message, it just silently drops the notification — the bot
 notices (it checks the permission before every ping) and sends an admin
-alert instead of failing quietly. See
+alert instead of failing quietly. On top of that per-ping check, the bot
+also checks every configured channel's permissions once at startup and
+sends a single admin alert naming anything missing anywhere — see
 [`docs/deploy.md`](docs/deploy.md) for how to grant it.
 
 ## Architecture
@@ -170,8 +186,9 @@ newsbot/
     repo.py         all queries (no SQL anywhere else)
   bot/
     client.py       discord client, scheduler wiring, heartbeat, code alert poster
-    commands.py     /news, /news search, /newsbot status|run-now|preview|test-alert
+    commands.py     /news, /news search, /newsbot status|run-now|preview|test-alert, /shift codes
     format.py       digest + result embeds + code alerts, paging, UTF-16-aware limits
+    permissions.py  startup check: does the bot have what it needs in every configured channel
   alerts.py         admin-channel notifications
   healthcheck.py    Docker HEALTHCHECK entry point (checks the heartbeat file)
 ```
@@ -283,9 +300,11 @@ also git-ignored.
 Highlights of the schema — see `config.example.yaml` for a complete, real
 example, and `docs/design.md` section 3 for the full spec:
 
-- **`topics`**: each has a `key`, display `name`, `aliases`, `entities`
-  (looser, "uncertain" matches), and optional `search_queries` used for that
-  topic's Brave News queries instead of the global templates.
+- **`topics`**: each has a `key`, display `name`, its own `channel_id` (as
+  of v2.0 — every game posts to its own channel, no shared fallback),
+  `aliases`, `entities` (looser, "uncertain" matches), and optional
+  `search_queries` used for that topic's Brave News queries instead of the
+  global templates.
 - **`sources`**: `rss`, `steam_news`, `bluesky_search`, and `web_search`.
   Each has a `trust` level (`official`, `press`, or `community`), which
   affects labeling and which items survive the per-topic cap.
@@ -293,6 +312,13 @@ example, and `docs/design.md` section 3 for the full spec:
   topic is a confident match for that topic even if the item's text never
   mentions the game by name — this is how, say, a Steam patch-notes post
   titled "v0.6.2 Update" still reaches the Palworld digest.
+- **`alerts.channel_id`**: required once `alerts.enabled: true` — SHiFT
+  code alerts post to this dedicated channel, not a game channel or the
+  admin channel.
+- There is no more `digest.channel_id` or a shared `alerts.channel_id`
+  fallback to it — that field was removed in v2.0 along with the combined
+  digest channel. An old v1 `config.yaml` still setting it fails config
+  validation with a message saying where each setting moved.
 - **Secrets** (`.env`): `DISCORD_TOKEN`, `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`,
   and optionally `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` for authenticated
   Bluesky search (see Limitations below).

@@ -31,7 +31,9 @@ from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.prompts import build_prompt
 from newsbot.store.models import PriorStory
 
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
+DIABLO4 = Topic(
+    key="diablo4", name="Diablo IV", channel_id=1, aliases=["Diablo 4", "D4"], entities=["Blizzard"]
+)
 
 
 def _topic_item(*, title="Diablo IV update", excerpt="Patch notes.", uncertain=False) -> TopicItem:

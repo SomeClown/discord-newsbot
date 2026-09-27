@@ -22,7 +22,7 @@ from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.summarize import StoriesOut, StoryOut, postprocess
 
 BORDERLANDS4 = Topic(
-    key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"]
+    key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"], entities=["Gearbox"]
 )
 
 

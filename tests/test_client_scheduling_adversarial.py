@@ -53,7 +53,11 @@ def db_path(tmp_path):
 def _cfg(*, alerts_enabled: bool, interval_minutes: int = 60):
     cfg = load_config(CONFIG_PATH)
     alerts = cfg.alerts.model_copy(
-        update={"enabled": alerts_enabled, "interval_minutes": interval_minutes}
+        update={
+            "enabled": alerts_enabled,
+            "channel_id": 999999999999999999,
+            "interval_minutes": interval_minutes,
+        }
     )
     return cfg.model_copy(update={"alerts": alerts})
 
@@ -124,6 +128,23 @@ async def test_code_sweep_job_disabled_by_default_config(db_path):
     assert bot.code_alert_poster is None
 
 
+# --- /shift codes registration (design.md §13, D4) ---
+
+
+async def test_shift_group_absent_when_alerts_disabled(db_path):
+    bot = NewsBot(_cfg(alerts_enabled=False), _secrets(), db_path)
+    await _run_setup_hook(bot)
+    assert bot.tree.get_command("shift") is None
+
+
+async def test_shift_group_present_when_alerts_enabled(db_path):
+    bot = NewsBot(_cfg(alerts_enabled=True), _secrets(), db_path)
+    await _run_setup_hook(bot)
+    group = bot.tree.get_command("shift")
+    assert group is not None
+    assert {c.name for c in group.commands} == {"codes"}
+
+
 # --- build_sweep_deps / build_deps ---
 
 
@@ -135,7 +156,7 @@ def _prep_bot_for_deps(cfg, db_path, *, secrets=None) -> NewsBot:
     bot = NewsBot(cfg, secrets or _secrets(), db_path)
     bot.http_client = httpx.AsyncClient()
     bot.llm = object()  # build_deps only checks it's not None
-    bot.code_alert_poster = DiscordCodeAlertPoster(bot, cfg.digest.channel_id)
+    bot.code_alert_poster = DiscordCodeAlertPoster(bot, cfg.alerts.channel_id)
     return bot
 
 
@@ -238,12 +259,19 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
 
     monkeypatch.setattr(bot, "alert", fake_alert)
 
-    # _catch_up would otherwise try a real pipeline run; short-circuit it
-    # since only the interrupted-codes reporting is under test here.
+    # _catch_up would otherwise try a real pipeline run, and
+    # _check_permissions would try real Discord HTTP calls this fake bot
+    # was never connected for -- short-circuit both, since only the
+    # interrupted-codes reporting is under test here (see
+    # test_permissions.py for the permission check itself).
     async def fake_catch_up() -> None:
         return None
 
+    async def fake_check_permissions() -> None:
+        return None
+
     monkeypatch.setattr(bot, "_catch_up", fake_catch_up)
+    monkeypatch.setattr(bot, "_check_permissions", fake_check_permissions)
 
     await bot.on_ready()
     assert len(alerts) == 1
@@ -269,8 +297,12 @@ async def test_no_interrupted_codes_means_no_startup_alert(db_path, monkeypatch)
     async def fake_catch_up() -> None:
         return None
 
+    async def fake_check_permissions() -> None:
+        return None
+
     monkeypatch.setattr(bot, "alert", fake_alert)
     monkeypatch.setattr(bot, "_catch_up", fake_catch_up)
+    monkeypatch.setattr(bot, "_check_permissions", fake_check_permissions)
     await bot.on_ready()
     assert alerts == []
 

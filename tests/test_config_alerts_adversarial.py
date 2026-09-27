@@ -20,6 +20,7 @@ VALID_TAIL = """
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -43,7 +44,6 @@ def test_alerts_explicitly_empty_block_gives_disabled_defaults(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -69,7 +69,6 @@ def test_alerts_explicit_null_is_rejected_not_silently_defaulted(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -85,7 +84,6 @@ def test_alerts_null_explicit_key_with_other_keys_present_still_rejected(tmp_pat
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}

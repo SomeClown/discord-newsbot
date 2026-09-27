@@ -12,9 +12,9 @@ from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import AlertStatus, DigestRow, SourceHealthRow, StatusSnapshot, Usage
 
 RUN_DATE = date(2026, 9, 23)
-BL4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
-PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=[], entities=[])
+BL4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=2, aliases=[], entities=[])
+DIABLO4 = Topic(key="diablo4", name="Diablo IV", channel_id=3, aliases=[], entities=[])
 TOPICS = [BL4, PALWORLD, DIABLO4]
 
 _EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)
@@ -47,6 +47,10 @@ def _topic_item(title="Item", url="https://example.com/item", source_name="Some 
         published_at=None,
     )
     return TopicItem(item=item, topic_key="palworld", uncertain=False)
+
+
+def _first_embed(rendered):
+    return rendered.messages[0].embed
 
 
 # --- esc ---
@@ -115,7 +119,7 @@ def test_stories_sort_official_then_reported_then_rumor():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert description.index("Official story") < description.index("Reported story")
     assert description.index("Reported story") < description.index("Rumor story")
 
@@ -128,7 +132,7 @@ def test_more_items_sort_before_fewer_within_same_label():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert description.index("Three links") < description.index("One link")
 
 
@@ -140,7 +144,7 @@ def test_update_gets_update_marker_and_sorts_within_its_label():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert "🔁 UPDATE" in description
     assert "🟢 OFFICIAL" in description
 
@@ -154,34 +158,57 @@ def test_4096_boundary_cuts_least_important_and_adds_more_line():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    embed = rendered.embed_messages[0][0]
+    embed = _first_embed(rendered)
     assert len(embed.description) <= 4096
     assert "more, use /news" in embed.description
     assert len(embed) <= 6000
 
 
-def test_three_large_topics_split_into_more_than_one_message():
-    long_summary = "y" * 380
-    stories = [_draft(f"Story {i}", summary=long_summary, label="official") for i in range(30)]
+def test_each_topic_gets_its_own_message_to_its_own_channel():
+    stories = [_draft("A")]
     summaries = {t.key: _summary(t.key, stories) for t in TOPICS}
     rendered = render_digest(RUN_DATE, TOPICS, summaries, {}, [])
-    assert len(rendered.embed_messages) >= 2
-    for message in rendered.embed_messages:
-        assert sum(len(e) for e in message) <= 6000
-        assert len(message) <= 10
+    assert len(rendered.messages) == 3
+    assert [m.channel_id for m in rendered.messages] == [1, 2, 3]
+    assert [m.topic_key for m in rendered.messages] == [t.key for t in TOPICS]
 
 
-# --- empty topic ---
+# --- empty topic: posts nothing at all (design.md §13) ---
 
 
-def test_empty_topic_shows_no_new_stories():
+def test_empty_topic_produces_no_message():
     rendered = render_digest(RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [])}, {}, [])
-    assert rendered.embed_messages[0][0].description == "No new stories today."
+    assert rendered.messages == []
 
 
-def test_topic_with_no_summary_at_all_also_shows_no_new_stories():
+def test_topic_with_no_summary_at_all_also_produces_no_message():
     rendered = render_digest(RUN_DATE, [PALWORLD], {}, {}, [])
-    assert rendered.embed_messages[0][0].description == "No new stories today."
+    assert rendered.messages == []
+
+
+def test_topics_with_and_without_news_only_the_first_posts():
+    stories = [_draft("A")]
+    summaries = {"borderlands4": _summary("borderlands4", stories)}
+    rendered = render_digest(RUN_DATE, TOPICS, summaries, {}, [])
+    assert [m.topic_key for m in rendered.messages] == ["borderlands4"]
+
+
+def test_all_empty_topics_gives_no_messages_at_all():
+    summaries = {t.key: _summary(t.key, []) for t in TOPICS}
+    rendered = render_digest(RUN_DATE, TOPICS, summaries, {}, [])
+    assert rendered.messages == []
+
+
+def test_message_order_follows_the_topics_argument_not_alphabetical_or_key_order():
+    # design.md §13: "Topics post in config order" -- render_digest must
+    # never impose an order of its own. Handed topics reversed from
+    # TOPICS's usual borderlands4/palworld/diablo4 order (which also isn't
+    # alphabetical, so a stray sort() on name or key would show up here).
+    reversed_topics = [DIABLO4, PALWORLD, BL4]
+    stories = [_draft("A")]
+    summaries = {t.key: _summary(t.key, stories) for t in reversed_topics}
+    rendered = render_digest(RUN_DATE, reversed_topics, summaries, {}, [])
+    assert [m.topic_key for m in rendered.messages] == ["diablo4", "palworld", "borderlands4"]
 
 
 # --- fallback ---
@@ -195,7 +222,7 @@ def test_fallback_topic_renders_items_as_headline_and_link_list():
         )
     }
     rendered = render_digest(RUN_DATE, [PALWORLD], summaries, {"palworld": items}, [])
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert "Patch notes posted" in description
     assert "<https://example.com/patch>" in description
     assert "Summary unavailable" in description
@@ -221,7 +248,7 @@ def test_story_url_with_breakout_characters_never_produces_a_masked_link():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert "](https://evil.example" not in description
     assert "> **boom**" not in description
 
@@ -235,19 +262,19 @@ def test_fallback_item_url_with_breakout_characters_never_produces_a_masked_link
         )
     }
     rendered = render_digest(RUN_DATE, [PALWORLD], summaries, {"palworld": [item]}, [])
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert "](https://evil.example" not in description
     assert "> **boom**" not in description
 
 
-def test_fallback_topic_with_no_items_shows_no_new_stories():
+def test_fallback_topic_with_no_items_produces_no_message():
     summaries = {
         "palworld": _summary(
             "palworld", fallback=True, note="Summary unavailable; showing headlines."
         )
     }
     rendered = render_digest(RUN_DATE, [PALWORLD], summaries, {"palworld": []}, [])
-    assert rendered.embed_messages[0][0].description == "No new stories today."
+    assert rendered.messages == []
 
 
 # --- escaping in real output ---
@@ -266,43 +293,57 @@ def test_headline_with_everyone_and_bold_is_escaped_in_embed():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
     )
-    description = rendered.embed_messages[0][0].description
+    description = _first_embed(rendered).description
     assert "**Big**" not in description
     assert "@everyone" not in description
 
 
-# --- coverage notes ---
+# --- coverage notes (D1: footer of every posted embed) ---
 
 
-def test_coverage_note_appears_in_header():
+def test_coverage_note_appears_in_every_posted_embeds_footer():
+    stories = [_draft("A")]
+    summaries = {t.key: _summary(t.key, stories) for t in TOPICS}
     rendered = render_digest(
-        RUN_DATE,
-        [PALWORLD],
-        {"palworld": _summary("palworld", [])},
-        {},
-        ["Brave search skipped: quota exceeded"],
+        RUN_DATE, TOPICS, summaries, {}, ["Brave search skipped: quota exceeded"]
     )
-    assert "Brave search skipped: quota exceeded" in rendered.header
+    assert len(rendered.messages) == 3
+    for message in rendered.messages:
+        assert "Brave search skipped: quota exceeded" in message.embed.footer.text
 
 
-def test_header_has_per_topic_story_counts():
-    stories = [_draft("A"), _draft("B")]
+def test_no_coverage_notes_leaves_footer_unset():
     rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
+        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [_draft("A")])}, {}, []
     )
-    assert "Palworld: 2" in rendered.header
+    assert _first_embed(rendered).footer.text is None
+
+
+def test_empty_topic_with_coverage_notes_still_produces_no_message():
+    # A topic that isn't posting shouldn't get a footer added to an embed
+    # that never gets sent.
+    rendered = render_digest(
+        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [])}, {}, ["some note"]
+    )
+    assert rendered.messages == []
 
 
 # --- to_text ---
 
 
-def test_to_text_includes_header_and_topic_titles():
+def test_to_text_includes_channel_and_topic_titles():
     rendered = render_digest(
         RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [_draft("A")])}, {}, []
     )
     text = to_text(rendered)
     assert "Palworld" in text
     assert "A" in text
+    assert "#2" in text  # PALWORLD's channel_id
+
+
+def test_to_text_with_nothing_to_post_says_so():
+    rendered = render_digest(RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [])}, {}, [])
+    assert to_text(rendered) == "Nothing would post today: no game has news."
 
 
 # --- render_status ---

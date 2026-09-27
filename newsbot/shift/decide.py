@@ -28,6 +28,17 @@ from newsbot.store.models import AlertState
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
+# design.md §13, D3 (owner decision, 2026-09-26): at most this many fresh
+# roundup-only codes post per check, first-seen order. A roundup thread
+# that names sixty codes in one post is a Reddit megathread, not sixty
+# separate announcements, and the SHiFT channel doesn't need to receive
+# all of them back to back just because none of them happened to ping.
+# Codes past the cap are recorded silently as `'roundup'` (same as v1's
+# "every roundup code is silent" behavior) rather than dropped -- they're
+# still known codes, `/shift codes` still lists them, they just didn't get
+# a message this check.
+MAX_ROUNDUP_CODES = 50
+
 
 @dataclass(frozen=True)
 class CodeSighting:
@@ -76,13 +87,20 @@ class AlertPlan:
 
     `silent` pairs a candidate with why it's being recorded without a post
     (`"seeded"` while the marker is unset, A1; `"too_old"` once seeded but
-    stale, A11). `to_post` is already in the order an alert message should
-    announce them. `mark_seeded` tells the caller whether this batch is the
-    one that gets to flip the marker on.
+    stale, A11; `"roundup"` for a fresh roundup-only code that overflowed
+    `MAX_ROUNDUP_CODES`, design.md §13 D3). `to_post` is already in the
+    order an alert message should announce them; `roundup_to_post` is the
+    same idea for fresh roundup-only codes (design.md §13: these now post
+    too, just unpinged and in their own "from a roundup" message) --
+    kept separate from `to_post` because roundup codes never contribute to
+    `ping`/`cap_reached` and never spend the ping budget. `mark_seeded`
+    tells the caller whether this batch is the one that gets to flip the
+    marker on.
     """
 
     silent: list[tuple[CodeCandidate, str]]
     to_post: list[CodeCandidate]
+    roundup_to_post: list[CodeCandidate]
     ping: bool
     cap_reached: bool
     mark_seeded: bool
@@ -254,6 +272,27 @@ def pings_used_today(state: AlertState, today: str) -> int:
     return state.ping_count if state.ping_day == today else 0
 
 
+def group_roundups(candidates: list[CodeCandidate]) -> list[list[CodeCandidate]]:
+    """Group roundup candidates by the item they came from (`source_name`, `item_url`).
+
+    `format.render_roundup_alerts` needs this: one roundup post can name
+    several codes, and design.md §13 wants one header (naming that post)
+    per group, not one header per code. Groups come back in the order
+    their first member first appeared in `candidates`; a group's own
+    members keep `candidates`' relative order too -- both first-seen,
+    matching every other ordering rule in this module.
+    """
+    order: list[tuple[str, str]] = []
+    by_key: dict[tuple[str, str], list[CodeCandidate]] = {}
+    for c in candidates:
+        key = (c.source_name, c.item_url)
+        if key not in by_key:
+            order.append(key)
+            by_key[key] = []
+        by_key[key].append(c)
+    return [by_key[key] for key in order]
+
+
 def plan_alerts(
     candidates: list[CodeCandidate],
     *,
@@ -262,43 +301,52 @@ def plan_alerts(
     seeding_ok: bool,
     pings_today: int,
     max_pings: int,
+    max_roundup_codes: int = MAX_ROUNDUP_CODES,
 ) -> AlertPlan:
-    """Turn this batch's candidates into what to record and what to post.
+    """Turn this batch's candidates into what to record, post, and post-unpinged.
 
     Codes already in `known` (any status, ever) are dropped outright --
-    they're not this function's business anymore. A roundup-only code
-    (owner decision, 2026-09-25 -- `CodeCandidate.roundup`) is recorded
-    silently as `"roundup"` regardless of `seeded`, and never reaches the
-    rest of this logic at all: it was never a genuine single-code
-    announcement, so there's nothing to seed, age out, or post. What's
-    left of `new_candidates` splits on `seeded`:
+    they're not this function's business anymore. What's left splits into
+    a roundup-only pipeline and a normal one (`CodeCandidate.roundup`);
+    both then split the same way on `seeded`, but only the normal pipeline
+    ever contributes to `to_post`, `ping`, or `cap_reached` -- design.md
+    §13's "roundup posts never spend the ping budget."
 
-    - **Unseeded** (A1): every new code is recorded silently as `"seeded"`,
-      nothing posts, and `mark_seeded` becomes `seeding_ok` -- the caller
-      only gets to flip the marker on if this batch was healthy.
-    - **Seeded**: stale codes (A11) are recorded silently as `"too_old"`
-      and never get another chance; fresh codes are queued to post, in
-      first-seen order with every `trusted` one moved ahead of every
-      untrusted one (still first-seen order within each group) so a
-      pinging batch's first message is guaranteed to carry a trusted
-      code. One ping covers the whole batch (A4), gated on trust (owner
-      decision, 2026-09-25, QA item 7 option A): `ping` is true only if
-      at least one candidate queued to post is `trusted` *and* the day's
-      budget isn't spent -- a batch made entirely of community-only codes
-      still posts every one of them, just never with a ping, and never
-      spends or reports against the cap for it. `cap_reached` says the
-      budget (not "nothing trusted to post") is what stopped the ping --
-      a caller uses that to decide whether an admin alert about the cap
-      is warranted.
+    - **Unseeded** (A1): every new code, roundup included, is recorded
+      silently as `"seeded"`, nothing posts, and `mark_seeded` becomes
+      `seeding_ok` -- the caller only gets to flip the marker on if this
+      batch was healthy.
+    - **Seeded**: stale codes (A11), roundup included, are recorded
+      silently as `"too_old"` and never get another chance. Fresh normal
+      codes are queued to `to_post`, in first-seen order with every
+      `trusted` one moved ahead of every untrusted one (still first-seen
+      order within each group) so a pinging batch's first message is
+      guaranteed to carry a trusted code. Fresh roundup codes are queued
+      to `roundup_to_post`, first-seen order, capped at
+      `max_roundup_codes` (D3) -- anything past the cap is recorded
+      silently as `"roundup"` instead, the same status v1 gave every
+      roundup code, unconditionally.
+
+    One ping covers the whole normal batch (A4), gated on trust (owner
+    decision, 2026-09-25, QA item 7 option A): `ping` is true only if at
+    least one candidate queued to `to_post` is `trusted` *and* the day's
+    budget isn't spent -- a batch made entirely of community-only codes
+    still posts every one of them, just never with a ping, and never
+    spends or reports against the cap for it. `cap_reached` says the
+    budget (not "nothing trusted to post") is what stopped the ping -- a
+    caller uses that to decide whether an admin alert about the cap is
+    warranted.
     """
     new_candidates = [c for c in candidates if c.code not in known]
-    roundup_silent = [(c, "roundup") for c in new_candidates if c.roundup]
+    roundup_candidates = [c for c in new_candidates if c.roundup]
     new_candidates = [c for c in new_candidates if not c.roundup]
 
     if not seeded:
+        silent = [(c, "seeded") for c in roundup_candidates + new_candidates]
         return AlertPlan(
-            silent=roundup_silent + [(c, "seeded") for c in new_candidates],
+            silent=silent,
             to_post=[],
+            roundup_to_post=[],
             ping=False,
             cap_reached=False,
             mark_seeded=seeding_ok,
@@ -312,9 +360,21 @@ def plan_alerts(
     any_trusted = any(c.trusted for c in fresh_ordered)
     ping = any_trusted and pings_today < max_pings
     cap_reached = any_trusted and not ping
+
+    roundup_stale = [c for c in roundup_candidates if not c.fresh]
+    roundup_fresh = [c for c in roundup_candidates if c.fresh]
+    roundup_to_post = roundup_fresh[:max_roundup_codes]
+    roundup_overflow = roundup_fresh[max_roundup_codes:]
+
+    silent = (
+        [(c, "too_old") for c in stale]
+        + [(c, "too_old") for c in roundup_stale]
+        + [(c, "roundup") for c in roundup_overflow]
+    )
     return AlertPlan(
-        silent=roundup_silent + [(c, "too_old") for c in stale],
+        silent=silent,
         to_post=fresh_ordered,
+        roundup_to_post=roundup_to_post,
         ping=ping,
         cap_reached=cap_reached,
         mark_seeded=False,
@@ -322,10 +382,12 @@ def plan_alerts(
 
 
 __all__ = [
+    "MAX_ROUNDUP_CODES",
     "AlertPlan",
     "CodeCandidate",
     "CodeSighting",
     "aggregate",
+    "group_roundups",
     "pings_used_today",
     "plan_alerts",
     "seeding_healthy",

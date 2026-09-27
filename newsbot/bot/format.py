@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import discord
 
@@ -31,17 +33,20 @@ from newsbot.config import Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
-from newsbot.shift.decide import CodeCandidate
+from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
-from newsbot.store.models import AlertStatus, StatusSnapshot, StoryView, Usage
+from newsbot.store.models import AlertStatus, CodeView, StatusSnapshot, StoryView, Usage
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
-_MESSAGE_TOTAL_LIMIT = 6000
-_MAX_EMBEDS_PER_MESSAGE = 10
-_HEADER_LIMIT = 2000
 _MAX_LINKS_SHOWN = 3
 _MAX_FIELD_VALUE = 1024
+# design.md §13, D1: a coverage note ("Brave search skipped: quota exceeded")
+# now rides along in the footer of every topic embed that actually posts,
+# since there's no shared header message left for it to live in. Capped well
+# under an embed footer's real 2048-unit limit -- a footer is meant to be a
+# quiet aside, not a second description.
+_COVERAGE_FOOTER_LIMIT = 512
 # Discord's plain-message content cap (as opposed to an embed's much bigger
 # limits above) -- code alerts are plain messages, not embeds, since a code
 # is meant to be select-and-copy-able, and an embed's description puts a
@@ -110,6 +115,21 @@ def _truncate_utf16(text: str, limit: int, *, suffix: str = "") -> str:
         kept.append(ch)
         total += ch_len
     return "".join(kept).rstrip() + suffix
+
+
+def _defuse_mentions_and_links(s: str) -> str:
+    """Same mention/channel-link/invite/url-scheme defusing as `esc`, minus markdown escaping.
+
+    For text headed into an embed *footer*: Discord doesn't render
+    markdown there at all, so `escape_markdown`'s backslashes would just
+    show up as literal backslashes instead of escaping anything -- this
+    keeps the actual safety (no live @everyone, no live link) without
+    adding punctuation nobody asked for.
+    """
+    escaped = discord.utils.escape_mentions(s)
+    escaped = _LINKY_MENTION_RE.sub("<​", escaped)
+    escaped = _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:​", escaped)
+    return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}​/", escaped)
 
 
 def esc(s: str) -> str:
@@ -195,6 +215,12 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
 
 
 def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
+    # By the time this is called, render_digest has already decided this
+    # topic has something to say (design.md §13: a topic with nothing posts
+    # nothing, rather than an embed reading "No new stories today.") -- this
+    # still handles an empty list defensively, since a caller outside
+    # render_digest (a future one, or a test) shouldn't get a crash instead
+    # of a sane-looking embed for the case that's genuinely rare now.
     color = _topic_color(topic.key)
     title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
     if not stories:
@@ -245,45 +271,6 @@ def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> d
     )
 
 
-def _embed_len(embed: discord.Embed) -> int:
-    """`discord.Embed.__len__`, but counted in UTF-16 units instead of codepoints.
-
-    Mirrors discord.py's own `__len__` (title + description + every
-    field's name and value + footer text + author name) field for field,
-    since that total -- not any individual piece -- is what
-    `_MESSAGE_TOTAL_LIMIT` (Discord's 6000-per-message cap) is measured
-    against.
-    """
-    total = discord_len(embed.title or "") + discord_len(embed.description or "")
-    for field in embed.fields:
-        total += discord_len(field.name or "") + discord_len(field.value or "")
-    if embed.footer and embed.footer.text:
-        total += discord_len(embed.footer.text)
-    if embed.author and embed.author.name:
-        total += discord_len(embed.author.name)
-    return total
-
-
-def _pack_messages(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
-    """Greedily pack embeds into messages, respecting the 10-embed and 6000-char caps."""
-    messages: list[list[discord.Embed]] = []
-    current: list[discord.Embed] = []
-    current_total = 0
-    for embed in embeds:
-        embed_len = _embed_len(embed)
-        if current and (
-            len(current) >= _MAX_EMBEDS_PER_MESSAGE
-            or current_total + embed_len > _MESSAGE_TOTAL_LIMIT
-        ):
-            messages.append(current)
-            current, current_total = [], 0
-        current.append(embed)
-        current_total += embed_len
-    if current:
-        messages.append(current)
-    return messages
-
-
 def _story_count(
     topic: Topic, summaries: dict[str, TopicSummary], fallback_items: dict[str, list[TopicItem]]
 ) -> int:
@@ -295,26 +282,43 @@ def _story_count(
     return len(summary.stories)
 
 
-def _header(
-    run_date: date,
-    topics: list[Topic],
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    coverage_notes: list[str],
-) -> str:
-    counts = " · ".join(
-        f"{esc(topic.name)}: {_story_count(topic, summaries, fallback_items)}" for topic in topics
-    )
-    lines = [f"**News digest — {run_date.isoformat()}**", counts]
-    if coverage_notes:
-        lines.append("\n".join(f"- {esc(note)}" for note in coverage_notes))
-    return _truncate_description("\n".join(lines), _HEADER_LIMIT)
+def _coverage_footer(coverage_notes: list[str]) -> str | None:
+    """The footer text every posted topic embed carries today's coverage notes in (D1).
+
+    v1 put these in the header, under a shared message every topic's
+    embeds rode along with; v2 has no header left, so each embed that
+    actually posts gets its own copy in the footer instead -- a reader
+    looking at just the Palworld channel still gets to know Brave search
+    was skipped today, without needing a digest-wide message that no
+    longer exists to tell them.
+    """
+    if not coverage_notes:
+        return None
+    text = "Reduced coverage today: " + "; ".join(coverage_notes)
+    return _truncate_utf16(_defuse_mentions_and_links(text), _COVERAGE_FOOTER_LIMIT, suffix="…")
+
+
+@dataclass
+class TopicMessage:
+    """One topic's own digest post: one embed, to one channel (design.md §13).
+
+    v1 packed every topic's embed under a shared header message in one
+    channel; v2 gives each game its own channel and drops the header and
+    the discussion thread entirely, so there's no longer anything to pack
+    -- one topic, one embed, one message, one channel.
+    """
+
+    topic_key: str
+    topic_name: str
+    channel_id: int
+    embed: discord.Embed
 
 
 @dataclass
 class RenderedDigest:
-    header: str
-    embed_messages: list[list[discord.Embed]]  # each inner list is one Discord message
+    run_date: date
+    messages: list[TopicMessage]
+    coverage_notes: list[str]
 
 
 def render_digest(
@@ -324,23 +328,36 @@ def render_digest(
     fallback_items: dict[str, list[TopicItem]],
     coverage_notes: list[str],
 ) -> RenderedDigest:
-    """Render one day's digest: a header plus embeds packed into messages.
+    """Render one day's digest: one `TopicMessage` per topic that actually has something to say.
 
     A topic with no `TopicSummary` at all (nothing was collected for it
-    today) renders the same empty state as one that got items but no
-    stories -- from a reader's chair, "nothing happened" and "we found
-    nothing worth a story" look identical, and should.
+    today), an empty stories list, or a fallback with no items to list
+    gets no message at all -- design.md §13's "nothing posted for a game
+    with no news" (owner decision A). Topics post in config order,
+    matching the order `topics` was handed in.
     """
-    embeds = []
+    footer = _coverage_footer(coverage_notes)
+    messages = []
     for topic in topics:
         summary = summaries.get(topic.key)
         if summary is not None and summary.fallback:
-            embeds.append(_fallback_embed(topic, fallback_items.get(topic.key, []), summary.note))
+            items = fallback_items.get(topic.key, [])
+            if not items:
+                continue
+            embed = _fallback_embed(topic, items, summary.note)
         else:
-            embeds.append(_topic_embed(topic, summary.stories if summary else []))
-
-    header = _header(run_date, topics, summaries, fallback_items, coverage_notes)
-    return RenderedDigest(header=header, embed_messages=_pack_messages(embeds))
+            stories = summary.stories if summary else []
+            if not stories:
+                continue
+            embed = _topic_embed(topic, stories)
+        if footer:
+            embed.set_footer(text=footer)
+        messages.append(
+            TopicMessage(
+                topic_key=topic.key, topic_name=topic.name, channel_id=topic.channel_id, embed=embed
+            )
+        )
+    return RenderedDigest(run_date=run_date, messages=messages, coverage_notes=coverage_notes)
 
 
 def render_story_page(
@@ -372,6 +389,102 @@ def render_story_page(
         )
     embed.description = _truncate_description("\n\n".join(blocks))
     embed.set_footer(text=f"Page {page} of {pages}")
+    return embed
+
+
+# --- /shift codes (design.md §13) ---
+
+_CODE_PAGE_MAX_SOURCE = 100
+_CODE_PAGE_FOOTER_NOTE = "I don't know when codes expire; older ones may have stopped working."
+_CODE_PAGE_EMPTY = "No codes seen in that window."
+
+
+def _code_marker(view: CodeView) -> str | None:
+    """The D5 marker for one code, or None for a code that just... posted normally.
+
+    Checked in this order on purpose: `from_roundup` wins over `status`
+    (a roundup code that overflowed the cap is `status='roundup'`, not
+    `'posted'`, but it's still "from a roundup" to a member reading this,
+    not some fourth unexplained state) -- see `record_silent_codes`'s own
+    docstring for why `from_roundup` is a separate column instead of being
+    derived from `status`.
+    """
+    if view.from_roundup:
+        return "from a roundup"
+    if view.status == "too_old":
+        return "old post"
+    if view.status == "seeded":
+        return "already around when alerts started"
+    return None
+
+
+def _code_page_block(view: CodeView, timezone: str, *, max_len: int | None = None) -> str:
+    code_block = f"```\n{view.code}\n```"
+    first_seen = view.first_seen_at.astimezone(ZoneInfo(timezone)).date().isoformat()
+    seen_prefix = f"First seen {first_seen} · "
+    marker = _code_marker(view)
+    marker_suffix = f" · ({marker})" if marker else ""
+    source = _truncate_utf16(esc(view.source_name), _CODE_PAGE_MAX_SOURCE, suffix="…")
+    safe_url = _safe_link(view.item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    block = f"{code_block}\n{seen_prefix}{source}{link}{marker_suffix}"
+    if max_len is None or discord_len(block) <= max_len:
+        return block
+
+    # Same shedding order as `_alert_block`: the link goes first (a
+    # collected URL is the part most likely to be long and least likely
+    # to be missed -- the code and its source are the point).
+    block = f"{code_block}\n{seen_prefix}{source}{marker_suffix}"
+    if discord_len(block) <= max_len:
+        return block
+
+    # Still too long -- hard-truncate the source name. The fenced code
+    # block never shrinks; a partial code would be actively wrong, and
+    # cutting mid-fence would unbalance every block after it.
+    fixed_len = discord_len(code_block) + 1 + discord_len(seen_prefix) + discord_len(marker_suffix)
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(view.source_name), name_budget, suffix="…")
+    return f"{code_block}\n{seen_prefix}{truncated_name}{marker_suffix}"
+
+
+def render_code_page(
+    codes: list[CodeView], *, title: str, page: int, pages: int, timezone: str
+) -> discord.Embed:
+    """Render one page of `/shift codes`: every known code, newest-first, in copyable blocks.
+
+    `timezone` is `cfg.digest.timezone` -- the same local calendar the
+    daily digest and the ping cap already reason in, so "first seen" reads
+    against the clock a member already expects everything else in this
+    bot to use, not a UTC date nobody configured. `_code_marker` is what
+    turns `from_roundup`/`status` into D5's three markers; a plain
+    `'posted'`, non-roundup code gets none, since "posted normally" isn't
+    something a reader needs flagged.
+
+    Every entry gets an equal share of the description budget up front
+    (QA follow-up: hard-truncating the whole joined description used to
+    silently drop entries near the end of a page, and could cut a fenced
+    code block in half). `_code_page_block`'s own shrinking -- drop the
+    link, then truncate the source -- only kicks in for an entry that
+    actually needs it; a normal-length one is untouched.
+    """
+    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
+    if not codes:
+        embed.description = _CODE_PAGE_EMPTY
+    else:
+        joiner_overhead = 2 * (len(codes) - 1)  # "\n\n" between entries
+        per_entry_budget = max((_DESCRIPTION_LIMIT - joiner_overhead) // len(codes), 0)
+        blocks = [_code_page_block(c, timezone, max_len=per_entry_budget) for c in codes]
+        description = "\n\n".join(blocks)
+        # Belt-and-suspenders, same spirit as `render_code_alerts`' own
+        # loud failure: nothing should reach here over the cap, since
+        # every block above was built to fit its own share of it.
+        if discord_len(description) > _DESCRIPTION_LIMIT:
+            raise ValueError(
+                f"rendered code page exceeds {_DESCRIPTION_LIMIT} UTF-16 units "
+                f"({discord_len(description)})"
+            )
+        embed.description = description
+    embed.set_footer(text=f"Page {page} of {pages} · {_CODE_PAGE_FOOTER_NOTE}")
     return embed
 
 
@@ -618,6 +731,130 @@ def render_code_alerts(
     return rendered
 
 
+_ROUNDUP_HEADER_PREFIX = "**SHiFT codes from a roundup**"
+
+
+def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = None) -> str:
+    safe_url = _safe_link(item_url)
+    link = f" · <{safe_url}>" if safe_url else ""
+    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}{link}"
+    if max_len is None or discord_len(header) <= max_len:
+        return header
+
+    # Same shedding order as `_alert_block`: the link is the first thing
+    # to go (it's redundant with "click the code" anyway), and if a
+    # hostile or just very long source name still doesn't fit, hard-
+    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks --
+    # it's what tells a reader this code didn't come with a ping.
+    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}"
+    if discord_len(header) <= max_len:
+        return header
+
+    fixed_len = discord_len(_ROUNDUP_HEADER_PREFIX) + 3  # " · " joining prefix to the name
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(source_name), name_budget, suffix="…")
+    return f"{_ROUNDUP_HEADER_PREFIX} · {truncated_name}"
+
+
+def _roundup_code_block(candidate: CodeCandidate) -> str:
+    # No source/link per entry (the header already carries the one
+    # source and link every code in this group shares) and no golden-key
+    # prefix (design.md §13 doesn't ask for one here) -- just the code
+    # itself, select-and-copy-able the same way a normal alert's code is.
+    if not is_code(candidate.code):
+        raise ValueError(f"not a SHiFT code: {candidate.code!r}")
+    return f"```\n{candidate.code}\n```"
+
+
+def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert]:
+    """Render fresh roundup-only codes into unpinged "from a roundup" messages (design.md §13).
+
+    v1 recorded every roundup-only code silently, forever; v2.0 posts the
+    fresh ones instead (`shift/decide.py`'s `AlertPlan.roundup_to_post`),
+    just without a ping and headed differently -- these are still "we're
+    not confident enough in this to wake anyone up for it" codes, they're
+    just not invisible anymore. `ping` is always `False` here (never
+    `True`, not even conditionally); this function is never the place a
+    future edit could accidentally reintroduce a second `@everyone` path.
+
+    `group_roundups` splits `candidates` by the post they came from
+    (`source_name`, `item_url`) -- design.md §13's "two roundup items ->
+    two headers" -- and each group renders independently, packing its own
+    codes into one or more messages under Discord's 2000-unit cap exactly
+    like `render_code_alerts` does for a normal batch: the first message
+    of a group carries that group's header, any continuation uses
+    `_CONTINUATION_HEADER`, and no group's codes ever share a message with
+    another group's (a header names one specific roundup post; mixing two
+    posts' codes under one header would misattribute them).
+    """
+    if not candidates:
+        return []
+
+    rendered: list[RenderedAlert] = []
+    for group in group_roundups(candidates):
+        entries = [(c.code, _roundup_code_block(c)) for c in group]
+        # Every code block is short and fixed-shape (a 29-character code
+        # in a fenced block), so it's always the header -- not the block --
+        # that's at risk of busting the cap (a ~2000-char URL, a hostile
+        # source name). Give `_roundup_header` a budget that guarantees it
+        # fits alongside this group's first block before measuring anything
+        # else, instead of discovering the overflow after the fact.
+        first_block_len = discord_len(entries[0][1]) + 2  # "\n\n" joining header to block
+        first_header = _roundup_header(
+            group[0].source_name,
+            group[0].item_url,
+            max_len=_ALERT_CONTENT_LIMIT - first_block_len,
+        )
+        solo_budget = (
+            _ALERT_CONTENT_LIMIT
+            - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER))
+            - 2
+        )
+        # This is now a belt-and-suspenders check, not the mechanism that
+        # keeps things under budget -- `_roundup_header`'s own shrinking
+        # already guarantees the first block fits under `first_header`;
+        # this still catches a code block busting the *continuation*
+        # header's budget, which never shrinks.
+        for code, block in entries:
+            if discord_len(block) > solo_budget:
+                raise ValueError(f"roundup code block for {code!r} exceeds the per-message budget")
+
+        batches: list[list[tuple[str, str]]] = []
+        current: list[tuple[str, str]] = []
+        current_len = 0
+        for code, block in entries:
+            header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+            block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
+            if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
+                batches.append(current)
+                current = []
+                current_len = 0
+            current.append((code, block))
+            current_len += block_len
+        if current:
+            batches.append(current)
+
+        for i, batch in enumerate(batches):
+            header = first_header if i == 0 else _CONTINUATION_HEADER
+            content = "\n\n".join([header, *(block for _, block in batch)])
+            if discord_len(content) > _ALERT_CONTENT_LIMIT:
+                raise ValueError(
+                    f"rendered roundup alert content exceeds {_ALERT_CONTENT_LIMIT} "
+                    f"UTF-16 units ({discord_len(content)})"
+                )
+            batch_codes = [code for code, _ in batch]
+            # Plan §5: sha256("roundup|" + codes + index) -- distinct from
+            # render_code_alerts' own nonce scheme (no "roundup|" prefix)
+            # so a normal and a roundup message for the same code (which
+            # can't actually happen, once-per-code, but nonces are cheap
+            # insurance) could never collide.
+            nonce = hashlib.sha256(f"roundup|{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+            rendered.append(
+                RenderedAlert(content=content, codes=batch_codes, ping=False, nonce=nonce)
+            )
+    return rendered
+
+
 # --- Admin-channel run reports (design.md §6, §8) ---
 #
 # One plain-text message to the admin channel after every POST run that
@@ -646,15 +883,40 @@ def _report_date(run_date: date) -> str:
     return f"{run_date.strftime('%a %b')} {run_date.day}"
 
 
+def _report_jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
 def _report_story_counts_line(
     topics: list[Topic],
     summaries: dict[str, TopicSummary],
     fallback_items: dict[str, list[TopicItem]],
+    guild_id: int,
+    posted_by_topic: Mapping[str, int],
+    *,
+    with_links: bool = True,
 ) -> str:
-    counts = [(topic.name, _story_count(topic, summaries, fallback_items)) for topic in topics]
-    total = sum(c for _, c in counts)
-    per_topic = " · ".join(f"{esc(name)} {c}" for name, c in counts)
-    return f"{total} stories: {per_topic}"
+    """The run report's "N stories: ..." line, with a `[jump]` link per topic that posted.
+
+    design.md §13: each game now has its own channel and its own message,
+    so the one jump link v1's header carried becomes one *per topic* --
+    `posted_by_topic` (topic_key -> the message id `DiscordPublisher.publish`
+    actually got back) is empty for a topic that had nothing to post, and
+    `with_links=False` is `render_run_report`'s own shedding step when the
+    whole report doesn't fit under the cap otherwise.
+    """
+    parts = []
+    total = 0
+    for topic in topics:
+        count = _story_count(topic, summaries, fallback_items)
+        total += count
+        part = f"{esc(topic.name)} {count}"
+        message_id = posted_by_topic.get(topic.key) if with_links else None
+        if message_id is not None:
+            link = _report_jump_link(guild_id, topic.channel_id, message_id)
+            part += f" [jump](<{link}>)"
+        parts.append(part)
+    return f"{total} stories: " + " · ".join(parts)
 
 
 def _report_sources_line(results: list[CollectorResult]) -> str:
@@ -694,21 +956,9 @@ def _report_duration_str(duration: timedelta) -> str:
     return f"{seconds}s"
 
 
-def _report_jump_link(guild_id: int, channel_id: int, header_message_id: int | None) -> str | None:
-    if header_message_id is None:
-        return None
-    return f"https://discord.com/channels/{guild_id}/{channel_id}/{header_message_id}"
-
-
-def _report_cost_line(
-    usage: Usage, duration: timedelta, guild_id: int, channel_id: int, header_message_id: int | None
-) -> str:
+def _report_cost_line(usage: Usage, duration: timedelta) -> str:
     spend = estimate_spend_usd(usage.input_tokens, usage.output_tokens)
-    line = f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
-    link = _report_jump_link(guild_id, channel_id, header_message_id)
-    if link is not None:
-        line += f" · [jump to digest](<{link}>)"
-    return line
+    return f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
 
 
 def render_run_report(
@@ -724,32 +974,39 @@ def render_run_report(
     duration: timedelta,
     notes: list[str],
     guild_id: int,
-    channel_id: int,
-    header_message_id: int | None,
+    posted_by_topic: Mapping[str, int],
 ) -> str:
-    """Render the admin-channel run report (design.md §6): one plain-text message.
+    """Render the admin-channel run report (design.md §6, §13): one plain-text message.
 
     `results` is *this run's* collector results, not the cumulative
     `source_health` table -- an admin reading this wants to know what just
     happened, not the all-time record. `notes` is the same coverage-note
-    list `render_digest`'s header and `save_run`'s `error_notes` already
+    list `render_digest`'s footer and `save_run`'s `error_notes` already
     use; it only shows up here as a "Notes: ..." line when `status` is
-    `partial` and there's actually something to say.
+    `partial` and there's actually something to say. `posted_by_topic` is
+    `DiscordPublisher.publish`'s own return value: topic key -> the message
+    id that topic's embed actually landed with, missing for any topic that
+    had nothing to post -- that's what lets the stories line's `[jump]`
+    links point at the right message in the right channel per game
+    (design.md §13), instead of v1's one link to a header that no longer
+    exists.
 
     Kept under `_ALERT_CONTENT_LIMIT` (Discord's plain-message cap, the
     same 2000 UTF-16 units the SHiFT alert messages respect) by shedding
     detail in priority order if it doesn't fit: the notes line first, then
-    the per-source failure detail, then -- a case that shouldn't be
-    reachable given how short every other line is -- a flat truncation of
-    the whole thing.
+    the per-source failure detail, then the per-topic jump links, then --
+    a case that shouldn't be reachable given how short every other line
+    is -- a flat truncation of the whole thing.
     """
     header_line = (
         f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
         f"{_report_date(run_date)} ({run_kind})"
     )
-    story_line = _report_story_counts_line(topics, summaries, fallback_items)
+    story_line = _report_story_counts_line(
+        topics, summaries, fallback_items, guild_id, posted_by_topic
+    )
     sources_line = _report_sources_line(results)
-    cost_line = _report_cost_line(usage, duration, guild_id, channel_id, header_message_id)
+    cost_line = _report_cost_line(usage, duration)
 
     notes_line = None
     if status == "partial" and notes:
@@ -773,35 +1030,49 @@ def render_run_report(
     if discord_len(content) <= _ALERT_CONTENT_LIMIT:
         return content
 
+    story_line_no_links = _report_story_counts_line(
+        topics, summaries, fallback_items, guild_id, posted_by_topic, with_links=False
+    )
+    content = "\n".join([header_line, story_line_no_links, bare_sources_line, cost_line])
+    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+        return content
+
     return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
 
 
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
-    Nobody's Discord client is involved in `--dry-run`, so the embeds'
-    structure (title, description, footer) gets flattened into something
-    readable on a terminal instead.
+    Nobody's Discord client is involved in `--dry-run`, so each topic's
+    embed gets flattened into something readable on a terminal instead,
+    headed by which channel it would have gone to (there's no header
+    message left to print ahead of it).
     """
-    parts = [r.header]
-    for message in r.embed_messages:
-        for embed in message:
-            parts.append(f"\n--- {embed.title or ''} ---")
-            if embed.description:
-                parts.append(str(embed.description))
-            for field in embed.fields:
-                parts.append(f"{field.name}: {field.value}")
-            if embed.footer and embed.footer.text:
-                parts.append(f"({embed.footer.text})")
-    return "\n".join(parts)
+    if not r.messages:
+        return "Nothing would post today: no game has news."
+    parts = []
+    for message in r.messages:
+        embed = message.embed
+        parts.append(f"--- #{message.channel_id} · {embed.title or ''} ---")
+        if embed.description:
+            parts.append(str(embed.description))
+        for field in embed.fields:
+            parts.append(f"{field.name}: {field.value}")
+        if embed.footer and embed.footer.text:
+            parts.append(f"({embed.footer.text})")
+        parts.append("")
+    return "\n".join(parts).rstrip()
 
 
 __all__ = [
     "RenderedAlert",
     "RenderedDigest",
+    "TopicMessage",
     "esc",
     "render_code_alerts",
+    "render_code_page",
     "render_digest",
+    "render_roundup_alerts",
     "render_run_report",
     "render_status",
     "render_story_page",

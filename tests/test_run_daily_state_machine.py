@@ -17,9 +17,11 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+import discord
 import httpx
 import pytest
 
+from newsbot.bot.client import DiscordPublisher
 from newsbot.bot.format import to_text
 from newsbot.config import load_config
 from newsbot.pipeline.publisher import PrintPublisher
@@ -327,3 +329,161 @@ async def test_normal_success_is_unaffected_by_the_baseexception_safety_net(db_p
             "SELECT status FROM digests WHERE run_date = ?", (RUN_DATE_LOCAL.isoformat(),)
         ).fetchone()
     assert row["status"] == "ok"
+
+
+# --- an all-empty day (no items collected at all) still saves ok with [] ---
+
+
+async def test_all_empty_day_saves_ok_with_no_message_ids_and_no_sends(db_path, http_client):
+    # No collectors at all -- every topic has literally nothing to
+    # summarize, so render_digest (design.md §13, owner decision A) emits
+    # zero TopicMessages. That's success ("nothing to report today"), not
+    # a failure, and nothing should have been sent anywhere.
+    deps = _make_deps(db_path, http_client, collectors=[])
+
+    outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
+
+    assert outcome.status == "ok"
+    assert outcome.rendered is not None
+    assert outcome.rendered.messages == []
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status, posted_message_ids FROM digests WHERE run_date = ?",
+            (RUN_DATE_LOCAL.isoformat(),),
+        ).fetchone()
+    assert row["status"] == "ok"
+    assert json.loads(row["posted_message_ids"]) == []
+
+
+# --- real DiscordPublisher wired through run_daily, hand-written channel fakes ---
+#
+# Everything above drives run_daily with PrintPublisher or a tiny stand-in.
+# These use the real DiscordPublisher (newsbot/bot/client.py) against
+# hand-written FakeClient/FakeChannel objects -- the same spirit as
+# test_discord_publisher.py and test_publish_with_retry.py, but exercised
+# through the whole pipeline (claim -> build -> publish -> save) instead of
+# in isolation, since that's the only way to see what actually lands in
+# the `digests` row.
+
+_BL4_CHANNEL_ID = 123456789012345690
+_PALWORLD_CHANNEL_ID = 123456789012345691
+_DIABLO_CHANNEL_ID = 123456789012345692
+
+
+class _FakeMessage:
+    def __init__(self, message_id: int) -> None:
+        self.id = message_id
+
+
+class _FakeChannel:
+    def __init__(self, *, next_id: int, raise_error: Exception | None = None) -> None:
+        self._next_id = next_id
+        self.raise_error = raise_error
+        self.sent = 0
+
+    async def send(self, content=None, *, embed=None, allowed_mentions=None, nonce=None):
+        if self.raise_error is not None:
+            raise self.raise_error
+        self.sent += 1
+        self._next_id += 1
+        return _FakeMessage(self._next_id)
+
+
+class _FakeGatewayClient:
+    def __init__(self, channels: dict[int, _FakeChannel]) -> None:
+        self._channels = channels
+
+    def get_channel(self, channel_id: int):
+        return self._channels.get(channel_id)
+
+    async def fetch_channel(self, channel_id: int):
+        return self._channels[channel_id]
+
+
+async def test_forced_run_now_after_a_partial_failure_reposts_every_topic(db_path, http_client):
+    # design.md §13 plan section 4's documented v1 limitation: nothing
+    # persists per-topic progress *across* separate run_daily calls (only
+    # within one DiscordPublisher instance's own retries). A first run
+    # that posts borderlands4 then permanently fails on palworld leaves a
+    # `failed` row with borderlands4's id; a forced run-now with a fresh
+    # publisher reposts *both* topics, including the one that already
+    # made it out. Pinned here so a future fix to that limitation is a
+    # deliberate change to this test, not a silent regression.
+    first_channels = {
+        _BL4_CHANNEL_ID: _FakeChannel(next_id=100),
+        _PALWORLD_CHANNEL_ID: _FakeChannel(
+            next_id=200, raise_error=discord.HTTPException(_fake_403(), "forbidden")
+        ),
+        _DIABLO_CHANNEL_ID: _FakeChannel(next_id=300),
+    }
+    deps = _make_deps(db_path, http_client)
+    first_publisher = DiscordPublisher(_FakeGatewayClient(first_channels))
+
+    first_outcome = await run_daily(deps, first_publisher, mode=RunMode.POST, sleep=_no_sleep)
+    assert first_outcome.status == "failed"
+    assert first_channels[_BL4_CHANNEL_ID].sent == 1
+    assert first_channels[_PALWORLD_CHANNEL_ID].sent == 0
+
+    # The publish-failed admin alert names which games made it out and
+    # which didn't -- palworld's 403 is a permanent error, so it never got
+    # a retry and the wording says so instead of claiming "after retries".
+    failure_alerts = [a for a in deps.alerts if "publish failed" in a]
+    assert len(failure_alerts) == 1
+    assert "publish failed:" in failure_alerts[0]
+    assert "after retries" not in failure_alerts[0]
+    assert "posted: Borderlands 4" in failure_alerts[0]
+    assert "did not post:" in failure_alerts[0]
+    assert "Palworld" in failure_alerts[0].split("did not post:")[1]
+
+    # A fresh publisher, all channels healthy now, forced re-run.
+    second_channels = {
+        _BL4_CHANNEL_ID: _FakeChannel(next_id=400),
+        _PALWORLD_CHANNEL_ID: _FakeChannel(next_id=500),
+        _DIABLO_CHANNEL_ID: _FakeChannel(next_id=600),
+    }
+    second_publisher = DiscordPublisher(_FakeGatewayClient(second_channels))
+    second_outcome = await run_daily(
+        deps, second_publisher, mode=RunMode.POST, force=True, sleep=_no_sleep
+    )
+
+    assert second_outcome.status == "ok"
+    # borderlands4 gets a second message even though its first one is
+    # still sitting in the channel -- the documented limitation.
+    assert second_channels[_BL4_CHANNEL_ID].sent == 1
+    assert second_channels[_PALWORLD_CHANNEL_ID].sent == 1
+
+
+def _fake_403():
+    class _Resp:
+        status = 403
+        reason = "forbidden"
+        headers = {}
+        request_info = None
+
+    return _Resp()
+
+
+async def test_cancelled_error_mid_publish_still_records_what_the_publisher_posted(
+    db_path, http_client
+):
+    channels = {
+        _BL4_CHANNEL_ID: _FakeChannel(next_id=100),
+        _PALWORLD_CHANNEL_ID: _FakeChannel(next_id=200, raise_error=asyncio.CancelledError()),
+        _DIABLO_CHANNEL_ID: _FakeChannel(next_id=300),
+    }
+    deps = _make_deps(db_path, http_client)
+    publisher = DiscordPublisher(_FakeGatewayClient(channels))
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_daily(deps, publisher, mode=RunMode.POST, sleep=_no_sleep)
+
+    # The publisher itself knows borderlands4's message landed...
+    assert publisher.posted_ids != []
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status, posted_message_ids FROM digests WHERE run_date = ?",
+            (RUN_DATE_LOCAL.isoformat(),),
+        ).fetchone()
+    assert row["status"] == "failed"
+    # ...but the digest row should carry the same id, not lose it.
+    assert json.loads(row["posted_message_ids"]) == publisher.posted_ids

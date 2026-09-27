@@ -27,14 +27,15 @@ def test_multiple_failures_are_all_listed_together(tmp_path):
 guild_id: 1
 admin_permission: not_a_real_permission
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
   - key: "Not Valid!"
     name: "Bad Topic"
+    channel_id: 2
   - key: "Not Valid!"
     name: "Duplicate Of Bad Topic"
+    channel_id: 3
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -60,7 +61,9 @@ sources:
 
 
 def test_too_many_topics_message_names_the_limit_and_actual_count(tmp_path):
-    topics = "\n".join(f'  - key: "topic{i}"\n    name: "Topic {i}"' for i in range(26))
+    topics = "\n".join(
+        f'  - key: "topic{i}"\n    name: "Topic {i}"\n    channel_id: {i + 2}' for i in range(26)
+    )
     sources = "\n".join(
         f'  - type: steam_news\n    name: "Source {i}"\n    app_id: {i}\n    '
         f"topics: [topic{i}]\n    trust: official"
@@ -69,7 +72,6 @@ def test_too_many_topics_message_names_the_limit_and_actual_count(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -83,9 +85,11 @@ sources:
     assert "26 topics exceeds the limit of 24" in message
 
 
-def test_pydantic_level_error_message_names_the_field_path(tmp_path):
-    """A pydantic type error (missing required field) still gets folded
-    into the same "Invalid config" format."""
+def test_digest_channel_id_present_gives_the_removal_message(tmp_path):
+    # v2.0 (design.md §13, plan step 4): digest.channel_id is gone -- an
+    # old v1 config that still sets it gets a message pointing at the
+    # per-topic replacement instead of a bare pydantic "extra fields not
+    # permitted".
     text = """
 guild_id: 1
 digest:
@@ -95,6 +99,64 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+"""
+    with pytest.raises(ConfigError) as exc_info:
+        _load_with(tmp_path, text)
+    message = str(exc_info.value)
+    assert (
+        "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+        "on each topic (topics[].channel_id); there is no fallback" in message
+    )
+
+
+def test_digest_channel_id_removal_message_joins_other_errors(tmp_path):
+    # The raw-YAML pre-check has to fold into the same combined ConfigError
+    # as every other problem, not raise on its own and hide a second,
+    # unrelated failure.
+    text = """
+guild_id: 1
+admin_permission: not_a_real_permission
+digest:
+  channel_id: 1
+  time: "09:00"
+  timezone: "UTC"
+topics:
+  - key: palworld
+    name: "Palworld"
+    channel_id: 2
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+"""
+    with pytest.raises(ConfigError) as exc_info:
+        _load_with(tmp_path, text)
+    message = str(exc_info.value)
+    assert "digest.channel_id was removed in v2.0" in message
+    assert "not_a_real_permission" in message
+
+
+def test_pydantic_level_error_message_names_the_field_path(tmp_path):
+    """A pydantic type error (missing required field) still gets folded
+    into the same "Invalid config" format."""
+    text = """
+guild_id: 1
+digest:
+  time: "09:00"
+  timezone: "UTC"
+topics:
+  - key: palworld
+    name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"

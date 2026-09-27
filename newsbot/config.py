@@ -41,15 +41,44 @@ class ConfigError(Exception):
     """
 
 
+def _reject_bool_channel_id(v: object) -> object:
+    """A `mode="before"` guard shared by every `channel_id` field.
+
+    Pydantic's lax int coercion happily turns a quoted numeric string or a
+    whole-number float into an int -- both genuinely useful for a
+    hand-edited YAML file -- but `bool` is *also* an `int` subclass in
+    Python, so `channel_id: true` was silently loading as `1` instead of
+    failing config validation, which is a considerably more confusing way
+    to find out than a startup error (test-engineer caught it before a
+    typo like that ever got the chance to). `strict=True` would close this
+    the blunt way, but it also closes the string/float coercions this
+    module's own tests pin as intentional -- rejecting bool specifically,
+    ahead of pydantic's normal int coercion, is the one check that catches
+    the typo without taking those away.
+    """
+    if isinstance(v, bool):
+        raise ValueError("channel_id must be an int, not a bool")
+    return v
+
+
 class Topic(BaseModel):
     key: str
     name: str
+    # v2.0 (design.md §13): each game posts its own digest to its own
+    # channel now, so there's no longer a shared fallback to inherit this
+    # from -- every topic has to name one.
+    channel_id: int = Field(gt=0)
     aliases: list[str] = []
     entities: list[str] = []
     # Per-topic overrides for the web_search collector. Empty means "use the
     # source's global query_templates"; the two schemas coexist because most
     # topics are happy with "{name} news" and one weird topic never is.
     search_queries: list[str] = []
+
+    @field_validator("channel_id", mode="before")
+    @classmethod
+    def _validate_channel_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_channel_id(v)
 
     @field_validator("search_queries")
     @classmethod
@@ -60,7 +89,11 @@ class Topic(BaseModel):
 
 
 class DigestCfg(BaseModel):
-    channel_id: int
+    # v2.0 (design.md §13): the combined digest channel is gone -- each
+    # topic posts to its own Topic.channel_id instead. A leftover
+    # digest.channel_id in an old v1 config.yaml is caught by
+    # load_config's raw-YAML pre-check, before pydantic ever gets a
+    # chance to just silently ignore the unrecognized field.
     time: str
     timezone: str
     lookback_hours: int = 24
@@ -138,6 +171,11 @@ class AlertsCfg(BaseModel, extra="forbid"):
     """
 
     enabled: bool = False
+    # v2.0 (design.md §13): SHiFT alerts move off the shared digest channel
+    # onto their own -- required once `enabled` is true (checked in
+    # load_config, where the friendly message lives), optional otherwise
+    # so a disabled block doesn't need a channel it'll never post to.
+    channel_id: int | None = Field(None, gt=0)
     interval_minutes: int = Field(60, ge=15, le=1440)
     max_item_age_hours: int = Field(48, ge=1, le=720)
     # 0 disables pinging entirely without disabling the sweep -- codes
@@ -163,6 +201,11 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # alerting (shift/decide.py's aggregate/sightings_from_items).
     max_codes_per_item: int = Field(5, ge=1)
 
+    @field_validator("channel_id", mode="before")
+    @classmethod
+    def _validate_channel_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_channel_id(v)
+
 
 class AppConfig(BaseModel):
     guild_id: int
@@ -186,6 +229,37 @@ def _bluesky_default_name(query: str) -> str:
     return f"Bluesky: {query}"
 
 
+def _format_pydantic_error(error: dict, raw: dict) -> str:
+    """Turn one pydantic error dict into a line for `ConfigError`.
+
+    Almost every error just gets pydantic's own `msg` prefixed with its
+    dotted location, same as before v2.0. The one exception: a missing
+    `topics[i].channel_id` gets a message naming the topic by key instead
+    of just its index, since "topics.2.channel_id: Field required" makes
+    an owner go count list entries by hand before they even know which
+    game they forgot.
+    """
+    loc = error["loc"]
+    if (
+        len(loc) == 3
+        and loc[0] == "topics"
+        and loc[2] == "channel_id"
+        and error["type"] == "missing"
+    ):
+        idx = loc[1]
+        raw_topics = raw.get("topics") or []
+        key = (
+            raw_topics[idx].get("key", "?")
+            if isinstance(idx, int) and idx < len(raw_topics)
+            else "?"
+        )
+        return (
+            f"topics[{idx}] ({key}): channel_id is required -- each game "
+            "posts to its own channel as of v2.0"
+        )
+    return f"{'.'.join(str(p) for p in loc)}: {error['msg']}"
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Load, validate, and cross-check `config.yaml`.
 
@@ -195,13 +269,28 @@ def load_config(path: str | Path) -> AppConfig:
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
 
+    # A pre-check against the raw YAML, not a pydantic field: DigestCfg no
+    # longer declares channel_id at all, and a plain BaseModel silently
+    # ignores fields it doesn't recognize -- an old v1 config.yaml that
+    # still sets digest.channel_id would otherwise load "successfully"
+    # with that value quietly going nowhere, which is a worse outcome
+    # than the field simply not existing. Collected ahead of pydantic's
+    # own errors so it folds into the same combined ConfigError either way.
+    pre_errors: list[str] = []
+    digest_raw = raw.get("digest")
+    if isinstance(digest_raw, dict) and "channel_id" in digest_raw:
+        pre_errors.append(
+            "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+            "on each topic (topics[].channel_id); there is no fallback"
+        )
+
     try:
         cfg = AppConfig.model_validate(raw)
     except ValidationError as exc:
-        errors = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+        errors = pre_errors + [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
 
-    errors: list[str] = []
+    errors: list[str] = list(pre_errors)
 
     # admin_permission must name a real discord.Permissions flag, checked
     # against VALID_FLAGS (the actual name -> bit mapping), not hasattr()
@@ -236,6 +325,12 @@ def load_config(path: str | Path) -> AppConfig:
     for topic_key in cfg.alerts.topics:
         if topic_key not in known_keys:
             errors.append(f"alerts.topics references unknown topic {topic_key!r}")
+
+    if cfg.alerts.enabled and cfg.alerts.channel_id is None:
+        errors.append(
+            "alerts.channel_id is required when alerts.enabled is true "
+            "(v2.0: SHiFT alerts post to their own channel)"
+        )
 
     if cfg.alerts.allow_test_command and not cfg.alerts.enabled:
         # A config that turns on the test command but not the feature it

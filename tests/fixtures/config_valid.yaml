@@ -3,7 +3,6 @@ admin_channel_id: 123456789012345679
 admin_permission: manage_guild
 
 digest:
-  channel_id: 123456789012345680
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24
@@ -12,14 +11,17 @@ digest:
 topics:
   - key: borderlands4
     name: "Borderlands 4"
+    channel_id: 123456789012345690
     aliases: ["BL4", "Borderlands"]
     entities: ["Gearbox", "2K", "Take-Two"]
   - key: palworld
     name: "Palworld"
+    channel_id: 123456789012345691
     aliases: []
     entities: ["Pocketpair"]
   - key: diablo4
     name: "Diablo IV"
+    channel_id: 123456789012345692
     aliases: ["Diablo 4", "D4"]
     entities: ["Blizzard", "Activision Blizzard", "Microsoft Gaming"]
 

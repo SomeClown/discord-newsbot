@@ -64,7 +64,14 @@ class PagerView(discord.ui.View):
         self.page += delta
         self._sync_buttons()
         embed = await self._render_page(self.page)
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Explicit, not just relying on NewsBot's own default -- /shift
+        # codes shares this view with /news, and design.md §13 wants
+        # every send on that path to visibly say "never pings", not
+        # inherit it silently from a client-level default someone could
+        # change later without noticing this view depends on it.
+        await interaction.response.edit_message(
+            embed=embed, view=self, allowed_mentions=discord.AllowedMentions.none()
+        )
 
     @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
     async def prev_button(

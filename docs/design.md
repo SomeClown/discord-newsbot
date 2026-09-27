@@ -166,7 +166,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `digests` | id, run_date (UNIQUE), status (pending/ok/partial/failed), posted_message_ids (JSON), error_notes, input_tokens, output_tokens, created_at, updated_at |
 | `source_health` | source_name (PK), last_success_at, last_error_at, last_error, consecutive_failures |
 | `stories_fts` | external-content FTS5 table over `stories(headline, summary)`, kept in sync by AFTER INSERT/DELETE/UPDATE triggers |
-| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25) |
+| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`), from_roundup (bool, default 0) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25); `from_roundup` added by migration 003 (v2.0, §13), backfilled from `status = 'roundup'` -- see §13's rollback note for why it exists |
 | `alert_state` | key (PK), value -- a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
@@ -179,10 +179,10 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 
 ## 6. Discord interface
 
-**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands.
+**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands. **Superseded by §13** as of v2.0: there's no combined digest channel left to create a thread on, so the invite no longer needs Create Public Threads -- see §13's per-game-channel permissions instead.
 
 ### Digest
-- A header message with the date, a story count for each game, and a coverage note if any source type was skipped. A public thread is created on the header for discussion.
+- A header message with the date, a story count for each game, and a coverage note if any source type was skipped. A public thread is created on the header for discussion. **Superseded by §13** as of v2.0: there's no combined channel left to post a header to, so there's no header message and no thread. Each game's embed posts alone to that game's own channel, and a coverage note rides in that embed's own footer instead.
 - One embed for each topic, color-coded. Stories are sorted official, then reported, then rumor, with updates placed with their label:
   `🟢 OFFICIAL · headline`, summary, then up to 3 source links plus "+N more".
   Other markers: `🟡 REPORTED`, `🔴 RUMOR`, `🔁 UPDATE` (linking to the original story).
@@ -191,7 +191,10 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
   or `partial`) -- scheduled, catch-up, or `/newsbot run-now` -- one plain
   text message goes to the admin channel: per-topic story counts, that
   run's own source health, estimated Claude spend, duration, and a jump
-  link to the digest header. `failed`/`skipped` runs send no report (they
+  link to the digest header. **Superseded by §13** as of v2.0: there's no
+  single digest header to link to anymore, so the report carries one jump
+  link per topic that actually posted instead (see §13's admin run report
+  note). `failed`/`skipped` runs send no report (they
   keep their existing detailed alerts, §8) and `/newsbot preview` never
   reports. Controlled by `digest.report_to_admin` (default `true`),
   effective only when `admin_channel_id` is set. `format.render_run_report`
@@ -262,7 +265,7 @@ All resolved as of M2 (2026-09-24):
 
 ## 12. SHiFT code alerts (v1.2, approved 2026-09-25)
 
-A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions.
+A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions. **Superseded by §13** as of v2.0: SHiFT alerts now post to their own dedicated `alerts.channel_id`, not the digest channel -- there is no longer a single shared channel to point either of them at.
 
 **Pattern.** Five groups of five ASCII letters or digits joined by hyphens (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`), matched case-insensitively and normalized to uppercase. The match must stand alone: not preceded or followed by another letter, digit, or hyphen. It is a fixed, anchored pattern with no user-supplied regex (no ReDoS surface). Matching runs over each item's title and **full** text, not the 500-character excerpt stored for summaries, so collectors must make the untruncated text available to the matcher.
 
@@ -291,7 +294,7 @@ alerts:
   max_codes_per_item: 5              # A17, QA item 7 -- roundup/megathread threshold
 ```
 
-**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code.
+**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code. **Superseded by §13** as of v2.0: that permission is needed in `alerts.channel_id`'s SHiFT codes channel, not the digest channel -- see §13's startup permission check.
 
 ### Implementation clarifications (A1–A13, recorded 2026-09-25)
 
@@ -389,3 +392,42 @@ message that Discord would reject outright (`bot/format.py`'s
   batch ("judged by the normal item"); a code whose *every* sighting is
   from a roundup item is recorded silently as `'roundup'` (A2) and never
   reaches the seeded/too_old/post logic at all, regardless of `seeded`.
+  **Superseded by §13** as of v2.0: a roundup-only code no longer stays
+  silent forever. It's still recorded `'roundup'` the first time (this
+  paragraph is unchanged for that first sighting), but once it's fresh by
+  `max_item_age_hours`, it now posts to the SHiFT channel without a ping,
+  headed "SHiFT codes from a roundup" -- see §13's roundup-codes-channel
+  section for the posting rule and the 50-per-check cap.
+
+## 13. Per-game channels and a SHiFT codes channel (v2.0, approved 2026-09-26)
+
+The combined digest channel goes away. Each game's daily digest posts to its own channel, and SHiFT code alerts move to a dedicated channel, which also gains an on-request list command. Owner decisions: no combined channel or index (A); one embed per game per day with no header or thread (A); nothing posted for a game with no news (A); keep `@everyone` for alerts (A, revisit later: the server is ~15 members, all playing Borderlands 4); roundup codes are now posted without a ping (B); channel IDs live in `config.yaml` next to what they configure (approach 1).
+
+**Config (breaking, hence v2.0.0).**
+- `topics[].channel_id: int` is required for every topic.
+- `digest.channel_id` is removed. If present, config validation fails with a message saying to move it to per-topic `channel_id`s. No silent fallback.
+- `alerts.channel_id: int` is required when `alerts.enabled` is true (validation error otherwise). All other `alerts` settings are unchanged.
+
+**Per-game digests.**
+- At the digest time, each topic with at least one story (or fallback headline) gets exactly one message in its channel: that topic's embed, rendered and trimmed as today (official → reported → rumor; "+N more, use /news" when over limits). No header message, no discussion thread. Topics with nothing post nothing. Topics post in config order.
+- Still one `digests` row per local day: the claim/publish/save guard, catch-up, `run-now` confirmation, and `failed`-with-posted-ids semantics are unchanged in meaning.
+- The resumable publisher's unit of progress becomes the topic: posted message ids are tracked per topic; a retry after a transient failure posts only topics not yet posted. A run where some topics posted and a later one failed is recorded `failed` with the posted ids, and `run-now` asks for confirmation before re-running.
+- Game channels need View Channel, Send Messages, Embed Links. Create Public Threads is no longer needed.
+
+**SHiFT codes channel.**
+- All code alert messages post to `alerts.channel_id`. Ping rules are unchanged: `@everyone` only when ≥1 code in the batch has a trusted (`ping_trust`) source, under `max_pings_per_day`, first message of a batch only.
+- Roundup change: a fresh (per `max_item_age_hours`) code whose only sightings are roundup items (more than `max_codes_per_item` codes) is now **posted without a ping** in a separate message headed "SHiFT codes from a roundup" with the source name and link; overflow continues in further unpinged messages. It no longer counts as silent. Once-per-code, seeding silence, and the age rule still apply; roundup posts never spend the ping budget.
+- Still never posted: codes first seen only in items older than the age limit, and everything recorded by the silent seeding sweep.
+- The SHiFT channel needs View Channel, Send Messages, and Mention @everyone.
+
+**`/shift codes` (member-facing).**
+- `/shift codes days:<1–90, default 14> public:<bool, default False>` lists every known code first seen within the window, newest first: code in a copyable block, first-seen date, source name with link, and a marker for roundup / old-post / seeded codes. Codes whose status is `pending` or `failed` are excluded.
+- Paged with the existing pager (buttons usable only by the requester); ephemeral unless `public:True`. Footer: the bot doesn't know expiry dates. Never pings (`AllowedMentions.none()`).
+
+**Startup permission check.** On first `on_ready`, the bot resolves every configured channel (each topic's, the SHiFT channel if alerts are on, the admin channel) and checks the permissions it needs there; anything missing produces one admin alert naming the channel and the missing permissions. A missing channel is reported the same way. The bot still starts.
+
+**Admin run report.** The stories line carries a jump link per topic that posted (`Borderlands 4 2 [jump] · Palworld 1 [jump] · Diablo IV 0`); topics with no post have no link.
+
+**Unchanged.** `/news recent`, `/news search`, `/newsbot status|run-now|preview` (preview shows what each channel would get), the 09:00 run's SHiFT code check, retention, backups.
+
+**Rollback.** Implementation needed one additive schema change after all: migration 003 adds `alerted_codes.from_roundup` (backfilled from `status='roundup'`), because §13's original plan to reuse `status='posted'` for a roundup-posted code turned out to collide with `/shift codes`'s "from a roundup" marker -- nothing else on the row would have distinguished the two. Migration 003 is purely additive, the same shape as 002: v1.3.0 runs unmodified against a v2 database, it just never reads or writes the new column. Rolling back means restoring a v1 `config.yaml` (v1.3.0 requires `digest.channel_id` and rejects unknown `alerts` keys, so the v2-shaped config won't load as-is) along with `TAG=1.3.0`; no database restore is needed either direction.

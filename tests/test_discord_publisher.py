@@ -6,80 +6,76 @@ there's no pure function to extract the interesting behavior into. Instead
 of mocking discord.py's `Client`/`Message` internals, these tests hand it
 tiny hand-written fakes that implement only the handful of calls
 `DiscordPublisher` actually makes (`get_channel`, `fetch_channel`,
-`channel.send`, `message.create_thread`, `client.alert`) -- the same spirit
-as `FixtureCollector`/`StubLLM` standing in for the real thing elsewhere in
-this codebase.
+`channel.send`) -- the same spirit as `FixtureCollector`/`StubLLM` standing
+in for the real thing elsewhere in this codebase.
 
-The behavior worth pinning: a retried `publish()` call must never repost a
-header or embed message it already got an id back for, transient errors
-(network blips, 5xx) must come back wrapped as `PublishError` carrying
-whatever got posted so far, and a 4xx like `discord.Forbidden` must escape
-unwrapped so `_publish_with_retry` doesn't waste backoff retrying a
-permissions problem that will never fix itself.
+design.md §13 moved the unit of progress from "message" to "topic": each
+topic gets its own embed, in its own channel, so the behavior worth
+pinning is now: a retried `publish()` call must never repost a topic it
+already got an id back for, transient errors (network blips, 5xx) must
+come back wrapped as `PublishError(retryable=True)` carrying whatever
+posted so far, and a permanent error (a 4xx, or a channel that isn't
+sendable) must come back as `PublishError(retryable=False)` -- so
+`_publish_with_retry` doesn't waste backoff retrying a permissions problem
+that will never fix itself, while still keeping whatever did land.
 """
 
 from __future__ import annotations
-
-from datetime import date
 
 import aiohttp
 import discord
 import pytest
 
 from newsbot.bot.client import DiscordPublisher
-from newsbot.bot.format import RenderedDigest
+from newsbot.bot.format import RenderedDigest, TopicMessage
 from newsbot.pipeline.publisher import PublishError
-
-RUN_DATE = date(2026, 9, 23)
 
 
 class FakeMessage:
     def __init__(self, message_id: int) -> None:
         self.id = message_id
-        self.thread_created_with: str | None = None
-        self.thread_error: Exception | None = None
-
-    async def create_thread(self, *, name: str) -> None:
-        if self.thread_error is not None:
-            raise self.thread_error
-        self.thread_created_with = name
 
 
 class FakeChannel:
     """Records every `send()` call; can be told to fail on a given call index."""
 
     def __init__(self) -> None:
-        self.sent: list[tuple[str | None, object]] = []
+        self.sent: list[object] = []
+        self.nonces: list[str | None] = []
         self._next_id = 100
         self.fail_on_call: dict[int, Exception] = {}
         self._call_count = 0
 
-    async def send(self, content: str | None = None, *, embeds=None, allowed_mentions=None):
+    async def send(
+        self, content: str | None = None, *, embed=None, allowed_mentions=None, nonce=None
+    ):
         call_index = self._call_count
         self._call_count += 1
+        self.nonces.append(nonce)
         if call_index in self.fail_on_call:
             raise self.fail_on_call[call_index]
         self._next_id += 1
         message = FakeMessage(self._next_id)
-        self.sent.append((content, embeds))
+        self.sent.append(embed)
         return message
 
 
 class FakeClient:
-    def __init__(self, channel: FakeChannel | None) -> None:
-        self._channel = channel
+    def __init__(self, channels: dict[int, FakeChannel]) -> None:
+        self._channels = channels
         self.alerts: list[str] = []
         self.fetch_error: Exception | None = None
 
     def get_channel(self, channel_id: int):
-        return self._channel
+        return self._channels.get(channel_id)
 
     async def fetch_channel(self, channel_id: int):
         if self.fetch_error is not None:
             raise self.fetch_error
-        if self._channel is None:
+        channel = self._channels.get(channel_id)
+        if channel is None:
             raise discord.HTTPException(_fake_response(404), "not found")
-        return self._channel
+        return channel
 
     async def alert(self, text: str) -> None:
         self.alerts.append(text)
@@ -97,212 +93,269 @@ def _fake_response(status: int):
     return _FakeResponse(status)
 
 
-def _rendered(n_embed_messages: int) -> RenderedDigest:
-    embed = discord.Embed(title="story")
-    return RenderedDigest(
-        header="# News for 2026-09-23",
-        embed_messages=[[embed] for _ in range(n_embed_messages)],
+def _topic_message(topic_key: str, channel_id: int) -> TopicMessage:
+    return TopicMessage(
+        topic_key=topic_key,
+        topic_name=topic_key,
+        channel_id=channel_id,
+        embed=discord.Embed(title=topic_key),
     )
 
 
-async def test_publish_happy_path_posts_header_thread_and_embeds():
-    channel = FakeChannel()
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+def _rendered(*messages: TopicMessage) -> RenderedDigest:
+    from datetime import date
 
-    ids = await publisher.publish(_rendered(2))
-
-    assert len(ids) == 3  # header + 2 embed messages
-    assert len(channel.sent) == 3
-    assert channel.sent[0][0] == "# News for 2026-09-23"
+    return RenderedDigest(run_date=date(2026, 9, 23), messages=list(messages), coverage_notes=[])
 
 
-async def test_retry_after_embed_failure_does_not_repost_header():
-    channel = FakeChannel()
-    # Header (call 0) and first embed (call 1) succeed; second embed
-    # (call 2) fails transiently on the first attempt only.
-    channel.fail_on_call = {2: aiohttp.ClientError("connection reset")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+async def test_publish_happy_path_posts_one_message_per_topic_to_its_own_channel():
+    bl4 = FakeChannel()
+    palworld = FakeChannel()
+    client = FakeClient({1: bl4, 2: palworld})
+    publisher = DiscordPublisher(client)
+
+    ids = await publisher.publish(
+        _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
+    )
+
+    assert set(ids) == {"borderlands4", "palworld"}
+    assert len(bl4.sent) == 1
+    assert len(palworld.sent) == 1
+
+
+async def test_retry_after_one_topics_failure_does_not_repost_the_other():
+    bl4 = FakeChannel()
+    palworld = FakeChannel()
+    # borderlands4 (call 0 on its own channel) succeeds; palworld (call 0
+    # on its own channel) fails transiently on the first attempt only.
+    palworld.fail_on_call = {0: aiohttp.ClientError("connection reset")}
+    client = FakeClient({1: bl4, 2: palworld})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
 
     with pytest.raises(PublishError) as excinfo:
-        await publisher.publish(_rendered(2))
-    assert len(excinfo.value.posted_ids) == 2  # header + first embed, both already posted
-    assert len(channel.sent) == 2
+        await publisher.publish(rendered)
+    assert list(excinfo.value.posted_by_topic) == ["borderlands4"]
+    assert len(bl4.sent) == 1
+    assert len(palworld.sent) == 0
 
     # Retry the same publisher instance -- it must resume, not repost
-    # the header or the first embed.
-    channel.fail_on_call = {}
-    ids = await publisher.publish(_rendered(2))
-    assert len(ids) == 3
-    assert len(channel.sent) == 3  # only the missing embed got sent on retry
+    # borderlands4's embed.
+    palworld.fail_on_call = {}
+    ids = await publisher.publish(rendered)
+    assert set(ids) == {"borderlands4", "palworld"}
+    assert len(bl4.sent) == 1  # not reposted
+    assert len(palworld.sent) == 1
 
 
-async def test_transient_network_error_is_wrapped_as_publish_error():
+async def test_transient_network_error_is_wrapped_as_retryable_publish_error():
     channel = FakeChannel()
     channel.fail_on_call = {0: OSError("network unreachable")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
 
-    with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is True
 
 
-async def test_forbidden_is_not_wrapped_and_not_retryable():
+async def test_forbidden_is_wrapped_and_not_retryable():
     channel = FakeChannel()
     channel.fail_on_call = {0: discord.Forbidden(_fake_response(403), "missing access")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
 
-    with pytest.raises(discord.Forbidden):
-        await publisher.publish(_rendered(1))
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is False
 
 
-async def test_other_4xx_is_not_wrapped():
+async def test_other_4xx_is_wrapped_and_not_retryable():
     channel = FakeChannel()
     channel.fail_on_call = {0: discord.HTTPException(_fake_response(400), "bad request")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
 
-    with pytest.raises(discord.HTTPException):
-        await publisher.publish(_rendered(1))
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is False
+
+
+async def test_429_rate_limit_is_wrapped_and_retryable():
+    # 429 is a 4xx by number, but it's Discord's own rate limit -- the
+    # one 4xx that backing off and retrying actually fixes.
+    channel = FakeChannel()
+    channel.fail_on_call = {0: discord.HTTPException(_fake_response(429), "rate limited")}
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is True
 
 
 async def test_discord_5xx_is_wrapped_and_retryable():
     channel = FakeChannel()
     channel.fail_on_call = {0: discord.HTTPException(_fake_response(503), "service unavailable")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
 
-    with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
-
-
-async def test_thread_creation_failure_is_non_fatal_and_alerts_admin():
-    channel = FakeChannel()
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
-
-    # Make the header message's create_thread blow up, without touching
-    # publish()'s own send/receive path.
-    real_send = channel.send
-
-    async def send_and_break_thread(content=None, *, embeds=None, allowed_mentions=None):
-        message = await real_send(content, embeds=embeds, allowed_mentions=allowed_mentions)
-        if content is not None:  # the header call
-            message.thread_error = discord.HTTPException(_fake_response(500), "thread failed")
-        return message
-
-    channel.send = send_and_break_thread
-
-    ids = await publisher.publish(_rendered(1))
-
-    assert len(ids) == 2  # header + embed message still both posted
-    assert len(client.alerts) == 1
-    assert "thread" in client.alerts[0].lower()
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is True
 
 
-async def test_channel_fetch_failure_is_wrapped_as_publish_error():
-    client = FakeClient(channel=None)
+async def test_channel_fetch_failure_is_wrapped_as_retryable_publish_error():
+    client = FakeClient(channels={})
     client.fetch_error = aiohttp.ClientError("dns failure")
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is True
+
+
+async def test_channel_fetch_not_found_is_a_permanent_publish_error():
+    # get_channel misses the cache (never seen this guild's channel before)
+    # and fetch_channel comes back 404 -- the channel was deleted, or the
+    # id was never valid. No amount of retrying fixes a channel that isn't
+    # there.
+    client = FakeClient(channels={})
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is False
+
+
+async def test_non_sendable_channel_is_a_permanent_publish_error():
+    # A resolved "channel" with no send() at all -- a category, a voice
+    # channel misconfigured into channel_id -- isn't something a retry
+    # ever fixes.
+    class _NotSendable:
+        pass
+
+    client = FakeClient({1: _NotSendable()})
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is False
+
+
+async def test_posted_ids_property_reflects_progress_so_far():
+    bl4 = FakeChannel()
+    palworld = FakeChannel()
+    palworld.fail_on_call = {0: aiohttp.ClientError("blip")}
+    client = FakeClient({1: bl4, 2: palworld})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
 
     with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
+        await publisher.publish(rendered)
+
+    assert len(publisher.posted_ids) == 1
 
 
-# --- adversarial: multiple retries, thread-failure-then-retry, header-retry ---
+async def test_second_topic_channel_resolution_is_cached_across_calls():
+    # publish() is called with the same rendered digest twice on a
+    # publisher that's already posted everything -- the second call
+    # shouldn't repost, and shouldn't need to re-fetch a channel either.
+    channel = FakeChannel()
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1))
+
+    ids = await publisher.publish(rendered)
+    ids_again = await publisher.publish(rendered)
+
+    assert ids == ids_again
+    assert len(channel.sent) == 1
+
+
+# --- adversarial: multiple retries, several topics failing in sequence ---
 
 
 async def test_retry_survives_two_consecutive_transient_failures_before_succeeding():
-    # Not just one failed attempt then a clean retry -- the embed keeps
-    # failing transiently across two whole attempts before finally
-    # landing on the third, and the header must still never be reposted.
     channel = FakeChannel()
-    channel.fail_on_call = {1: aiohttp.ClientError("blip 1")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    channel.fail_on_call = {0: aiohttp.ClientError("blip 1")}
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1))
 
     with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
-    assert len(channel.sent) == 1  # only the header landed
+        await publisher.publish(rendered)
+    assert len(channel.sent) == 0
 
-    # FakeChannel's call index keeps counting across attempts (it's a
-    # property of the channel, not of one publish() call) -- the header
-    # was call 0, the failed embed was call 1, so the retry's embed
-    # attempt is call 2.
-    channel.fail_on_call = {2: aiohttp.ClientError("blip 2")}
+    channel.fail_on_call = {1: aiohttp.ClientError("blip 2")}
     with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
-    assert len(channel.sent) == 1  # header still not reposted, embed still failing
+        await publisher.publish(rendered)
+    assert len(channel.sent) == 0
 
     channel.fail_on_call = {}
-    ids = await publisher.publish(_rendered(1))
-    assert len(ids) == 2
-    assert len(channel.sent) == 2  # header sent exactly once total, across all three attempts
-    header_sends = [c for c in channel.sent if c[0] is not None]
-    assert len(header_sends) == 1
+    ids = await publisher.publish(rendered)
+    assert ids == {"borderlands4": channel._next_id}
+    assert len(channel.sent) == 1  # sent exactly once total, across all three attempts
 
 
-async def test_retry_after_header_send_itself_fails_does_not_double_post_header():
+async def test_publish_with_no_topics_returns_empty_and_is_resumable():
+    client = FakeClient({})
+    publisher = DiscordPublisher(client)
+
+    ids = await publisher.publish(_rendered())
+    assert ids == {}
+
+    ids_again = await publisher.publish(_rendered())
+    assert ids_again == {}
+
+
+# --- nonces (design.md §13 follow-up: retries must be able to dedup) ---
+
+
+async def test_retry_on_the_same_instance_reuses_the_topics_nonce():
     channel = FakeChannel()
-    channel.fail_on_call = {0: aiohttp.ClientError("header blip")}
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    channel.fail_on_call = {0: aiohttp.ClientError("blip")}
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1))
 
     with pytest.raises(PublishError):
-        await publisher.publish(_rendered(1))
-    assert len(channel.sent) == 0  # header never actually landed
+        await publisher.publish(rendered)
+    # The failed attempt still asked discord.py to send with a nonce --
+    # that's what makes the retry's identical nonce meaningful.
+    first_nonce = channel.nonces[0]
+    assert first_nonce
 
     channel.fail_on_call = {}
-    ids = await publisher.publish(_rendered(1))
-    assert len(ids) == 2
-    header_sends = [c for c in channel.sent if c[0] is not None]
-    assert len(header_sends) == 1  # exactly one header, sent on the successful retry
+    await publisher.publish(rendered)
+    assert channel.nonces[1] == first_nonce
 
 
-async def test_thread_creation_is_not_retried_after_a_later_transient_embed_failure():
-    # Thread creation fails (non-fatally, alerts once) on the first
-    # attempt; the second embed then fails transiently and the whole
-    # publish() call raises. On retry, thread creation must not be
-    # attempted a second time -- it already ran (and already alerted)
-    # once, and _thread_created is set regardless of success.
+async def test_different_topics_get_different_nonces():
+    bl4 = FakeChannel()
+    palworld = FakeChannel()
+    client = FakeClient({1: bl4, 2: palworld})
+    publisher = DiscordPublisher(client)
+
+    await publisher.publish(
+        _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
+    )
+
+    assert bl4.nonces[0] != palworld.nonces[0]
+
+
+async def test_a_new_publisher_instance_gets_a_different_nonce_for_the_same_topic():
+    # A confirmed run-now builds a fresh DiscordPublisher -- that repost is
+    # deliberate, so it must not share a nonce with whatever a previous
+    # instance sent for the same topic.
     channel = FakeChannel()
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
+    client = FakeClient({1: channel})
+    rendered = _rendered(_topic_message("borderlands4", 1))
 
-    real_send = channel.send
+    first = DiscordPublisher(client)
+    await first.publish(rendered)
 
-    async def send_with_failures(content=None, *, embeds=None, allowed_mentions=None):
-        message = await real_send(content, embeds=embeds, allowed_mentions=allowed_mentions)
-        if content is not None:  # header call: break its thread
-            message.thread_error = discord.HTTPException(_fake_response(500), "thread failed")
-        return message
+    second = DiscordPublisher(client)
+    await second.publish(rendered)
 
-    channel.send = send_with_failures
-    channel.fail_on_call = {2: aiohttp.ClientError("second embed blip")}
-
-    with pytest.raises(PublishError):
-        await publisher.publish(_rendered(2))
-    assert len(client.alerts) == 1  # thread failure alerted exactly once
-
-    channel.fail_on_call = {}
-    ids = await publisher.publish(_rendered(2))
-    assert len(ids) == 3
-    assert len(client.alerts) == 1  # not alerted again -- thread creation wasn't retried
-
-
-async def test_publish_with_no_embed_messages_still_resumable_and_posts_only_header():
-    channel = FakeChannel()
-    client = FakeClient(channel)
-    publisher = DiscordPublisher(client, channel_id=1, run_date=RUN_DATE)
-
-    ids = await publisher.publish(_rendered(0))
-    assert len(ids) == 1
-    assert len(channel.sent) == 1
-
-    # A second publish() call on the same (already-succeeded) instance
-    # must not repost anything either.
-    ids_again = await publisher.publish(_rendered(0))
-    assert ids_again == ids
-    assert len(channel.sent) == 1
+    assert channel.nonces[0] != channel.nonces[1]

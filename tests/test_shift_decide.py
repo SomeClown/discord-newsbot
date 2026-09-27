@@ -18,6 +18,7 @@ from newsbot.shift.decide import (
     CodeCandidate,
     CodeSighting,
     aggregate,
+    group_roundups,
     pings_used_today,
     plan_alerts,
     seeding_healthy,
@@ -85,7 +86,7 @@ def test_sightings_from_items_sets_golden_flag():
 
 
 def test_sightings_from_items_empty_alert_topics_scopes_to_everything():
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     items = [_item(title=f"unrelated post {CODE_A}", topics=("palworld",))]
     sightings = sightings_from_items(items, topics=topics, alert_topics=[])
     assert [s.code for s in sightings] == [CODE_A]
@@ -93,8 +94,8 @@ def test_sightings_from_items_empty_alert_topics_scopes_to_everything():
 
 def test_sightings_from_items_scopes_to_configured_topics_by_keyword():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     matching = _item(url="https://e/1", title=f"BL4 code: {CODE_A}")
     other = _item(url="https://e/2", title=f"Palworld code: {CODE_B}")
@@ -105,7 +106,7 @@ def test_sightings_from_items_scopes_to_configured_topics_by_keyword():
 
 
 def test_sightings_from_items_scopes_dedicated_source_with_no_keyword_hit():
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     # A dedicated single-topic source counts even with no keyword hit at
     # all (SPEC-DEV 3 / A6) -- a Steam patch note that never says the
     # game's name by name.
@@ -116,8 +117,8 @@ def test_sightings_from_items_scopes_dedicated_source_with_no_keyword_hit():
 
 def test_sightings_from_items_drops_items_outside_scoped_topics():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     item = _item(title=f"Palworld code: {CODE_A}", topics=("palworld",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
@@ -129,7 +130,7 @@ def test_sightings_from_items_press_item_not_mentioning_bl4_never_alerts():
     # by keyword; one that never names Borderlands 4 (or an alias) at all
     # shouldn't count toward the scoped alert topic just because it's a
     # press item covering games in general.
-    topics = [Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"])]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"])]
     item = _item(
         title=f"This week in gaming news: a code appeared, {CODE_A}",
         trust="press",
@@ -141,8 +142,8 @@ def test_sightings_from_items_press_item_not_mentioning_bl4_never_alerts():
 
 def test_sightings_from_items_diablo_item_never_alerts_when_scoped_to_bl4():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="diablo4", name="Diablo IV"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="diablo4", name="Diablo IV", channel_id=1),
     ]
     item = _item(title=f"Diablo IV season code: {CODE_A}", topics=("diablo4",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
@@ -157,8 +158,8 @@ def test_sightings_from_items_item_matched_to_both_bl4_and_another_topic_still_c
     # confidently matches borderlands4 too, it should still count even
     # though it's also tagged for another topic.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     item = _item(
         title=f"Crossover event: BL4 and Palworld code {CODE_A}",
@@ -175,7 +176,13 @@ def test_sightings_from_items_entity_only_match_never_alerts():
     # show next to a human-readable headline but that this module's job
     # is to reject outright.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     item = _item(
         title=f"Gearbox drops new Tiny Tina's Wonderlands SHiFT code {CODE_A}",
@@ -192,7 +199,13 @@ def test_sightings_from_items_dedicated_source_still_counts_alongside_entity_onl
     # (SPEC-DEV 3) and must still alert, in the same batch that also
     # contains an entity-only item that must not.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     dedicated = _item(
         url="https://e/dedicated",
@@ -218,7 +231,13 @@ def test_sightings_from_items_press_item_confidently_naming_the_topic_still_coun
     # entity-only case, it must not accidentally exclude confident press
     # matches too.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     item = _item(
         title=f"Borderlands 4 SHiFT code just dropped: {CODE_A}", trust="press", topics=None
@@ -231,7 +250,7 @@ def test_sightings_from_items_dedicated_bl4_source_always_counts():
     # A dedicated (single-topic) source counts as a confident match with
     # no keyword check at all -- the flip side of the press-item test
     # above: this is what "dedicated BL4 sources do alert" means.
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     item = _item(title="v1.3 patch notes", excerpt=f"redeem {CODE_A}", topics=("borderlands4",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
     assert [s.code for s in sightings] == [CODE_A]
@@ -424,23 +443,99 @@ def test_sightings_from_items_at_the_threshold_is_not_roundup():
     assert not any(s.roundup for s in sightings)
 
 
-# --- plan_alerts: roundup silent recording (QA item 7) ---
+# --- plan_alerts: roundup codes (design.md §13, D3 -- v2.0 posts them unpinged) ---
+#
+# v1 recorded every roundup-only code silently, always, regardless of
+# `seeded` (QA item 7). v2.0 changes that: a roundup code now goes through
+# the same seeded/stale/fresh judgment a normal code does, it just never
+# reaches `to_post`/`ping`/`cap_reached` -- fresh ones land in
+# `roundup_to_post` instead, to post unpinged (`format.render_roundup_alerts`,
+# `sweep._apply_plan`). These tests replace the old "always silent" ones.
 
 
-def test_plan_alerts_roundup_candidate_recorded_silently_regardless_of_seeded():
+def test_plan_alerts_unseeded_roundup_candidate_recorded_as_seeded():
     roundup_candidate = _candidate(roundup=True)
-    plan_unseeded = plan_alerts(
+    plan = plan_alerts(
         [roundup_candidate], known=set(), seeded=False, seeding_ok=True, pings_today=0, max_pings=3
     )
-    assert plan_unseeded.silent == [(roundup_candidate, "roundup")]
-    assert plan_unseeded.to_post == []
+    assert plan.silent == [(roundup_candidate, "seeded")]
+    assert plan.to_post == []
+    assert plan.roundup_to_post == []
+    assert plan.mark_seeded is True
 
-    plan_seeded = plan_alerts(
-        [roundup_candidate], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
+
+def test_plan_alerts_seeded_stale_roundup_candidate_recorded_too_old():
+    stale_roundup = _candidate(roundup=True, fresh=False)
+    plan = plan_alerts(
+        [stale_roundup], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
     )
-    assert plan_seeded.silent == [(roundup_candidate, "roundup")]
-    assert plan_seeded.to_post == []
-    assert plan_seeded.ping is False
+    assert plan.silent == [(stale_roundup, "too_old")]
+    assert plan.to_post == []
+    assert plan.roundup_to_post == []
+
+
+def test_plan_alerts_seeded_fresh_roundup_candidate_queued_unpinged():
+    fresh_roundup = _candidate(roundup=True, fresh=True, trusted=True)
+    plan = plan_alerts(
+        [fresh_roundup], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
+    )
+    assert plan.silent == []
+    assert plan.to_post == []  # never the normal (pinging) pipeline
+    assert plan.roundup_to_post == [fresh_roundup]
+    assert plan.ping is False
+    assert plan.cap_reached is False
+
+
+def test_plan_alerts_roundup_never_spends_or_reports_the_ping_cap():
+    # A batch with only a fresh, trusted roundup code shouldn't ping, and
+    # shouldn't read as "the cap stopped it" either -- there was nothing
+    # in the normal pipeline to ping for in the first place.
+    fresh_roundup = _candidate(roundup=True, fresh=True, trusted=True)
+    plan = plan_alerts(
+        [fresh_roundup], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
+    )
+    assert plan.ping is False
+    assert plan.cap_reached is False
+
+
+def test_plan_alerts_roundup_cap_overflow_is_silent_roundup():
+    codes = [f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(3)]
+    fresh_roundups = [_candidate(code=c, roundup=True, fresh=True) for c in codes]
+    plan = plan_alerts(
+        fresh_roundups,
+        known=set(),
+        seeded=True,
+        seeding_ok=True,
+        pings_today=0,
+        max_pings=3,
+        max_roundup_codes=2,
+    )
+    assert plan.roundup_to_post == fresh_roundups[:2]
+    assert plan.silent == [(fresh_roundups[2], "roundup")]
+
+
+# --- group_roundups ---
+
+
+def test_group_roundups_groups_by_source_and_url():
+    same_post_a = _candidate(code=CODE_A, source_name="Reddit", item_url="https://e/roundup")
+    same_post_b = _candidate(code=CODE_B, source_name="Reddit", item_url="https://e/roundup")
+    other_post = _candidate(
+        code="CCCC3-CCCCC-CCCCC-CCCCC-CCCCC", source_name="Discord", item_url="https://e/other"
+    )
+    groups = group_roundups([same_post_a, other_post, same_post_b])
+    assert groups == [[same_post_a, same_post_b], [other_post]]
+
+
+def test_group_roundups_preserves_first_seen_group_order():
+    first_group = _candidate(code=CODE_A, source_name="First", item_url="https://e/1")
+    second_group = _candidate(code=CODE_B, source_name="Second", item_url="https://e/2")
+    groups = group_roundups([second_group, first_group])
+    assert groups == [[second_group], [first_group]]
+
+
+def test_group_roundups_empty_input_returns_empty():
+    assert group_roundups([]) == []
 
 
 # --- plan_alerts: trust-gated pings (QA item 7 option A) ---

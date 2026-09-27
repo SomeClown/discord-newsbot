@@ -26,6 +26,7 @@ from datetime import UTC, date, datetime, timedelta
 from newsbot.store.models import (
     AlertState,
     AlertStatus,
+    CodeView,
     DigestRow,
     PriorStory,
     SourceHealthRow,
@@ -72,6 +73,25 @@ def existing_urls(conn: sqlite3.Connection, urls: Iterable[str]) -> set[str]:
     return found
 
 
+def _utc_iso(moment: datetime) -> str:
+    """ISO string for `moment` in UTC, for comparing against stored timestamps.
+
+    Every timestamp in the database is stored as UTC ISO text, and SQLite
+    compares that text as text. That works exactly as long as both sides
+    are UTC; hand it a Pacific-time boundary and "an hour later" can sort
+    earlier. test-engineer proved it with a naive-datetime boundary in
+    mind, so every time boundary goes through here first. (`/shift
+    codes`'s own window is already a rolling UTC one -- `now - days`, no
+    timezone involved; it's only the *displayed* first-seen date that
+    gets converted to the digest's timezone, in `format.py`, well after
+    this function's job is done.) A naive datetime is taken to already be
+    UTC, which is what the rest of this module assumes anyway.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
 def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) -> list[PriorStory]:
     """Headlines for `topic_key` since `since`, newest first.
 
@@ -81,7 +101,7 @@ def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) 
     rows = conn.execute(
         "SELECT id, headline, created_at FROM stories "
         "WHERE topic_key = ? AND created_at >= ? ORDER BY created_at DESC",
-        (topic_key, since.isoformat()),
+        (topic_key, _utc_iso(since)),
     ).fetchall()
     return [
         PriorStory(
@@ -259,13 +279,28 @@ def mark_digest_failed(
 
     Items and stories aren't touched here: `save_run` never ran for this
     attempt, so there's nothing to undo. A retry just recollects.
+
+    `message_ids` is unioned with whatever `posted_message_ids` this row
+    already had, not written over it (a pre-existing bug): a forced
+    run-now that fails again after a first failure already recorded some
+    ids would otherwise overwrite them with this attempt's shorter list
+    (or an empty one, if this attempt didn't post anything before
+    failing), and an unattended restart's catch-up check would then have
+    no way to know those earlier messages exist and repost them. Order is
+    preserved -- whatever was already there, then any new id this attempt
+    got that wasn't already in the list.
     """
     now_iso = _resolve_now(now)
     with conn:
+        row = conn.execute(
+            "SELECT posted_message_ids FROM digests WHERE id = ?", (digest_id,)
+        ).fetchone()
+        existing_ids: list[int] = json.loads(row["posted_message_ids"]) if row else []
+        merged_ids = existing_ids + [i for i in message_ids if i not in existing_ids]
         conn.execute(
             "UPDATE digests SET status = 'failed', error_notes = ?, posted_message_ids = ?, "
             "updated_at = ? WHERE id = ?",
-            (notes, json.dumps(message_ids), now_iso, digest_id),
+            (notes, json.dumps(merged_ids), now_iso, digest_id),
         )
 
 
@@ -313,7 +348,7 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
     the AFTER DELETE trigger, and any story pointing at a deleted one via
     `is_update_of` gets nulled rather than orphaned.
     """
-    cutoff_iso = cutoff.isoformat()
+    cutoff_iso = _utc_iso(cutoff)
     with conn:
         items_deleted = conn.execute(
             "DELETE FROM items WHERE collected_at < ?", (cutoff_iso,)
@@ -381,31 +416,36 @@ def known_codes(conn: sqlite3.Connection, codes: Iterable[str]) -> set[str]:
 
 def record_silent_codes(
     conn: sqlite3.Connection,
-    rows: list[tuple[str, str, str, str]],
+    rows: list[tuple[str, str, str, str, bool]],
     *,
     now: Callable[[], datetime] | None = None,
     mark_seeded: bool,
 ) -> None:
-    """Record codes without posting them: `(code, source_name, item_url, status)`.
+    """Record codes without posting them: `(code, source_name, item_url, status, from_roundup)`.
 
     `status` is `'seeded'` (unseeded sweep, A1), `'too_old'` (A11, a
     fresh-vs-stale call `shift/decide.py` already made), or `'roundup'`
     (QA item 7, owner decision 2026-09-25: a code whose every sighting
     came from an item naming more than `max_codes_per_item` distinct
-    codes). `ON CONFLICT DO NOTHING` because a code landing here twice
-    across two sweeps should just stay however it was first recorded.
-    `mark_seeded=True` sets the `seeded_at` marker -- but only if it isn't
-    already set, since the marker means "the first sweep after enabling
-    has run", not "the most recent healthy sweep ran".
+    codes). `from_roundup` (migration 003) is `CodeCandidate.roundup`
+    passed straight through -- true exactly when `status == 'roundup'`
+    today, but kept as its own column (not derived from `status`) because
+    v2.0 (design.md §13) starts posting some roundup codes instead of
+    silently recording them, at which point `status` alone can't carry
+    the marker anymore. `ON CONFLICT DO NOTHING` because a code landing
+    here twice across two sweeps should just stay however it was first
+    recorded. `mark_seeded=True` sets the `seeded_at` marker -- but only
+    if it isn't already set, since the marker means "the first sweep
+    after enabling has run", not "the most recent healthy sweep ran".
     """
     now_iso = _resolve_now(now)
     with conn:
-        for code, source_name, item_url, status in rows:
+        for code, source_name, item_url, status, from_roundup in rows:
             conn.execute(
                 "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, status) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
-                (code, now_iso, source_name, item_url, status),
+                "(code, first_seen_at, source_name, item_url, status, from_roundup) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
+                (code, now_iso, source_name, item_url, status, int(from_roundup)),
             )
         if mark_seeded:
             conn.execute(
@@ -423,8 +463,15 @@ def claim_codes(
     local_day: str,
     now: Callable[[], datetime] | None = None,
     max_pings: int | None = None,
+    from_roundup: bool = False,
 ) -> bool:
     """Claim `codes` as `pending` and spend today's ping budget, in one transaction.
+
+    `from_roundup` (migration 003) is stamped onto every row in this
+    claim -- one call always claims one kind of batch, never a mix, so
+    a single bool per call (not per code) is enough. Defaults to False:
+    every caller before v2.0 (design.md §13) claims a normal, non-roundup
+    batch, and step 5's roundup posting is the first to pass True.
 
     `codes` is `(code, source_name, item_url)`. This is a plain `INSERT`,
     not `ON CONFLICT DO NOTHING` -- record-then-post (plan §1) depends on
@@ -482,9 +529,9 @@ def claim_codes(
         for code, source_name, item_url in codes:
             conn.execute(
                 "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, pinged, status) "
-                "VALUES (?, ?, ?, ?, ?, 'pending')",
-                (code, now_iso, source_name, item_url, int(actual_pinged)),
+                "(code, first_seen_at, source_name, item_url, pinged, from_roundup, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (code, now_iso, source_name, item_url, int(actual_pinged), int(from_roundup)),
             )
         conn.execute("COMMIT")
     except BaseException:
@@ -585,6 +632,48 @@ def alert_status(
     )
 
 
+def query_codes(
+    conn: sqlite3.Connection, since: datetime, limit: int, offset: int
+) -> tuple[list[CodeView], int]:
+    """Known SHiFT codes for `/shift codes`, newest first.
+
+    Excludes `'pending'` (still being claimed/posted, not confirmed yet)
+    and `'failed'` (claimed but never actually landed in Discord) -- a
+    member paging through known codes shouldn't see either half-state.
+    Everything else (`'seeded'`, `'too_old'`, `'roundup'`, `'posted'`)
+    is fair game; `format.render_code_page` is what turns `from_roundup`
+    and `status` into the "from a roundup" / "old post" / "already
+    around when alerts started" markers (D5). Ties in `first_seen_at`
+    (plausible: a batch claimed together shares one timestamp) break on
+    `rowid`, so paging never reorders rows between calls.
+    """
+    since_iso = _utc_iso(since)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM alerted_codes "
+        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ?",
+        (since_iso,),
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT code, first_seen_at, source_name, item_url, status, from_roundup "
+        "FROM alerted_codes "
+        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ? "
+        "ORDER BY first_seen_at DESC, rowid ASC "
+        "LIMIT ? OFFSET ?",
+        (since_iso, limit, offset),
+    ).fetchall()
+    return [
+        CodeView(
+            code=row["code"],
+            first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
+            source_name=row["source_name"],
+            item_url=row["item_url"],
+            status=row["status"],
+            from_roundup=bool(row["from_roundup"]),
+        )
+        for row in rows
+    ], total
+
+
 # --- Read path: /news commands and /newsbot status ---
 #
 # Everything below only reads. It's split out here more for the reader's
@@ -640,7 +729,7 @@ def query_stories(
 ) -> tuple[list[StoryView], int]:
     """Stories for `/news recent`, newest first. An empty `topic_keys` means "All"."""
     where = ["created_at >= ?"]
-    params: list[object] = [since.isoformat()]
+    params: list[object] = [_utc_iso(since)]
     if topic_keys:
         placeholders = ",".join("?" for _ in topic_keys)
         where.append(f"topic_key IN ({placeholders})")  # noqa: S608
@@ -696,7 +785,7 @@ def search_stories(
             "SELECT COUNT(*) FROM stories_fts "
             "JOIN stories ON stories.id = stories_fts.rowid "
             "WHERE stories_fts MATCH ? AND stories.created_at >= ?",
-            (escaped, since.isoformat()),
+            (escaped, _utc_iso(since)),
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT stories.id, stories.topic_key, stories.headline, stories.summary, "
@@ -706,7 +795,7 @@ def search_stories(
             "WHERE stories_fts MATCH ? AND stories.created_at >= ? "
             "ORDER BY bm25(stories_fts), stories.created_at DESC "
             "LIMIT ? OFFSET ?",
-            (escaped, since.isoformat(), limit, offset),
+            (escaped, _utc_iso(since), limit, offset),
         ).fetchall()
     except sqlite3.OperationalError:
         # fts_escape should make every query syntactically valid, but this

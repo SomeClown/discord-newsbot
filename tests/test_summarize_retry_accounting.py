@@ -34,7 +34,9 @@ from newsbot.pipeline.summarize import (
 )
 from newsbot.store.models import Usage
 
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
+DIABLO4 = Topic(
+    key="diablo4", name="Diablo IV", channel_id=1, aliases=["Diablo 4", "D4"], entities=["Blizzard"]
+)
 
 
 def _topic_item(url="https://example.com/a") -> TopicItem:

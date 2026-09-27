@@ -23,7 +23,9 @@ from newsbot.store.models import PriorStory
 _HEADLINE_MAX = 200
 _SUMMARY_MAX = 400
 
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
+DIABLO4 = Topic(
+    key="diablo4", name="Diablo IV", channel_id=1, aliases=["Diablo 4", "D4"], entities=["Blizzard"]
+)
 
 
 def _item(url="https://real.example.com/a", *, trust="official"):

@@ -16,7 +16,11 @@ admin_channel_id: 000000000000000000  # placeholder -- optional; alerts go here
 admin_permission: manage_guild
 
 digest:
-  channel_id: 000000000000000000      # placeholder -- where the daily digest posts
+  # v2.0: there is no digest.channel_id here anymore -- the combined
+  # digest channel is gone, and each game posts to its own topics[].
+  # channel_id below instead. A config still setting digest.channel_id
+  # (a v1 leftover) fails validation with a message pointing at the
+  # per-topic replacement; there's no silent fallback.
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24
@@ -32,6 +36,7 @@ digest:
 topics:
   - key: borderlands4
     name: "Borderlands 4"
+    channel_id: 111111111111111111  # placeholder -- this game's own channel (v2.0)
     # Bare "Borderlands" was tempting and wrong: it also matches BL1-3, Tiny
     # Tina, the 2024 movie, and (I am not making this up) an academic
     # "Association for Borderlands Studies". "BL4" and "Borderlands4" don't
@@ -43,6 +48,7 @@ topics:
       - "Borderlands 4 update OR DLC OR patch"
   - key: palworld
     name: "Palworld"
+    channel_id: 111111111111111112  # placeholder -- this game's own channel (v2.0)
     aliases: []                       # the name is distinctive enough that it needs no help
     entities: ["Pocketpair"]
     search_queries:
@@ -50,6 +56,7 @@ topics:
       - "Palworld update OR patch OR DLC"
   - key: diablo4
     name: "Diablo IV"
+    channel_id: 111111111111111113  # placeholder -- this game's own channel (v2.0)
     # "D4" got dropped for the same reason "Borderlands" did: it's a chess
     # opening, a TTRPG die, and a Nikon camera before it's ever this game.
     # "Diablo V"/"Diablo 5" are in here on purpose, not by accident: Diablo V
@@ -239,9 +246,13 @@ sources:
 # topics for your own game list, and see README.md's "SHiFT code alerts"
 # section and docs/deploy.md before flipping enabled to true in prod --
 # the bot's role needs the "Mention @everyone, @here, and All Roles"
-# permission in the digest channel, or the ping silently gets dropped.
+# permission in the SHiFT codes channel, or the ping silently gets dropped.
 # alerts:
 #   enabled: true
+#   # v2.0: SHiFT alerts get their own dedicated channel now, separate from
+#   # every game's digest channel -- required once enabled is true, no
+#   # fallback to a game channel or the admin channel.
+#   channel_id: 111111111111111114  # placeholder -- a channel just for this
 #   # Scope the sweep to specific topic keys (A6) -- empty means every
 #   # topic, but a code from an unrelated game pinging the whole server
 #   # is a worse default than a deliberate, narrow list. Borderlands 4 is

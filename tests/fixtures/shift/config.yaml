@@ -3,7 +3,6 @@ admin_channel_id: 123456789012345679
 admin_permission: manage_guild
 
 digest:
-  channel_id: 123456789012345680
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24
@@ -12,10 +11,12 @@ digest:
 topics:
   - key: borderlands4
     name: "Borderlands 4"
+    channel_id: 123456789012345690
     aliases: ["BL4", "Borderlands"]
     entities: ["Gearbox"]
   - key: palworld
     name: "Palworld"
+    channel_id: 123456789012345691
     aliases: []
     entities: ["Pocketpair"]
 
@@ -23,6 +24,7 @@ topics:
 # ignored by this sweep, on purpose, to demonstrate the scoping.
 alerts:
   enabled: true
+  channel_id: 123456789012345693
   interval_minutes: 60
   max_item_age_hours: 48
   max_pings_per_day: 3
