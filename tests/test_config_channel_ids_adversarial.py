@@ -205,6 +205,30 @@ topics:
     assert "topics[0] (palworld): channel_id is required" in message
 
 
+def test_digest_channel_id_removal_message_matches_the_plans_exact_wording(tmp_path):
+    # Plan step 4 specifies this message verbatim; pinned exactly (not just
+    # a substring) so a future edit to the wording is a deliberate change
+    # to this test, not an accidental drift nobody notices.
+    text = f"""
+guild_id: 1
+digest:
+  channel_id: 99
+  time: "09:00"
+  timezone: "UTC"
+topics:
+  - key: palworld
+    name: Palworld
+    channel_id: 5
+{VALID_SRC}
+"""
+    with pytest.raises(ConfigError) as exc_info:
+        _load_with(tmp_path, text)
+    assert (
+        "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+        "on each topic (topics[].channel_id); there is no fallback"
+    ) in str(exc_info.value)
+
+
 def test_empty_topics_list_loads_with_no_topics_and_no_error(tmp_path):
     # Nothing in load_config requires at least one topic; an owner who
     # emptied the list (accidentally or deliberately) gets a bot with

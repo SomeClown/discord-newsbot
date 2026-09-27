@@ -199,6 +199,18 @@ def test_all_empty_topics_gives_no_messages_at_all():
     assert rendered.messages == []
 
 
+def test_message_order_follows_the_topics_argument_not_alphabetical_or_key_order():
+    # design.md §13: "Topics post in config order" -- render_digest must
+    # never impose an order of its own. Handed topics reversed from
+    # TOPICS's usual borderlands4/palworld/diablo4 order (which also isn't
+    # alphabetical, so a stray sort() on name or key would show up here).
+    reversed_topics = [DIABLO4, PALWORLD, BL4]
+    stories = [_draft("A")]
+    summaries = {t.key: _summary(t.key, stories) for t in reversed_topics}
+    rendered = render_digest(RUN_DATE, reversed_topics, summaries, {}, [])
+    assert [m.topic_key for m in rendered.messages] == ["diablo4", "palworld", "borderlands4"]
+
+
 # --- fallback ---
 
 

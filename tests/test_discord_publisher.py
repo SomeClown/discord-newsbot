@@ -198,6 +198,19 @@ async def test_channel_fetch_failure_is_wrapped_as_retryable_publish_error():
     assert excinfo.value.retryable is True
 
 
+async def test_channel_fetch_not_found_is_a_permanent_publish_error():
+    # get_channel misses the cache (never seen this guild's channel before)
+    # and fetch_channel comes back 404 -- the channel was deleted, or the
+    # id was never valid. No amount of retrying fixes a channel that isn't
+    # there.
+    client = FakeClient(channels={})
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is False
+
+
 async def test_non_sendable_channel_is_a_permanent_publish_error():
     # A resolved "channel" with no send() at all -- a category, a voice
     # channel misconfigured into channel_id -- isn't something a retry
