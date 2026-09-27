@@ -71,12 +71,12 @@ Source of truth: `docs/design.md` §13. Branch `feat/per-game-channels`. Gate af
 - **Test churn:** ~90–110 existing tests modified/deleted, ~60–80 new.
 
 ## 5. Owner decisions (2026-09-26)
-- D1 coverage notes: _pending_
-- D2 permanent per-channel error: _pending_
-- D3 roundup cap: _pending_
-- D4 `/shift codes` only when alerts enabled: _pending_
-- D5 marker wording: _pending_
-- Topics sharing a channel: allowed (no validation) unless the owner says otherwise.
+- D1 coverage notes: **in each posted game embed's footer** (A).
+- D2 permanent per-channel error: **stop**, record `failed` with posted ids, admin alert (A).
+- D3 roundup cap: **50 per check** as a module constant; overflow silent `roundup` + admin note (A).
+- D4 `/shift codes`: **registered only when alerts are enabled** (A).
+- D5 markers: **as proposed** ("from a roundup", "old post", "already around when alerts started").
+- Topics sharing a channel: **allowed** (no validation).
 
 ## 6. Out of scope
 Multi-guild config (to-do #6); persisting per-topic ids to skip posted topics on a forced rerun; `/newsbot status` changes; code expiry; roundup test-alert mode; deleting the old digest channel; CLAUDE.md status.
