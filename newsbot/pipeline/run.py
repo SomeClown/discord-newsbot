@@ -685,9 +685,7 @@ def _render_publish_failure_alert(
     verb = "publish failed after retries" if publish_error.retryable else "publish failed"
     posted_part = ", ".join(posted) if posted else "none"
     missing_part = ", ".join(missing) if missing else "none"
-    return (
-        f"newsbot: {verb}: {publish_error} -- posted: {posted_part}; did not post: {missing_part}"
-    )
+    return f"newsbot: {verb}: {publish_error}; posted: {posted_part}; did not post: {missing_part}"
 
 
 async def _publish_with_retry(
@@ -1167,7 +1165,7 @@ def _web_search_note(cfg: AppConfig, secrets: Secrets, config_path: str) -> str 
 
     `None` when web_search isn't configured at all (nothing to say) or
     when it's configured *and* keyed (it ran, and shows up in the
-    ordinary source table like anything else) -- a note only earns its
+    ordinary source table like anything else): a note only earns its
     place when there's a source in config.yaml that didn't get a chance
     to run.
     """

@@ -64,8 +64,8 @@ _LABEL_CHOICES = ("official", "reported", "rumor")
 # same regardless of which of the three tripped over it.
 _BUSY_MESSAGE = "A run or code check is in progress."
 _NOT_A_CODE_MESSAGE = (
-    "That doesn't look like a SHiFT code -- expected five groups of five "
-    "letters or digits joined by hyphens (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)."
+    "That doesn't look like a SHiFT code (expected five groups of five "
+    "letters or digits joined by hyphens: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX)."
 )
 
 

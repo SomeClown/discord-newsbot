@@ -6,13 +6,13 @@
 # below for real ones, and you have a bot that starts up and has one
 # game's worth of news to post while you decide whether you want more.
 #
-# Every ID below that says "placeholder" is fake and must be replaced --
+# Every ID below that says "placeholder" is fake and must be replaced:
 # the bot will happily start up pointed at a channel that doesn't exist
 # and then fail confusingly later, which is a worse failure mode than a
 # config error at startup.
 
-guild_id: 123456789012345678          # placeholder -- your server's ID
-admin_channel_id: 123456789012345679  # placeholder -- optional; alerts go here
+guild_id: 123456789012345678          # placeholder: your server's ID
+admin_channel_id: 123456789012345679  # placeholder: optional; alerts go here
 admin_permission: manage_guild
 
 digest:
@@ -25,12 +25,12 @@ topics:
   # One game to start. `key` has to be lowercase letters/digits/underscore
   # and is what shows up in the database and slash-command choices;
   # `name` is what actually gets posted and said to the model. Copy this
-  # block for a second game once you're happy with the first -- each one
+  # block for a second game once you're happy with the first: each one
   # needs its own channel_id (v2.0: there's no shared digest channel
   # anymore, every game posts to its own).
   - key: yourgame
     name: "Your Game"
-    channel_id: 111111111111111111  # placeholder -- this game's own channel
+    channel_id: 111111111111111111  # placeholder: this game's own channel
     aliases: []          # alternate names/abbreviations worth matching, if the name alone is ambiguous
     entities: []          # a studio/publisher name worth a looser (marked "uncertain") match
     search_queries:       # literal Brave News queries for this topic; see docs/finding-sources.md
@@ -41,11 +41,11 @@ sources:
   # A dedicated source: it names exactly one topic, so every item it
   # returns counts as a confident match for that topic even if the text
   # never says the game's name (design.md §4). Steam announcements are the
-  # easiest of these to find -- see docs/finding-sources.md for how to get
+  # easiest of these to find; see docs/finding-sources.md for how to get
   # the app_id.
   - type: steam_news
     name: "Your Game Steam"
-    app_id: 1234567  # placeholder -- steamdb.info or the store URL has this
+    app_id: 1234567  # placeholder: steamdb.info or the store URL has this
     topics: [yourgame]
     trust: official
 
@@ -56,7 +56,7 @@ sources:
   # recipes for all of these.
   - type: rss
     name: "Your Game News"
-    url: "https://example.com/feed.xml"  # placeholder -- a real feed URL
+    url: "https://example.com/feed.xml"  # placeholder: a real feed URL
     topics: [yourgame]
     trust: press
 
@@ -70,7 +70,7 @@ sources:
 
 # SHiFT code alerts (design.md §12) are Borderlands-family only and stay
 # off by default (AlertsCfg.enabled defaults to False even with this
-# whole block absent, same as here) -- there's nothing to uncomment for a
+# whole block absent, same as here); there's nothing to uncomment for a
 # minimal single-topic start. See config.example.yaml's own alerts: block
 # and README.md's "SHiFT code alerts" section if your game actually has
 # redeem codes and you want the hourly sweep.

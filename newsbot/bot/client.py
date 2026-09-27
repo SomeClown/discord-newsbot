@@ -98,15 +98,15 @@ _RETENTION_DAYS = 90
 _HEARTBEAT_INTERVAL_S = 60
 _PENDING_STARTUP_ALERT = (
     "newsbot: found a 'pending' digest row at startup. That usually means "
-    "the process crashed mid-run last time -- it may or may not have "
-    "already posted. Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "the process crashed mid-run last time (it may or may not have "
+    "already posted). Check the game channels and `/newsbot status`, then "
+    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
     "before posting again, since we can't tell whether today already went out."
 )
 _PARTIAL_FAILURE_STARTUP_ALERT = (
     "newsbot: today's digest row is 'failed' but some messages already "
     "posted before it died. Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
+    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
     "before posting again, since part of today's digest is already out there."
 )
 
@@ -335,7 +335,7 @@ class NullPublisher:
 _MISSING_MENTION_PERMISSION_ALERT = (
     "newsbot: a SHiFT code alert wanted to ping @everyone, but this bot's "
     "role is missing 'Mention @everyone, @here, and All Roles' in the "
-    "SHiFT codes channel -- Discord posts the message but silently drops "
+    "SHiFT codes channel: Discord posts the message but silently drops "
     "the ping. Posted anyway; grant the permission (docs/deploy.md) if you "
     "want the next one to actually notify anyone."
 )

@@ -41,8 +41,8 @@ sources:
         _load_with(tmp_path, text)
     message = str(exc_info.value)
     assert (
-        "topics[0] (palworld): channel_id is required -- each game posts "
-        "to its own channel as of v2.0" in message
+        "topics[0] (palworld): channel_id is required "
+        "(each game posts to its own channel as of v2.0)" in message
     )
 
 
