@@ -19,11 +19,10 @@ from contextlib import closing
 from pathlib import Path
 
 import httpx
-import pytest
 from pydantic import SecretStr
 
 from newsbot.config import Secrets, load_config
-from newsbot.useragent import build_user_agent, user_agent_headers, warn_if_contact_unset
+from newsbot.useragent import build_user_agent, warn_if_contact_unset
 
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 
@@ -43,14 +42,11 @@ def _capturing_transport(
 # --- NEWSBOT_CONTACT: whitespace, empty string, very long, non-ASCII ---
 
 
-def test_contact_whitespace_only_is_honored_literally_not_treated_as_unset():
-    # build_user_agent only checks truthiness, not blankness: a whitespace
-    # string is truthy, so it's used as-is rather than falling back. Not
-    # necessarily the ideal behavior, but it's the behavior, and this pins
-    # it so a future "helpful" .strip() doesn't change it by accident.
-    ua = build_user_agent({"NEWSBOT_CONTACT": "   "})
-    assert "(+   )" in ua
-    assert "contact unset" not in ua
+def test_contact_whitespace_only_is_treated_as_unset():
+    # Blank after trimming means nobody to contact, so it gets the same
+    # fallback (and the same startup warning) as an unset variable.
+    ua = build_user_agent({"NEWSBOT_CONTACT": "   \t "})
+    assert "contact unset" in ua
 
 
 def test_contact_empty_string_falls_back_to_unset():
@@ -67,59 +63,59 @@ def test_contact_very_long_value_is_passed_through_whole():
     assert len(ua) > 4000
 
 
-def test_contact_non_ascii_value_is_passed_through():
-    ua = build_user_agent({"NEWSBOT_CONTACT": "mailto:owner@exämple.com · ☎"})
-    assert "☎" in ua
+def test_contact_non_ascii_value_is_rejected_because_headers_must_be_ascii():
+    # httpx refuses a non-ASCII header value (UnicodeEncodeError), which
+    # would fail every outbound request; the builder falls back instead.
+    ua = build_user_agent({"NEWSBOT_CONTACT": "mailto:owner@ex\u00e4mple.com"})
+    assert "contact unset" in ua
+    ua.encode("ascii")
+
+
+def test_contact_surrounding_whitespace_is_trimmed():
+    ua = build_user_agent({"NEWSBOT_CONTACT": "  https://example.com/me  "})
+    assert "(+https://example.com/me)" in ua
 
 
 # --- newline/CR injection: the interesting adversarial case ---
 
 
-def _assert_wire_encoding_refuses(header_value: str) -> None:
-    """The real backstop for a header-injection value: HTTP/1.1 wire encoding.
+def _assert_wire_encoding_accepts(header_value: str) -> None:
+    """Drive h11 (httpx's real HTTP/1.1 encoder) to prove the value serializes.
 
-    `httpx.MockTransport` hands a request straight to the transport's
-    handler without ever going through the h11-based HTTP/1.1 encoder that
-    a real connection uses, so it can't catch this: the `Headers` mapping
-    happily stores a value containing "\\r\\n", as shown by
-    `test_contact_with_newline_is_stored_verbatim_by_the_headers_mapping`
-    below. `h11` (httpx's real HTTP/1.1 implementation over the wire) is
-    the layer that actually refuses to serialize it, so this drives that
-    layer directly rather than a transport that never touches it.
+    `httpx.MockTransport` never touches the wire encoder, so it can't tell
+    a legal header from one that would fail on a real connection.
     """
     import h11
 
     conn = h11.Connection(h11.CLIENT)
-    with pytest.raises(h11.LocalProtocolError):
-        request = h11.Request(
+    conn.send(
+        h11.Request(
             method="GET",
             target="/",
-            headers=[(b"host", b"example.com"), (b"user-agent", header_value.encode())],
+            headers=[(b"host", b"example.com"), (b"user-agent", header_value.encode("ascii"))],
         )
-        conn.send(request)
+    )
 
 
-def test_contact_with_newline_is_stored_verbatim_by_the_headers_mapping():
-    # build_user_agent/user_agent_headers are pure string builders and
-    # don't strip anything: the CRLF survives all the way into the
-    # httpx.Headers mapping. That's exactly why the wire-encoding check
-    # below matters -- nothing upstream of it is stopping this value.
-    contact = "evil\r\nX-Injected: header"
-    headers = user_agent_headers({"NEWSBOT_CONTACT": contact})
-    assert "\r\n" in headers["User-Agent"]
-    assert "\r\n" in httpx.Headers(headers)["User-Agent"]
-
-
-def test_contact_with_crlf_is_refused_at_http11_wire_encoding():
+def test_contact_with_crlf_is_rejected_before_it_reaches_a_header():
     contact = "evil\r\nX-Injected: header"
     ua = build_user_agent({"NEWSBOT_CONTACT": contact})
-    _assert_wire_encoding_refuses(ua)
+    assert "\r" not in ua and "\n" not in ua
+    assert "contact unset" in ua
+    _assert_wire_encoding_accepts(ua)
 
 
-def test_contact_with_bare_newline_no_cr_is_also_refused_at_wire_encoding():
-    contact = "evil\nX-Injected: header"
-    ua = build_user_agent({"NEWSBOT_CONTACT": contact})
-    _assert_wire_encoding_refuses(ua)
+def test_contact_with_bare_newline_is_rejected_too():
+    ua = build_user_agent({"NEWSBOT_CONTACT": "evil\nX-Injected: header"})
+    assert "\n" not in ua
+    _assert_wire_encoding_accepts(ua)
+
+
+def test_rejected_contact_gets_its_own_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="newsbot.useragent"):
+        warn_if_contact_unset({"NEWSBOT_CONTACT": "evil\r\nX: y"})
+    assert len(caplog.records) == 1
+    assert "can't carry" in caplog.records[0].getMessage()
 
 
 # --- warning logged exactly once per process-start call, not once per request ---

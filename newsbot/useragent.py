@@ -53,8 +53,24 @@ def build_user_agent(env: Mapping[str, str] = os.environ) -> str:
     as a caller likes; `warn_if_contact_unset` is the one place that
     complains about a missing contact, and only at startup.
     """
-    contact = env.get("NEWSBOT_CONTACT") or _UNSET_CONTACT
+    contact = _usable_contact(env) or _UNSET_CONTACT
     return f"discord-newsbot/{_package_version()} (+{contact})"
+
+
+def _usable_contact(env: Mapping[str, str]) -> str | None:
+    """`NEWSBOT_CONTACT`, trimmed, if it can safely go in an HTTP header; else None.
+
+    Header values have to be plain printable ASCII. A stray newline from a
+    shell-quoting slip, or an accented email domain, doesn't let anyone
+    inject a header (the HTTP library refuses first), but it does make
+    every single outbound request fail, which is a spectacularly quiet way
+    to lose all of your sources at once. So anything outside printable
+    ASCII is treated as unset, and `warn_if_contact_unset` says why.
+    """
+    raw = (env.get("NEWSBOT_CONTACT") or "").strip()
+    if raw and all(" " <= ch <= "~" for ch in raw):
+        return raw
+    return None
 
 
 def warn_if_contact_unset(env: Mapping[str, str] = os.environ) -> None:
@@ -64,7 +80,13 @@ def warn_if_contact_unset(env: Mapping[str, str] = os.environ) -> None:
     `main`, so both front doors say the same thing about a missing
     contact instead of one warning and one silent fallback.
     """
-    if not env.get("NEWSBOT_CONTACT"):
+    if (env.get("NEWSBOT_CONTACT") or "").strip() and _usable_contact(env) is None:
+        logger.warning(
+            "NEWSBOT_CONTACT contains characters an HTTP header can't carry (a line "
+            "break, a control character, or non-ASCII text); ignoring it. Use a plain "
+            "URL or email address."
+        )
+    elif _usable_contact(env) is None:
         logger.warning(
             "NEWSBOT_CONTACT is not set; outbound requests will identify this bot "
             "with no way to reach its operator. Set it to a URL or an email address."
