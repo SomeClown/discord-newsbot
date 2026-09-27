@@ -419,6 +419,34 @@ sources:
         _load_with(tmp_path, text)
 
 
+def test_digest_subject_defaults_to_video_games(monkeypatch):
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(FIXTURE)
+    assert cfg.digest.subject == "video games"
+
+
+def test_digest_subject_is_overridable(tmp_path):
+    text = """
+guild_id: 1
+digest:
+  time: "09:00"
+  timezone: "UTC"
+  subject: "tabletop RPGs"
+topics:
+  - key: palworld
+    name: "Palworld"
+    channel_id: 2
+sources:
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+"""
+    cfg = _load_with(tmp_path, text)
+    assert cfg.digest.subject == "tabletop RPGs"
+
+
 def test_load_secrets_reads_env():
     secrets = load_secrets(
         {

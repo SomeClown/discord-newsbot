@@ -246,6 +246,7 @@ async def build_digest(
             topic_items,
             prior_by_topic.get(topic.key, []),
             all_topics=cfg.topics,
+            subject=cfg.digest.subject,
         )
 
     stored_items = _build_stored_items(grouped)

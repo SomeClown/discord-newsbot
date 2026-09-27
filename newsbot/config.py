@@ -105,6 +105,14 @@ class DigestCfg(BaseModel):
     # is meant to be the normal, boring case, not something an owner has to
     # discover and opt into.
     report_to_admin: bool = True
+    # Self-host plan task 2: what SYSTEM_PROMPT calls the things `topics`
+    # are ("the video games {games}"). Defaults to "video games" so an
+    # owner who never touches this keeps the exact prompt this bot has
+    # always shipped with, byte for byte -- a fork tracking, say, tabletop
+    # RPG news instead can say so without editing prompts.py. Any change
+    # here still needs an owner-reviewed `/newsbot preview` before merge
+    # (CLAUDE.md), same as any other prompt edit.
+    subject: str = "video games"
 
     @field_validator("time")
     @classmethod

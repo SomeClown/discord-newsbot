@@ -32,6 +32,12 @@ digest:
   # admin_channel_id (above) is set. Defaults to true; uncomment to turn
   # it off if the admin channel would rather only hear about failures.
   # report_to_admin: false
+  # What the summarizer prompt calls the things `topics` are ("the video
+  # games Borderlands 4, Palworld and Diablo IV"). Defaults to "video
+  # games"; a fork tracking something else (tabletop RPG news, say) can
+  # say so here instead of editing pipeline/prompts.py. Any change here
+  # still needs an owner-reviewed `/newsbot preview` before merging.
+  # subject: "video games"
 
 topics:
   - key: borderlands4
