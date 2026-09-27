@@ -381,7 +381,7 @@ class _FakeChannel:
         self.raise_error = raise_error
         self.sent = 0
 
-    async def send(self, content=None, *, embed=None, allowed_mentions=None):
+    async def send(self, content=None, *, embed=None, allowed_mentions=None, nonce=None):
         if self.raise_error is not None:
             raise self.raise_error
         self.sent += 1

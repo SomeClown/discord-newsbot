@@ -42,7 +42,9 @@ class FakeChannel:
         self.fail_on_call: dict[int, Exception] = {}
         self._call_count = 0
 
-    async def send(self, content: str | None = None, *, embed=None, allowed_mentions=None):
+    async def send(
+        self, content: str | None = None, *, embed=None, allowed_mentions=None, nonce=None
+    ):
         call_index = self._call_count
         self._call_count += 1
         if call_index in self.fail_on_call:

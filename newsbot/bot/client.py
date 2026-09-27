@@ -20,6 +20,7 @@ until 9 a.m. the first morning it matters.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import socket
 import uuid
@@ -246,6 +247,13 @@ class DiscordPublisher:
         self._client = client
         self._posted: dict[str, int] = {}
         self._channels: dict[int, discord.abc.Messageable] = {}
+        # One salt per instance, not per send: a retry on *this* instance
+        # (the same run, backing off after a transient failure) reuses the
+        # salt and so reuses each topic's nonce, letting Discord's own
+        # dedup catch a send that actually landed before the retry thought
+        # it failed. A confirmed run-now builds a fresh `DiscordPublisher`,
+        # hence a fresh salt -- that repost is deliberate, not a dupe.
+        self._nonce_salt = uuid.uuid4().hex
 
     @property
     def posted_ids(self) -> list[int]:
@@ -263,9 +271,14 @@ class DiscordPublisher:
             if message.topic_key in self._posted:
                 continue
             channel = await self._resolve_channel(message.channel_id)
+            nonce = hashlib.sha256(f"{self._nonce_salt}|{message.topic_key}".encode()).hexdigest()[
+                :25
+            ]
             try:
                 sent = await channel.send(
-                    embed=message.embed, allowed_mentions=discord.AllowedMentions.none()
+                    embed=message.embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    nonce=nonce,
                 )
             except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
                 self._reraise_or_wrap(exc)

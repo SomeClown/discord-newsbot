@@ -41,13 +41,17 @@ class FakeChannel:
 
     def __init__(self) -> None:
         self.sent: list[object] = []
+        self.nonces: list[str | None] = []
         self._next_id = 100
         self.fail_on_call: dict[int, Exception] = {}
         self._call_count = 0
 
-    async def send(self, content: str | None = None, *, embed=None, allowed_mentions=None):
+    async def send(
+        self, content: str | None = None, *, embed=None, allowed_mentions=None, nonce=None
+    ):
         call_index = self._call_count
         self._call_count += 1
+        self.nonces.append(nonce)
         if call_index in self.fail_on_call:
             raise self.fail_on_call[call_index]
         self._next_id += 1
@@ -290,3 +294,55 @@ async def test_publish_with_no_topics_returns_empty_and_is_resumable():
 
     ids_again = await publisher.publish(_rendered())
     assert ids_again == {}
+
+
+# --- nonces (design.md §13 follow-up: retries must be able to dedup) ---
+
+
+async def test_retry_on_the_same_instance_reuses_the_topics_nonce():
+    channel = FakeChannel()
+    channel.fail_on_call = {0: aiohttp.ClientError("blip")}
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+    rendered = _rendered(_topic_message("borderlands4", 1))
+
+    with pytest.raises(PublishError):
+        await publisher.publish(rendered)
+    # The failed attempt still asked discord.py to send with a nonce --
+    # that's what makes the retry's identical nonce meaningful.
+    first_nonce = channel.nonces[0]
+    assert first_nonce
+
+    channel.fail_on_call = {}
+    await publisher.publish(rendered)
+    assert channel.nonces[1] == first_nonce
+
+
+async def test_different_topics_get_different_nonces():
+    bl4 = FakeChannel()
+    palworld = FakeChannel()
+    client = FakeClient({1: bl4, 2: palworld})
+    publisher = DiscordPublisher(client)
+
+    await publisher.publish(
+        _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
+    )
+
+    assert bl4.nonces[0] != palworld.nonces[0]
+
+
+async def test_a_new_publisher_instance_gets_a_different_nonce_for_the_same_topic():
+    # A confirmed run-now builds a fresh DiscordPublisher -- that repost is
+    # deliberate, so it must not share a nonce with whatever a previous
+    # instance sent for the same topic.
+    channel = FakeChannel()
+    client = FakeClient({1: channel})
+    rendered = _rendered(_topic_message("borderlands4", 1))
+
+    first = DiscordPublisher(client)
+    await first.publish(rendered)
+
+    second = DiscordPublisher(client)
+    await second.publish(rendered)
+
+    assert channel.nonces[0] != channel.nonces[1]
