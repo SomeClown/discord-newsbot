@@ -507,7 +507,7 @@ async def _run_claimed(
         # nothing left for a cancellation here to corrupt -- the digest's
         # own outcome is already on disk.
         await _maybe_check_codes(deps, collected, results)
-        await deps.alert(f"newsbot: publish failed after retries: {publish_error}")
+        await deps.alert(_render_publish_failure_alert(rendered, posted_by_topic, publish_error))
         return PipelineOutcome(
             status="failed", rendered=rendered, notes=[*notes, str(publish_error)], usage=usage
         )
@@ -655,6 +655,34 @@ async def _record_source_health(deps: Deps, results: list[CollectorResult]) -> N
     flagged = await asyncio.to_thread(_record_health_sync, deps.db_path, results, deps.now())
     for source_name in flagged:
         await deps.alert(f"newsbot: source {source_name!r} has failed 3 runs in a row")
+
+
+def _render_publish_failure_alert(
+    rendered: RenderedDigest, posted_by_topic: dict[str, int], publish_error: PublishError
+) -> str:
+    """Say which games posted and which didn't, and only blame retries that happened.
+
+    `rendered.messages` is every topic that had something to post today
+    (empty topics never make it in); `posted_by_topic` is the subset that
+    actually got a message id back before `publish_error` ended the
+    attempt. Without naming both sides, "publish failed after retries"
+    told an admin *that* something broke but not whether Diablo IV's
+    channel is now missing a digest or Borderlands 4's is -- exactly the
+    thing you'd want to know before deciding whether `run-now` (which
+    reposts everything, §10 of deploy.md) is worth the duplicate posts.
+
+    "after retries" is only true for a retryable error -- a permanent one
+    (`PublishError.retryable is False`, a 4xx or a channel that's gone)
+    never got a second attempt, so saying so would be misleading.
+    """
+    posted = [m.topic_name for m in rendered.messages if m.topic_key in posted_by_topic]
+    missing = [m.topic_name for m in rendered.messages if m.topic_key not in posted_by_topic]
+    verb = "publish failed after retries" if publish_error.retryable else "publish failed"
+    posted_part = ", ".join(posted) if posted else "none"
+    missing_part = ", ".join(missing) if missing else "none"
+    return (
+        f"newsbot: {verb}: {publish_error} -- posted: {posted_part}; did not post: {missing_part}"
+    )
 
 
 async def _publish_with_retry(

@@ -574,10 +574,15 @@ missing after 09:15:
 
 This re-runs the pipeline and posts. It asks for confirmation if today's
 digest already posted, so it's safe to try even if you're not sure of the
-exact state -- it won't silently double-post. If the failure was a
-transient upstream issue (a source timing out, a Claude API hiccup), this
-is usually all that's needed. If it fails again, check the logs (§11)
-for what's actually going wrong before retrying further.
+exact state. That confirmation is about *asking before it does anything*,
+not about avoiding duplicates: per-topic progress from a partial failure
+lives in memory on the publisher that hit it, not in the database, so a
+confirmed run-now after a partial failure reposts **every** game today,
+including the ones that already went out -- there's no "only repost what
+didn't post" mode yet (a known limitation, not a bug). If the failure was
+a transient upstream issue (a source timing out, a Claude API hiccup),
+this is usually all that's needed anyway. If it fails again, check the
+logs (§11) for what's actually going wrong before retrying further.
 
 ## 11. Rotating secrets
 

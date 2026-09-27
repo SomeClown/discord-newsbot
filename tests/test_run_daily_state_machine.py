@@ -424,6 +424,17 @@ async def test_forced_run_now_after_a_partial_failure_reposts_every_topic(db_pat
     assert first_channels[_BL4_CHANNEL_ID].sent == 1
     assert first_channels[_PALWORLD_CHANNEL_ID].sent == 0
 
+    # The publish-failed admin alert names which games made it out and
+    # which didn't -- palworld's 403 is a permanent error, so it never got
+    # a retry and the wording says so instead of claiming "after retries".
+    failure_alerts = [a for a in deps.alerts if "publish failed" in a]
+    assert len(failure_alerts) == 1
+    assert "publish failed:" in failure_alerts[0]
+    assert "after retries" not in failure_alerts[0]
+    assert "posted: Borderlands 4" in failure_alerts[0]
+    assert "did not post:" in failure_alerts[0]
+    assert "Palworld" in failure_alerts[0].split("did not post:")[1]
+
     # A fresh publisher, all channels healthy now, forced re-run.
     second_channels = {
         _BL4_CHANNEL_ID: _FakeChannel(next_id=400),
