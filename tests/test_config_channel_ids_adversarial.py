@@ -8,8 +8,8 @@ nothing pins in a test yet -- duplicate channel ids across topics (§5
 "Topics sharing a channel: allowed"), `alerts.channel_id` equal to a topic's
 channel (same decision, no cross-field validation exists), and
 `digest.channel_id` still being present while a topic is missing its own id
-(step 1: `digest.channel_id` is optional-but-present is not a substitute for
-a topic's own required field).
+(step 4: `digest.channel_id`'s removal message and a topic's own missing-id
+message both fire together, not one instead of the other).
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ def test_channel_id_as_quoted_string_is_coerced_to_int(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -61,7 +60,6 @@ def test_channel_id_as_whole_number_float_is_coerced_to_int(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -78,7 +76,6 @@ def test_channel_id_as_fractional_float_is_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -99,7 +96,6 @@ def test_channel_id_larger_than_a_63_bit_signed_int_is_accepted(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -123,7 +119,6 @@ def test_channel_id_as_bool_is_rejected_not_silently_coerced_to_one(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -145,7 +140,6 @@ def test_duplicate_channel_ids_across_topics_are_allowed(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -173,7 +167,6 @@ def test_alerts_channel_id_equal_to_a_topic_channel_id_is_allowed(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -189,10 +182,11 @@ alerts:
     assert cfg.alerts.channel_id == cfg.topics[0].channel_id == 5
 
 
-def test_digest_channel_id_present_does_not_excuse_a_missing_topic_channel_id(tmp_path):
+def test_leftover_digest_channel_id_does_not_excuse_a_missing_topic_channel_id(tmp_path):
     # A leftover v1 digest.channel_id in the config doesn't fall back to
-    # cover a topic that never got its own channel_id -- step 1's message
-    # still fires, naming the topic, not the digest block.
+    # cover a topic that never got its own channel_id -- both the step 4
+    # removal message and the step 1 missing-channel-id message fire
+    # together, naming the topic, not just the digest block.
     text = f"""
 guild_id: 1
 digest:
@@ -207,6 +201,7 @@ topics:
     with pytest.raises(ConfigError) as exc_info:
         _load_with(tmp_path, text)
     message = str(exc_info.value)
+    assert "digest.channel_id was removed in v2.0" in message
     assert "topics[0] (palworld): channel_id is required" in message
 
 
@@ -218,7 +213,6 @@ def test_empty_topics_list_loads_with_no_topics_and_no_error(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics: []

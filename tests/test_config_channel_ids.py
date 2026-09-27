@@ -2,8 +2,8 @@
 
 `topics[].channel_id` is now required (each game posts to its own channel)
 and `alerts.channel_id` is required whenever `alerts.enabled` is true (SHiFT
-alerts move to their own channel). `digest.channel_id` stays optional for
-now -- step 3/4 still reads it, and it's only removed in step 4.
+alerts move to their own channel). `digest.channel_id` itself is gone as of
+step 4 -- see `test_config_validation_messages.py` for the removal error.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ def test_missing_topic_channel_id_gives_a_friendly_message(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -51,7 +50,6 @@ def test_missing_topic_channel_id_names_the_right_topic_among_several(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -77,7 +75,6 @@ def test_topic_channel_id_zero_is_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -99,7 +96,6 @@ def test_topic_channel_id_negative_is_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -135,7 +131,6 @@ def test_alerts_enabled_without_channel_id_is_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TOPIC}
@@ -155,7 +150,6 @@ def test_alerts_enabled_with_channel_id_is_fine(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TOPIC}
@@ -171,7 +165,6 @@ def test_alerts_disabled_without_channel_id_is_fine(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TOPIC}
@@ -185,7 +178,6 @@ def test_alerts_channel_id_zero_is_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TOPIC}
@@ -197,24 +189,10 @@ alerts:
         _load_with(tmp_path, text)
 
 
-def test_digest_channel_id_still_optional_for_now(tmp_path):
-    # Step 4 removes this field; for now it's just no longer required.
-    text = f"""
-guild_id: 1
-digest:
-  time: "09:00"
-  timezone: "UTC"
-{VALID_TOPIC}
-"""
-    cfg = _load_with(tmp_path, text)
-    assert cfg.digest.channel_id is None
-
-
 def test_multiple_missing_topic_channel_ids_all_listed_together(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:

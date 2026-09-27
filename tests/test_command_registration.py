@@ -114,7 +114,6 @@ def test_admin_group_default_permissions_follow_configured_admin_permission(tmp_
 guild_id: 1
 admin_permission: kick_members
 digest:
-  channel_id: 2
   time: "09:00"
   timezone: "America/Los_Angeles"
 topics:
@@ -186,7 +185,6 @@ def _cfg_with_test_alert(tmp_path, monkeypatch, *, allow_test_command: bool):
     config_text = f"""
 guild_id: 1
 digest:
-  channel_id: 2
   time: "09:00"
   timezone: "America/Los_Angeles"
 topics:

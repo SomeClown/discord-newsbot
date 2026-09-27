@@ -97,7 +97,6 @@ def test_bad_timezone_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "Not/AZone"
 {VALID_TAIL}
@@ -110,7 +109,6 @@ def test_bad_time_format_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "9am"
   timezone: "UTC"
 {VALID_TAIL}
@@ -123,7 +121,6 @@ def test_unknown_topic_reference_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -145,7 +142,6 @@ def test_duplicate_source_names_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -173,7 +169,6 @@ def test_bad_admin_permission_rejected(tmp_path):
 guild_id: 1
 admin_permission: not_a_real_permission
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -193,7 +188,6 @@ def test_admin_permission_value_is_rejected(tmp_path):
 guild_id: 1
 admin_permission: value
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -210,7 +204,6 @@ def test_admin_permission_all_classmethod_is_rejected(tmp_path):
 guild_id: 1
 admin_permission: all
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -224,7 +217,6 @@ def test_admin_permission_none_classmethod_is_rejected(tmp_path):
 guild_id: 1
 admin_permission: none
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -245,7 +237,6 @@ def test_every_real_permission_flag_name_is_accepted(tmp_path):
 guild_id: 1
 admin_permission: {flag_name}
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -258,7 +249,6 @@ def test_duplicate_topic_keys_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -283,7 +273,6 @@ def test_bad_topic_key_format_rejected(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -305,7 +294,6 @@ def test_bluesky_source_default_name(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -327,7 +315,6 @@ def test_web_search_without_brave_key_disables_source(tmp_path, caplog, monkeypa
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -414,7 +401,6 @@ def test_topic_search_queries_rejects_blank_entries(tmp_path):
     text = """
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 topics:
@@ -485,7 +471,6 @@ def test_alerts_missing_block_gives_disabled_defaults(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -504,7 +489,6 @@ def test_alerts_full_block_parses(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -532,7 +516,6 @@ def test_alerts_max_codes_per_item_must_be_at_least_one(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -547,7 +530,6 @@ def test_alerts_ping_trust_rejects_unknown_trust_level(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -573,7 +555,6 @@ def test_alerts_unknown_key_rejected(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -599,7 +580,6 @@ def test_alerts_out_of_bounds_values_rejected(tmp_path, field, value):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -614,7 +594,6 @@ def test_alerts_bounds_are_inclusive(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -633,7 +612,6 @@ def test_alerts_max_item_age_hours_upper_bound_is_inclusive_at_720(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -648,7 +626,6 @@ def test_allow_test_command_true_with_enabled_false_is_a_config_error(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -664,7 +641,6 @@ def test_allow_test_command_true_with_enabled_true_is_fine(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -681,7 +657,6 @@ def test_allow_test_command_false_with_enabled_false_is_fine(tmp_path):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -697,7 +672,6 @@ def test_alerts_allow_test_command_true_logs_a_warning(tmp_path, caplog):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}
@@ -715,7 +689,6 @@ def test_alerts_allow_test_command_false_logs_no_warning(tmp_path, caplog):
     text = f"""
 guild_id: 1
 digest:
-  channel_id: 1
   time: "09:00"
   timezone: "UTC"
 {VALID_TAIL}

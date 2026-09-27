@@ -181,7 +181,7 @@ async def test_keyed_and_unkeyed_run_concurrently_state_only_affects_keyed(http_
 def _cfg(sources) -> AppConfig:
     return AppConfig(
         guild_id=1,
-        digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
+        digest=DigestCfg(time="09:00", timezone="UTC"),
         topics=[Topic(key="borderlands4", name="Borderlands 4", channel_id=1)],
         sources=sources,
     )

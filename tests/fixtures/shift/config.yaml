@@ -3,7 +3,6 @@ admin_channel_id: 123456789012345679
 admin_permission: manage_guild
 
 digest:
-  channel_id: 123456789012345680
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24

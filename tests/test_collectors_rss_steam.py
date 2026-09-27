@@ -886,7 +886,7 @@ async def test_run_collectors_quota_exceeded_becomes_skipped_not_error():
 def _full_config() -> AppConfig:
     return AppConfig(
         guild_id=1,
-        digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
+        digest=DigestCfg(time="09:00", timezone="UTC"),
         topics=[Topic(key="palworld", name="Palworld", channel_id=1)],
         sources=[
             RssSource(
@@ -944,7 +944,7 @@ def test_build_collectors_skips_web_search_without_brave_key():
 def test_build_collectors_bluesky_has_no_session_without_bluesky_secrets():
     cfg = AppConfig(
         guild_id=1,
-        digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
+        digest=DigestCfg(time="09:00", timezone="UTC"),
         topics=[Topic(key="palworld", name="Palworld", channel_id=1)],
         sources=[BlueskySource(type="bluesky_search", query="Palworld", trust="community")],
     )

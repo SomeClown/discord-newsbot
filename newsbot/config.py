@@ -89,12 +89,11 @@ class Topic(BaseModel):
 
 
 class DigestCfg(BaseModel):
-    # v2.0 (design.md §13): the combined digest channel is going away in
-    # favor of a channel per topic, but the field stays optional -- not
-    # gone -- until step 4 actually removes it; nothing reads it as
-    # optional in the meantime, since the topics that still need a
-    # channel to post to now get one from Topic.channel_id instead.
-    channel_id: int | None = None
+    # v2.0 (design.md §13): the combined digest channel is gone -- each
+    # topic posts to its own Topic.channel_id instead. A leftover
+    # digest.channel_id in an old v1 config.yaml is caught by
+    # load_config's raw-YAML pre-check, before pydantic ever gets a
+    # chance to just silently ignore the unrecognized field.
     time: str
     timezone: str
     lookback_hours: int = 24
@@ -270,13 +269,28 @@ def load_config(path: str | Path) -> AppConfig:
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
 
+    # A pre-check against the raw YAML, not a pydantic field: DigestCfg no
+    # longer declares channel_id at all, and a plain BaseModel silently
+    # ignores fields it doesn't recognize -- an old v1 config.yaml that
+    # still sets digest.channel_id would otherwise load "successfully"
+    # with that value quietly going nowhere, which is a worse outcome
+    # than the field simply not existing. Collected ahead of pydantic's
+    # own errors so it folds into the same combined ConfigError either way.
+    pre_errors: list[str] = []
+    digest_raw = raw.get("digest")
+    if isinstance(digest_raw, dict) and "channel_id" in digest_raw:
+        pre_errors.append(
+            "digest.channel_id was removed in v2.0 -- move it to a channel_id "
+            "on each topic (topics[].channel_id); there is no fallback"
+        )
+
     try:
         cfg = AppConfig.model_validate(raw)
     except ValidationError as exc:
-        errors = [_format_pydantic_error(e, raw) for e in exc.errors()]
+        errors = pre_errors + [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
 
-    errors: list[str] = []
+    errors: list[str] = list(pre_errors)
 
     # admin_permission must name a real discord.Permissions flag, checked
     # against VALID_FLAGS (the actual name -> bit mapping), not hasattr()

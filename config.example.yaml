@@ -16,7 +16,6 @@ admin_channel_id: 000000000000000000  # placeholder -- optional; alerts go here
 admin_permission: manage_guild
 
 digest:
-  channel_id: 000000000000000000      # placeholder -- where the daily digest posts
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24
