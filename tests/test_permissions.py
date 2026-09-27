@@ -29,11 +29,17 @@ _GUILD_ID = 123456789012345678
 _ALL = discord.Permissions.all()
 
 
-def _cfg(*, alerts_enabled: bool = False, alerts_channel_id: int | None = None):
+def _cfg(
+    *,
+    alerts_enabled: bool = False,
+    alerts_channel_id: int | None = None,
+    max_pings_per_day: int | None = None,
+):
     cfg = load_config(CONFIG_PATH)
-    alerts = cfg.alerts.model_copy(
-        update={"enabled": alerts_enabled, "channel_id": alerts_channel_id}
-    )
+    updates = {"enabled": alerts_enabled, "channel_id": alerts_channel_id}
+    if max_pings_per_day is not None:
+        updates["max_pings_per_day"] = max_pings_per_day
+    alerts = cfg.alerts.model_copy(update=updates)
     return cfg.model_copy(update={"alerts": alerts})
 
 
@@ -83,6 +89,21 @@ def test_alerts_channel_absent_when_disabled():
     # configured at all -- alerts.channel_id is None here.
     assert all(req.needed != frozenset({"mention_everyone"}) for req in reqs)
     assert len(channel_ids) == len(cfg.topics) + 1  # + admin channel, no alerts channel
+
+
+def test_alerts_channel_does_not_need_mention_everyone_when_pings_are_off():
+    # max_pings_per_day == 0 means pinging is off on purpose (same rule
+    # sweep.py uses to suppress the "cap reached" alert) -- there's no
+    # point flagging a permission that will never actually get used.
+    cfg = _cfg(alerts_enabled=True, alerts_channel_id=999999999999999999, max_pings_per_day=0)
+    reqs = {req.channel_id: req for req in required_channels(cfg)}
+    assert reqs[999999999999999999].needed == frozenset({"view_channel", "send_messages"})
+
+
+def test_alerts_channel_needs_mention_everyone_when_pings_are_on():
+    cfg = _cfg(alerts_enabled=True, alerts_channel_id=999999999999999999, max_pings_per_day=1)
+    reqs = {req.channel_id: req for req in required_channels(cfg)}
+    assert "mention_everyone" in reqs[999999999999999999].needed
 
 
 def test_shared_channel_ids_merge_needed_sets():
@@ -144,6 +165,28 @@ class FakeTextChannel(discord.TextChannel):
 class FakeNonTextChannel:
     def __init__(self, guild: FakeGuild) -> None:
         self.guild = guild
+
+
+class FakeThread(discord.Thread):
+    """A stand-in satisfying `isinstance(channel, discord.Thread)`."""
+
+    def __init__(self, guild: FakeGuild | None, perms: discord.Permissions) -> None:
+        self.guild = guild
+        self._perms = perms
+
+    def permissions_for(self, member: object) -> discord.Permissions:
+        return self._perms
+
+
+class FakeVoiceChannel(discord.VoiceChannel):
+    """A stand-in satisfying `isinstance(channel, discord.VoiceChannel)`."""
+
+    def __init__(self, guild: FakeGuild | None, perms: discord.Permissions) -> None:
+        self.guild = guild
+        self._perms = perms
+
+    def permissions_for(self, member: object) -> discord.Permissions:
+        return self._perms
 
 
 class FakeClient:
@@ -237,6 +280,32 @@ async def test_check_channels_not_a_text_channel():
     channels = _clean_channels(cfg)
     voice_topic = cfg.topics[0]
     channels[voice_topic.channel_id] = FakeNonTextChannel(FakeGuild(_GUILD_ID))
+    client = FakeClient(channels)
+
+    problems = await check_channels(client, cfg)
+    assert len(problems) == 1
+    assert "not a text channel" in problems[0]
+
+
+async def test_check_channels_accepts_a_thread():
+    cfg = _cfg()
+    channels = _clean_channels(cfg)
+    thread_topic = cfg.topics[0]
+    channels[thread_topic.channel_id] = FakeThread(FakeGuild(_GUILD_ID), _ALL)
+    client = FakeClient(channels)
+
+    problems = await check_channels(client, cfg)
+    assert problems == []
+
+
+async def test_check_channels_still_flags_a_voice_channel():
+    # VoiceChannel is technically `Messageable` in discord.py these days,
+    # but it's not what an owner means by "post the digest here" -- it
+    # stays flagged even though it'd otherwise pass the sendable check.
+    cfg = _cfg()
+    channels = _clean_channels(cfg)
+    voice_topic = cfg.topics[0]
+    channels[voice_topic.channel_id] = FakeVoiceChannel(FakeGuild(_GUILD_ID), _ALL)
     client = FakeClient(channels)
 
     problems = await check_channels(client, cfg)

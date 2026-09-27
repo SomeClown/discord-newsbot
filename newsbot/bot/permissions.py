@@ -87,11 +87,14 @@ def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
         )
 
     if cfg.alerts.enabled and cfg.alerts.channel_id is not None:
-        _add(
-            cfg.alerts.channel_id,
-            "SHiFT codes",
-            frozenset({"view_channel", "send_messages", "mention_everyone"}),
-        )
+        needed = {"view_channel", "send_messages"}
+        # max_pings_per_day == 0 means pinging is off on purpose (sweep.py
+        # already suppresses the "cap reached" alert for the same reason)
+        # -- flagging a missing Mention @everyone permission that will
+        # never actually get used would just be noise.
+        if cfg.alerts.max_pings_per_day > 0:
+            needed.add("mention_everyone")
+        _add(cfg.alerts.channel_id, "SHiFT codes", frozenset(needed))
 
     if cfg.admin_channel_id is not None:
         _add(cfg.admin_channel_id, "admin", frozenset({"view_channel", "send_messages"}))
@@ -111,6 +114,33 @@ async def _resolve_channel(client: discord.Client, channel_id: int) -> object:
     return await client.fetch_channel(channel_id)
 
 
+# Voice and stage channels are, technically, `Messageable` in discord.py
+# (Discord grew text chat in voice channels a while back) -- but they're
+# not what an owner means by "post the digest here", so they stay flagged
+# even though they'd otherwise pass the check below.
+_EXCLUDED_CHANNEL_TYPES = (discord.VoiceChannel, discord.StageChannel)
+
+
+def _is_sendable_guild_channel(channel: object) -> bool:
+    """True for anything `_check_one` should treat as a normal text destination.
+
+    A thread isn't a `discord.abc.GuildChannel` (it's its own class), but
+    it's exactly as sendable as the channel it lives in, and there's no
+    design.md reason a game or SHiFT channel couldn't be one -- excluding
+    it just because it fails an `isinstance(..., TextChannel)` check was
+    the actual bug here. Forum and category channels fail this on their
+    own (neither is `Messageable`); voice and stage channels are excluded
+    explicitly, above.
+    """
+    if isinstance(channel, _EXCLUDED_CHANNEL_TYPES):
+        return False
+    if isinstance(channel, discord.Thread):
+        return True
+    return isinstance(channel, discord.abc.Messageable) and isinstance(
+        channel, discord.abc.GuildChannel
+    )
+
+
 async def _check_one(client: discord.Client, guild_id: int, req: ChannelRequirement) -> str | None:
     """Return one problem line for `req`, or None if the channel checks out clean."""
     try:
@@ -121,7 +151,7 @@ async def _check_one(client: discord.Client, guild_id: int, req: ChannelRequirem
     guild = getattr(channel, "guild", None)
     if guild is None or guild.id != guild_id:
         return f"{req.purpose} channel <#{req.channel_id}>: not in the configured guild"
-    if not isinstance(channel, discord.TextChannel):
+    if not _is_sendable_guild_channel(channel):
         return f"{req.purpose} channel <#{req.channel_id}>: not a text channel"
 
     me = guild.me
