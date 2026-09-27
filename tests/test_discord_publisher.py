@@ -139,7 +139,7 @@ async def test_retry_after_one_topics_failure_does_not_repost_the_other():
     assert len(bl4.sent) == 1
     assert len(palworld.sent) == 0
 
-    # Retry the same publisher instance -- it must resume, not repost
+    # Retry the same publisher instance: it must resume, not repost
     # borderlands4's embed.
     palworld.fail_on_call = {}
     ids = await publisher.publish(rendered)
@@ -182,7 +182,7 @@ async def test_other_4xx_is_wrapped_and_not_retryable():
 
 
 async def test_429_rate_limit_is_wrapped_and_retryable():
-    # 429 is a 4xx by number, but it's Discord's own rate limit -- the
+    # 429 is a 4xx by number, but it's Discord's own rate limit: the
     # one 4xx that backing off and retrying actually fixes.
     channel = FakeChannel()
     channel.fail_on_call = {0: discord.HTTPException(_fake_response(429), "rate limited")}
@@ -217,7 +217,7 @@ async def test_channel_fetch_failure_is_wrapped_as_retryable_publish_error():
 
 async def test_channel_fetch_not_found_is_a_permanent_publish_error():
     # get_channel misses the cache (never seen this guild's channel before)
-    # and fetch_channel comes back 404 -- the channel was deleted, or the
+    # and fetch_channel comes back 404: the channel was deleted, or the
     # id was never valid. No amount of retrying fixes a channel that isn't
     # there.
     client = FakeClient(channels={})
@@ -229,8 +229,8 @@ async def test_channel_fetch_not_found_is_a_permanent_publish_error():
 
 
 async def test_non_sendable_channel_is_a_permanent_publish_error():
-    # A resolved "channel" with no send() at all -- a category, a voice
-    # channel misconfigured into channel_id -- isn't something a retry
+    # A resolved "channel" with no send() at all (a category, a voice
+    # channel misconfigured into channel_id) isn't something a retry
     # ever fixes.
     class _NotSendable:
         pass
@@ -259,7 +259,7 @@ async def test_posted_ids_property_reflects_progress_so_far():
 
 async def test_second_topic_channel_resolution_is_cached_across_calls():
     # publish() is called with the same rendered digest twice on a
-    # publisher that's already posted everything -- the second call
+    # publisher that's already posted everything: the second call
     # shouldn't repost, and shouldn't need to re-fetch a channel either.
     channel = FakeChannel()
     client = FakeClient({1: channel})
@@ -345,7 +345,7 @@ async def test_different_topics_get_different_nonces():
 
 
 async def test_a_new_publisher_instance_gets_a_different_nonce_for_the_same_topic():
-    # A confirmed run-now builds a fresh DiscordPublisher -- that repost is
+    # A confirmed run-now builds a fresh DiscordPublisher: that repost is
     # deliberate, so it must not share a nonce with whatever a previous
     # instance sent for the same topic.
     channel = FakeChannel()

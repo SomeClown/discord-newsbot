@@ -66,10 +66,10 @@ def test_claim_codes_empty_list_does_not_spend_a_ping_even_when_pinged_true(conn
 
 def test_ping_day_boundary_is_exact_string_equality_not_calendar_adjacency(conn):
     # local_day is an opaque caller-supplied string (cfg.digest.timezone's
-    # local date, per A8) -- claim_codes has no zoneinfo or date math of
+    # local date, per A8): claim_codes has no zoneinfo or date math of
     # its own. A single-character difference has to be treated as a full
     # day boundary crossing (reset), never as "close enough, keep
-    # counting" -- which is exactly what a real local-midnight rollover
+    # counting": which is exactly what a real local-midnight rollover
     # looks like from this layer's point of view.
     repo.claim_codes(
         conn,
@@ -147,7 +147,7 @@ def test_concurrent_claim_of_same_code_from_two_connections_fails_cleanly(tmp_pa
             now=_now,
         )
         # A second connection racing to claim the exact same code hits the
-        # PRIMARY KEY constraint and rolls back cleanly -- it never sees,
+        # PRIMARY KEY constraint and rolls back cleanly: it never sees,
         # let alone spends, the ping budget.
         with pytest.raises(sqlite3.IntegrityError):
             repo.claim_codes(
@@ -222,7 +222,7 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
         local_day="2026-09-25",
         now=_now,
     )
-    # CCCCC is left "pending" -- an interrupted claim that never got to
+    # CCCCC is left "pending": an interrupted claim that never got to
     # mark_codes_posted/failed.
 
     repo.record_silent_codes(
@@ -233,7 +233,7 @@ def test_alert_status_counts_only_posted_not_pending_or_failed(conn):
     )
 
     # QA item 7: a roundup-only code recorded 'roundup' must not count
-    # toward codes_alerted either -- /newsbot status stays unaffected by
+    # toward codes_alerted either: /newsbot status stays unaffected by
     # this feature.
     repo.record_silent_codes(
         conn,
@@ -296,7 +296,7 @@ def test_migration_002_applies_on_real_v1_schema_with_related_data_and_fk_on(tmp
         assert conn.execute("SELECT COUNT(*) FROM item_topics").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM story_items").fetchone()[0] == 0
         # is_update_of / stories themselves aren't cascade-deleted by an
-        # item going away -- only the join table row is.
+        # item going away: only the join table row is.
         assert conn.execute("SELECT COUNT(*) FROM stories").fetchone()[0] == 1
 
         # New tables are present and empty, and honor their own CHECK

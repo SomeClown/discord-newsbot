@@ -223,7 +223,7 @@ def test_status_snapshot_month_token_sums_respect_boundary(conn):
 
 def test_status_snapshot_omits_removed_source(conn):
     # A source that used to be configured (and recorded health) but has
-    # since been dropped from config.yaml -- the IGN scenario -- shouldn't
+    # since been dropped from config.yaml (the IGN scenario) shouldn't
     # show up just because it kept its row.
     repo.record_source_result(conn, "IGN", datetime(2026, 9, 23, tzinfo=UTC), "403")
     repo.record_source_result(conn, "Blizzard News", datetime(2026, 9, 23, tzinfo=UTC), None)

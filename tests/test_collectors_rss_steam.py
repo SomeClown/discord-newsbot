@@ -204,8 +204,8 @@ async def test_rss_collector_retries_on_429_then_succeeds():
         items = await RssCollector(source, sleep=recording_sleep).collect(http)
 
     assert len(calls) == 3
-    # QA step 20, group 6f: the old backoffs (5.0, 15.0 -- 20s just in
-    # sleeps, before any request latency) didn't fit inside
+    # QA step 20, group 6f: the old backoffs (5.0, 15.0, summing to 20s
+    # just in sleeps, before any request latency) didn't fit inside
     # pipeline/run.py's 20s _COLLECT_TIMEOUT_S, so the third (successful)
     # attempt could never actually land within the budget. Shrunk so the
     # full retry sequence has real room left for request round trips too.
@@ -237,7 +237,7 @@ async def test_rss_collector_gives_up_after_retries_and_raises():
 async def test_fetch_body_caps_response_at_5mb():
     # A feed (broken, malicious, or just enormous) that tries to hand back
     # more than 5MB shouldn't get to make this collector buffer the whole
-    # thing into memory -- _fetch_body is the one place that reads the
+    # thing into memory: _fetch_body is the one place that reads the
     # response body, so the cap is tested directly against it rather than
     # through collect()'s parse step (whether an oversized-then-truncated
     # body happens to still parse is feedparser's business, not this
@@ -325,7 +325,7 @@ async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_p
     monkeypatch,
 ):
     # The literal-IP cases above never exercise the DNS-resolution branch
-    # of _reject_private_redirect -- a redirect to a *hostname* (not an IP
+    # of _reject_private_redirect: a redirect to a *hostname* (not an IP
     # literal) that happens to resolve to a private address needs the
     # same rejection, and only mocking the resolver can prove that branch
     # actually runs and actually rejects.
@@ -385,7 +385,7 @@ async def test_fetch_body_at_exactly_5mb_is_not_truncated():
 
 async def test_fetch_body_cap_applies_even_without_a_content_length_header():
     # _fetch_body reads via aiter_bytes() chunk-by-chunk and never
-    # consults Content-Length to decide when to stop -- this pins that a
+    # consults Content-Length to decide when to stop: this pins that a
     # response streamed without that header (a chunked-transfer response,
     # which is exactly what a malicious or misconfigured server might
     # send to dodge a length-based guard) is still capped correctly.
@@ -533,7 +533,7 @@ async def test_rss_collector_full_text_combines_content_and_differing_summary():
 
 async def test_rss_collector_excerpt_byte_identical_on_existing_fixture_with_full_text_added():
     # Pins that adding full_text didn't disturb excerpt's own output on an
-    # existing fixture -- same excerpt string test_rss_collector_decodes_
+    # existing fixture: same excerpt string test_rss_collector_decodes_
     # entities_and_truncates_long_html_description already checks, plus
     # the new full_text field, which should hold the untruncated body.
     body = (FIXTURES / "rss20_messy_content.xml").read_bytes()

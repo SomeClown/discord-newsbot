@@ -140,7 +140,7 @@ async def test_report_never_sent_on_a_failed_publish(db_path, http_client):
 
     assert outcome.status == "failed"
     assert not any("Digest posted" in a for a in deps.alerts)
-    # the existing failure alert still fires -- this feature doesn't touch it
+    # the existing failure alert still fires: this feature doesn't touch it
     assert any("publish failed" in a for a in deps.alerts)
 
 
@@ -274,7 +274,7 @@ async def test_report_is_sent_only_after_the_digest_row_is_already_saved(db_path
         if "Digest posted" not in text:
             return
         # Read the DB from a *separate* connection at the moment the
-        # report fires -- if the report were ever sent before save_run's
+        # report fires: if the report were ever sent before save_run's
         # transaction committed, this would see `pending` (or nothing),
         # not the finished row.
         with closing(connect(db_path)) as conn:
@@ -321,12 +321,12 @@ async def test_force_rerun_sends_a_second_report_reflecting_the_new_outcome(
     assert second.status == "failed"
     second_reports = [a for a in deps.alerts if "Digest posted" in a]  # type: ignore[attr-defined]
     # A failed run gets no report of its own (design.md: failed/skipped
-    # send no report) -- so forcing a re-run that turns out worse must
+    # send no report), so forcing a re-run that turns out worse must
     # *not* add a second "Digest posted" message on top of the first.
     assert len(second_reports) == 1
 
     # Now force a third run that succeeds again: this is the case the
-    # task actually asks about -- force re-run reporting again with a
+    # task actually asks about: force re-run reporting again with a
     # *new* ok outcome, not just re-showing the first one.
     third = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep)
     assert third.status == "ok"

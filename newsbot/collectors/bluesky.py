@@ -9,7 +9,7 @@ fooled by whatever a CDN's error page looks like today.
 
 Without a `BlueskySession` (SPEC-DEV 7 has no Bluesky secret by default),
 every search just tries the public endpoint and treats a 401/403 as
-"skip me, note the coverage gap" rather than a source failure -- Bluesky's
+"skip me, note the coverage gap" rather than a source failure: Bluesky's
 own official accounts still get through via their RSS mirror
 (`collectors/rss.py`), so this collector going quiet doesn't mean silence.
 """
@@ -46,6 +46,12 @@ class BlueskySession:
         self._lock = asyncio.Lock()
 
     async def token(self, http: httpx.AsyncClient) -> str:
+        """Return the shared access token, logging in on the first call only.
+
+        Holds `self._lock` for the whole check-and-maybe-login, so the
+        second and third collector to ask while a login is in flight wait
+        for that same login instead of each starting their own.
+        """
         async with self._lock:
             if self._token is None:
                 response = await http.post(

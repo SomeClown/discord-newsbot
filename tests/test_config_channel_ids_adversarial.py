@@ -162,7 +162,7 @@ sources:
 
 def test_alerts_channel_id_equal_to_a_topic_channel_id_is_allowed(tmp_path):
     # No validation cross-checks alerts.channel_id against topics[].channel_id
-    # either -- same "no validation" decision extends here since nothing in
+    # either: same "no validation" decision extends here since nothing in
     # the plan singles this combination out as an error.
     text = f"""
 guild_id: 1
@@ -184,7 +184,7 @@ alerts:
 
 def test_leftover_digest_channel_id_does_not_excuse_a_missing_topic_channel_id(tmp_path):
     # A leftover v1 digest.channel_id in the config doesn't fall back to
-    # cover a topic that never got its own channel_id -- both the step 4
+    # cover a topic that never got its own channel_id: both the step 4
     # removal message and the step 1 missing-channel-id message fire
     # together, naming the topic, not just the digest block.
     text = f"""

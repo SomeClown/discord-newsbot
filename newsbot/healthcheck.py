@@ -1,7 +1,7 @@
 """`python -m newsbot.healthcheck`: the Docker `HEALTHCHECK` command.
 
-There's no port to poll -- the bot only makes outgoing connections to
-Discord's gateway -- so the healthcheck instead looks at a heartbeat file
+There's no port to poll (the bot only makes outgoing connections to
+Discord's gateway), so the healthcheck instead looks at a heartbeat file
 (`bot/client.HEARTBEAT`) that the running process rewrites every 60
 seconds, but only while it's actually connected and its scheduler is
 running (see `NewsBot._heartbeat_job`). If that file goes stale, something

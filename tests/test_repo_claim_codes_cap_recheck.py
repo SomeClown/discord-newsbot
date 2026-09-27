@@ -40,7 +40,7 @@ def _now():
 
 
 def test_max_pings_none_skips_the_recheck_same_as_before(conn):
-    # The default -- every caller from before max_pings existed keeps
+    # The default: every caller from before max_pings existed keeps
     # spending exactly what it asked for, cap or no cap.
     for i in range(5):
         actual = repo.claim_codes(
@@ -144,7 +144,7 @@ def test_two_connections_racing_the_last_ping_slot_only_one_gets_it(tmp_path):
     t1.join(timeout=5)
     t2.join(timeout=5)
 
-    # BEGIN IMMEDIATE serializes the two writers -- exactly one of them
+    # BEGIN IMMEDIATE serializes the two writers: exactly one of them
     # sees "budget available" and actually spends it; whichever runs
     # second sees the first one's committed count and gets downgraded,
     # rather than each reading the same stale zero and both pinging.

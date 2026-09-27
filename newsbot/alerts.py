@@ -1,8 +1,8 @@
 """Admin-channel notifications.
 
-When something in the daily job goes sideways -- a source dies three days
+When something in the daily job goes sideways (a source dies three days
 running, a publish fails after every retry, the process finds a stale
-`pending` row at startup -- somebody should hear about it without needing
+`pending` row at startup), somebody should hear about it without needing
 to tail container logs at 6 a.m. That somebody is `admin_channel_id`, if
 the owner configured one.
 
@@ -25,7 +25,7 @@ async def send_alert(client: discord.Client, admin_channel_id: int | None, text:
     """Post `text` to the admin channel, if one is configured. Never raises.
 
     A failure here (channel deleted, permissions revoked, gateway hiccup)
-    is logged and swallowed rather than propagated -- the code calling
+    is logged and swallowed rather than propagated; the code calling
     `send_alert` is usually already in an exception handler, and an alert
     system that can knock over its own caller defeats the point of having
     one.

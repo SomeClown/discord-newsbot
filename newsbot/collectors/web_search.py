@@ -4,7 +4,7 @@ Unlike the other collector types, one configured source here expands into
 several requests: `queries_per_topic` templates, formatted per topic, so
 three topics and two templates means six searches. Brave's free tier is
 good for about one request a second, so those six run one after another
-with a pause between them, not concurrently -- there's no `httpx` retry
+with a pause between them, not concurrently; there's no `httpx` retry
 for "the whole run got 429'd because we fired six requests at once".
 """
 
@@ -113,7 +113,7 @@ class WebSearchCollector:
                     published_at=_parse_page_age(result.get("page_age")),
                     topics=(topic_key,),
                     # Brave only ever gives us a snippet, never full-page
-                    # text -- this is the same source `excerpt` is built
+                    # text: this is the same source `excerpt` is built
                     # from, just uncapped at 500 characters, not some
                     # additional fetch of the whole article.
                     full_text=text.plain_text(description) if description else None,

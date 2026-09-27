@@ -61,7 +61,7 @@ def _format_games_list(topics: list[Topic]) -> str:
     """ "A, B and C" from a list of topics, matching the old hardcoded string's shape.
 
     No Oxford comma, "and" before the last name, plain "A and B" for
-    exactly two, and just the one name for a single topic -- picked to
+    exactly two, and just the one name for a single topic: picked to
     reproduce the original hardcoded "Borderlands 4, Palworld and Diablo
     IV" byte-for-byte when given those three topics in that order.
     """
@@ -102,7 +102,7 @@ def build_prompt(
     and ends.
 
     `all_topics` names every game SYSTEM_PROMPT should say the bot tracks
-    -- normally `cfg.topics`, so the prompt stays in sync with whatever's
+    (normally `cfg.topics`), so the prompt stays in sync with whatever's
     actually configured instead of a string someone has to remember to
     update by hand. Defaults to just `[topic]` for callers (mostly tests)
     that don't have the full list handy and don't care.

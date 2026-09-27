@@ -221,7 +221,7 @@ def test_test_alert_absent_when_allow_test_command_false(tmp_path, monkeypatch):
 
 def test_test_alert_absent_by_default(cfg):
     # The fixture config carries no alerts: block at all, which defaults
-    # allow_test_command to False -- the same "never surprise a prod
+    # allow_test_command to False: the same "never surprise a prod
     # config" default AlertsCfg documents for the whole feature.
     group = make_admin_group(cfg, _FakeBot())
     assert "test-alert" not in {c.name for c in group.commands}
@@ -244,7 +244,7 @@ def test_test_alert_golden_option_defaults_false(tmp_path, monkeypatch):
 
 # --- /shift codes (design.md §13, plan step 6) ---
 #
-# `make_shift_group` itself doesn't check `cfg.alerts.enabled` -- that's
+# `make_shift_group` itself doesn't check `cfg.alerts.enabled`: that's
 # `NewsBot.setup_hook`'s call (D4), covered in
 # `test_client_scheduling_adversarial.py`. This file stays at the same
 # "cheap object-level checks" level as everything else here: option

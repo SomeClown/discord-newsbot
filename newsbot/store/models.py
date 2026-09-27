@@ -92,7 +92,7 @@ class SourceHealthRow:
     last_error_at: datetime | None
     last_error: str | None
     consecutive_failures: int
-    # True for a configured source with no source_health row yet -- e.g. one
+    # True for a configured source with no source_health row yet: e.g. one
     # added to config.yaml since the last run. consecutive_failures stays 0
     # for it (there's nothing to be unhealthy about), so this is the only
     # way to tell "never run" apart from "ran fine."
@@ -107,7 +107,7 @@ class AlertState:
     finds gets recorded silently instead of posted, so turning the
     feature on against feeds full of months-old codes doesn't flood the
     channel on the first run. `ping_count` only means anything alongside
-    `ping_day` -- a stale `ping_day` (not today, in `cfg.digest.timezone`)
+    `ping_day`: a stale `ping_day` (not today, in `cfg.digest.timezone`)
     means the count has already effectively reset; see `pings_used_today`
     in `shift/decide.py`.
     """
@@ -140,7 +140,7 @@ class CodeView:
     `from_roundup` (migration 003) is the marker `/shift codes` needs to
     show "from a roundup" that the `status` column alone can't give it
     once a roundup post's status is just `posted` like everything else
-    (design.md §13) -- see `repo.query_codes`.
+    (design.md §13): see `repo.query_codes`.
     """
 
     code: str

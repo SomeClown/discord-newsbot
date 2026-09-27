@@ -73,7 +73,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
     with closing(connect(db_path)) as conn:
         migrate(conn)
         # from_roundup is stamped explicitly here (as record_silent_codes and
-        # claim_codes always do post-v2.0) -- migration 003's own backfill
+        # claim_codes always do post-v2.0): migration 003's own backfill
         # UPDATE only ever runs once, at migration time, not on later inserts.
         conn.execute(
             "INSERT INTO alerted_codes "
@@ -93,8 +93,8 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
 
 def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_three(db_path, monkeypatch):
     # Build a real v2.0 database first (migrations 001-003 applied), then
-    # simulate a v1.3.0 process's migrate() -- which only ever globs
-    # 001/002 out of its own migrations/ directory -- running against it.
+    # simulate a v1.3.0 process's migrate() (which only ever globs
+    # 001/002 out of its own migrations/ directory) running against it.
     # No migration file it knows about has a version > 3, so `migrate()`'s
     # own "skip anything <= current" loop leaves user_version at 3 and
     # touches nothing, which is exactly what makes downgrading TAG back to
@@ -128,7 +128,7 @@ def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_three(db_
             "SELECT status, from_roundup FROM alerted_codes "
             "WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
         ).fetchone()
-        # from_roundup still exists and holds its value -- v1.3.0's migrate()
+        # from_roundup still exists and holds its value: v1.3.0's migrate()
         # never touches it, but it also never has to know it's there.
         assert row["status"] == "roundup"
         assert row["from_roundup"] == 1

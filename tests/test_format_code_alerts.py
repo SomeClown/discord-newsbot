@@ -98,7 +98,7 @@ def test_hostile_source_name_is_escaped():
     hostile = "@everyone <@123456> __pwned__"
     rendered = render_code_alerts([_candidate(source_name=hostile)], ping=True)
     content = rendered[0].content
-    # Only the header's own leading "@everyone " -- the source name's copy
+    # Only the header's own leading "@everyone ": the source name's copy
     # must have been neutralized by esc().
     assert content.count("@everyone") == 1
 

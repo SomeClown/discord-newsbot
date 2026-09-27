@@ -164,7 +164,7 @@ async def test_retry_after_send_that_landed_but_errored_carries_the_ping_at_most
 
     assert outcome.posted == 1
     assert channel.calls == 3  # first attempt + 2 retries, third one finally "landed" for us
-    # Every attempt reused the same nonce -- Discord's own dedup can catch
+    # Every attempt reused the same nonce: Discord's own dedup can catch
     # a message that actually landed on an earlier, errored-out attempt.
     nonces = {n for _content, _mentions, n in channel.sent}
     assert len(nonces) == 1

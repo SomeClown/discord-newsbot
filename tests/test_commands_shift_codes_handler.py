@@ -129,7 +129,7 @@ def _freeze_now(monkeypatch, moment: datetime) -> None:
 
 def _allowed_mentions_none(mentions: discord.AllowedMentions) -> bool:
     # discord.AllowedMentions has no __eq__, so two "equivalent" instances
-    # compare unequal by identity -- compare the fields that matter instead.
+    # compare unequal by identity: compare the fields that matter instead.
     return mentions.everyone is False and mentions.users is False and mentions.roles is False
 
 
@@ -212,7 +212,7 @@ async def test_code_just_inside_the_days_window_around_la_midnight_is_included(
 ):
     # 14 days back from "now" is a fixed instant regardless of timezone
     # (resolve happens in UTC in the handler, via datetime.now(UTC) -
-    # timedelta(days=days)) -- this pins that a code sitting right at the
+    # timedelta(days=days)): this pins that a code sitting right at the
     # LA midnight boundary of that window still shows up.
     cfg = _cfg()
     now = datetime(2026, 3, 15, 7, 59, tzinfo=UTC)  # just after LA midnight (PDT, UTC-7)

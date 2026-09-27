@@ -39,7 +39,7 @@ async def test_skip_leaves_the_lock_state_untouched():
     try:
         async with run_lock_or_skip():
             pass
-        # Still held by the original acquirer -- a skip must never have
+        # Still held by the original acquirer: a skip must never have
         # released (or double-acquired) anything.
         assert is_run_in_progress() is True
     finally:
@@ -64,13 +64,13 @@ async def test_run_lock_or_skip_can_wait_behind_an_already_queued_waiter():
 
     _run_lock.release()  # flips the internal flag synchronously; `waiter` hasn't resumed yet
     # `run_lock_or_skip`'s own `.locked()` check can now read False, but
-    # `waiter` is still queued -- `_run_lock.acquire()` below has to wait
+    # `waiter` is still queued: `_run_lock.acquire()` below has to wait
     # its turn behind it rather than skip *or* return immediately.
     async with run_lock_or_skip() as acquired:
         order.append("skip-caller" if acquired else "skip-caller-skipped")
 
     await waiter_task
     # The already-queued waiter got the lock first, exactly as a fair
-    # lock promises -- run_lock_or_skip's own attempt landed second, and
+    # lock promises: run_lock_or_skip's own attempt landed second, and
     # it waited for it rather than racing past it.
     assert order == ["waiter", "skip-caller"]

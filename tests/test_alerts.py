@@ -88,7 +88,7 @@ async def test_send_alert_logs_when_it_swallows_a_failure(caplog):
 
 
 async def test_send_alert_never_lets_a_ping_through_even_with_hostile_text():
-    # Every run report and admin alert -- run reports included -- goes
+    # Every run report and admin alert (run reports included) goes
     # through this one send path. The behavioral check, not just the
     # `test_mentions_tripwire.py` AST scan: the actual kwarg landing on
     # `channel.send` disables every mention kind, on a message whose text

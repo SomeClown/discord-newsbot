@@ -130,7 +130,7 @@ async def test_literal_everyone_text_in_content_cannot_ping_when_ping_false():
     # The content string itself can contain the literal text "@everyone"
     # (e.g. baked into a collected URL's path by a hostile or just weird
     # source, since `render_code_alerts` never scrubs URLs the way `esc()`
-    # scrubs headline text) -- Discord only turns that into a real mention
+    # scrubs headline text): Discord only turns that into a real mention
     # if `allowed_mentions` says so. With ping=False, this must go out
     # with AllowedMentions.none() regardless of what the text contains.
     channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=True)

@@ -117,7 +117,7 @@ async def test_code_sweep_job_first_run_is_about_two_minutes_out(db_path):
 
 
 async def test_code_sweep_job_disabled_by_default_config(db_path):
-    # config_valid.yaml carries no alerts: block -- confirms the "off"
+    # config_valid.yaml carries no alerts: block, confirming the "off"
     # side of the wiring test isn't just an artifact of explicitly setting
     # enabled=False above.
     cfg = load_config(CONFIG_PATH)
@@ -171,7 +171,7 @@ async def test_build_sweep_deps_excludes_web_search(db_path):
 
 
 async def test_build_deps_includes_web_search_when_configured(db_path, monkeypatch):
-    # config_valid.yaml's sources include a web_search entry -- build_deps
+    # config_valid.yaml's sources include a web_search entry: build_deps
     # (the daily job's path) should still build it; only build_sweep_deps
     # excludes it. BRAVE_API_KEY has to be set *before* load_config runs
     # (config.py drops an unconfigured web_search source at load time),
@@ -225,7 +225,7 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
     cfg = _cfg(alerts_enabled=True)
     bot = NewsBot(cfg, _secrets(), db_path)
 
-    # Seed a 'pending' row directly -- as if a prior process claimed a
+    # Seed a 'pending' row directly, as if a prior process claimed a
     # code and died before confirming the send. fail_pending_codes()
     # (called from setup_hook, before scheduler.start()) should flip it
     # to 'failed' and remember it for the first on_ready.
@@ -261,7 +261,7 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
 
     # _catch_up would otherwise try a real pipeline run, and
     # _check_permissions would try real Discord HTTP calls this fake bot
-    # was never connected for -- short-circuit both, since only the
+    # was never connected for: short-circuit both, since only the
     # interrupted-codes reporting is under test here (see
     # test_permissions.py for the permission check itself).
     async def fake_catch_up() -> None:
@@ -277,7 +277,7 @@ async def test_interrupted_codes_reported_on_first_on_ready_only(db_path, monkey
     assert len(alerts) == 1
     assert "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA" in alerts[0]
 
-    # A reconnect fires on_ready again -- the interrupted-codes report is
+    # A reconnect fires on_ready again: the interrupted-codes report is
     # a one-time thing, not repeated on every reconnect.
     await bot.on_ready()
     assert len(alerts) == 1
@@ -444,5 +444,5 @@ async def test_sweep_job_lock_busy_does_not_silently_clear_a_real_crash_flag(db_
     await bot._sweep_job()
 
     # A lock-busy skip tells us nothing about whether the underlying crash
-    # is fixed -- the flag should still read True until an actual success.
+    # is fixed: the flag should still read True until an actual success.
     assert bot._sweep_crash_alerted is True

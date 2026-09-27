@@ -317,7 +317,7 @@ async def test_huge_url_and_source_name_never_strand_claimed_rows_pending(db_pat
     # QA follow-up: `_roundup_header` used to be unable to shrink, so a
     # ~2010-char url plus a very long source name could blow the 2000-unit
     # cap and raise *after* `claim_codes` had already marked the rows
-    # pending -- stranding them there with nothing posted. Render-before-
+    # pending: stranding them there with nothing posted. Render-before-
     # claim plus the header's own shrinking should mean this just works.
     _seed(db_path)
     poster = _FakePoster()
@@ -342,7 +342,7 @@ async def test_huge_url_and_source_name_never_strand_claimed_rows_pending(db_pat
 async def test_stale_roundup_code_never_alerts_even_on_a_later_fresh_sighting(db_path, http_client):
     # Once a code is recorded 'too_old' it's in `known`, so a later batch
     # that sees the *same* code again (fresh this time) must never post
-    # it -- A11's "never gets another chance" rule.
+    # it: A11's "never gets another chance" rule.
     _seed(db_path)
     poster = _FakePoster()
     deps = _deps(db_path, http_client, poster=poster)

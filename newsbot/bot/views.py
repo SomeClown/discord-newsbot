@@ -4,7 +4,7 @@ Both views share one worry: a button click is its own interaction, and
 Discord will happily let anyone in the channel click a button someone
 else's ephemeral message put in front of them. `is_command_owner` is the
 one-line check both views build on, pulled out on its own so it can be
-tested without a fake `discord.Interaction` -- it's just "does this id
+tested without a fake `discord.Interaction`: it's just "does this id
 match that id", and testing it as anything fancier would be testing
 discord.py, not us.
 """
@@ -29,7 +29,7 @@ class PagerView(discord.ui.View):
 
     `render_page` does the actual DB query and embed rendering for a given
     page number (through `asyncio.to_thread` on the caller's side, since
-    it's a coroutine) -- this view only owns the paging state and the
+    it's a coroutine): this view only owns the paging state and the
     owner check. A 600s timeout matches the plan; after that the buttons
     just stop responding rather than erroring, which is fine for a result
     list nobody's still reading ten minutes later.
@@ -64,7 +64,7 @@ class PagerView(discord.ui.View):
         self.page += delta
         self._sync_buttons()
         embed = await self._render_page(self.page)
-        # Explicit, not just relying on NewsBot's own default -- /shift
+        # Explicit, not just relying on NewsBot's own default: /shift
         # codes shares this view with /news, and design.md §13 wants
         # every send on that path to visibly say "never pings", not
         # inherit it silently from a client-level default someone could
@@ -92,8 +92,8 @@ class ConfirmView(discord.ui.View):
     `value` starts `None` (nobody's answered yet), then becomes `True` or
     `False` once a button's clicked; the caller does `await view.wait()`
     and then reads `value`. `None` after `wait()` returns means the
-    600s -- sorry, this one's 60s, a confirmation nobody's answering in a
-    minute isn't getting answered -- timeout hit instead.
+    600s (sorry, this one's 60s, a confirmation nobody's answering in a
+    minute isn't getting answered) timeout hit instead.
     """
 
     def __init__(self, owner_id: int, *, timeout: float = 60) -> None:

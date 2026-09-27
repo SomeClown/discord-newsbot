@@ -82,7 +82,7 @@ def test_purge_on_empty_database_returns_zero_zero(conn):
 
 def test_purge_older_than_never_touches_alerted_codes_or_alert_state(conn):
     # design.md §12 / plan §4: retention has no lookback for "have we ever
-    # alerted this code before" -- purge_older_than only ever compares
+    # alerted this code before": purge_older_than only ever compares
     # items.collected_at and stories.created_at, so a code recorded years
     # ago (and the seeded/last-sweep state alongside it) must survive a
     # purge that would happily delete an item from the same moment.

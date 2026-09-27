@@ -3,7 +3,7 @@
 Everything upstream of this module (collectors, normalize, filter,
 summarize, format) is a pure function or close to one: given inputs, it
 returns outputs, and none of it knows the word "Discord" exists. This
-module is where that stops being true -- it's the one place that has to
+module is where that stops being true: it's the one place that has to
 juggle a database, a language model, a publish target and a wall clock all
 at once, and get the ordering right when any one of them fails partway
 through.
@@ -11,7 +11,7 @@ through.
 The ordering it protects is the double-post guard (SPEC-DEV 2): claim
 today's slot with a `pending` row *before* doing anything slow, publish,
 and only then save. A crash between claim and save leaves a `pending` row
-and nothing else -- annoying (it blocks the next automatic run until
+and nothing else, annoying (it blocks the next automatic run until
 someone force-reclaims it), but never a duplicate post, which was the
 actual failure mode worth avoiding.
 
@@ -101,7 +101,7 @@ class RunMode(StrEnum):
 class RunKind(StrEnum):
     """Why this POST run happened, shown on the admin-channel run report (design.md §6).
 
-    Deliberately doesn't say *who* ran `/newsbot run-now` -- the privacy
+    Deliberately doesn't say *who* ran `/newsbot run-now`: the privacy
     policy promises we don't keep user ids around, and this is not the
     place to start.
     """
@@ -123,16 +123,16 @@ class Deps:
     # Shared with the SHiFT alert sweep (design.md §12) so Reddit's gap is
     # honored across the daily job and every hourly sweep, not reset fresh
     # each time. `None` (the default) keeps this run's own collection
-    # exactly as it's always behaved -- nothing about the daily job
+    # exactly as it's always behaved: nothing about the daily job
     # requires cross-call state on its own.
     rate_limit_state: RateLimitState | None = None
     # Set by the bot layer when alerts.enabled; None means "no poster
-    # configured", which is also every existing test's default -- the
+    # configured", which is also every existing test's default: the
     # daily POST hook (added in `_run_claimed`) is a no-op without one.
     code_alert_poster: CodeAlertPoster | None = None
-    # Why this POST run is happening -- scheduled cron, startup catch-up,
-    # or /newsbot run-now. `None` (the default, and every existing test's
-    # default) means "don't send an admin-channel run report" -- the
+    # Why this POST run is happening (scheduled cron, startup catch-up,
+    # or /newsbot run-now). `None` (the default, and every existing test's
+    # default) means "don't send an admin-channel run report": the
     # report hook added in `_run_claimed` is a no-op without one, so every
     # caller that predates this feature sees exactly today's behavior.
     run_kind: RunKind | None = None
@@ -149,7 +149,7 @@ class PipelineOutcome:
 def local_run_date(now: datetime, timezone: str) -> date:
     """The local calendar date `now` falls on in `timezone`.
 
-    Not UTC's date -- the digest is keyed by the *local* day, because the
+    Not UTC's date: the digest is keyed by the *local* day, because the
     owner reads it in the morning, not at midnight UTC. Near midnight UTC
     the two dates genuinely differ (a run at 02:00 UTC is still "yesterday"
     at 09:00 America/Los_Angeles), which is exactly the case worth a test.
@@ -197,13 +197,13 @@ async def build_digest(
     ready for `repo.save_run`, an overall status (`ok`/`partial`), header
     notes, token usage, the raw per-collector results (for source health
     bookkeeping, which happens one level up), the raw collected items
-    (before normalize's own store-dedupe and digest lookback window --
+    (before normalize's own store-dedupe and digest lookback window;
     SHiFT code alerts, design.md §12: the daily run's own code check
     runs against these, on its own `max_item_age_hours`/once-per-code
-    rules rather than the digest's, since `StoredItem` -- what actually
-    reaches `save_run` -- has no `full_text` field to find a code in
+    rules rather than the digest's, since `StoredItem` (what actually
+    reaches `save_run`) has no `full_text` field to find a code in
     anyway), and the per-topic summaries plus fallback items `render_digest`
-    already used to build `rendered` -- handed back out again so the
+    already used to build `rendered`: handed back out again so the
     admin-channel run report (design.md §6) can build its own per-topic
     story counts without re-deriving them from a rendered embed.
     """
@@ -301,7 +301,7 @@ def _build_stored_items(grouped: dict[str, list[TopicItem]]) -> list[StoredItem]
     """Collapse `filter_items`' per-topic grouping back into one row per item.
 
     An item that matched two topics shows up in two of `grouped`'s lists,
-    but it's one row in `items` -- `item_topics` is what carries the
+    but it's one row in `items`: `item_topics` is what carries the
     one-to-many relationship, so this rebuilds a url -> item map alongside
     a url -> {topic_key: uncertain} map and zips them back together.
     """
@@ -336,7 +336,7 @@ async def run_daily(
 ) -> PipelineOutcome:
     """Run one day's pipeline, in POST or PREVIEW mode.
 
-    PREVIEW never claims, never writes source health, and never saves --
+    PREVIEW never claims, never writes source health, and never saves:
     it reads the store (for dedupe and prior headlines) and nothing more,
     so running a preview can never change what the real job sees later.
 
@@ -400,8 +400,8 @@ async def _run_post(
         # already have their own handling below, and return a normal
         # PipelineOutcome instead of raising. If something gets past both
         # of those, it's a shape of failure this module didn't
-        # anticipate -- a bug, a publisher raising something other than
-        # PublishError, the run getting cancelled -- and the one thing
+        # anticipate (a bug, a publisher raising something other than
+        # PublishError, the run getting cancelled), and the one thing
         # that must not happen is `digest_id` staying `pending` forever,
         # since that blocks every run (and, pre-group-4, every admin)
         # after it. Record it failed with whatever got posted (a
@@ -496,7 +496,7 @@ async def _run_claimed(
             deps.now,
         )
         # The SHiFT alert check (design.md §12) runs regardless of whether
-        # the digest itself made it out -- a code sitting in today's
+        # the digest itself made it out: a code sitting in today's
         # collected items doesn't stop being real because the digest
         # publish failed. It runs *after* the digest row above is already
         # durably `failed` (QA item 3), not before: a cancellation landing
@@ -504,7 +504,7 @@ async def _run_claimed(
         # function before `_mark_failed_sync` ever ran, letting
         # `_run_post`'s own outer handler mark the digest failed a second
         # time with the wrong notes and an empty id list. Now there's
-        # nothing left for a cancellation here to corrupt -- the digest's
+        # nothing left for a cancellation here to corrupt: the digest's
         # own outcome is already on disk.
         await _maybe_check_codes(deps, collected, results)
         await deps.alert(_render_publish_failure_alert(rendered, posted_by_topic, publish_error))
@@ -561,14 +561,14 @@ async def _maybe_send_run_report(
 
     A no-op whenever there's no `run_kind` (every caller that predates
     this feature, and every test that doesn't set one up), `report_to_admin`
-    is off, or `status` isn't `ok`/`partial` -- a `failed` run already gets
+    is off, or `status` isn't `ok`/`partial`: a `failed` run already gets
     a detailed alert of its own above, and a report on top of that would
     just be noise about the same failure twice. Only ever called once
     today's digest row is already durably saved (same ordering
     `_maybe_check_codes` relies on, for the same reason): nothing in here
-    may change what already landed, so any exception -- a bug in
-    `render_run_report`, a Discord hiccup inside `deps.alert` (which
-    already swallows its own) -- is caught and logged, never re-raised.
+    may change what already landed, so any exception (a bug in
+    `render_run_report`; a Discord hiccup inside `deps.alert`, which
+    already swallows its own) is caught and logged, never re-raised.
 
     `posted_by_topic` is exactly what `DiscordPublisher.publish` handed
     back (or `{}`, for a publisher that predates this or doesn't post
@@ -667,11 +667,11 @@ def _render_publish_failure_alert(
     actually got a message id back before `publish_error` ended the
     attempt. Without naming both sides, "publish failed after retries"
     told an admin *that* something broke but not whether Diablo IV's
-    channel is now missing a digest or Borderlands 4's is -- exactly the
+    channel is now missing a digest or Borderlands 4's is: exactly the
     thing you'd want to know before deciding whether `run-now` (which
     reposts everything, §10 of deploy.md) is worth the duplicate posts.
 
-    "after retries" is only true for a retryable error -- a permanent one
+    "after retries" is only true for a retryable error: a permanent one
     (`PublishError.retryable is False`, a 4xx or a channel that's gone)
     never got a second attempt, so saying so would be misleading.
     """
@@ -690,17 +690,17 @@ async def _publish_with_retry(
 ) -> tuple[dict[str, int], PublishError | None]:
     """Retry `publisher.publish()` on transient failure, with backoff.
 
-    Only `PublishError` is caught here -- that's the contract the
+    Only `PublishError` is caught here: that's the contract the
     `Publisher` protocol documents, and a resumable publisher (see
     `DiscordPublisher`) is exactly what makes retrying the *same*
     publisher instance safe: each attempt picks up where the last one
     left off instead of reposting what already made it through. A
     permanent per-channel error (`exc.retryable is False`, design.md §13's
-    D2 -- a 4xx, a channel that's gone, one lacking permission) stops the
+    D2, a 4xx, a channel that's gone, one lacking permission) stops the
     loop immediately instead of burning the rest of the backoff schedule
     on something no amount of waiting fixes. On final failure, the
     mapping returned comes from the error itself
-    (`PublishError.posted_by_topic`), not an empty one -- those ids are
+    (`PublishError.posted_by_topic`), not an empty one: those ids are
     real messages sitting in real channels, and `_run_post` needs them to
     record against the `failed` row so a human (or `needs_confirmation`)
     knows part of the digest already posted.
@@ -724,7 +724,7 @@ async def _maybe_check_codes(
     """Run the SHiFT alert check against this run's own collected items (design.md §12).
 
     A no-op whenever alerts aren't configured (`code_alert_poster is
-    None`) or aren't enabled -- every existing caller of `run_daily`, and
+    None`) or aren't enabled: every existing caller of `run_daily`, and
     every test that doesn't set one up, sees exactly today's behavior.
     Deliberately swallows everything: a bug in the alert path is a problem
     worth an admin alert, never a reason to turn a digest that posted fine
@@ -734,16 +734,16 @@ async def _maybe_check_codes(
     `shift/sweep.py` can each import from the other without either one
     eagerly importing the other at module load time.
 
-    `seeding_ok` is computed the same way the hourly sweep computes it --
-    `decide.seeding_healthy(results)` -- rather than always `True`. The
+    `seeding_ok` is computed the same way the hourly sweep computes it
+    `decide.seeding_healthy(results)`, rather than always `True`. The
     daily run does run every non-web_search collector for real, but "for
     real" isn't "successfully": a run where most of those sources timed
     out shouldn't get to declare today's (mostly missing) haul the
     historical baseline any more than an unhealthy sweep should (A1).
 
     Callers only ever reach this once today's digest row is already
-    durably recorded (QA item 3, `_run_claimed`) -- `_save_run_sync` on
-    success, `_mark_failed_sync` on a publish failure -- so by the time
+    durably recorded (QA item 3, `_run_claimed`): `_save_run_sync` on
+    success, `_mark_failed_sync` on a publish failure, so by the time
     this runs, there's no digest outcome left for anything in here to
     corrupt. That's what makes it safe to catch `BaseException`, not just
     `Exception`: a cancellation landing here (the scheduler shutting the
@@ -751,7 +751,7 @@ async def _maybe_check_codes(
     function *before* the digest was saved, and `_run_post`'s own
     catch-all would then mark an already-published digest `failed` with
     an empty id list. Swallowing it here instead just means this one
-    best-effort code check didn't finish -- the next sweep interval (or
+    best-effort code check didn't finish: the next sweep interval (or
     tomorrow's run) tries again; the digest that already posted stays
     exactly as posted.
     """
@@ -763,7 +763,7 @@ async def _maybe_check_codes(
 
         # The hourly sweep never runs web_search at all (it builds its own
         # collector list with include_web_search=False, to keep Brave
-        # within its free allowance) -- a code that only ever showed up in
+        # within its free allowance): a code that only ever showed up in
         # a Brave result was never seeded by any sweep, so the daily run's
         # own check has to hold itself to the same restriction, not just
         # collect from everything it happens to have on hand. Filtered by
@@ -791,7 +791,7 @@ async def _maybe_check_codes(
             rate_limit_state=deps.rate_limit_state,
         )
         await process_items(sweep_deps, sweepable_items, seeding_ok=seeding_healthy(results))
-    except BaseException as exc:  # never let an alert-path bug -- or a cancellation -- touch
+    except BaseException as exc:  # never let an alert-path bug, or a cancellation, touch
         # the digest's own already-recorded outcome; see the docstring above.
         logger.exception("SHiFT code alert check failed")
         await deps.alert(f"newsbot: SHiFT code alert check failed: {exc}")
@@ -810,7 +810,7 @@ class FixtureCollector:
     """Reads pre-collected `RawItem`s from a JSON file instead of the network.
 
     One file, one "collector". The file's own name becomes the source
-    name shown in logs and coverage notes -- there's no config source to
+    name shown in logs and coverage notes: there's no config source to
     borrow a name from, since fixtures replace the whole collector list.
     """
 
@@ -847,7 +847,7 @@ def build_fixture_collectors(fixtures_dir: Path) -> list[Collector]:
     `llm.json` is excluded on purpose: the CLI's `--stub-llm` file lives
     in the same directory as the feed fixtures (see the verify command in
     the plan), and it's shaped like canned stories, not like a collected
-    item list -- globbing it in here would turn "no LLM configured" into
+    item list: globbing it in here would turn "no LLM configured" into
     a mysteriously broken collector instead of a clear error.
     """
     return [
@@ -889,6 +889,24 @@ async def _stdout_alert(text: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """`python -m newsbot.pipeline.run`: the CLI front door for a run with no Discord.
+
+    Defaults to PREVIEW against a `PrintPublisher`; `--post-to-stdout`
+    switches to POST (still printing, not posting), which is the only way
+    to exercise the claim/save transaction and the double-post guard
+    without a live bot token. `--fixtures` replaces the real collectors
+    with `FixtureCollector`s reading canned JSON, and `--stub-llm`
+    replaces `AnthropicLLM` with `StubLLM` reading canned stories; either
+    can be used alone or together, and together they add up to a fully
+    offline run. `--sweep` runs one SHiFT code alert sweep instead of the
+    daily pipeline, and never touches the LLM either way.
+
+    `--config` (or `$NEWSBOT_CONFIG`) is always required. Secrets
+    (`ANTHROPIC_API_KEY`, and `BRAVE_API_KEY`/Bluesky's if configured) are
+    only loaded for whatever `--fixtures`/`--stub-llm`/`--sweep` didn't
+    replace, so a fully offline run (`--fixtures` and `--stub-llm`
+    together) needs none of them.
+    """
     parser = argparse.ArgumentParser(prog="python -m newsbot.pipeline.run")
     parser.add_argument("--config", default=os.environ.get("NEWSBOT_CONFIG"))
     parser.add_argument("--db", default=os.environ.get("NEWSBOT_DB", "./data/newsbot.db"))
@@ -994,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run_sweep_cli(cfg: AppConfig, db_path: str, collectors: list[Collector]) -> int:
     """`python -m newsbot.pipeline.run --sweep`: one sweep, printed instead of posted.
 
-    A thin CLI wrapper around `shift.sweep.run_code_sweep` -- imported
+    A thin CLI wrapper around `shift.sweep.run_code_sweep`, imported
     lazily for the same reason `pipeline/run.py`'s other code-alert entry
     point does (see `_maybe_check_codes`): it keeps a normal digest run
     from ever needing to import `shift/sweep.py` at all.

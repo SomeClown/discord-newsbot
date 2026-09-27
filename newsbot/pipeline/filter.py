@@ -67,7 +67,7 @@ def build_matchers(topics: list[Topic]) -> dict[str, TopicMatcher]:
 def _cap_key(topic_item: TopicItem) -> tuple[int, int, float]:
     published = topic_item.item.published_at
     # Undated items (SPEC-DEV 4 keeps them around) sort as if they were the
-    # oldest thing in the batch -- recency can't rank what it doesn't know.
+    # oldest thing in the batch: recency can't rank what it doesn't know.
     recency = -published.timestamp() if published else float("inf")
     return (
         _MATCH_RANK["uncertain" if topic_item.uncertain else "confident"],
@@ -83,7 +83,7 @@ def filter_items(
 
     An item with `topics` set only considers those topics (and, per
     SPEC-DEV 3, is a confident match for a single named topic with no
-    keyword check at all -- a dedicated Steam feed's patch notes don't
+    keyword check at all; a dedicated Steam feed's patch notes don't
     have to mention the game by name). An item with `topics=None` is
     checked against every topic by keyword.
 

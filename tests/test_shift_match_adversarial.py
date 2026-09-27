@@ -41,7 +41,7 @@ def test_code_with_numeric_entity_hyphen_still_matches():
 
 def test_code_surrounded_by_nbsp_still_matches():
     # &nbsp; decodes to U+00A0, which _collapse's \s+ regex treats as
-    # ordinary whitespace and folds down to a single space -- same
+    # ordinary whitespace and folds down to a single space: same
     # boundary as a real space, not a glued character.
     text = plain_text("code&nbsp;AAAA1-BBBBB-CCCCC-DDDDD-EEEEE&nbsp;end")
     assert find_codes(text) == [CODE]
@@ -63,15 +63,15 @@ def test_code_in_a_query_string_is_matched():
     # immediately touching the code; "=" isn't a letter/digit/hyphen, so
     # a code embedded in ?code=... matches like anywhere else. Pinning
     # this as the documented contract, not asserting it "should" be
-    # excluded -- match.py's docstring never scopes the search to
+    # excluded: match.py's docstring never scopes the search to
     # "outside of a URL", and Gearbox does post codes as reward-page
     # query params.
     assert find_codes(f"https://shift.gearboxsoftware.com/rewards?code={CODE}&src=x") == [CODE]
 
 
 def test_code_as_a_bare_url_path_segment_does_not_match():
-    # QA item 6: `/` is now a blocking boundary on either side of a code
-    # -- a bare path segment (as opposed to a query-string value, which
+    # QA item 6: `/` is now a blocking boundary on either side of a code:
+    # a bare path segment (as opposed to a query-string value, which
     # `test_code_in_a_query_string_is_matched` above still covers) reads
     # as "glued to the URL's structure", the same reasoning that already
     # applied to a letter, digit or hyphen.
@@ -95,7 +95,7 @@ def test_code_in_markdown_code_span_matches():
 
 def test_code_in_markdown_bold_span_matches():
     # A code inside **bold** (not <b> tags) never goes through text.py at
-    # all -- Markdown asterisks aren't markup this matcher strips, they're
+    # all: Markdown asterisks aren't markup this matcher strips, they're
     # just punctuation next to the code, exactly like the existing
     # surrounded-by-parens/backticks cases.
     assert find_codes(f"**{CODE}**") == [CODE]

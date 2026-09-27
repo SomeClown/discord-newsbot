@@ -119,7 +119,7 @@ def test_entry_full_text_three_content_parts_all_kept_once():
     }
     result = _entry_full_text(entry)
     # Duplicate-suppression only guards the summary append, not content
-    # entries against each other -- pinning the current (permissive)
+    # entries against each other: pinning the current (permissive)
     # behavior rather than assuming a stronger guarantee that isn't there.
     assert result == "Part A.\nPart B.\nPart A."
 

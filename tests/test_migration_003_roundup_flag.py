@@ -92,7 +92,7 @@ def test_existing_roundup_rows_are_backfilled_to_from_roundup_true(db_path):
 
 def test_v1_3_shaped_insert_omitting_the_column_still_works(db_path):
     # Rollback proof (design.md §13): a v1.3.0 process running against a
-    # v2.0 database never mentions from_roundup at all -- its INSERT
+    # v2.0 database never mentions from_roundup at all: its INSERT
     # statement predates the column entirely. This has to keep working so
     # a rollback (restore config.v1.yaml + TAG=1.3.0) doesn't also need a
     # DB restore.

@@ -103,7 +103,7 @@ def _alert(*, ping: bool, codes: list[str] | None = None) -> RenderedAlert:
 
 async def test_missing_permission_alerts_admin_once_per_sweep_not_once_ever():
     # Two separate sweeps (each starting its own begin_batch() dedupe
-    # window) both missing the permission -- two separate admin alerts,
+    # window) both missing the permission: two separate admin alerts,
     # not a single one-shot warning that stops repeating forever.
     channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=False)
     client = FakeClient(channel)
@@ -123,7 +123,7 @@ async def test_missing_permission_alerts_admin_once_per_sweep_not_once_ever():
 async def test_missing_permission_dedupes_within_one_sweeps_begin_batch_window():
     # Same sweep (no begin_batch() between them, e.g. an overflow batch's
     # several messages, or _post_with_retry's several attempts at one
-    # message) -- only the first missing-permission post() alerts.
+    # message): only the first missing-permission post() alerts.
     channel = FakeChannel(guild=FakeGuild(me=FakeMember()), can_mention=False)
     client = FakeClient(channel)
     poster = DiscordCodeAlertPoster(client, channel_id=1)
@@ -154,7 +154,7 @@ async def test_missing_permission_then_permission_granted_only_alerts_for_the_fi
 
 
 async def test_channel_fetch_404_propagates_unwrapped():
-    # 404 ("channel not found") is a 4xx -- final, not worth retrying --
+    # 404 ("channel not found") is a 4xx (final, not worth retrying),
     # so it propagates unwrapped, same as any other 4xx classification.
     client = FakeClient(None)
     poster = DiscordCodeAlertPoster(client, channel_id=999)
@@ -236,7 +236,7 @@ async def test_continuation_messages_always_post_with_allowed_mentions_none():
 
 async def test_continuation_messages_none_even_when_permission_missing():
     # A missing mention_everyone permission only matters to the message
-    # that's actually trying to ping -- continuations never try, so they
+    # that's actually trying to ping: continuations never try, so they
     # should never trigger the missing-permission admin alert either.
     candidates = [
         _candidate(

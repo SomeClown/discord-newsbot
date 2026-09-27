@@ -8,7 +8,7 @@ number" without standing up a Discord connection, which is a genuinely
 bad way to find out you're off by one.
 
 Everything user-facing that started life as scraped text goes through
-`esc()` before it reaches an embed. URLs never do -- they go straight into
+`esc()` before it reaches an embed. URLs never do: they go straight into
 link targets (`<url>`, which suppresses Discord's preview embed instead of
 letting six of them stack up under one story), and only ever come from
 `StoryDraft.item_urls`, which `pipeline/summarize.py` has already checked
@@ -44,11 +44,11 @@ _MAX_FIELD_VALUE = 1024
 # design.md §13, D1: a coverage note ("Brave search skipped: quota exceeded")
 # now rides along in the footer of every topic embed that actually posts,
 # since there's no shared header message left for it to live in. Capped well
-# under an embed footer's real 2048-unit limit -- a footer is meant to be a
+# under an embed footer's real 2048-unit limit: a footer is meant to be a
 # quiet aside, not a second description.
 _COVERAGE_FOOTER_LIMIT = 512
 # Discord's plain-message content cap (as opposed to an embed's much bigger
-# limits above) -- code alerts are plain messages, not embeds, since a code
+# limits above): code alerts are plain messages, not embeds, since a code
 # is meant to be select-and-copy-able, and an embed's description puts a
 # faint background behind text that makes triple-clicking to select it a
 # worse experience than it needs to be.
@@ -83,7 +83,7 @@ def discord_len(s: str) -> int:
 
     A Python `str` counts codepoints (`len("🤖") == 1`), but Discord's
     documented limits (title, description, field, embed-total, message)
-    are UTF-16 code units -- and most emoji, plus a good chunk of CJK
+    are UTF-16 code units, and most emoji, plus a good chunk of CJK
     extension characters, live outside the Basic Multilingual Plane, which
     makes them *two* UTF-16 units apiece. A digest full of emoji reactions
     to a patch note could look comfortably under 4096 by `len()` and still
@@ -97,7 +97,7 @@ def _truncate_utf16(text: str, limit: int, *, suffix: str = "") -> str:
     """Truncate `text` to at most `limit` UTF-16 units, keeping `suffix` (if any) intact.
 
     Walks codepoint by codepoint rather than slicing raw UTF-16 units, so
-    an astral character (2 units) is always kept whole or dropped whole --
+    an astral character (2 units) is always kept whole or dropped whole:
     a raw unit-based slice could otherwise cut a surrogate pair in half
     and leave a lone surrogate sitting at the end of the string, which is
     exactly the kind of thing that turns into a mojibake diamond in
@@ -122,7 +122,7 @@ def _defuse_mentions_and_links(s: str) -> str:
 
     For text headed into an embed *footer*: Discord doesn't render
     markdown there at all, so `escape_markdown`'s backslashes would just
-    show up as literal backslashes instead of escaping anything -- this
+    show up as literal backslashes instead of escaping anything: this
     keeps the actual safety (no live @everyone, no live link) without
     adding punctuation nobody asked for.
     """
@@ -168,16 +168,16 @@ def _topic_color(topic_key: str) -> int:
 def _sort_key(story: StoryDraft) -> tuple[int, int]:
     # Official before reported before rumor; within a label, the story
     # backed by more sources comes first. Ties keep dict/list order,
-    # which is fine -- nothing here claims to break them meaningfully.
+    # which is fine: nothing here claims to break them meaningfully.
     return (_LABEL_ORDER[story.label], -len(story.item_urls))
 
 
 def _safe_link(url: str) -> str | None:
     """Re-run `url` through `canonicalize()` immediately before it's wrapped in `<...>`.
 
-    Every URL that reaches here should already be canonical -- item_urls
+    Every URL that reaches here should already be canonical (item_urls
     via `pipeline.summarize.postprocess`, fallback items via
-    `pipeline.normalize.normalize()` at collection time -- but "should
+    `pipeline.normalize.normalize()` at collection time), but "should
     already be" is exactly the kind of assumption that's cheap to just
     re-check right where it matters. `canonicalize()` percent-encodes any
     angle bracket, square bracket, quote, backtick or space in the path,
@@ -194,7 +194,7 @@ def _link_line(urls: list[str]) -> str:
     safe_urls = [safe for url in urls if (safe := _safe_link(url)) is not None]
     shown = safe_urls[:_MAX_LINKS_SHOWN]
     # `<url>` (angle brackets) tells Discord "link this, but don't expand
-    # it into a preview card" -- without that, three or four stacked link
+    # it into a preview card": without that, three or four stacked link
     # previews turn one story into a wall of thumbnails.
     line = " · ".join(f"<{url}>" for url in shown)
     extra = len(safe_urls) - len(shown)
@@ -217,7 +217,7 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
 def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
     # By the time this is called, render_digest has already decided this
     # topic has something to say (design.md §13: a topic with nothing posts
-    # nothing, rather than an embed reading "No new stories today.") -- this
+    # nothing, rather than an embed reading "No new stories today."): this
     # still handles an empty list defensively, since a caller outside
     # render_digest (a future one, or a test) shouldn't get a crash instead
     # of a sane-looking embed for the case that's genuinely rare now.
@@ -287,7 +287,7 @@ def _coverage_footer(coverage_notes: list[str]) -> str | None:
 
     v1 put these in the header, under a shared message every topic's
     embeds rode along with; v2 has no header left, so each embed that
-    actually posts gets its own copy in the footer instead -- a reader
+    actually posts gets its own copy in the footer instead: a reader
     looking at just the Palworld channel still gets to know Brave search
     was skipped today, without needing a digest-wide message that no
     longer exists to tell them.
@@ -304,8 +304,8 @@ class TopicMessage:
 
     v1 packed every topic's embed under a shared header message in one
     channel; v2 gives each game its own channel and drops the header and
-    the discussion thread entirely, so there's no longer anything to pack
-    -- one topic, one embed, one message, one channel.
+    the discussion thread entirely, so there's no longer anything to pack:
+    one topic, one embed, one message, one channel.
     """
 
     topic_key: str
@@ -332,7 +332,7 @@ def render_digest(
 
     A topic with no `TopicSummary` at all (nothing was collected for it
     today), an empty stories list, or a fallback with no items to list
-    gets no message at all -- design.md §13's "nothing posted for a game
+    gets no message at all: design.md §13's "nothing posted for a game
     with no news" (owner decision A). Topics post in config order,
     matching the order `topics` was handed in.
     """
@@ -405,7 +405,7 @@ def _code_marker(view: CodeView) -> str | None:
     Checked in this order on purpose: `from_roundup` wins over `status`
     (a roundup code that overflowed the cap is `status='roundup'`, not
     `'posted'`, but it's still "from a roundup" to a member reading this,
-    not some fourth unexplained state) -- see `record_silent_codes`'s own
+    not some fourth unexplained state): see `record_silent_codes`'s own
     docstring for why `from_roundup` is a separate column instead of being
     derived from `status`.
     """
@@ -433,12 +433,12 @@ def _code_page_block(view: CodeView, timezone: str, *, max_len: int | None = Non
 
     # Same shedding order as `_alert_block`: the link goes first (a
     # collected URL is the part most likely to be long and least likely
-    # to be missed -- the code and its source are the point).
+    # to be missed; the code and its source are the point).
     block = f"{code_block}\n{seen_prefix}{source}{marker_suffix}"
     if discord_len(block) <= max_len:
         return block
 
-    # Still too long -- hard-truncate the source name. The fenced code
+    # Still too long: hard-truncate the source name. The fenced code
     # block never shrinks; a partial code would be actively wrong, and
     # cutting mid-fence would unbalance every block after it.
     fixed_len = discord_len(code_block) + 1 + discord_len(seen_prefix) + discord_len(marker_suffix)
@@ -452,7 +452,7 @@ def render_code_page(
 ) -> discord.Embed:
     """Render one page of `/shift codes`: every known code, newest-first, in copyable blocks.
 
-    `timezone` is `cfg.digest.timezone` -- the same local calendar the
+    `timezone` is `cfg.digest.timezone`: the same local calendar the
     daily digest and the ping cap already reason in, so "first seen" reads
     against the clock a member already expects everything else in this
     bot to use, not a UTC date nobody configured. `_code_marker` is what
@@ -463,8 +463,8 @@ def render_code_page(
     Every entry gets an equal share of the description budget up front
     (QA follow-up: hard-truncating the whole joined description used to
     silently drop entries near the end of a page, and could cut a fenced
-    code block in half). `_code_page_block`'s own shrinking -- drop the
-    link, then truncate the source -- only kicks in for an entry that
+    code block in half). `_code_page_block`'s own shrinking (drop the
+    link, then truncate the source) only kicks in for an entry that
     actually needs it; a normal-length one is untouched.
     """
     embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
@@ -494,7 +494,7 @@ def _alerts_field_value(alerts: AlertStatus) -> str:
     `disabled` when the config block's off; otherwise the last sweep's
     time and summary (or "no sweep yet" before the first one has run),
     how many codes have ever posted, and today's ping spend against the
-    cap -- with `(seeding)` appended while the marker's still unset, since
+    cap: with `(seeding)` appended while the marker's still unset, since
     "0 codes alerted, pings 0 of 3" reads very differently depending on
     whether that's "nothing's happened yet" or "we're deliberately
     staying quiet on purpose" (A1).
@@ -582,7 +582,7 @@ def render_status(
 class RenderedAlert:
     """One Discord message's worth of a SHiFT code alert batch.
 
-    `codes` is that message's own slice of the codes it announces -- when a
+    `codes` is that message's own slice of the codes it announces: when a
     batch splits across several messages (see `render_code_alerts`),
     `shift/sweep.py` needs to know which codes to mark `posted` against
     which message id, and a code that landed in message 2 shouldn't get
@@ -594,9 +594,9 @@ class RenderedAlert:
     codes: list[str]
     ping: bool
     # A deterministic id for this message, passed to `channel.send(nonce=...)`
-    # (plan §1) so a retried send after a `PublishError` -- our own client
+    # (plan §1) so a retried send after a `PublishError` (our own client
     # gave up waiting for a response, not necessarily proof the message
-    # never landed -- can't turn into a second `@everyone` in the channel.
+    # never landed) can't turn into a second `@everyone` in the channel.
     # Discord dedupes two sends sharing a nonce within its own short
     # window; deriving it from `codes` and this message's position in the
     # batch (not from wall-clock time or a random value) is what makes a
@@ -632,7 +632,7 @@ def _alert_block(
 
     # Long enough that even a message holding this one entry alone would
     # bust Discord's 2000-unit cap (a hostile or just very long source
-    # name plus a long collected URL, most likely) -- shed the link
+    # name plus a long collected URL, most likely): shed the link
     # first. The code itself is the whole point of the alert; the source
     # name is the next thing worth keeping (it's what a reader checks
     # against before trusting a code); the link is the part most likely
@@ -642,7 +642,7 @@ def _alert_block(
     if discord_len(block) <= max_len:
         return block
 
-    # Still too long -- hard-truncate the source name itself. The fenced
+    # Still too long: hard-truncate the source name itself. The fenced
     # code block (```\n<code>\n```) and any golden-key prefix are fixed
     # and never truncated: a partial code would be actively wrong, not
     # just abbreviated.
@@ -716,7 +716,7 @@ def render_code_alerts(
         # Belt-and-suspenders on the packing loop above: nothing should
         # ever reach here over the cap, but a RenderedAlert that snuck
         # past it would be silently rejected by Discord, losing a code
-        # nobody would notice was lost -- worth a loud failure instead of
+        # nobody would notice was lost: worth a loud failure instead of
         # a plain `assert`, which strips out under `-O`.
         if discord_len(content) > _ALERT_CONTENT_LIMIT:
             raise ValueError(
@@ -759,7 +759,7 @@ def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = No
 def _roundup_code_block(candidate: CodeCandidate) -> str:
     # No source/link per entry (the header already carries the one
     # source and link every code in this group shares) and no golden-key
-    # prefix (design.md §13 doesn't ask for one here) -- just the code
+    # prefix (design.md §13 doesn't ask for one here): just the code
     # itself, select-and-copy-able the same way a normal alert's code is.
     if not is_code(candidate.code):
         raise ValueError(f"not a SHiFT code: {candidate.code!r}")
@@ -771,15 +771,15 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 
     v1 recorded every roundup-only code silently, forever; v2.0 posts the
     fresh ones instead (`shift/decide.py`'s `AlertPlan.roundup_to_post`),
-    just without a ping and headed differently -- these are still "we're
+    just without a ping and headed differently: these are still "we're
     not confident enough in this to wake anyone up for it" codes, they're
     just not invisible anymore. `ping` is always `False` here (never
     `True`, not even conditionally); this function is never the place a
     future edit could accidentally reintroduce a second `@everyone` path.
 
     `group_roundups` splits `candidates` by the post they came from
-    (`source_name`, `item_url`) -- design.md §13's "two roundup items ->
-    two headers" -- and each group renders independently, packing its own
+    (`source_name`, `item_url`), matching design.md §13's "two roundup
+    items -> two headers", and each group renders independently, packing its own
     codes into one or more messages under Discord's 2000-unit cap exactly
     like `render_code_alerts` does for a normal batch: the first message
     of a group carries that group's header, any continuation uses
@@ -794,7 +794,7 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
     for group in group_roundups(candidates):
         entries = [(c.code, _roundup_code_block(c)) for c in group]
         # Every code block is short and fixed-shape (a 29-character code
-        # in a fenced block), so it's always the header -- not the block --
+        # in a fenced block), so it's always the header, not the block,
         # that's at risk of busting the cap (a ~2000-char URL, a hostile
         # source name). Give `_roundup_header` a budget that guarantees it
         # fits alongside this group's first block before measuring anything
@@ -811,7 +811,7 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
             - 2
         )
         # This is now a belt-and-suspenders check, not the mechanism that
-        # keeps things under budget -- `_roundup_header`'s own shrinking
+        # keeps things under budget: `_roundup_header`'s own shrinking
         # already guarantees the first block fits under `first_header`;
         # this still catches a code block busting the *continuation*
         # header's budget, which never shrinks.
@@ -843,7 +843,7 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
                     f"UTF-16 units ({discord_len(content)})"
                 )
             batch_codes = [code for code, _ in batch]
-            # Plan §5: sha256("roundup|" + codes + index) -- distinct from
+            # Plan §5: sha256("roundup|" + codes + index): distinct from
             # render_code_alerts' own nonce scheme (no "roundup|" prefix)
             # so a normal and a roundup message for the same code (which
             # can't actually happen, once-per-code, but nonces are cheap
@@ -858,7 +858,7 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 # --- Admin-channel run reports (design.md §6, §8) ---
 #
 # One plain-text message to the admin channel after every POST run that
-# actually posts -- scheduled, catch-up, or /newsbot run-now. Failed and
+# actually posts: scheduled, catch-up, or /newsbot run-now. Failed and
 # skipped runs keep their existing detailed alerts (pipeline/run.py) and
 # get no report; a preview never reports at all. Plain text, not an embed,
 # for the same reason the header is plain text: nobody needs a colored
@@ -867,7 +867,7 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 _REPORT_HEADER_EMOJI = {"ok": "✅", "partial": "⚠️"}
 _REPORT_HEADER_VERB = {"ok": "Digest posted", "partial": "Digest posted with gaps"}
 # How many failed/skipped sources get spelled out by name before the report
-# just says "+N more" -- three was picked as "enough to see a pattern
+# just says "+N more": three was picked as "enough to see a pattern
 # (every Reddit source timed out) without the report turning into its own
 # source_health dump."
 _MAX_REPORT_SOURCES_SHOWN = 3
@@ -878,7 +878,7 @@ _MAX_REPORT_ERROR_SNIPPET = 60
 
 def _report_date(run_date: date) -> str:
     # "Sat Sep 27", not strftime's platform-dependent %-d/%e for the
-    # unpadded day -- Linux and macOS both accept %-d, but there's no
+    # unpadded day: Linux and macOS both accept %-d, but there's no
     # reason to bet a plain-text status line on a glibc quirk.
     return f"{run_date.strftime('%a %b')} {run_date.day}"
 
@@ -940,7 +940,7 @@ def _report_sources_line(results: list[CollectorResult]) -> str:
 
 
 def _report_cost_str(spend_usd: float) -> str:
-    # "<$0.01" for anything that'd otherwise round to "$0.00" -- a
+    # "<$0.01" for anything that'd otherwise round to "$0.00": a
     # summarization call that costs half a cent still cost something, and
     # "$0.00" reads as free, which it isn't.
     if spend_usd < 0.01:
@@ -979,14 +979,14 @@ def render_run_report(
     """Render the admin-channel run report (design.md §6, §13): one plain-text message.
 
     `results` is *this run's* collector results, not the cumulative
-    `source_health` table -- an admin reading this wants to know what just
+    `source_health` table: an admin reading this wants to know what just
     happened, not the all-time record. `notes` is the same coverage-note
     list `render_digest`'s footer and `save_run`'s `error_notes` already
     use; it only shows up here as a "Notes: ..." line when `status` is
     `partial` and there's actually something to say. `posted_by_topic` is
     `DiscordPublisher.publish`'s own return value: topic key -> the message
     id that topic's embed actually landed with, missing for any topic that
-    had nothing to post -- that's what lets the stories line's `[jump]`
+    had nothing to post: that's what lets the stories line's `[jump]`
     links point at the right message in the right channel per game
     (design.md §13), instead of v1's one link to a header that no longer
     exists.
@@ -994,9 +994,9 @@ def render_run_report(
     Kept under `_ALERT_CONTENT_LIMIT` (Discord's plain-message cap, the
     same 2000 UTF-16 units the SHiFT alert messages respect) by shedding
     detail in priority order if it doesn't fit: the notes line first, then
-    the per-source failure detail, then the per-topic jump links, then --
-    a case that shouldn't be reachable given how short every other line
-    is -- a flat truncation of the whole thing.
+    the per-source failure detail, then the per-topic jump links, then
+    (a case that shouldn't be reachable given how short every other line
+    is) a flat truncation of the whole thing.
     """
     header_line = (
         f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "

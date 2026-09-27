@@ -33,7 +33,7 @@ _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 # Reddit's 429 usually clears after a short pause; a couple of retries here
 # is cheap insurance on top of the per-host gap `run_collectors` already
 # adds between Reddit sources. Kept well under pipeline/run.py's 20s
-# per-collector timeout (_COLLECT_TIMEOUT_S) -- the old (5.0, 15.0) pair
+# per-collector timeout (_COLLECT_TIMEOUT_S): the old (5.0, 15.0) pair
 # summed to 20s in sleeps *alone*, before any request had actually gone
 # out, which meant the third (and only successful) attempt could never
 # land inside its own budget. Found the hard way: a "retries and succeeds"
@@ -52,7 +52,7 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
     """Raise if `response.url`'s host resolves to a private/loopback/link-local address.
 
     `follow_redirects=True` means whatever server first answered a feed
-    URL gets to redirect this client anywhere it wants -- including, if
+    URL gets to redirect this client anywhere it wants: including, if
     nothing stopped it, the cloud metadata endpoint at
     `169.254.169.254` or a service only reachable from inside this
     container's own network. This runs after redirects are followed
@@ -66,7 +66,7 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
     try:
         addresses = [ipaddress.ip_address(host)]
     except ValueError:
-        # Not a literal IP -- resolve it. A DNS failure here isn't this
+        # Not a literal IP: resolve it. A DNS failure here isn't this
         # function's problem to report; raise_for_status()/feedparser
         # will have their own opinion about a response that never came.
         try:
@@ -106,7 +106,7 @@ async def _fetch_body(
                 if remaining <= 0:
                     break
                 if len(chunk) > remaining:
-                    # Slice rather than just stop after this chunk -- a
+                    # Slice rather than just stop after this chunk: a
                     # transport is free to hand back the whole body as
                     # one chunk (a test double does exactly that), and
                     # appending it whole would blow the cap it was just
@@ -135,7 +135,7 @@ def _entry_full_text(entry: feedparser.FeedParserDict) -> str:
     post (text and HTML, say); all of it goes in, on the theory that a
     code buried in any of them is a code worth finding. `summary` is
     appended too, but only when a feed used it for something `content`
-    didn't already say -- most feeds that have `content` at all just
+    didn't already say: most feeds that have `content` at all just
     repeat the same text in `summary`, and there's no reason to scan it
     twice.
     """
@@ -171,7 +171,7 @@ class RssCollector:
     async def collect(self, http: httpx.AsyncClient) -> list[RawItem]:
         body = await _fetch_body(http, str(self._source.url), sleep=self._sleep)
         # feedparser.parse() and clean_text() are both plain synchronous
-        # CPU work (XML parsing, regex-based HTML stripping) -- running
+        # CPU work (XML parsing, regex-based HTML stripping): running
         # them straight on the event loop would stall every other
         # collector and the gateway's heartbeat for however long a large
         # feed takes to chew through. One to_thread call for the whole

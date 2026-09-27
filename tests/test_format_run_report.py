@@ -321,8 +321,8 @@ def test_masked_link_spoof_in_error_string_does_not_become_a_clickable_link():
 
 
 def test_bare_url_in_error_string_does_not_autolink():
-    # `esc()` defuses any "scheme://" token wherever it appears -- an
-    # error string is no exception -- so a URL an attacker slipped into a
+    # `esc()` defuses any "scheme://" token wherever it appears (an
+    # error string is no exception), so a URL an attacker slipped into a
     # collector's error text never becomes a live link at all, masked or
     # otherwise.
     hostile_error = "fetch failed: https://evil.example/free-vbucks timed out"
@@ -352,7 +352,7 @@ def test_identical_topic_names_are_both_shown_with_their_own_counts():
 
 
 def test_zero_topics_configured_still_renders_a_sane_zero_stories_line():
-    # config.py has no minimum-topics check -- an owner could ship a
+    # config.py has no minimum-topics check: an owner could ship a
     # config with an empty topics list (everything filtered out by other
     # means), so render_run_report must not crash on it.
     text = _render(topics=[], summaries={}, fallback_items={}, posted_by_topic={})
@@ -443,7 +443,7 @@ def test_jump_links_are_shed_before_the_report_falls_back_to_flat_truncation():
     # Plan step 3's shedding order: notes, then source detail, then the
     # per-topic jump links, then flat truncation. Many topics with long
     # names, each carrying its own jump link, is what actually overflows
-    # even the bare (no-per-source-detail) sources line -- check the
+    # even the bare (no-per-source-detail) sources line: check the
     # links vanish (but the story counts don't) before content starts
     # getting clipped mid-line.
     topics = [

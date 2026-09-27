@@ -52,7 +52,7 @@ from newsbot.store.repo import (
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 6
-# design.md §13: /shift codes' own page size -- a code's block is smaller
+# design.md §13: /shift codes' own page size: a code's block is smaller
 # than a story's (no headline, no summary, just a code and a source line),
 # so a page holds a couple more of them before it'd risk the embed's
 # 4096-unit cap.
@@ -60,7 +60,7 @@ _SHIFT_PAGE_SIZE = 8
 _GAME_ALL = "all"
 _LABEL_CHOICES = ("official", "reported", "rumor")
 # run-now, preview, and test-alert all block on the same _run_lock (a
-# sweep holds it too, briefly) -- one shared wording so "busy" reads the
+# sweep holds it too, briefly): one shared wording so "busy" reads the
 # same regardless of which of the three tripped over it.
 _BUSY_MESSAGE = "A run or code check is in progress."
 _NOT_A_CODE_MESSAGE = (
@@ -78,7 +78,7 @@ def resolve_query_args(
     """Turn `/news recent`'s raw option values into `repo.query_stories` arguments.
 
     `game` is a topic key, or the literal "all" that the "All" choice
-    carries as its value -- which maps to an empty `topic_keys` list,
+    carries as its value: which maps to an empty `topic_keys` list,
     since `query_stories` already treats "no topics given" as "every
     topic". `topics` isn't actually consulted here; it's in the signature
     so a caller can't hand this a game value that skipped validation
@@ -95,7 +95,7 @@ def needs_confirmation(existing: DigestRow | None) -> bool:
     """True if `/newsbot run-now` should ask before running again.
 
     `ok`/`partial` (today already posted) always needs confirming, and so
-    does a `failed` row with a non-empty `posted_message_ids` -- that
+    does a `failed` row with a non-empty `posted_message_ids`: that
     combination means a publish attempt got the header (and maybe some
     embeds) into the channel before it died, so a plain re-run would post
     a second header on top of the one already there. A `failed` row with
@@ -103,9 +103,9 @@ def needs_confirmation(existing: DigestRow | None) -> bool:
     it doesn't need asking.
 
     `pending` also needs confirming (QA step 20, group 4): it means either
-    something else is mid-run right now, or -- far more likely, since
+    something else is mid-run right now, or (far more likely, since
     `is_run_in_progress()` already caught the former before this function
-    is even consulted -- a previous run crashed between claiming the day
+    is even consulted) a previous run crashed between claiming the day
     and saving or failing it, and nobody knows whether it posted. `run-now`
     passes `force=True` through to `claim_digest` after the admin confirms,
     which (as of the same change) is what actually lets the reclaim
@@ -148,7 +148,7 @@ def summarize_test_alert(outcome: CodeCheckOutcome) -> str:
 
     `run_test_alert` always treats its one synthetic code as seeded and
     fresh, so the only ways it can land here are: it posted (with or
-    without a ping -- the cap decided that), it failed to actually send,
+    without a ping, the cap decided that), it failed to actually send,
     or the code was already in `alerted_codes` from an earlier test (or a
     real alert) and `plan_alerts` dropped it before it ever reached
     `to_post`. `outcome.failed` is checked first: a code that both failed
@@ -168,9 +168,9 @@ def invalid_test_alert_code_message(code: str) -> str | None:
     """None if `code` is a real SHiFT code shape; otherwise what to tell the caller.
 
     A plain function, not inlined into the handler, so a fullwidth or
-    otherwise malformed code -- the slash command option's
+    otherwise malformed code (the slash command option's
     `Range[str, 29, 29]` only bounds length, not shape, so plenty of
-    29-character garbage still reaches here -- can be exercised without a
+    29-character garbage still reaches here) can be exercised without a
     fake `discord.Interaction`.
     """
     if is_code(code):
@@ -251,7 +251,7 @@ async def _first_page_and_view(
     `functools.partial`); every call, including this first one, goes
     through `asyncio.to_thread` so a slow query never blocks the gateway.
     `render(items, page, pages)` turns one page's worth of rows into an
-    embed -- generalized (design.md §13) so `/shift codes` can share this
+    embed: generalized (design.md §13) so `/shift codes` can share this
     with `/news recent`/`/news search` instead of each command re-doing
     the same "query, embed page 1, wire up Prev/Next" dance with its own
     fixed call to `render_story_page`.
@@ -391,7 +391,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         )
         spend = estimate_spend_usd(snap.month_input_tokens, snap.month_output_tokens)
         # Computed regardless of cfg.alerts.enabled, same as every other
-        # field here -- an admin reading /newsbot status on a bot where
+        # field here: an admin reading /newsbot status on a bot where
         # alerts are off should see "disabled", not have the whole field
         # vanish and wonder whether the feature exists at all.
         today = local_run_date(now, cfg.digest.timezone).isoformat()
@@ -425,7 +425,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             # same underlying situation from an admin's point of view: a
             # run died partway through and nobody knows for sure what
             # made it to the channel. "ok"/"partial" is the unambiguous
-            # case -- it definitely posted, this would just post again.
+            # case: it definitely posted, this would just post again.
             if existing is not None and existing.status in ("pending", "failed"):
                 prompt = (
                     "A previous run may have crashed mid-post; check the game channels. "
@@ -481,7 +481,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
 
     if cfg.alerts.allow_test_command:
         # Registered only when the config opts in (config.py already logs
-        # a startup warning when it does) -- a prod config should never
+        # a startup warning when it does): a prod config should never
         # carry a command that lets any admin post a fake @everyone-ping
         # on demand, and the plan's owner checklist relies on this command
         # disappearing the moment allow_test_command flips back to false.
@@ -511,7 +511,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             outcome = await run_test_alert(bot.build_sweep_deps(), code, golden)
             if outcome is None:
                 # Lost the race between the pre-check above and actually
-                # acquiring the run lock (step 7) -- something else (a
+                # acquiring the run lock (step 7): something else (a
                 # sweep, another test-alert) grabbed it first.
                 await interaction.followup.send(_BUSY_MESSAGE, ephemeral=True)
                 return
@@ -524,7 +524,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
 
 
 def make_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
-    """Build `/shift codes` -- the member-facing list of known SHiFT codes.
+    """Build `/shift codes`: the member-facing list of known SHiFT codes.
 
     `setup_hook` only ever calls this when `cfg.alerts.enabled` (D4): a
     list of codes from a feature that's off would just be an empty list
@@ -560,7 +560,7 @@ def make_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
         )
         # Explicit (design.md §13): a member-facing list of codes should
         # never be the send that reintroduces a ping, even though nothing
-        # here mentions anyone -- belt and suspenders next to NewsBot's
+        # here mentions anyone: belt and suspenders next to NewsBot's
         # own client-level default.
         await interaction.followup.send(
             embed=embed,

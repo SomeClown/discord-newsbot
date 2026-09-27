@@ -35,7 +35,7 @@ from newsbot.store.db import connect, migrate
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 INTEGRATION_FIXTURES = Path(__file__).parent / "fixtures" / "integration"
 
-# 13:00 America/Los_Angeles on 2026-09-25 (PDT, UTC-7) -- an ordinary
+# 13:00 America/Los_Angeles on 2026-09-25 (PDT, UTC-7): an ordinary
 # daytime instant, nowhere near a local-midnight edge case.
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=UTC)
 NEXT_LA_DAY = NOW + timedelta(days=1)
@@ -172,7 +172,7 @@ async def test_unseeded_healthy_records_silently_and_sets_marker(db_path, http_c
 
 async def test_healthy_empty_sweep_sets_seeded_marker(db_path, http_client):
     # QA item 4: an unseeded, healthy sweep that finds zero codes
-    # anywhere still has to flip the marker on -- otherwise the *next*
+    # anywhere still has to flip the marker on: otherwise the *next*
     # sweep to find a real fresh code treats it as brand new and silently
     # seeds it instead of posting.
     deps = _deps(db_path, http_client)
@@ -289,7 +289,7 @@ async def test_press_only_batch_pings(db_path, http_client):
 
 
 async def test_trusted_candidates_ordered_first_in_the_batch(db_path, http_client):
-    # Community first, official second in collection order -- the
+    # Community first, official second in collection order: the
     # rendered (and posted) batch should still put the trusted one first,
     # so the one message that carries the ping carries a trusted code.
     _seed(db_path)
@@ -302,7 +302,7 @@ async def test_trusted_candidates_ordered_first_in_the_batch(db_path, http_clien
 
 
 # --- roundups now post unpinged (design.md §13, D3; v1 recorded them all
-# silently forever -- these two tests are deliberately flipped from that
+# silently forever: these two tests are deliberately flipped from that
 # pinned behavior to the new one, same as the plan calls for) ---
 
 
@@ -361,7 +361,7 @@ async def test_roundup_cap_overflow_posts_fifty_records_rest_silently_with_admin
 ):
     # design.md §13, D3: MAX_ROUNDUP_CODES caps a check at 50 posted
     # roundup codes; the other 10 (of 60) are recorded silently as
-    # 'roundup' and one admin alert notes the trim -- not one per code.
+    # 'roundup' and one admin alert notes the trim: not one per code.
     _seed(db_path)
     alerts: list[str] = []
     cfg = _cfg(max_codes_per_item=1)  # any item with >1 code counts as a roundup
@@ -403,7 +403,7 @@ async def test_roundup_threshold_is_configurable(db_path, http_client):
 
     outcome = await process_items(deps, [item], seeding_ok=True)
 
-    # 6 codes no longer exceeds a raised threshold of 10 -- not a roundup.
+    # 6 codes no longer exceeds a raised threshold of 10: not a roundup.
     assert outcome.posted == 6
 
 
@@ -458,7 +458,7 @@ async def test_poster_failing_every_attempt_marks_failed_no_retry_ping_stays_spe
     assert poster.calls == 4  # 1 attempt + 3 retries (pipeline/run.py's own backoff length)
     assert _row(db_path, CODE_A)["status"] == "failed"
     with closing(connect(db_path)) as conn:
-        # The ping was spent at claim time and stays spent -- a failed post
+        # The ping was spent at claim time and stays spent: a failed post
         # doesn't get the budget back.
         assert repo.get_alert_state(conn).ping_count == 1
     assert any("failed" in a.lower() for a in alerts)
@@ -492,7 +492,7 @@ async def test_poster_fails_on_second_of_three_messages_earlier_codes_stay_poste
     class _FailsOnSecondPoster:
         # Fails every attempt (including retries) of the *second distinct*
         # message content it sees, so message 1 posts once and message 2
-        # exhausts its retries -- a call-count check alone would miss
+        # exhausts its retries: a call-count check alone would miss
         # this, since a retry re-invokes `post()` for the same message.
         def __init__(self) -> None:
             self.calls = 0
@@ -623,7 +623,7 @@ def _daily_deps(
 
 async def test_daily_post_run_checks_codes_and_alerts_once(db_path, http_client):
     # integration/borderlands4.json's first item embeds a code in full_text
-    # (see the fixture file) -- silent-seeded on this first run, same as a
+    # (see the fixture file): silent-seeded on this first run, same as a
     # fresh sweep would.
     poster = _FakePoster()
     deps = _daily_deps(db_path, http_client, poster=poster)
@@ -674,7 +674,7 @@ async def test_daily_hook_never_alerts_on_a_web_search_only_code(db_path, http_c
     assert outcome.status in ("ok", "partial")
     with closing(connect(db_path)) as conn:
         # web_search_item's code never even got recorded, let alone
-        # seeded or posted -- it's as if that sweep-invisible item never
+        # seeded or posted: it's as if that sweep-invisible item never
         # existed for the code check at all.
         assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0
     assert poster.sent == []
@@ -709,7 +709,7 @@ async def test_daily_hook_cancelled_after_successful_publish_leaves_digest_ok_wi
     db_path, http_client
 ):
     # QA item 3: the code check now runs only after the digest row is
-    # already durably saved -- a CancelledError raised inside it must not
+    # already durably saved: a CancelledError raised inside it must not
     # unwind past _run_claimed and let _run_post's own catch-all mark an
     # already-published digest `failed` with no ids.
     _seed(db_path)  # already seeded, so this run actually tries to post
@@ -770,14 +770,14 @@ async def test_run_test_alert_posts_with_ping_and_counts_against_cap(db_path, ht
     row = _row(db_path, CODE_A)
     assert row["status"] == "posted"
     with closing(connect(db_path)) as conn:
-        # Still counted against the daily cap -- a free test alert
+        # Still counted against the daily cap: a free test alert
         # wouldn't actually exercise the cap.
         assert repo.get_alert_state(conn).ping_count == 1
 
 
 async def test_run_test_alert_does_not_set_the_seeded_marker(db_path, http_client):
     # A test alert is treated as already seeded (so it always tries to
-    # post) without ever setting the marker itself -- it doesn't get to
+    # post) without ever setting the marker itself: it doesn't get to
     # vouch for every other code sitting in the feeds.
     deps = _deps(db_path, http_client)
     await run_test_alert(deps, CODE_A, False)
@@ -787,7 +787,7 @@ async def test_run_test_alert_does_not_set_the_seeded_marker(db_path, http_clien
 
 async def test_run_test_alert_with_already_known_code_posts_nothing(db_path, http_client):
     # The code was already alerted (posted) for real; a test run against
-    # the same code shouldn't re-post it or spend another ping -- known
+    # the same code shouldn't re-post it or spend another ping: known
     # codes are dropped in plan_alerts regardless of the caller.
     _seed(db_path)
     poster = _FakePoster()
@@ -876,7 +876,7 @@ async def test_cap_reached_admin_alert_suppressed_when_max_pings_is_zero(db_path
     assert outcome.ping is False
     assert outcome.cap_reached is True
     # The cap being 0 is the config working as intended, not an admin-worthy
-    # surprise -- no "cap reached" alert for it.
+    # surprise: no "cap reached" alert for it.
     assert not any("cap" in a.lower() for a in alerts)
 
 
@@ -893,7 +893,7 @@ def test_sweep_cli_round_trip_is_idempotent_against_the_same_fixtures(tmp_path):
 
     def _run_sweep_cli() -> subprocess.CompletedProcess:
         # Every argument is a fixed literal or a path this test built
-        # itself -- nothing here comes from untrusted input.
+        # itself: nothing here comes from untrusted input.
         return subprocess.run(  # noqa: S603
             [
                 sys.executable,

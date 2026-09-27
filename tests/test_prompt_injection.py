@@ -125,7 +125,7 @@ def test_multiple_items_each_carrying_delimiter_lookalikes_all_round_trip_cleanl
 def test_prior_headline_containing_delimiter_text_does_not_move_the_real_items_tags():
     # Prior headlines are rendered as plain markdown bullets, outside the
     # <items> block, from our own store rather than from the untrusted
-    # items batch -- build_prompt's job here is narrower: whatever a prior
+    # items batch: build_prompt's job here is narrower, whatever a prior
     # headline says, it must not relocate or duplicate the real <items>
     # delimiters that fence the *current* batch of scraped items.
     prior = [

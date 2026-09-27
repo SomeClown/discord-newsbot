@@ -108,7 +108,7 @@ def test_sightings_from_items_scopes_to_configured_topics_by_keyword():
 def test_sightings_from_items_scopes_dedicated_source_with_no_keyword_hit():
     topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     # A dedicated single-topic source counts even with no keyword hit at
-    # all (SPEC-DEV 3 / A6) -- a Steam patch note that never says the
+    # all (SPEC-DEV 3 / A6): a Steam patch note that never says the
     # game's name by name.
     item = _item(title=f"v1.2 patch notes {CODE_A}", topics=("borderlands4",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
@@ -227,7 +227,7 @@ def test_sightings_from_items_dedicated_source_still_counts_alongside_entity_onl
 
 def test_sightings_from_items_press_item_confidently_naming_the_topic_still_counts():
     # A press item that actually names "Borderlands 4" (a confident match,
-    # not an entity-only one) still counts -- item 2 only tightens the
+    # not an entity-only one) still counts: item 2 only tightens the
     # entity-only case, it must not accidentally exclude confident press
     # matches too.
     topics = [
@@ -248,7 +248,7 @@ def test_sightings_from_items_press_item_confidently_naming_the_topic_still_coun
 
 def test_sightings_from_items_dedicated_bl4_source_always_counts():
     # A dedicated (single-topic) source counts as a confident match with
-    # no keyword check at all -- the flip side of the press-item test
+    # no keyword check at all: the flip side of the press-item test
     # above: this is what "dedicated BL4 sources do alert" means.
     topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     item = _item(title="v1.3 patch notes", excerpt=f"redeem {CODE_A}", topics=("borderlands4",))
@@ -415,7 +415,7 @@ def test_aggregate_normal_sighting_alongside_roundup_is_not_roundup():
 
 
 def test_aggregate_roundup_sighting_ignored_for_freshness_when_normal_exists():
-    # The roundup sighting is fresher than the normal one -- "judged by
+    # The roundup sighting is fresher than the normal one: "judged by
     # the normal item" means the roundup sighting doesn't get to make a
     # stale normal sighting read as fresh.
     roundup = _sighting(roundup=True, published_at=NOW)
@@ -443,12 +443,12 @@ def test_sightings_from_items_at_the_threshold_is_not_roundup():
     assert not any(s.roundup for s in sightings)
 
 
-# --- plan_alerts: roundup codes (design.md §13, D3 -- v2.0 posts them unpinged) ---
+# --- plan_alerts: roundup codes (design.md §13, D3: v2.0 posts them unpinged) ---
 #
 # v1 recorded every roundup-only code silently, always, regardless of
 # `seeded` (QA item 7). v2.0 changes that: a roundup code now goes through
 # the same seeded/stale/fresh judgment a normal code does, it just never
-# reaches `to_post`/`ping`/`cap_reached` -- fresh ones land in
+# reaches `to_post`/`ping`/`cap_reached`: fresh ones land in
 # `roundup_to_post` instead, to post unpinged (`format.render_roundup_alerts`,
 # `sweep._apply_plan`). These tests replace the old "always silent" ones.
 
@@ -488,7 +488,7 @@ def test_plan_alerts_seeded_fresh_roundup_candidate_queued_unpinged():
 
 def test_plan_alerts_roundup_never_spends_or_reports_the_ping_cap():
     # A batch with only a fresh, trusted roundup code shouldn't ping, and
-    # shouldn't read as "the cap stopped it" either -- there was nothing
+    # shouldn't read as "the cap stopped it" either: there was nothing
     # in the normal pipeline to ping for in the first place.
     fresh_roundup = _candidate(roundup=True, fresh=True, trusted=True)
     plan = plan_alerts(
@@ -655,7 +655,7 @@ def _la_day(utc_dt: datetime) -> str:
 
 def test_pings_used_today_resets_at_la_midnight_not_utc_midnight():
     # 2026-09-25 07:30 UTC is still 2026-09-25 00:30 America/Los_Angeles
-    # (UTC-7 in September) -- UTC's date has already rolled to the 25th
+    # (UTC-7 in September): UTC's date has already rolled to the 25th
     # hours before LA's does, and pings_used_today has to agree with LA's
     # calendar, not UTC's.
     still_previous_utc_day_la_today = datetime(2026, 9, 25, 7, 30, tzinfo=UTC)

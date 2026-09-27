@@ -3,8 +3,8 @@
 `run.py` builds a `RenderedDigest` and hands it to whichever publisher it
 was given. The CLI's publisher prints it; the bot's (`bot/client.py`,
 `DiscordPublisher`) posts each topic's embed to that topic's own channel
-(design.md §13). Every other piece of this pipeline -- the double-post
-guard, the save transaction, the publish retry with backoff -- gets
+(design.md §13). Every other piece of this pipeline (the double-post
+guard, the save transaction, the publish retry with backoff) gets
 written and tested once, against a publisher that just prints to a
 terminal, instead of twice against a terminal and a live gateway
 connection. That trade cost one small interface; it's been worth it every
@@ -23,14 +23,14 @@ class PublishError(Exception):
     """A publish attempt failed. `run_daily` retries a few times before giving up on it.
 
     `posted_by_topic` carries whatever topic -> message id mapping the
-    failed attempt already got back from Discord before it died -- a
+    failed attempt already got back from Discord before it died: a
     `DiscordPublisher` posts one message per topic, to that topic's own
     channel, and any one of those sends can be the one that fails. Without
     this, a publish that got two topics' embeds out before a third one
     timed out would report "nothing posted" right alongside two channels
     that very much have an embed sitting in them.
 
-    `posted_ids` is `list(posted_by_topic.values())` -- the same ids,
+    `posted_ids` is `list(posted_by_topic.values())`, the same ids,
     flattened, since that's the shape `digests.posted_message_ids` and
     everything upstream of `DiscordPublisher` (the double-post guard, the
     run-now confirmation) has always dealt in, and still does (design.md
@@ -38,7 +38,7 @@ class PublishError(Exception):
 
     `retryable` is `False` for a permanent per-channel error (a 4xx, a
     channel that's gone or a permission that's missing, design.md §13's
-    D2) -- `_publish_with_retry` shouldn't burn its backoff budget retrying
+    D2): `_publish_with_retry` shouldn't burn its backoff budget retrying
     something no amount of waiting will fix; whatever's in
     `posted_by_topic` at that point is what gets recorded on the `failed`
     row.
@@ -64,7 +64,7 @@ class Publisher(Protocol):
     async def publish(self, r: RenderedDigest) -> dict[str, int]:
         """Publish a rendered digest and return topic key -> message id for whatever posted.
 
-        Raises `PublishError` on failure -- never posts half a digest and
+        Raises `PublishError` on failure: never posts half a digest and
         calls it a success.
         """
         ...

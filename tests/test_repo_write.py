@@ -67,7 +67,7 @@ def test_claim_digest_blocked_by_partial(conn):
 
 def test_claim_digest_pending_is_reclaimed_with_force(conn):
     # Behavior change (QA step 20, group 4): force now overrides pending
-    # too, not just ok/partial -- see test_repo_guard_edge_cases.py for
+    # too, not just ok/partial: see test_repo_guard_edge_cases.py for
     # the reasoning (the in-process _run_lock already rules out a live
     # concurrent run, so a pending row here is always a crash artifact).
     digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
@@ -146,7 +146,7 @@ def test_mark_digest_failed(conn):
 
 def test_mark_digest_failed_unions_with_ids_already_recorded(conn):
     # A forced run-now that fails again after an earlier failure already
-    # recorded some ids must not overwrite them -- an unattended restart's
+    # recorded some ids must not overwrite them: an unattended restart's
     # catch-up check relies on posted_message_ids to know those messages
     # exist and skip reposting them.
     digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)

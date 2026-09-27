@@ -219,7 +219,7 @@ async def test_every_topic_falling_back_gives_partial_not_failed(db_path, http_c
 # PipelineOutcome. This is the case QA flagged that neither of those
 # covers: something else goes wrong after the claim (a bug, a publisher
 # that raises something other than PublishError, a cancellation) and
-# nothing catches it -- leaving a bare `pending` row that blocks every
+# nothing catches it: leaving a bare `pending` row that blocks every
 # future run and every future admin forever, since nothing ever calls
 # mark_digest_failed for it.
 
@@ -317,7 +317,7 @@ async def test_unexpected_exception_posted_ids_are_persisted_on_the_failed_row(
 
 async def test_normal_success_is_unaffected_by_the_baseexception_safety_net(db_path, http_client):
     # The outer `except BaseException` in `_run_post` must never catch and
-    # swallow a normal successful run -- it should only ever see something
+    # swallow a normal successful run: it should only ever see something
     # that escapes `_run_claimed`'s own handling.
     deps = _make_deps(db_path, http_client)
 
@@ -335,7 +335,7 @@ async def test_normal_success_is_unaffected_by_the_baseexception_safety_net(db_p
 
 
 async def test_all_empty_day_saves_ok_with_no_message_ids_and_no_sends(db_path, http_client):
-    # No collectors at all -- every topic has literally nothing to
+    # No collectors at all: every topic has literally nothing to
     # summarize, so render_digest (design.md §13, owner decision A) emits
     # zero TopicMessages. That's success ("nothing to report today"), not
     # a failure, and nothing should have been sent anywhere.
@@ -359,7 +359,7 @@ async def test_all_empty_day_saves_ok_with_no_message_ids_and_no_sends(db_path, 
 #
 # Everything above drives run_daily with PrintPublisher or a tiny stand-in.
 # These use the real DiscordPublisher (newsbot/bot/client.py) against
-# hand-written FakeClient/FakeChannel objects -- the same spirit as
+# hand-written FakeClient/FakeChannel objects: the same spirit as
 # test_discord_publisher.py and test_publish_with_retry.py, but exercised
 # through the whole pipeline (claim -> build -> publish -> save) instead of
 # in isolation, since that's the only way to see what actually lands in
@@ -425,7 +425,7 @@ async def test_forced_run_now_after_a_partial_failure_reposts_every_topic(db_pat
     assert first_channels[_PALWORLD_CHANNEL_ID].sent == 0
 
     # The publish-failed admin alert names which games made it out and
-    # which didn't -- palworld's 403 is a permanent error, so it never got
+    # which didn't: palworld's 403 is a permanent error, so it never got
     # a retry and the wording says so instead of claiming "after retries".
     failure_alerts = [a for a in deps.alerts if "publish failed" in a]
     assert len(failure_alerts) == 1
@@ -448,7 +448,7 @@ async def test_forced_run_now_after_a_partial_failure_reposts_every_topic(db_pat
 
     assert second_outcome.status == "ok"
     # borderlands4 gets a second message even though its first one is
-    # still sitting in the channel -- the documented limitation.
+    # still sitting in the channel: the documented limitation.
     assert second_channels[_BL4_CHANNEL_ID].sent == 1
     assert second_channels[_PALWORLD_CHANNEL_ID].sent == 1
 

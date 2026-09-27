@@ -133,7 +133,7 @@ async def test_non_admin_rejected_before_anything_else_runs(db_path):
 
 
 async def test_non_admin_rejected_even_with_an_invalid_code():
-    # Admin check runs before code validation -- a non-admin shouldn't get
+    # Admin check runs before code validation: a non-admin shouldn't get
     # to learn anything about code shape validation from this command.
     cfg = _cfg()
     bot = _FakeBot(":memory:")
@@ -148,7 +148,7 @@ async def test_non_admin_rejected_even_with_an_invalid_code():
 
 async def test_administrator_flag_alone_is_sufficient(db_path):
     # has_admin_permission() also honors the blanket Administrator bit,
-    # independent of the configured admin_permission -- pinned here
+    # independent of the configured admin_permission: pinned here
     # through the real handler, not just the pure function.
     cfg = _cfg()
     bot = _FakeBot(db_path)
@@ -180,7 +180,7 @@ async def test_admin_with_invalid_code_gets_the_not_a_code_message(db_path):
 
 
 async def test_admin_with_whitespace_padded_code_gets_the_not_a_code_message(db_path):
-    # Range[str, 29, 29] only bounds length -- a 29-character string that's
+    # Range[str, 29, 29] only bounds length: a 29-character string that's
     # mostly whitespace still reaches the handler and must still be
     # rejected by is_code's shape check.
     cfg = _cfg()
@@ -267,7 +267,7 @@ async def test_busy_run_in_progress_gets_the_busy_message(db_path):
 
 async def test_run_test_alert_returning_none_gets_the_busy_message(db_path, monkeypatch):
     # The pre-check (is_run_in_progress()) has a window between checking
-    # and actually calling run_test_alert -- something could grab the lock
+    # and actually calling run_test_alert: something could grab the lock
     # in between. run_test_alert itself now shares the lock (step 7) and
     # returns None on that race, same shape as run_code_sweep; the handler
     # has to turn that into the same busy message, not crash on None.

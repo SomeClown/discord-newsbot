@@ -93,7 +93,7 @@ def test_reader_is_not_blocked_by_an_open_writer_transaction(db_path):
         start = time.monotonic()
         with closing(connect(db_path)) as reader:
             # The writer hasn't committed yet, so this shouldn't see its row,
-            # and -- the actual point of this test -- shouldn't have to wait
+            # and, which is the actual point of this test, shouldn't have to wait
             # for it either.
             count = reader.execute("SELECT COUNT(*) FROM digests").fetchone()[0]
         elapsed = time.monotonic() - start

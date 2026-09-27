@@ -35,7 +35,7 @@ def test_migrate_twice_is_a_noop(db_path):
 
 def test_migrate_v1_database_with_data_upgrades_intact(db_path):
     # Simulates a database that has only ever seen migration 001 (every
-    # pre-v1.2 install) -- 002 has to apply cleanly on top of real data,
+    # pre-v1.2 install): 002 has to apply cleanly on top of real data,
     # not just an empty fresh database.
     migrations_dir = Path(__file__).parent.parent / "newsbot" / "store" / "migrations"
     v1_sql = (migrations_dir / "001_initial.sql").read_text()

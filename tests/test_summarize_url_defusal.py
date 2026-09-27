@@ -121,7 +121,7 @@ def test_uppercase_scheme_url_is_removed():
 
 
 def test_markdown_masked_link_scheme_is_removed():
-    # "[legit text](https://evil.example)" -- the token regex is
+    # "[legit text](https://evil.example)": the token regex is
     # scheme-anchored, not markdown-aware, so it matches starting at the
     # "https://" inside the parens and eats through to the next
     # whitespace (including the closing paren). The link is gone either
@@ -135,7 +135,7 @@ def test_markdown_masked_link_scheme_is_removed():
 
 def test_url_with_no_scheme_and_no_www_prefix_is_left_alone():
     # "real.example.com" with no scheme and no www prefix isn't a token
-    # anything will autolink -- stripping it would just be mangling
+    # anything will autolink: stripping it would just be mangling
     # ordinary prose that happens to mention a domain-shaped word.
     items = [_topic_item()]
     story = _story(summary="See real.example.com for details, not a clickable link here.")

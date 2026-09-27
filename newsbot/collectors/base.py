@@ -52,13 +52,13 @@ class RawItem:
     """One collected item, before normalization, dedupe or topic matching.
 
     `topics` restricts (or, for a single-topic source, assigns) which
-    topics this item can match -- `None` means "let keyword matching
+    topics this item can match: `None` means "let keyword matching
     against every topic decide" (see `pipeline/filter.py`, SPEC-DEV 3).
 
     `full_text` is the untruncated companion to `excerpt`, added for the
     SHiFT code sweep (design.md §12): a code five paragraphs into a
     patch-notes post never shows up in a 500-character excerpt. It's
-    memory-only -- `compare=False` and `repr=False` keep it out of
+    memory-only: `compare=False` and `repr=False` keep it out of
     equality checks and log lines, and `StoredItem` (what actually reaches
     `save_run`) has no field for it at all, so there's no code path that
     could persist it or hand it to the LLM even by accident.
@@ -125,8 +125,8 @@ class RateLimitState:
     daily run, but the SHiFT alert sweep (design.md §12) calls
     `run_collectors` every `interval_minutes` from the same process, and
     Reddit doesn't reset its patience just because the previous call
-    returned. Threading one `RateLimitState` through every call -- the
-    daily job's and every sweep's alike -- is what makes the gap a real
+    returned. Threading one `RateLimitState` through every call (the
+    daily job's and every sweep's alike) is what makes the gap a real
     cross-call throttle instead of a fresh burst every hour.
     """
 
@@ -149,15 +149,15 @@ async def run_collectors(
     solo group and run alongside everything else, and never wait on
     anything. Collectors that share a key (currently just the Reddit
     sources) run one at a time within their group, `rate_limit_gap_s`
-    apart -- but that group itself still runs concurrently with every
+    apart, but that group itself still runs concurrently with every
     other group, so a throttled Reddit fetch doesn't hold up an RSS feed
     that has nothing to do with it.
 
     Without `rate_limit_state` (the default, and today's behavior), the
     gap only applies *within* one call: the first collector in a group
     never waits, and the clock resets to zero the next time this function
-    is called. With a `rate_limit_state`, every keyed collector -- the
-    first in its group included -- waits out whatever's left of the gap
+    is called. With a `rate_limit_state`, every keyed collector (the
+    first in its group included) waits out whatever's left of the gap
     since that key's *last* fetch, tracked across calls. That's what lets
     the hourly sweep and the daily job share one Reddit throttle instead
     of each starting a fresh burst.
@@ -202,7 +202,7 @@ def build_collectors(
     """Turn every configured source into its matching collector.
 
     A `web_search` source with no `BRAVE_API_KEY` is skipped here too, as a
-    second line of defense -- `config.py` already warns and is expected to
+    second line of defense: `config.py` already warns and is expected to
     have dropped it, but a collector built without a key it needs would
     just fail on every run instead of being invisible, which is worse.
 
