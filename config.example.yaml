@@ -16,6 +16,11 @@ admin_channel_id: 000000000000000000  # placeholder -- optional; alerts go here
 admin_permission: manage_guild
 
 digest:
+  # v2.0: there is no digest.channel_id here anymore -- the combined
+  # digest channel is gone, and each game posts to its own topics[].
+  # channel_id below instead. A config still setting digest.channel_id
+  # (a v1 leftover) fails validation with a message pointing at the
+  # per-topic replacement; there's no silent fallback.
   time: "09:00"
   timezone: "America/Los_Angeles"
   lookback_hours: 24
@@ -244,6 +249,10 @@ sources:
 # permission in the digest channel, or the ping silently gets dropped.
 # alerts:
 #   enabled: true
+#   # v2.0: SHiFT alerts get their own dedicated channel now, separate from
+#   # every game's digest channel -- required once enabled is true, no
+#   # fallback to a game channel or the admin channel.
+#   channel_id: 111111111111111114  # placeholder -- a channel just for this
 #   # Scope the sweep to specific topic keys (A6) -- empty means every
 #   # topic, but a code from an unrelated game pinging the whole server
 #   # is a worse default than a deliberate, narrow list. Borderlands 4 is

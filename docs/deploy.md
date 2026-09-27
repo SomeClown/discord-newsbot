@@ -192,10 +192,12 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
      the repo, a chat log, or this document.
 3. Generate an invite URL (OAuth2 → URL Generator):
    - Scopes: `bot`, `applications.commands`
-   - Bot permissions: **View Channels, Send Messages, Send Messages in
-     Threads, Embed Links, Create Public Threads**, and optionally **Read
-     Message History** (only needed if you want the bot to see prior
-     messages in a thread it's posting to; not required for its own posts).
+   - Bot permissions: **View Channels, Send Messages, Embed Links**. As of
+     v2.0 there's no combined digest channel and no discussion thread on
+     it, so **Create Public Threads** and **Send Messages in Threads**
+     aren't needed anymore -- each game gets its own channel and its own
+     plain message, nothing more. **Read Message History** isn't needed
+     either, for the same reason (it was only ever about threads).
    - **If you're enabling SHiFT code alerts (§15, "Enabling SHiFT code
      alerts," near the end of this document), also check "Mention
      @everyone, @here, and All Roles"** -- without it, the bot still
@@ -210,9 +212,13 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
 cp config.example.yaml /opt/newsbot/config.yaml
 ```
 
-Edit `config.yaml`: replace every placeholder ID (`guild_id`,
-`digest.channel_id`, `admin_channel_id` if used) with the real ones from
-the prod guild. The example file's comments explain what each one is for.
+Edit `config.yaml`: replace every placeholder ID (`guild_id`, each topic's
+`channel_id`, `admin_channel_id` if used, and `alerts.channel_id` if
+SHiFT alerts are enabled) with the real ones from the prod guild. There is
+no `digest.channel_id` as of v2.0 -- see §13 of `docs/design.md` and the
+"Upgrading to v2.0" section near the end of this document if you're
+coming from a v1 config. The example file's comments explain what each
+placeholder is for.
 
 ```bash
 cp .env.example /opt/newsbot/.env
@@ -420,6 +426,18 @@ tables, since nothing in that version's code references them. Rolling
 back doesn't need `config.yaml`'s `alerts:` block removed either; an
 older binary simply ignores config it doesn't know about, the same as any
 other config field a newer version added.
+
+**Rolling back past v2.0.0 (per-game channels) needs the v1 `config.yaml`
+back, not just the image.** Migration 003 (`alerted_codes.from_roundup`)
+is additive the same way 002 was -- a pre-2.0 binary starts up fine
+against a database already migrated to `user_version` 3, it just never
+reads or writes that column. The database needs no restore either way.
+What v1.3.0 *does* need is a v1-shaped `config.yaml`: it requires
+`digest.channel_id` (v2.0 removed the field pydantic validates against)
+and rejects any `alerts` key it doesn't recognize (`alerts.channel_id`
+didn't exist yet). Keep the pre-upgrade config around as `config.v1.yaml`
+-- see "Upgrading to v2.0" below -- and swap it back in alongside the
+`TAG` rollback above.
 
 ## 9. Backups
 
@@ -658,22 +676,28 @@ likely cause of an otherwise-inexplicable startup crash on a brand new
 New in v1.2.0 (`design.md` §12). Off by default -- nothing below changes
 existing behavior until you do it.
 
-1. **Grant the mention permission.** The bot's role needs **Mention
-   @everyone, @here, and All Roles** in the digest channel, or a ping
-   posts silently un-pinged (the bot notices and sends an admin alert,
-   but nobody gets notified that first time). Two ways to grant it to a
-   bot that's already invited, without re-inviting:
+1. **Create the SHiFT codes channel** (as of v2.0, alerts no longer share
+   a channel with any game's digest -- see "Upgrading to v2.0" below if
+   you're moving from a v1 config that still had alerts on the digest
+   channel).
+2. **Grant the mention permission.** The bot's role needs **View
+   Channel**, **Send Messages**, and **Mention @everyone, @here, and All
+   Roles** in that channel, or a ping posts silently un-pinged (the bot
+   notices and sends an admin alert, but nobody gets notified that first
+   time). Two ways to grant the mention permission to a bot that's
+   already invited, without re-inviting:
    - **Server-wide (simplest):** Server Settings → Roles → the bot's own
      role → toggle on "Mention @everyone, @here, and All Roles".
-   - **Digest-channel-only override (narrower):** the digest channel's
-     own Settings → Permissions → add the bot's role → toggle on the
-     same permission just for that channel, leaving the role's
-     server-wide permissions untouched. Prefer this if the bot's role
-     is also used anywhere you specifically don't want it able to ping.
-2. **Turn it on in `config.yaml`:**
+   - **Channel-only override (narrower):** the SHiFT codes channel's own
+     Settings → Permissions → add the bot's role → toggle on the same
+     permission just for that channel, leaving the role's server-wide
+     permissions untouched. Prefer this if the bot's role is also used
+     anywhere you specifically don't want it able to ping.
+3. **Turn it on in `config.yaml`:**
    ```yaml
    alerts:
      enabled: true
+     channel_id: <the SHiFT codes channel's id>
      topics: [borderlands4]   # scope to the game(s) that actually use SHiFT codes
    ```
    Everything else (`interval_minutes`, `max_item_age_hours`,
@@ -681,14 +705,16 @@ existing behavior until you do it.
    `config.example.yaml`'s commented block for what each one does. Leave
    `allow_test_command` out (or `false`) in prod -- it registers
    `/newsbot test-alert`, which is meant for the private test guild only.
-3. **Redeploy** the normal way (`./scripts/deploy.sh` or the by-hand
+4. **Redeploy** the normal way (`./scripts/deploy.sh` or the by-hand
    steps in §7) -- migration 002 (`alerted_codes`, `alert_state`) applies
    itself at startup the same way every other migration does; nothing
    extra to run by hand.
-4. **Confirm it's live:** `/newsbot status` should show a "SHiFT alerts"
-   field instead of "disabled". The first real sweep seeds silently
-   (shows `(seeding)`, posts nothing) -- that's expected, not a bug; see
-   `design.md` §12's silent-seeding safeguard.
+5. **Confirm it's live:** `/newsbot status` should show a "SHiFT alerts"
+   field instead of "disabled", and startup shouldn't have sent a
+   permission-check admin alert (§13 of `docs/design.md`) naming the new
+   channel. The first real sweep seeds silently (shows `(seeding)`, posts
+   nothing) -- that's expected, not a bug; see `design.md` §12's
+   silent-seeding safeguard.
 
 Rolling this back out is just `alerts.enabled: false` (or removing the
 `alerts:` block entirely) and redeploying -- migration 002 stays applied
@@ -795,6 +821,104 @@ sudo do-release-upgrade
 Same answers as round 1. After the reboot, `lsb_release -ds` should say
 24.04, and you re-run the same Docker repository block and the same three
 checks.
+
+## 17. Upgrading to v2.0
+
+v2.0.0 (`docs/design.md` §13) is a breaking config change: the combined
+digest channel is gone, each game posts to its own channel, and SHiFT code
+alerts move to a dedicated channel of their own. Nothing about the
+database changes in a way that needs a restore -- migration 003 is
+additive, same as every migration before it -- but `config.yaml` needs
+real edits before the new image will even start, so do this on purpose,
+not as a surprise the morning after a routine `deploy.sh`.
+
+1. **Pick a quiet moment and back up the old config.** Right after that
+   day's 09:00 digest has posted, and well before the next one:
+   ```bash
+   cd /opt/newsbot
+   cp config.yaml config.v1.yaml
+   ```
+   Note the currently-pinned `TAG` in `.env` too (it should read
+   `TAG=1.3.0` if you've kept up with releases) -- that, plus
+   `config.v1.yaml`, is everything the rollback at the end of this section
+   needs.
+2. **Create four channels:** one per game (`#borderlands4`, `#palworld`,
+   `#diablo4`, or whatever names fit your server) and one for SHiFT codes
+   (`#shift-codes`). Set the bot role's permissions per channel:
+   - Each game channel: **View Channel, Send Messages, Embed Links**.
+   - The SHiFT codes channel: **View Channel, Send Messages, Mention
+     @everyone, @here, and All Roles**.
+   Copy each channel's id (right-click → Copy Channel ID; Developer Mode
+   has to be on in Discord's own settings for that option to show up).
+3. **Edit `config.yaml`:** remove `digest.channel_id` entirely, give every
+   topic its own `channel_id`, and add `alerts.channel_id` if SHiFT alerts
+   are on. For example, going from a v1 shape to v2:
+   ```yaml
+   # before (v1)
+   digest:
+     channel_id: 100000000000000001
+     time: "09:00"
+     timezone: "America/Los_Angeles"
+   alerts:
+     enabled: true
+   ```
+   ```yaml
+   # after (v2.0)
+   digest:
+     time: "09:00"
+     timezone: "America/Los_Angeles"
+   topics:
+     - key: borderlands4
+       name: "Borderlands 4"
+       channel_id: 100000000000000010   # #borderlands4
+       # ...aliases, entities, search_queries unchanged...
+     - key: palworld
+       name: "Palworld"
+       channel_id: 100000000000000011   # #palworld
+     - key: diablo4
+       name: "Diablo IV"
+       channel_id: 100000000000000012   # #diablo4
+   alerts:
+     enabled: true
+     channel_id: 100000000000000013     # #shift-codes
+   ```
+   `topics[].channel_id` is required for every topic now (not just the
+   ones with alerts); `alerts.channel_id` is required only if
+   `alerts.enabled` is `true`.
+4. **Validate the edit locally before touching prod** -- `load_config`
+   is the same check the container runs at startup, and it's a lot
+   cheaper to fail here than mid-deploy:
+   ```bash
+   python -c "from newsbot.config import load_config; load_config('config.yaml')"
+   ```
+   (from a checked-out copy of this repo with the venv active, pointed at
+   a copy of the edited prod `config.yaml` -- not the live file on the
+   Droplet, and never via `docker compose ... config` against the real
+   `.env`; see §4 above and `CLAUDE.md` for why that command specifically
+   is off the table.) A `ConfigError` here lists every problem at once,
+   same as it would on a real startup crash.
+5. **Wait for the `v2.0.0` tag's build**, same as any other release (§7):
+   `gh run list --limit 3` shows when it's done, or watch for
+   `manifest unknown` if you jump the gun.
+6. **Pin `TAG=2.0.0`** in `.env` and deploy the normal way:
+   ```bash
+   cd /opt/newsbot
+   ./scripts/deploy.sh
+   ```
+   This takes a backup first (per §9) and applies migration 003 at
+   startup -- both automatic, nothing extra to run by hand.
+7. **Check:** no startup permission-check admin alert (§13 of
+   `docs/design.md` -- one alert here would name exactly which channel and
+   permission is missing); `/newsbot status` healthy; `/shift codes`
+   lists the codes that were already in `alerted_codes` before the
+   upgrade, with any old roundup-only codes marked "from a roundup". The
+   next morning, check that each game channel got its own message and
+   that the admin run report's jump links point at the right channels.
+8. **Rollback,** if needed: restore `config.v1.yaml` over `config.yaml`,
+   set `TAG` back to `1.3.0` in `.env`, and deploy again (§8, Rollback,
+   above, has the general form of this). No database restore is
+   necessary either direction -- migration 003 stays applied and
+   harmless, the same as every additive migration before it.
 
 ### Bring the bot back
 

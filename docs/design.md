@@ -166,7 +166,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `digests` | id, run_date (UNIQUE), status (pending/ok/partial/failed), posted_message_ids (JSON), error_notes, input_tokens, output_tokens, created_at, updated_at |
 | `source_health` | source_name (PK), last_success_at, last_error_at, last_error, consecutive_failures |
 | `stories_fts` | external-content FTS5 table over `stories(headline, summary)`, kept in sync by AFTER INSERT/DELETE/UPDATE triggers |
-| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25) |
+| `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`), from_roundup (bool, default 0) -- added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25); `from_roundup` added by migration 003 (v2.0, §13), backfilled from `status = 'roundup'` -- see §13's rollback note for why it exists |
 | `alert_state` | key (PK), value -- a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
@@ -179,10 +179,10 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 
 ## 6. Discord interface
 
-**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands.
+**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands. **Superseded by §13** as of v2.0: there's no combined digest channel left to create a thread on, so the invite no longer needs Create Public Threads -- see §13's per-game-channel permissions instead.
 
 ### Digest
-- A header message with the date, a story count for each game, and a coverage note if any source type was skipped. A public thread is created on the header for discussion.
+- A header message with the date, a story count for each game, and a coverage note if any source type was skipped. A public thread is created on the header for discussion. **Superseded by §13** as of v2.0: there's no combined channel left to post a header to, so there's no header message and no thread. Each game's embed posts alone to that game's own channel, and a coverage note rides in that embed's own footer instead.
 - One embed for each topic, color-coded. Stories are sorted official, then reported, then rumor, with updates placed with their label:
   `🟢 OFFICIAL · headline`, summary, then up to 3 source links plus "+N more".
   Other markers: `🟡 REPORTED`, `🔴 RUMOR`, `🔁 UPDATE` (linking to the original story).
@@ -191,7 +191,10 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
   or `partial`) -- scheduled, catch-up, or `/newsbot run-now` -- one plain
   text message goes to the admin channel: per-topic story counts, that
   run's own source health, estimated Claude spend, duration, and a jump
-  link to the digest header. `failed`/`skipped` runs send no report (they
+  link to the digest header. **Superseded by §13** as of v2.0: there's no
+  single digest header to link to anymore, so the report carries one jump
+  link per topic that actually posted instead (see §13's admin run report
+  note). `failed`/`skipped` runs send no report (they
   keep their existing detailed alerts, §8) and `/newsbot preview` never
   reports. Controlled by `digest.report_to_admin` (default `true`),
   effective only when `admin_channel_id` is set. `format.render_run_report`
@@ -389,6 +392,12 @@ message that Discord would reject outright (`bot/format.py`'s
   batch ("judged by the normal item"); a code whose *every* sighting is
   from a roundup item is recorded silently as `'roundup'` (A2) and never
   reaches the seeded/too_old/post logic at all, regardless of `seeded`.
+  **Superseded by §13** as of v2.0: a roundup-only code no longer stays
+  silent forever. It's still recorded `'roundup'` the first time (this
+  paragraph is unchanged for that first sighting), but once it's fresh by
+  `max_item_age_hours`, it now posts to the SHiFT channel without a ping,
+  headed "SHiFT codes from a roundup" -- see §13's roundup-codes-channel
+  section for the posting rule and the 50-per-check cap.
 
 ## 13. Per-game channels and a SHiFT codes channel (v2.0, approved 2026-09-26)
 
@@ -421,4 +430,4 @@ The combined digest channel goes away. Each game's daily digest posts to its own
 
 **Unchanged.** `/news recent`, `/news search`, `/newsbot status|run-now|preview` (preview shows what each channel would get), the 09:00 run's SHiFT code check, retention, backups.
 
-**Rollback.** No schema change is required by this design (the `alerted_codes` status set may gain nothing new: roundup-posted codes use `posted`); v1.3.0 runs against a v2 database. Rolling back means restoring a v1 `config.yaml` along with `TAG=1.3.0`. If implementation needs a schema change, it must stay additive and this note must be updated.
+**Rollback.** Implementation needed one additive schema change after all: migration 003 adds `alerted_codes.from_roundup` (backfilled from `status='roundup'`), because §13's original plan to reuse `status='posted'` for a roundup-posted code turned out to collide with `/shift codes`'s "from a roundup" marker -- nothing else on the row would have distinguished the two. Migration 003 is purely additive, the same shape as 002: v1.3.0 runs unmodified against a v2 database, it just never reads or writes the new column. Rolling back means restoring a v1 `config.yaml` (v1.3.0 requires `digest.channel_id` and rejects unknown `alerts` keys, so the v2-shaped config won't load as-is) along with `TAG=1.3.0`; no database restore is needed either direction.
