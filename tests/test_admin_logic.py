@@ -57,7 +57,7 @@ def test_has_admin_permission_unknown_flag_name_is_false_not_a_crash():
 
 def test_has_admin_permission_none_permissions_is_false_not_a_crash():
     # `discord.Interaction.permissions` is documented to return an empty
-    # Permissions object outside a guild context (DMs), never None -- but
+    # Permissions object outside a guild context (DMs), never None, but
     # `getattr(..., default=False)` means this function degrades cleanly
     # to "deny" even if a caller somehow hands it None anyway, instead of
     # raising and taking the whole command handler down with it.
@@ -67,7 +67,7 @@ def test_has_admin_permission_none_permissions_is_false_not_a_crash():
 def test_has_admin_permission_empty_permissions_in_dm_context_is_false():
     # discord.py hands back Permissions.none() for an interaction that
     # didn't happen in a guild (a DM'd command, if one were ever
-    # registered) -- there's no guild to be an admin of, so this should
+    # registered): there's no guild to be an admin of, so this should
     # deny cleanly rather than error.
     assert has_admin_permission(discord.Permissions.none(), "manage_guild") is False
 
@@ -83,7 +83,7 @@ def test_has_admin_permission_administrator_flag_alone_grants_access():
 def test_has_admin_permission_configured_permission_name_variants():
     # admin_permission is a free-form string naming any real
     # discord.Permissions flag (config.py only checks it's a valid one,
-    # not that it's manage_guild specifically) -- a few other plausible
+    # not that it's manage_guild specifically): a few other plausible
     # choices should all work the same way.
     assert has_admin_permission(discord.Permissions(kick_members=True), "kick_members") is True
     assert has_admin_permission(discord.Permissions(ban_members=True), "kick_members") is False
@@ -122,13 +122,13 @@ def test_needs_confirmation_pending_row_is_true():
 
 def test_needs_confirmation_failed_row_with_posted_ids_is_true():
     # A publish that got the header out before dying leaves a real
-    # message in the channel -- re-running unconfirmed would post a
+    # message in the channel: re-running unconfirmed would post a
     # second header on top of it.
     assert needs_confirmation(_digest_row("failed", posted_message_ids=[111])) is True
 
 
 def test_needs_confirmation_failed_row_with_no_posted_ids_is_false():
-    # Nothing reached Discord, so a plain re-run is safe -- this is the
+    # Nothing reached Discord, so a plain re-run is safe: this is the
     # same case test_needs_confirmation_failed_row_is_false pins, spelled
     # out explicitly now that "failed" isn't a single monolithic case.
     assert needs_confirmation(_digest_row("failed", posted_message_ids=[])) is False
@@ -152,7 +152,7 @@ def test_estimate_spend_usd_scales_linearly():
 
 
 def test_estimate_spend_usd_large_token_counts():
-    # A month's worth of real usage, not a single run -- nothing here
+    # A month's worth of real usage, not a single run: nothing here
     # should overflow or behave differently just because the numbers got
     # bigger.
     spend = estimate_spend_usd(50_000_000, 10_000_000)
@@ -164,7 +164,7 @@ def test_estimate_spend_usd_large_token_counts():
 
 def test_estimate_spend_usd_small_counts_round_via_plain_float_arithmetic():
     # Token counts that don't divide evenly leave this as ordinary float
-    # arithmetic (no decimal.Decimal rounding) -- pinning the actual
+    # arithmetic (no decimal.Decimal rounding): pinning the actual
     # value here so a future switch to Decimal, if it ever happens,
     # doesn't happen by accident.
     assert estimate_spend_usd(1, 1) == pytest.approx(0.000_006, abs=1e-12)
@@ -174,7 +174,7 @@ def test_commands_reexports_the_same_function_object_summarize_owns():
     # a45548d moved estimate_spend_usd from bot/commands.py to
     # pipeline/summarize.py so format.py could use it too. `commands.py`
     # importing the name back keeps `/newsbot status`'s spend figure
-    # wired to the exact same function -- not a copy that could drift --
+    # wired to the exact same function (not a copy that could drift),
     # so this pins identity, not just equal output.
     from newsbot.pipeline import summarize
 
