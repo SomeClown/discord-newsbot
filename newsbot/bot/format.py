@@ -117,6 +117,21 @@ def _truncate_utf16(text: str, limit: int, *, suffix: str = "") -> str:
     return "".join(kept).rstrip() + suffix
 
 
+def _defuse_mentions_and_links(s: str) -> str:
+    """Same mention/channel-link/invite/url-scheme defusing as `esc`, minus markdown escaping.
+
+    For text headed into an embed *footer*: Discord doesn't render
+    markdown there at all, so `escape_markdown`'s backslashes would just
+    show up as literal backslashes instead of escaping anything -- this
+    keeps the actual safety (no live @everyone, no live link) without
+    adding punctuation nobody asked for.
+    """
+    escaped = discord.utils.escape_mentions(s)
+    escaped = _LINKY_MENTION_RE.sub("<​", escaped)
+    escaped = _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:​", escaped)
+    return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}​/", escaped)
+
+
 def esc(s: str) -> str:
     """Escape markdown and @mentions, so scraped text can't format itself or ping the server.
 
@@ -280,7 +295,7 @@ def _coverage_footer(coverage_notes: list[str]) -> str | None:
     if not coverage_notes:
         return None
     text = "Reduced coverage today: " + "; ".join(coverage_notes)
-    return _truncate_utf16(esc(text), _COVERAGE_FOOTER_LIMIT, suffix="…")
+    return _truncate_utf16(_defuse_mentions_and_links(text), _COVERAGE_FOOTER_LIMIT, suffix="…")
 
 
 @dataclass

@@ -126,7 +126,11 @@ def test_coverage_footer_is_truncated_well_under_the_embed_footer_limit():
     assert discord_len(footer_text) <= 512
 
 
-def test_coverage_footer_escapes_hostile_notes():
+def test_coverage_footer_defuses_mentions_but_does_not_markdown_escape():
+    # Embed footers never render markdown, so escaping it would just leave
+    # literal backslashes sitting in the text (QA follow-up) -- mentions
+    # still get defused (the one thing a footer *can* do something with),
+    # but "**gotcha**" stays as plain, unescaped, still-inert text.
     rendered = render_digest(
         RUN_DATE,
         [PALWORLD],
@@ -136,7 +140,8 @@ def test_coverage_footer_escapes_hostile_notes():
     )
     footer_text = _first_embed(rendered).footer.text
     assert "@everyone" not in footer_text
-    assert "**gotcha**" not in footer_text
+    assert "\\" not in footer_text
+    assert "**gotcha**" in footer_text
 
 
 # --- very long single headline / URL ---
