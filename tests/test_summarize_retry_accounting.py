@@ -86,7 +86,7 @@ def _request() -> httpx2.Request:
     # SDK 1.x's exception classes wrap httpx2 Request/Response objects now,
     # not the plain `httpx` this project still uses for its own collectors.
     # Reaching for plain `httpx` here would build an exception that doesn't
-    # match what the real SDK ever raises -- the exact mix-up the SDK
+    # match what the real SDK ever raises: the exact mix-up the SDK
     # upgrade guide warns about.
     return httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 

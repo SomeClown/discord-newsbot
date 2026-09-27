@@ -59,7 +59,7 @@ alerts: {{}}
 
 def test_alerts_explicit_null_is_rejected_not_silently_defaulted(tmp_path):
     # `alerts:` with nothing after the colon parses as YAML null, which is
-    # not the same thing as the key being missing -- AppConfig.alerts is
+    # not the same thing as the key being missing: AppConfig.alerts is
     # typed as AlertsCfg (not AlertsCfg | None), so an explicit null fails
     # pydantic's type check rather than falling back to the field default.
     # Pinning this as the decided (and safer) behavior: a config that

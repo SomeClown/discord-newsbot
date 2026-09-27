@@ -33,7 +33,7 @@ def test_json_formatter_emits_parseable_json(capsys):
 
 def test_configure_logging_quiets_apscheduler_to_warning():
     # apscheduler's heartbeat job logs at INFO every 60s (see
-    # bot/client.py's _heartbeat_job) -- left at the root level, that's a
+    # bot/client.py's _heartbeat_job): left at the root level, that's a
     # log line a minute forever, drowning out everything else worth
     # seeing. WARNING still surfaces a misfire or a scheduler shutdown.
     configure_logging(level="INFO")

@@ -450,7 +450,7 @@ async def test_web_search_collector_skips_results_missing_url_or_title():
 
 async def test_web_search_collector_tolerates_a_null_description():
     # QA step 20, group 6c: Brave returning `"description": null` (present
-    # key, null value -- not a missing key) used to crash the whole
+    # key, null value, not a missing key) used to crash the whole
     # collector inside text.clean_text(None), losing every item that
     # request would have returned, not just the one with the null field.
     body = json.dumps(

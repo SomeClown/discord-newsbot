@@ -172,7 +172,7 @@ def test_huge_url_and_source_name_do_not_raise_and_still_post_the_code():
 
 def test_huge_url_is_dropped_before_source_name_is_truncated():
     # A source name that comfortably fits without the link should survive
-    # intact once the link is dropped -- shedding order matters.
+    # intact once the link is dropped: shedding order matters.
     huge_url = "https://example.com/" + "a" * 2010
     rendered = render_roundup_alerts([_candidate(item_url=huge_url, source_name="Short Name")])
     content = rendered[0].content

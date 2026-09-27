@@ -86,7 +86,7 @@ sources:
 
 
 def test_digest_channel_id_present_gives_the_removal_message(tmp_path):
-    # v2.0 (design.md §13, plan step 4): digest.channel_id is gone -- an
+    # v2.0 (design.md §13, plan step 4): digest.channel_id is gone; an
     # old v1 config that still sets it gets a message pointing at the
     # per-topic replacement instead of a bare pydantic "extra fields not
     # permitted".
