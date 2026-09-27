@@ -23,8 +23,7 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; some may never happen. "Agent time" means build, test and review, plus a short test-guild check.
 
 1. **Second-account permission check** (~2 minutes, owner, no code). Have a regular member try `/newsbot status` in the prod guild; it should be refused.
-2. **Dependabot `pydantic` bump** (~15 minutes once the PR exists). Review, CI, merge; maybe regenerate with `scripts/lock.sh`. Don't bump `pydantic-core` alone (it's pinned by `pydantic`).
-3. **Upgrade the Droplet off Ubuntu 20.04** (2–3 hours of owner time, no code). Follow `docs/deploy.md` §16; snapshot first.
+2. **Upgrade the Droplet off Ubuntu 20.04** (2–3 hours of owner time, no code). Follow `docs/deploy.md` §16; snapshot first.
 
 ## Documentation voice (read this before writing a docstring)
 
