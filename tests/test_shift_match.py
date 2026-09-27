@@ -187,7 +187,7 @@ def test_rejects_all_letter_five_by_five_no_digit():
 
 
 def test_rejects_url_slug_shaped_like_a_code_no_digit_no_slash():
-    # Five hyphen-joined, five-letter English words -- exactly the shape
+    # Five hyphen-joined, five-letter English words: exactly the shape
     # CODE_RE's boundary rules alone can't distinguish from five real
     # groups. Both example slugs from the QA report.
     assert find_codes("https://example.com/shift-codes-early-today-guide/") == []
@@ -200,7 +200,7 @@ def test_all_letter_five_by_five_is_not_a_code():
 
 def test_a_code_with_a_digit_still_matches_with_slash_boundary_in_effect():
     # The `/` boundary and the digit rule are both new restrictions, not
-    # a regression against ordinary text -- a real code sitting in an
+    # a regression against ordinary text: a real code sitting in an
     # ordinary sentence (no slash touching it) still matches.
     assert find_codes(f"Redeem this code: {CODE} today") == [CODE]
 

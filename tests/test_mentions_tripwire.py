@@ -116,7 +116,7 @@ def test_the_one_everyone_true_call_is_ping_everyone_in_bot_client():
     assert path.parent.name == "bot"
     lines = path.read_text().splitlines()
     # _PING_EVERYONE's assignment starts a line or two above the call
-    # itself (it's wrapped across lines for line length) -- look a few
+    # itself (it's wrapped across lines for line length); look a few
     # lines back for the name that owns this call, rather than requiring
     # the assignment and the everyone=True keyword on the same line.
     nearby = "\n".join(lines[max(0, lineno - 4) : lineno])
@@ -127,7 +127,7 @@ def test_client_default_and_publisher_sends_stay_none():
     source = (_SRC_ROOT / "bot" / "client.py").read_text()
     # DiscordPublisher's own sends (header + embed batches) and the
     # client's constructor-level default must both still be
-    # AllowedMentions.none() -- a coarse belt-and-suspenders next to the
+    # AllowedMentions.none(): a coarse belt-and-suspenders next to the
     # AST check above, pinned against the specific lines that matter most
     # (a regression here is a scraped headline pinging the whole server).
     assert "allowed_mentions=discord.AllowedMentions.none()" in source
