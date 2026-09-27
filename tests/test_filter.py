@@ -6,9 +6,13 @@ from newsbot.collectors.base import RawItem
 from newsbot.config import Topic
 from newsbot.pipeline.filter import build_matchers, filter_items
 
-BL4 = Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
-PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=["Pocketpair"])
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
+BL4 = Topic(
+    key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"], entities=["Gearbox"]
+)
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=["Pocketpair"])
+DIABLO4 = Topic(
+    key="diablo4", name="Diablo IV", channel_id=1, aliases=["Diablo 4", "D4"], entities=["Blizzard"]
+)
 TOPICS = [BL4, PALWORLD, DIABLO4]
 
 
@@ -70,7 +74,7 @@ def test_bl4_matches_with_surrounding_punctuation():
 
 
 def test_name_matches_possessive_apostrophe_s():
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     item = _item(title="Palworld's big update lands today")
     result = filter_items([item], topics, max_per_topic=10)
     assert len(result["palworld"]) == 1
@@ -78,13 +82,15 @@ def test_name_matches_possessive_apostrophe_s():
 
 
 def test_name_match_is_case_insensitive():
-    topics = [Topic(key="palworld", name="Palworld", aliases=[], entities=[])]
+    topics = [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
     result = filter_items([_item(title="PALWORLD update ships today")], topics, max_per_topic=10)
     assert len(result["palworld"]) == 1
 
 
 def test_2k_style_entity_matches_2k_games_not_substring_word():
-    topics = [Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=["2K"])]
+    topics = [
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=["2K"])
+    ]
     result = filter_items([_item(title="2K Games announces new slate")], topics, max_per_topic=10)
     assert len(result["borderlands4"]) == 1
     assert result["borderlands4"][0].uncertain is True

@@ -33,8 +33,10 @@ digest:
 topics:
   - key: "Not Valid!"
     name: "Bad Topic"
+    channel_id: 2
   - key: "Not Valid!"
     name: "Duplicate Of Bad Topic"
+    channel_id: 3
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -60,7 +62,9 @@ sources:
 
 
 def test_too_many_topics_message_names_the_limit_and_actual_count(tmp_path):
-    topics = "\n".join(f'  - key: "topic{i}"\n    name: "Topic {i}"' for i in range(26))
+    topics = "\n".join(
+        f'  - key: "topic{i}"\n    name: "Topic {i}"\n    channel_id: {i + 2}' for i in range(26)
+    )
     sources = "\n".join(
         f'  - type: steam_news\n    name: "Source {i}"\n    app_id: {i}\n    '
         f"topics: [topic{i}]\n    trust: official"
@@ -95,6 +99,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"

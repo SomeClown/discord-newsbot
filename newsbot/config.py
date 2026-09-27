@@ -44,6 +44,10 @@ class ConfigError(Exception):
 class Topic(BaseModel):
     key: str
     name: str
+    # v2.0 (design.md §13): each game posts its own digest to its own
+    # channel now, so there's no longer a shared fallback to inherit this
+    # from -- every topic has to name one.
+    channel_id: int = Field(gt=0)
     aliases: list[str] = []
     entities: list[str] = []
     # Per-topic overrides for the web_search collector. Empty means "use the
@@ -60,7 +64,12 @@ class Topic(BaseModel):
 
 
 class DigestCfg(BaseModel):
-    channel_id: int
+    # v2.0 (design.md §13): the combined digest channel is going away in
+    # favor of a channel per topic, but the field stays optional -- not
+    # gone -- until step 4 actually removes it; nothing reads it as
+    # optional in the meantime, since the topics that still need a
+    # channel to post to now get one from Topic.channel_id instead.
+    channel_id: int | None = None
     time: str
     timezone: str
     lookback_hours: int = 24
@@ -138,6 +147,11 @@ class AlertsCfg(BaseModel, extra="forbid"):
     """
 
     enabled: bool = False
+    # v2.0 (design.md §13): SHiFT alerts move off the shared digest channel
+    # onto their own -- required once `enabled` is true (checked in
+    # load_config, where the friendly message lives), optional otherwise
+    # so a disabled block doesn't need a channel it'll never post to.
+    channel_id: int | None = Field(None, gt=0)
     interval_minutes: int = Field(60, ge=15, le=1440)
     max_item_age_hours: int = Field(48, ge=1, le=720)
     # 0 disables pinging entirely without disabling the sweep -- codes
@@ -186,6 +200,37 @@ def _bluesky_default_name(query: str) -> str:
     return f"Bluesky: {query}"
 
 
+def _format_pydantic_error(error: dict, raw: dict) -> str:
+    """Turn one pydantic error dict into a line for `ConfigError`.
+
+    Almost every error just gets pydantic's own `msg` prefixed with its
+    dotted location, same as before v2.0. The one exception: a missing
+    `topics[i].channel_id` gets a message naming the topic by key instead
+    of just its index, since "topics.2.channel_id: Field required" makes
+    an owner go count list entries by hand before they even know which
+    game they forgot.
+    """
+    loc = error["loc"]
+    if (
+        len(loc) == 3
+        and loc[0] == "topics"
+        and loc[2] == "channel_id"
+        and error["type"] == "missing"
+    ):
+        idx = loc[1]
+        raw_topics = raw.get("topics") or []
+        key = (
+            raw_topics[idx].get("key", "?")
+            if isinstance(idx, int) and idx < len(raw_topics)
+            else "?"
+        )
+        return (
+            f"topics[{idx}] ({key}): channel_id is required -- each game "
+            "posts to its own channel as of v2.0"
+        )
+    return f"{'.'.join(str(p) for p in loc)}: {error['msg']}"
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Load, validate, and cross-check `config.yaml`.
 
@@ -198,7 +243,7 @@ def load_config(path: str | Path) -> AppConfig:
     try:
         cfg = AppConfig.model_validate(raw)
     except ValidationError as exc:
-        errors = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+        errors = [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
 
     errors: list[str] = []
@@ -236,6 +281,12 @@ def load_config(path: str | Path) -> AppConfig:
     for topic_key in cfg.alerts.topics:
         if topic_key not in known_keys:
             errors.append(f"alerts.topics references unknown topic {topic_key!r}")
+
+    if cfg.alerts.enabled and cfg.alerts.channel_id is None:
+        errors.append(
+            "alerts.channel_id is required when alerts.enabled is true "
+            "(v2.0: SHiFT alerts post to their own channel)"
+        )
 
     if cfg.alerts.allow_test_command and not cfg.alerts.enabled:
         # A config that turns on the test command but not the feature it

@@ -22,8 +22,8 @@ from newsbot.shift.sweep import CodeCheckOutcome
 
 _NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 TOPICS = [
-    Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[]),
-    Topic(key="palworld", name="Palworld", aliases=[], entities=[]),
+    Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[]),
+    Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[]),
 ]
 
 

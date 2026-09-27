@@ -19,7 +19,7 @@ from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import DigestRow, StatusSnapshot, Usage
 
 RUN_DATE = date(2026, 9, 23)
-PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
 _EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)
 
 
@@ -102,7 +102,10 @@ def test_esc_neutralizes_channel_mentions():
 
 def test_exactly_ten_small_embeds_fit_in_one_message():
     stories = {f"t{i}": _summary(f"t{i}", [_draft(f"S{i}")]) for i in range(10)}
-    topics = [Topic(key=f"t{i}", name=f"Topic {i}", aliases=[], entities=[]) for i in range(10)]
+    topics = [
+        Topic(key=f"t{i}", name=f"Topic {i}", channel_id=1, aliases=[], entities=[])
+        for i in range(10)
+    ]
     rendered = render_digest(RUN_DATE, topics, stories, {}, [])
     assert len(rendered.embed_messages) == 1
     assert len(rendered.embed_messages[0]) == 10
@@ -110,7 +113,10 @@ def test_exactly_ten_small_embeds_fit_in_one_message():
 
 def test_eleventh_small_embed_spills_into_a_second_message():
     stories = {f"t{i}": _summary(f"t{i}", [_draft(f"S{i}")]) for i in range(11)}
-    topics = [Topic(key=f"t{i}", name=f"Topic {i}", aliases=[], entities=[]) for i in range(11)]
+    topics = [
+        Topic(key=f"t{i}", name=f"Topic {i}", channel_id=1, aliases=[], entities=[])
+        for i in range(11)
+    ]
     rendered = render_digest(RUN_DATE, topics, stories, {}, [])
     assert len(rendered.embed_messages) == 2
     assert len(rendered.embed_messages[0]) == 10
@@ -122,7 +128,10 @@ def test_every_message_respects_the_6000_char_total_even_at_the_boundary():
     # packer to split on total-length, not just the embed-count cap.
     long_summary = "z" * 380
     stories = [_draft(f"Story {i}", summary=long_summary) for i in range(11)]
-    topics = [Topic(key=f"t{i}", name=f"Topic {i}", aliases=[], entities=[]) for i in range(4)]
+    topics = [
+        Topic(key=f"t{i}", name=f"Topic {i}", channel_id=1, aliases=[], entities=[])
+        for i in range(4)
+    ]
     summaries = {t.key: _summary(t.key, stories) for t in topics}
     rendered = render_digest(RUN_DATE, topics, summaries, {}, [])
     for message in rendered.embed_messages:
@@ -135,7 +144,7 @@ def test_every_message_respects_the_6000_char_total_even_at_the_boundary():
 
 def test_header_is_truncated_at_2000_chars():
     topics = [
-        Topic(key=f"t{i}", name=f"Topic {i} " + "x" * 40, aliases=[], entities=[])
+        Topic(key=f"t{i}", name=f"Topic {i} " + "x" * 40, channel_id=1, aliases=[], entities=[])
         for i in range(30)
     ]
     summaries = {t.key: _summary(t.key, [_draft("A")]) for t in topics}
@@ -149,7 +158,7 @@ def test_header_is_truncated_at_2000_chars():
 
 def test_topic_title_is_truncated_at_256_chars():
     long_name = "Diablo IV: " + "A Very Long Subtitle " * 20
-    topic = Topic(key="diablo4", name=long_name, aliases=[], entities=[])
+    topic = Topic(key="diablo4", name=long_name, channel_id=1, aliases=[], entities=[])
     rendered = render_digest(
         RUN_DATE, [topic], {"diablo4": _summary("diablo4", [_draft("A")])}, {}, []
     )
@@ -236,7 +245,7 @@ def test_topic_title_truncation_respects_utf16_units_not_codepoints():
     # limit, but only 200 Python characters -- a codepoint-counting
     # len()-based [:256] slice would let all 200 through untouched.
     long_name = "🤖" * 200
-    topic = Topic(key="diablo4", name=long_name, aliases=[], entities=[])
+    topic = Topic(key="diablo4", name=long_name, channel_id=1, aliases=[], entities=[])
     rendered = render_digest(
         RUN_DATE, [topic], {"diablo4": _summary("diablo4", [_draft("A")])}, {}, []
     )
@@ -252,7 +261,10 @@ def test_message_total_packing_respects_utf16_units_at_the_6000_boundary():
     # message really is and could pack past Discord's real 6000 cap.
     long_summary = "🤖" * 1900
     stories = [_draft(f"Story {i}", summary=long_summary) for i in range(4)]
-    topics = [Topic(key=f"t{i}", name=f"Topic {i}", aliases=[], entities=[]) for i in range(4)]
+    topics = [
+        Topic(key=f"t{i}", name=f"Topic {i}", channel_id=1, aliases=[], entities=[])
+        for i in range(4)
+    ]
     summaries = {t.key: _summary(t.key, stories) for t in topics}
     rendered = render_digest(RUN_DATE, topics, summaries, {}, [])
     for message in rendered.embed_messages:

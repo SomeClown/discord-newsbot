@@ -182,7 +182,7 @@ def _cfg(sources) -> AppConfig:
     return AppConfig(
         guild_id=1,
         digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
-        topics=[Topic(key="borderlands4", name="Borderlands 4")],
+        topics=[Topic(key="borderlands4", name="Borderlands 4", channel_id=1)],
         sources=sources,
     )
 

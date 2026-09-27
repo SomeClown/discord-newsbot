@@ -12,9 +12,9 @@ from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import AlertStatus, DigestRow, SourceHealthRow, StatusSnapshot, Usage
 
 RUN_DATE = date(2026, 9, 23)
-BL4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
-PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=[], entities=[])
+BL4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
+DIABLO4 = Topic(key="diablo4", name="Diablo IV", channel_id=1, aliases=[], entities=[])
 TOPICS = [BL4, PALWORLD, DIABLO4]
 
 _EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)

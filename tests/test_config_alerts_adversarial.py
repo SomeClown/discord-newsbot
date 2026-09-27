@@ -20,6 +20,7 @@ VALID_TAIL = """
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"

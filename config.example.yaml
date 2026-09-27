@@ -32,6 +32,7 @@ digest:
 topics:
   - key: borderlands4
     name: "Borderlands 4"
+    channel_id: 111111111111111111  # placeholder -- this game's own channel (v2.0)
     # Bare "Borderlands" was tempting and wrong: it also matches BL1-3, Tiny
     # Tina, the 2024 movie, and (I am not making this up) an academic
     # "Association for Borderlands Studies". "BL4" and "Borderlands4" don't
@@ -43,6 +44,7 @@ topics:
       - "Borderlands 4 update OR DLC OR patch"
   - key: palworld
     name: "Palworld"
+    channel_id: 111111111111111112  # placeholder -- this game's own channel (v2.0)
     aliases: []                       # the name is distinctive enough that it needs no help
     entities: ["Pocketpair"]
     search_queries:
@@ -50,6 +52,7 @@ topics:
       - "Palworld update OR patch OR DLC"
   - key: diablo4
     name: "Diablo IV"
+    channel_id: 111111111111111113  # placeholder -- this game's own channel (v2.0)
     # "D4" got dropped for the same reason "Borderlands" did: it's a chess
     # opening, a TTRPG die, and a Nikon camera before it's ever this game.
     # "Diablo V"/"Diablo 5" are in here on purpose, not by accident: Diablo V

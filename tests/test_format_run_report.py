@@ -16,9 +16,9 @@ from newsbot.pipeline.summarize import StoryDraft, TopicSummary
 from newsbot.store.models import Usage
 
 RUN_DATE = date(2026, 9, 27)  # a Sunday
-BL4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
-PALWORLD = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=[], entities=[])
+BL4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
+PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
+DIABLO4 = Topic(key="diablo4", name="Diablo IV", channel_id=1, aliases=[], entities=[])
 TOPICS = [BL4, PALWORLD, DIABLO4]
 
 _EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)
@@ -237,7 +237,7 @@ def test_jump_link_uses_guild_channel_and_message_id():
 
 
 def test_hostile_topic_name_is_escaped():
-    hostile = Topic(key="x", name="@everyone **x**", aliases=[], entities=[])
+    hostile = Topic(key="x", name="@everyone **x**", channel_id=1, aliases=[], entities=[])
     text = _render(topics=[hostile], summaries={}, fallback_items={})
     assert "@everyone" not in text
     assert "**x**" not in text
@@ -260,7 +260,7 @@ def test_hostile_notes_are_escaped():
 
 
 def test_astral_emoji_and_long_names_stay_under_the_cap():
-    hostile_topic = Topic(key="x", name="🤖" * 200, aliases=[], entities=[])
+    hostile_topic = Topic(key="x", name="🤖" * 200, channel_id=1, aliases=[], entities=[])
     results = [CollectorResult(f"src {'🤖' * 30}", "rss", [], error="💥" * 100) for _ in range(10)]
     text = _render(
         topics=[hostile_topic],
@@ -320,8 +320,8 @@ def test_error_string_with_backticks_and_newlines_stays_on_one_escaped_line():
 
 
 def test_identical_topic_names_are_both_shown_with_their_own_counts():
-    a = Topic(key="dupe_a", name="Same Name", aliases=[], entities=[])
-    b = Topic(key="dupe_b", name="Same Name", aliases=[], entities=[])
+    a = Topic(key="dupe_a", name="Same Name", channel_id=1, aliases=[], entities=[])
+    b = Topic(key="dupe_b", name="Same Name", channel_id=1, aliases=[], entities=[])
     summaries = {"dupe_a": _summary("dupe_a", 2), "dupe_b": _summary("dupe_b", 5)}
     text = _render(topics=[a, b], summaries=summaries, fallback_items={})
     assert "Same Name 2 · Same Name 5" in text
@@ -374,13 +374,13 @@ def test_content_exactly_at_the_2000_unit_boundary_with_astral_chars_is_not_trun
     room = 2000 - discord_len(base)
     pad_units = max(room, 0)
     pad = "🤖" * (pad_units // 2)
-    hostile_topic = Topic(key="x", name="Pad" + pad, aliases=[], entities=[])
+    hostile_topic = Topic(key="x", name="Pad" + pad, channel_id=1, aliases=[], entities=[])
     text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
     assert discord_len(text) <= 2000
 
 
 def test_content_one_astral_char_over_the_boundary_truncates_without_a_lone_surrogate():
-    hostile_topic = Topic(key="x", name="🤖" * 1200, aliases=[], entities=[])
+    hostile_topic = Topic(key="x", name="🤖" * 1200, channel_id=1, aliases=[], entities=[])
     text = _render(topics=[hostile_topic], summaries={}, fallback_items={}, status="ok")
     assert discord_len(text) <= 2000
     # A truncated lone surrogate encodes as a replacement char with

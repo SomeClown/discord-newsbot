@@ -53,7 +53,11 @@ def db_path(tmp_path):
 def _cfg(*, alerts_enabled: bool, interval_minutes: int = 60):
     cfg = load_config(CONFIG_PATH)
     alerts = cfg.alerts.model_copy(
-        update={"enabled": alerts_enabled, "interval_minutes": interval_minutes}
+        update={
+            "enabled": alerts_enabled,
+            "channel_id": 999999999999999999,
+            "interval_minutes": interval_minutes,
+        }
     )
     return cfg.model_copy(update={"alerts": alerts})
 
@@ -135,7 +139,7 @@ def _prep_bot_for_deps(cfg, db_path, *, secrets=None) -> NewsBot:
     bot = NewsBot(cfg, secrets or _secrets(), db_path)
     bot.http_client = httpx.AsyncClient()
     bot.llm = object()  # build_deps only checks it's not None
-    bot.code_alert_poster = DiscordCodeAlertPoster(bot, cfg.digest.channel_id)
+    bot.code_alert_poster = DiscordCodeAlertPoster(bot, cfg.alerts.channel_id)
     return bot
 
 

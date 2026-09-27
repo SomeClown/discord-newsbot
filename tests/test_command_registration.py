@@ -120,6 +120,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 3
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -191,6 +192,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 3
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -199,6 +201,7 @@ sources:
     trust: official
 alerts:
   enabled: true
+  channel_id: 4
   allow_test_command: {"true" if allow_test_command else "false"}
 """
     config_path = tmp_path / "config.yaml"

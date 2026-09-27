@@ -85,7 +85,7 @@ def test_sightings_from_items_sets_golden_flag():
 
 
 def test_sightings_from_items_empty_alert_topics_scopes_to_everything():
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     items = [_item(title=f"unrelated post {CODE_A}", topics=("palworld",))]
     sightings = sightings_from_items(items, topics=topics, alert_topics=[])
     assert [s.code for s in sightings] == [CODE_A]
@@ -93,8 +93,8 @@ def test_sightings_from_items_empty_alert_topics_scopes_to_everything():
 
 def test_sightings_from_items_scopes_to_configured_topics_by_keyword():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     matching = _item(url="https://e/1", title=f"BL4 code: {CODE_A}")
     other = _item(url="https://e/2", title=f"Palworld code: {CODE_B}")
@@ -105,7 +105,7 @@ def test_sightings_from_items_scopes_to_configured_topics_by_keyword():
 
 
 def test_sightings_from_items_scopes_dedicated_source_with_no_keyword_hit():
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     # A dedicated single-topic source counts even with no keyword hit at
     # all (SPEC-DEV 3 / A6) -- a Steam patch note that never says the
     # game's name by name.
@@ -116,8 +116,8 @@ def test_sightings_from_items_scopes_dedicated_source_with_no_keyword_hit():
 
 def test_sightings_from_items_drops_items_outside_scoped_topics():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     item = _item(title=f"Palworld code: {CODE_A}", topics=("palworld",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
@@ -129,7 +129,7 @@ def test_sightings_from_items_press_item_not_mentioning_bl4_never_alerts():
     # by keyword; one that never names Borderlands 4 (or an alias) at all
     # shouldn't count toward the scoped alert topic just because it's a
     # press item covering games in general.
-    topics = [Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"])]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"])]
     item = _item(
         title=f"This week in gaming news: a code appeared, {CODE_A}",
         trust="press",
@@ -141,8 +141,8 @@ def test_sightings_from_items_press_item_not_mentioning_bl4_never_alerts():
 
 def test_sightings_from_items_diablo_item_never_alerts_when_scoped_to_bl4():
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="diablo4", name="Diablo IV"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="diablo4", name="Diablo IV", channel_id=1),
     ]
     item = _item(title=f"Diablo IV season code: {CODE_A}", topics=("diablo4",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
@@ -157,8 +157,8 @@ def test_sightings_from_items_item_matched_to_both_bl4_and_another_topic_still_c
     # confidently matches borderlands4 too, it should still count even
     # though it's also tagged for another topic.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"]),
-        Topic(key="palworld", name="Palworld"),
+        Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=["BL4"]),
+        Topic(key="palworld", name="Palworld", channel_id=1),
     ]
     item = _item(
         title=f"Crossover event: BL4 and Palworld code {CODE_A}",
@@ -175,7 +175,13 @@ def test_sightings_from_items_entity_only_match_never_alerts():
     # show next to a human-readable headline but that this module's job
     # is to reject outright.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     item = _item(
         title=f"Gearbox drops new Tiny Tina's Wonderlands SHiFT code {CODE_A}",
@@ -192,7 +198,13 @@ def test_sightings_from_items_dedicated_source_still_counts_alongside_entity_onl
     # (SPEC-DEV 3) and must still alert, in the same batch that also
     # contains an entity-only item that must not.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     dedicated = _item(
         url="https://e/dedicated",
@@ -218,7 +230,13 @@ def test_sightings_from_items_press_item_confidently_naming_the_topic_still_coun
     # entity-only case, it must not accidentally exclude confident press
     # matches too.
     topics = [
-        Topic(key="borderlands4", name="Borderlands 4", aliases=["BL4"], entities=["Gearbox"])
+        Topic(
+            key="borderlands4",
+            name="Borderlands 4",
+            channel_id=1,
+            aliases=["BL4"],
+            entities=["Gearbox"],
+        )
     ]
     item = _item(
         title=f"Borderlands 4 SHiFT code just dropped: {CODE_A}", trust="press", topics=None
@@ -231,7 +249,7 @@ def test_sightings_from_items_dedicated_bl4_source_always_counts():
     # A dedicated (single-topic) source counts as a confident match with
     # no keyword check at all -- the flip side of the press-item test
     # above: this is what "dedicated BL4 sources do alert" means.
-    topics = [Topic(key="borderlands4", name="Borderlands 4")]
+    topics = [Topic(key="borderlands4", name="Borderlands 4", channel_id=1)]
     item = _item(title="v1.3 patch notes", excerpt=f"redeem {CODE_A}", topics=("borderlands4",))
     sightings = sightings_from_items([item], topics=topics, alert_topics=["borderlands4"])
     assert [s.code for s in sightings] == [CODE_A]

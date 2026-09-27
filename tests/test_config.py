@@ -83,6 +83,7 @@ VALID_TAIL = """
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -128,6 +129,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -149,6 +151,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Dupe"
@@ -261,8 +264,10 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
   - key: palworld
     name: "Palworld Again"
+    channel_id: 3
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -284,6 +289,7 @@ digest:
 topics:
   - key: "Not Valid!"
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: steam_news
     name: "Palworld Steam"
@@ -305,6 +311,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
 sources:
   - type: bluesky_search
     query: "Palworld"
@@ -389,12 +396,17 @@ def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(m
 
 
 def test_topic_search_queries_default_empty():
-    topic = Topic(key="palworld", name="Palworld")
+    topic = Topic(key="palworld", name="Palworld", channel_id=1)
     assert topic.search_queries == []
 
 
 def test_topic_search_queries_accepts_list():
-    topic = Topic(key="borderlands4", name="Borderlands 4", search_queries=["Borderlands 4 news"])
+    topic = Topic(
+        key="borderlands4",
+        name="Borderlands 4",
+        channel_id=1,
+        search_queries=["Borderlands 4 news"],
+    )
     assert topic.search_queries == ["Borderlands 4 news"]
 
 
@@ -408,6 +420,7 @@ digest:
 topics:
   - key: palworld
     name: "Palworld"
+    channel_id: 2
     search_queries: ["Palworld news", "   "]
 sources:
   - type: steam_news
@@ -497,6 +510,7 @@ digest:
 {VALID_TAIL}
 alerts:
   enabled: true
+  channel_id: 5
   interval_minutes: 30
   max_item_age_hours: 24
   max_pings_per_day: 5
@@ -656,6 +670,7 @@ digest:
 {VALID_TAIL}
 alerts:
   enabled: true
+  channel_id: 5
   allow_test_command: true
 """
     cfg = _load_with(tmp_path, text)
@@ -688,6 +703,7 @@ digest:
 {VALID_TAIL}
 alerts:
   enabled: true
+  channel_id: 5
   allow_test_command: true
 """
     with caplog.at_level("WARNING"):
@@ -705,6 +721,7 @@ digest:
 {VALID_TAIL}
 alerts:
   enabled: true
+  channel_id: 5
   allow_test_command: false
 """
     with caplog.at_level("WARNING"):

@@ -297,8 +297,8 @@ class NullPublisher:
 _MISSING_MENTION_PERMISSION_ALERT = (
     "newsbot: a SHiFT code alert wanted to ping @everyone, but this bot's "
     "role is missing 'Mention @everyone, @here, and All Roles' in the "
-    "digest channel -- Discord posts the message but silently drops the "
-    "ping. Posted anyway; grant the permission (docs/deploy.md) if you "
+    "SHiFT codes channel -- Discord posts the message but silently drops "
+    "the ping. Posted anyway; grant the permission (docs/deploy.md) if you "
     "want the next one to actually notify anyone."
 )
 
@@ -545,7 +545,9 @@ class NewsBot(discord.Client):
         )
 
         if self.cfg.alerts.enabled:
-            self.code_alert_poster = DiscordCodeAlertPoster(self, self.cfg.digest.channel_id)
+            # cfg.alerts.channel_id is required (validated in load_config)
+            # whenever cfg.alerts.enabled is True, so it's never None here.
+            self.code_alert_poster = DiscordCodeAlertPoster(self, self.cfg.alerts.channel_id)
             # A prior process may have died between claiming a code (and
             # spending the ping budget on it) and confirming the Discord
             # send landed (R4) -- flip those back to 'failed' before

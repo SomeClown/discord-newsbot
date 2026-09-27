@@ -26,7 +26,9 @@ from newsbot.pipeline.summarize import (
 )
 from newsbot.store.models import PriorStory, Usage
 
-DIABLO4 = Topic(key="diablo4", name="Diablo IV", aliases=["Diablo 4", "D4"], entities=["Blizzard"])
+DIABLO4 = Topic(
+    key="diablo4", name="Diablo IV", channel_id=1, aliases=["Diablo 4", "D4"], entities=["Blizzard"]
+)
 
 
 def _item(
@@ -116,14 +118,14 @@ def test_prompt_games_list_reflects_configured_topics_not_a_hardcoded_string():
     # cfg.topics actually configured -- a fourth game added to config.yaml
     # would summarize correctly but the model would still be told it's
     # only tracking three.
-    palworld = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
-    bl4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
+    palworld = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
+    bl4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
     system, _user = build_prompt(DIABLO4, [_topic_item()], [], all_topics=[bl4, palworld, DIABLO4])
     assert "Borderlands 4, Palworld and Diablo IV" in system
 
 
 def test_prompt_games_list_with_two_topics_has_no_oxford_comma():
-    palworld = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
+    palworld = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
     system, _user = build_prompt(DIABLO4, [_topic_item()], [], all_topics=[palworld, DIABLO4])
     assert "Palworld and Diablo IV" in system
 
@@ -133,9 +135,9 @@ def test_prompt_games_list_with_four_topics_still_has_no_oxford_comma():
     # compatibility for; a 4th game (the whole reason this got built
     # instead of staying a hardcoded string) needs the same "A, B, C and
     # D" shape, not an Oxford comma before "and".
-    palworld = Topic(key="palworld", name="Palworld", aliases=[], entities=[])
-    bl4 = Topic(key="borderlands4", name="Borderlands 4", aliases=[], entities=[])
-    fifth = Topic(key="fifth", name="Some Fifth Game", aliases=[], entities=[])
+    palworld = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
+    bl4 = Topic(key="borderlands4", name="Borderlands 4", channel_id=1, aliases=[], entities=[])
+    fifth = Topic(key="fifth", name="Some Fifth Game", channel_id=1, aliases=[], entities=[])
     system, _user = build_prompt(
         DIABLO4, [_topic_item()], [], all_topics=[bl4, palworld, DIABLO4, fifth]
     )

@@ -887,7 +887,7 @@ def _full_config() -> AppConfig:
     return AppConfig(
         guild_id=1,
         digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
-        topics=[Topic(key="palworld", name="Palworld")],
+        topics=[Topic(key="palworld", name="Palworld", channel_id=1)],
         sources=[
             RssSource(
                 type="rss", name="PC Gamer", url="https://www.pcgamer.com/rss/", trust="press"
@@ -945,7 +945,7 @@ def test_build_collectors_bluesky_has_no_session_without_bluesky_secrets():
     cfg = AppConfig(
         guild_id=1,
         digest=DigestCfg(channel_id=1, time="09:00", timezone="UTC"),
-        topics=[Topic(key="palworld", name="Palworld")],
+        topics=[Topic(key="palworld", name="Palworld", channel_id=1)],
         sources=[BlueskySource(type="bluesky_search", query="Palworld", trust="community")],
     )
     secrets = Secrets(
