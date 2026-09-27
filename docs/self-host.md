@@ -15,7 +15,7 @@ feature.
 **This guide describes v2.1.0 and later.** `--check-sources`,
 `NEWSBOT_CONTACT`, and multi-arch (amd64 + arm64) published images all
 arrive at v2.1.0; nothing below works against an older tag. As of this
-writing, `2.1.0` hasn't been tagged yet — check the
+writing, `2.1.0` hasn't been tagged yet; check the
 [Releases page](https://github.com/someclown/discord-newsbot/releases)
 before pinning `TAG=2.1.0` anywhere below, and use whatever the actual
 latest tag is once it exists. Until then, running from `main` (`TAG=latest`,
@@ -37,7 +37,7 @@ v2.1.0 tag's multi-arch build exists.
   both, so it runs unmodified on a typical cloud VM, a Raspberry Pi, or an
   Apple Silicon Mac. Builds before v2.1.0 are amd64-only; on arm64
   hardware, pinning one of those older tags means building locally instead
-  (§5 below) — same as running against `main` before v2.1.0 is tagged (see
+  (§5 below); same as running against `main` before v2.1.0 is tagged (see
   the version note above).
 - **Python 3.14, if you want to run the CLI locally** (`--check-sources`,
   the offline `--dry-run`) instead of only through Docker. Entirely
@@ -63,7 +63,7 @@ v2.1.0 tag's multi-arch build exists.
    - **Public Bot: off**, unless you actually want strangers adding this
      bot to their own servers (you almost certainly don't; see the scope
      note above). With Public Bot off, the portal may refuse to save
-     unless Installation → Install Link is also set to "None" — a
+     unless Installation → Install Link is also set to "None": a
      leftover install-link value from a template or an earlier edit is
      the usual cause; if the portal won't save your settings, check that
      first.
@@ -74,7 +74,7 @@ v2.1.0 tag's multi-arch build exists.
      never into `config.yaml`, a chat log, or a commit. **The portal shows
      it exactly once, at creation**; if you navigate away without copying
      it (or just aren't sure you got it right), "Reset Token" issues a new
-     one — there's no way to reveal the original again.
+     one; there's no way to reveal the original again.
 3. Turn on **Developer Mode** in your own Discord client (User Settings →
    Advanced) so you can right-click a server or a channel and copy its ID
    later: right-click the server's icon in the sidebar for "Copy Server
@@ -88,7 +88,7 @@ v2.1.0 tag's multi-arch build exists.
 5. Open the generated URL and invite the bot to your server.
 6. **If any of the bot's channels are private** (not visible to
    `@everyone`), add the bot's role to that channel's own member/role list
-   too — being invited to the server doesn't give a bot visibility into a
+   too; being invited to the server doesn't give a bot visibility into a
    channel it isn't otherwise allowed into, same as any other role.
 7. **Set permissions on the bot's managed role, not a one-off override.**
    Server Settings → Roles → the bot's own role (created automatically
@@ -103,11 +103,11 @@ v2.1.0 tag's multi-arch build exists.
    for that one channel, which makes for a confusing debugging session if
    you set permissions on the role and then can't figure out why the bot
    still can't post somewhere (this is a lesson from testing, not a
-   hypothetical) — check a misbehaving channel's own Permissions tab for
+   hypothetical); check a misbehaving channel's own Permissions tab for
    an override before assuming the role itself is wrong.
 
 `guild_id` (from step 3) is `config.yaml`'s server ID. `admin_channel_id`,
-if you set one, is where the bot's health alerts and run reports go — a
+if you set one, is where the bot's health alerts and run reports go: a
 one-message summary after every digest that actually posts, plus anything
 that goes wrong (a source failing three days running, a publish failure);
 make this channel private, since it's meant for you, not the whole server.
@@ -124,8 +124,8 @@ name works if you want it narrower or broader.
   a key can make any calls at all (there's no pay-later or free tier for
   the API); rough cost against a typical few-topic config running one
   digest a day is about **1 to 2 cents per daily run**, so roughly
-  **$0.30 to $0.60 a month** — a handful of dollars of prepaid credit
-  covers a long time.
+  **$0.30 to $0.60 a month** (a handful of dollars of prepaid credit
+  covers a long time).
 - **`BRAVE_API_KEY`** (optional): powers the `web_search` source type,
   which catches press coverage not already in your RSS list. Free tier math
   is in [`docs/finding-sources.md`](finding-sources.md); without a key, `web_search` sources are
@@ -189,7 +189,7 @@ would.
 
 `python -m newsbot.pipeline.run` (`--check-sources`, the offline
 `--dry-run`) reads secrets from **the process environment**, not from
-`.env` — nothing in this codebase parses `.env` itself; Docker Compose's
+`.env`: nothing in this codebase parses `.env` itself; Docker Compose's
 `env_file:` is what turns `.env` into environment variables, and that
 machinery doesn't exist outside a container. Export only what the command
 you're running actually needs, rather than sourcing the whole file:
