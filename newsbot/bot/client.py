@@ -207,7 +207,13 @@ def _classify_publish_error(
     erase what already landed for the topics before it.
     """
     if isinstance(exc, discord.HTTPException):
-        retryable = exc.status is None or not (400 <= exc.status < 500)
+        # 429 is a 4xx by number, but it's Discord's own rate limit --
+        # exactly the kind of thing backing off and trying again actually
+        # fixes, unlike the rest of the 4xx range (a permission that's
+        # missing, a channel that's gone). Treating it like every other
+        # 4xx meant `_publish_with_retry` gave up on a rate limit
+        # immediately instead of backing off through it.
+        retryable = exc.status is None or exc.status == 429 or not (400 <= exc.status < 500)
         raise PublishError(
             f"discord send failed: {exc}",
             posted_by_topic=posted_by_topic,

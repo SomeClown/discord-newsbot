@@ -181,6 +181,19 @@ async def test_other_4xx_is_wrapped_and_not_retryable():
     assert excinfo.value.retryable is False
 
 
+async def test_429_rate_limit_is_wrapped_and_retryable():
+    # 429 is a 4xx by number, but it's Discord's own rate limit -- the
+    # one 4xx that backing off and retrying actually fixes.
+    channel = FakeChannel()
+    channel.fail_on_call = {0: discord.HTTPException(_fake_response(429), "rate limited")}
+    client = FakeClient({1: channel})
+    publisher = DiscordPublisher(client)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(_rendered(_topic_message("borderlands4", 1)))
+    assert excinfo.value.retryable is True
+
+
 async def test_discord_5xx_is_wrapped_and_retryable():
     channel = FakeChannel()
     channel.fail_on_call = {0: discord.HTTPException(_fake_response(503), "service unavailable")}
