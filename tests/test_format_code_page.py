@@ -172,12 +172,47 @@ def test_long_source_name_is_truncated():
     assert discord_len(embed.description) <= 4096
 
 
-def test_many_codes_stay_under_the_4096_cap():
+def test_a_full_page_of_ordinary_codes_stays_under_the_4096_cap():
+    # /shift codes pages 8 at a time (commands._SHIFT_PAGE_SIZE) -- a full
+    # page of ordinary-length entries is nowhere near the cap.
     codes = [
         _view(code=f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA", item_url=f"https://e.com/{i}")
-        for i in range(200)
+        for i in range(8)
     ]
     embed = render_code_page(
         codes, title="/shift codes", page=1, pages=1, timezone="America/Los_Angeles"
     )
     assert discord_len(embed.description) <= 4096
+
+
+# --- per-entry budgeting (QA follow-up: truncation must not drop codes) ---
+
+
+def test_a_full_page_of_codes_with_huge_urls_keeps_every_code_and_balances_fences():
+    codes = [
+        _view(
+            code=f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA",
+            item_url="https://example.com/" + "a" * 400,
+        )
+        for i in range(8)
+    ]
+    embed = render_code_page(
+        codes, title="/shift codes", page=1, pages=1, timezone="America/Los_Angeles"
+    )
+    assert discord_len(embed.description) <= 4096
+    for c in codes:
+        assert f"```\n{c.code}\n```" in embed.description
+    assert embed.description.count("```") % 2 == 0
+
+
+def test_a_full_page_of_codes_with_huge_source_names_keeps_every_code():
+    codes = [
+        _view(code=f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA", source_name="Reddit Megathread " * 40)
+        for i in range(8)
+    ]
+    embed = render_code_page(
+        codes, title="/shift codes", page=1, pages=1, timezone="America/Los_Angeles"
+    )
+    assert discord_len(embed.description) <= 4096
+    for c in codes:
+        assert f"```\n{c.code}\n```" in embed.description

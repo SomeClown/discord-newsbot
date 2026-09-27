@@ -403,15 +403,33 @@ def _code_marker(view: CodeView) -> str | None:
     return None
 
 
-def _code_page_block(view: CodeView, timezone: str) -> str:
+def _code_page_block(view: CodeView, timezone: str, *, max_len: int | None = None) -> str:
     code_block = f"```\n{view.code}\n```"
     first_seen = view.first_seen_at.astimezone(ZoneInfo(timezone)).date().isoformat()
+    seen_prefix = f"First seen {first_seen} · "
+    marker = _code_marker(view)
+    marker_suffix = f" · ({marker})" if marker else ""
     source = _truncate_utf16(esc(view.source_name), _CODE_PAGE_MAX_SOURCE, suffix="…")
     safe_url = _safe_link(view.item_url)
     link = f" · <{safe_url}>" if safe_url else ""
-    marker = _code_marker(view)
-    marker_suffix = f" · ({marker})" if marker else ""
-    return f"{code_block}\nFirst seen {first_seen} · {source}{link}{marker_suffix}"
+    block = f"{code_block}\n{seen_prefix}{source}{link}{marker_suffix}"
+    if max_len is None or discord_len(block) <= max_len:
+        return block
+
+    # Same shedding order as `_alert_block`: the link goes first (a
+    # collected URL is the part most likely to be long and least likely
+    # to be missed -- the code and its source are the point).
+    block = f"{code_block}\n{seen_prefix}{source}{marker_suffix}"
+    if discord_len(block) <= max_len:
+        return block
+
+    # Still too long -- hard-truncate the source name. The fenced code
+    # block never shrinks; a partial code would be actively wrong, and
+    # cutting mid-fence would unbalance every block after it.
+    fixed_len = discord_len(code_block) + 1 + discord_len(seen_prefix) + discord_len(marker_suffix)
+    name_budget = max(max_len - fixed_len, 0)
+    truncated_name = _truncate_utf16(esc(view.source_name), name_budget, suffix="…")
+    return f"{code_block}\n{seen_prefix}{truncated_name}{marker_suffix}"
 
 
 def render_code_page(
@@ -426,13 +444,31 @@ def render_code_page(
     turns `from_roundup`/`status` into D5's three markers; a plain
     `'posted'`, non-roundup code gets none, since "posted normally" isn't
     something a reader needs flagged.
+
+    Every entry gets an equal share of the description budget up front
+    (QA follow-up: hard-truncating the whole joined description used to
+    silently drop entries near the end of a page, and could cut a fenced
+    code block in half). `_code_page_block`'s own shrinking -- drop the
+    link, then truncate the source -- only kicks in for an entry that
+    actually needs it; a normal-length one is untouched.
     """
     embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
     if not codes:
         embed.description = _CODE_PAGE_EMPTY
     else:
-        blocks = [_code_page_block(c, timezone) for c in codes]
-        embed.description = _truncate_description("\n\n".join(blocks))
+        joiner_overhead = 2 * (len(codes) - 1)  # "\n\n" between entries
+        per_entry_budget = max((_DESCRIPTION_LIMIT - joiner_overhead) // len(codes), 0)
+        blocks = [_code_page_block(c, timezone, max_len=per_entry_budget) for c in codes]
+        description = "\n\n".join(blocks)
+        # Belt-and-suspenders, same spirit as `render_code_alerts`' own
+        # loud failure: nothing should reach here over the cap, since
+        # every block above was built to fit its own share of it.
+        if discord_len(description) > _DESCRIPTION_LIMIT:
+            raise ValueError(
+                f"rendered code page exceeds {_DESCRIPTION_LIMIT} UTF-16 units "
+                f"({discord_len(description)})"
+            )
+        embed.description = description
     embed.set_footer(text=f"Page {page} of {pages} · {_CODE_PAGE_FOOTER_NOTE}")
     return embed
 
