@@ -79,10 +79,13 @@ def _utc_iso(moment: datetime) -> str:
     Every timestamp in the database is stored as UTC ISO text, and SQLite
     compares that text as text. That works exactly as long as both sides
     are UTC; hand it a Pacific-time boundary and "an hour later" can sort
-    earlier. test-engineer proved it with `/shift codes` in mind, which
-    computes its window in the digest's timezone. So every time boundary
-    goes through here first. A naive datetime is taken to already be UTC,
-    which is what the rest of this module assumes anyway.
+    earlier. test-engineer proved it with a naive-datetime boundary in
+    mind, so every time boundary goes through here first. (`/shift
+    codes`'s own window is already a rolling UTC one -- `now - days`, no
+    timezone involved; it's only the *displayed* first-seen date that
+    gets converted to the digest's timezone, in `format.py`, well after
+    this function's job is done.) A naive datetime is taken to already be
+    UTC, which is what the rest of this module assumes anyway.
     """
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
