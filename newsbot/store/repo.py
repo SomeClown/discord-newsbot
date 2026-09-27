@@ -276,13 +276,28 @@ def mark_digest_failed(
 
     Items and stories aren't touched here: `save_run` never ran for this
     attempt, so there's nothing to undo. A retry just recollects.
+
+    `message_ids` is unioned with whatever `posted_message_ids` this row
+    already had, not written over it (a pre-existing bug): a forced
+    run-now that fails again after a first failure already recorded some
+    ids would otherwise overwrite them with this attempt's shorter list
+    (or an empty one, if this attempt didn't post anything before
+    failing), and an unattended restart's catch-up check would then have
+    no way to know those earlier messages exist and repost them. Order is
+    preserved -- whatever was already there, then any new id this attempt
+    got that wasn't already in the list.
     """
     now_iso = _resolve_now(now)
     with conn:
+        row = conn.execute(
+            "SELECT posted_message_ids FROM digests WHERE id = ?", (digest_id,)
+        ).fetchone()
+        existing_ids: list[int] = json.loads(row["posted_message_ids"]) if row else []
+        merged_ids = existing_ids + [i for i in message_ids if i not in existing_ids]
         conn.execute(
             "UPDATE digests SET status = 'failed', error_notes = ?, posted_message_ids = ?, "
             "updated_at = ? WHERE id = ?",
-            (notes, json.dumps(message_ids), now_iso, digest_id),
+            (notes, json.dumps(merged_ids), now_iso, digest_id),
         )
 
 
