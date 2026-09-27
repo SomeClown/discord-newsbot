@@ -258,11 +258,11 @@ This runs against `config.example.yaml` rather than a `config.yaml` you may
 or may not have yet, since it's the one config this repo commits and every
 fixture item's topic keys (`borderlands4`, `palworld`) match; `--now` pins
 the clock to the fixture data's own frozen date (2026-09-23) so this stays
-deterministic no matter when you happen to run it -- see `docs/self-host.md`
+deterministic no matter when you happen to run it: see `docs/self-host.md`
 step 6 for why. Drop `--fixtures`/`--stub-llm`/`--now` to hit real sources
-and Claude with a real config — that's how the source list and the summary prompt get tuned in
-practice; see `docs/sources-research.md` for how the seed sources here were
-verified.
+and Claude with a real config — that's how the source list and the summary
+prompt get tuned in practice; see `docs/sources-research.md` for how the
+seed sources here were verified.
 
 ### Running the dev bot
 
