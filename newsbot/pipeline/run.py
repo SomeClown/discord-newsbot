@@ -421,7 +421,14 @@ async def _run_post(
                 "error after %s's digest was saved as %s; leaving it as is", run_date, status
             )
             raise
-        posted_ids = list(getattr(exc, "posted_ids", None) or [])
+        # A PublishError carries what landed. A CancelledError carries
+        # nothing, so ask the publisher itself: a deploy that interrupts
+        # Palworld must still remember that Borderlands 4 already posted,
+        # or the next catch-up posts it twice. (The plan said so; the first
+        # draft forgot, and test-engineer noticed.)
+        posted_ids = list(
+            getattr(exc, "posted_ids", None) or getattr(publisher, "posted_ids", None) or []
+        )
         logger.exception("unhandled error after claiming %s; marking it failed", run_date)
         await asyncio.to_thread(
             _mark_failed_sync,

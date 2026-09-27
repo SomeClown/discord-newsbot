@@ -452,22 +452,6 @@ def _fake_403():
     return _Resp()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "bug: DiscordPublisher.posted_ids tracks a topic posted right before a "
-        "CancelledError on a later topic's send, but _run_post's outer "
-        "`except BaseException` handler only reads `getattr(exc, 'posted_ids', "
-        "None)` off the CancelledError itself (which never carries one) -- it "
-        "never falls back to `publisher.posted_ids` the way client.py's own "
-        "DiscordPublisher.posted_ids docstring says it does. The digest row "
-        "gets saved `failed` with posted_message_ids == [] even though a "
-        "topic's embed really did land in its channel, so the next catch-up "
-        "or run-now (needs_confirmation/should_catch_up both read this same "
-        "column) treats it as a clean failure and reposts that topic's "
-        "embed a second time. newsbot/pipeline/run.py:424."
-    ),
-)
 async def test_cancelled_error_mid_publish_still_records_what_the_publisher_posted(
     db_path, http_client
 ):
