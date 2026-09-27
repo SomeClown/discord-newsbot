@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # any other reason importlib.metadata can't find the distribution. Kept in
 # sync with pyproject.toml's [project].version by hand; there's no test
 # for that because there's no code path that would catch it drifting.
-_FALLBACK_VERSION = "0.1.0"
+_FALLBACK_VERSION = "2.1.0"
 
 _REPO_URL = "https://github.com/someclown/discord-newsbot"
 _UNSET_CONTACT = f"{_REPO_URL}, contact unset"

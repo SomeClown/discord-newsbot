@@ -15,7 +15,9 @@ touches a real socket.
 from __future__ import annotations
 
 import logging
+import tomllib
 from contextlib import closing
+from importlib.metadata import version
 from pathlib import Path
 
 import httpx
@@ -25,6 +27,23 @@ from newsbot.config import Secrets, load_config
 from newsbot.useragent import build_user_agent, warn_if_contact_unset
 
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
+
+
+def test_installed_version_matches_pyproject():
+    # An editable install (`pip install -e . --no-deps`) writes its version
+    # metadata once, at install time; it won't notice a later hand-edit of
+    # pyproject.toml's own [project].version on its own. This is the
+    # tripwire useragent.py's own docstring says doesn't exist: a bump here
+    # that never gets an `--upgrade` reinstall to match now fails loudly in
+    # CI instead of quietly shipping a stale User-Agent.
+    pyproject_version = tomllib.loads(PYPROJECT_PATH.read_text())["project"]["version"]
+    assert version("newsbot") == pyproject_version
+
+
+def test_user_agent_reports_the_installed_version():
+    ua = build_user_agent({})
+    assert f"discord-newsbot/{version('newsbot')} " in ua
 
 
 def _capturing_transport(
