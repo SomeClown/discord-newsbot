@@ -112,17 +112,14 @@ topics:
     assert cfg.topics[0].channel_id == huge
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "bug: pydantic's int coercion accepts bool for an int field (True -> 1, "
-        "False -> 0), so a `channel_id: true` typo in config.yaml silently loads "
-        "as channel_id=1 instead of failing config validation -- Topic.channel_id "
-        "needs strict=True (or an explicit bool rejection) to catch this at load "
-        "time instead of at the first confusing Discord API error."
-    ),
-)
 def test_channel_id_as_bool_is_rejected_not_silently_coerced_to_one(tmp_path):
+    # Was a bug: pydantic's int coercion accepts bool for an int field
+    # (True -> 1, False -> 0), so a `channel_id: true` typo in config.yaml
+    # silently loaded as channel_id=1 instead of failing config validation.
+    # Topic.channel_id and AlertsCfg.channel_id both now reject bool
+    # explicitly (config.py's `_reject_bool_channel_id`), ahead of
+    # pydantic's normal coercion, without giving up the string/whole-float
+    # coercions the tests above this one still pin as intentional.
     text = f"""
 guild_id: 1
 digest:

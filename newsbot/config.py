@@ -41,6 +41,26 @@ class ConfigError(Exception):
     """
 
 
+def _reject_bool_channel_id(v: object) -> object:
+    """A `mode="before"` guard shared by every `channel_id` field.
+
+    Pydantic's lax int coercion happily turns a quoted numeric string or a
+    whole-number float into an int -- both genuinely useful for a
+    hand-edited YAML file -- but `bool` is *also* an `int` subclass in
+    Python, so `channel_id: true` was silently loading as `1` instead of
+    failing config validation, which is a considerably more confusing way
+    to find out than a startup error (test-engineer caught it before a
+    typo like that ever got the chance to). `strict=True` would close this
+    the blunt way, but it also closes the string/float coercions this
+    module's own tests pin as intentional -- rejecting bool specifically,
+    ahead of pydantic's normal int coercion, is the one check that catches
+    the typo without taking those away.
+    """
+    if isinstance(v, bool):
+        raise ValueError("channel_id must be an int, not a bool")
+    return v
+
+
 class Topic(BaseModel):
     key: str
     name: str
@@ -54,6 +74,11 @@ class Topic(BaseModel):
     # source's global query_templates"; the two schemas coexist because most
     # topics are happy with "{name} news" and one weird topic never is.
     search_queries: list[str] = []
+
+    @field_validator("channel_id", mode="before")
+    @classmethod
+    def _validate_channel_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_channel_id(v)
 
     @field_validator("search_queries")
     @classmethod
@@ -176,6 +201,11 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # single-code announcement -- its sightings don't count toward
     # alerting (shift/decide.py's aggregate/sightings_from_items).
     max_codes_per_item: int = Field(5, ge=1)
+
+    @field_validator("channel_id", mode="before")
+    @classmethod
+    def _validate_channel_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_channel_id(v)
 
 
 class AppConfig(BaseModel):
