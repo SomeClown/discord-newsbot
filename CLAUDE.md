@@ -71,6 +71,8 @@ to decode a pun.
   tonight").
 - Keep it PG-13. The repo may be shared with other servers.
 - Em dashes rarely; colons, semicolons, and parentheses do that work.
+  `--` is a dash too (not just an em dash character) and shouldn't be used
+  as one either, for the same reason.
 - Superlatives get softened ("one of the more fragile parts", not "the most
   fragile part").
 
