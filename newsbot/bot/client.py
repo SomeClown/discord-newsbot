@@ -633,7 +633,7 @@ class NewsBot(discord.Client):
             await self.alert(
                 "newsbot: found SHiFT code(s) left 'pending' from a prior crash: "
                 + ", ".join(self._interrupted_codes)
-                + ". They were never confirmed posted; check the digest channel."
+                + ". They were never confirmed posted; check the SHiFT codes channel."
             )
         await self._check_permissions()
         await self._catch_up()

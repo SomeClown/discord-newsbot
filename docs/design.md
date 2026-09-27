@@ -265,7 +265,7 @@ All resolved as of M2 (2026-09-24):
 
 ## 12. SHiFT code alerts (v1.2, approved 2026-09-25)
 
-A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions.
+A separate, near-real-time path alongside the daily digest: when a SHiFT code shows up in any source, post it to the digest channel with an `@everyone` ping, within about an hour instead of at the next 09:00 digest. Owner decisions: hourly checks (option 2B), same channel as the digest, `@everyone`, any code in the standard format regardless of what reward the post mentions. **Superseded by §13** as of v2.0: SHiFT alerts now post to their own dedicated `alerts.channel_id`, not the digest channel -- there is no longer a single shared channel to point either of them at.
 
 **Pattern.** Five groups of five ASCII letters or digits joined by hyphens (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`), matched case-insensitively and normalized to uppercase. The match must stand alone: not preceded or followed by another letter, digit, or hyphen. It is a fixed, anchored pattern with no user-supplied regex (no ReDoS surface). Matching runs over each item's title and **full** text, not the 500-character excerpt stored for summaries, so collectors must make the untruncated text available to the matcher.
 
@@ -294,7 +294,7 @@ alerts:
   max_codes_per_item: 5              # A17, QA item 7 -- roundup/megathread threshold
 ```
 
-**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code.
+**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping -- the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code. **Superseded by §13** as of v2.0: that permission is needed in `alerts.channel_id`'s SHiFT codes channel, not the digest channel -- see §13's startup permission check.
 
 ### Implementation clarifications (A1–A13, recorded 2026-09-25)
 

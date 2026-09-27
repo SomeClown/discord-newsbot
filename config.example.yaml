@@ -246,7 +246,7 @@ sources:
 # topics for your own game list, and see README.md's "SHiFT code alerts"
 # section and docs/deploy.md before flipping enabled to true in prod --
 # the bot's role needs the "Mention @everyone, @here, and All Roles"
-# permission in the digest channel, or the ping silently gets dropped.
+# permission in the SHiFT codes channel, or the ping silently gets dropped.
 # alerts:
 #   enabled: true
 #   # v2.0: SHiFT alerts get their own dedicated channel now, separate from
