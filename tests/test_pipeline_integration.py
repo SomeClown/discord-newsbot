@@ -149,7 +149,7 @@ async def test_force_replaces_row_and_finds_zero_new_items(db_path, http_client)
     second = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep)
     assert second.status == "ok"
     # design.md §13: a topic with nothing to say posts nothing at all now,
-    # rather than an embed reading "No new stories today." -- with every
+    # rather than an embed reading "No new stories today.": with every
     # item already known from the first run, every topic has nothing.
     assert to_text(second.rendered) == "Nothing would post today: no game has news."
 
@@ -173,7 +173,7 @@ async def test_publisher_failing_gives_failed_with_nothing_saved_then_rerun_succ
         status = conn.execute("SELECT status FROM digests").fetchone()[0]
     assert status == "failed"
 
-    # A failed digest doesn't need `force` to reclaim -- the guard only
+    # A failed digest doesn't need `force` to reclaim: the guard only
     # blocks ok/partial/pending.
     rerun = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
     assert rerun.status == "ok"
@@ -250,8 +250,8 @@ async def test_fixture_collector_full_text_defaults_to_none():
 
 async def test_save_run_stores_no_full_text_column(db_path, http_client):
     # An item with full_text set makes it all the way through run_daily
-    # without error, and the items table -- unchanged by v1.2's migration
-    # -- has nowhere to put full_text even if something tried.
+    # without error, and the items table (unchanged by v1.2's migration)
+    # has nowhere to put full_text even if something tried.
     deps = _make_deps(db_path, http_client)
     outcome = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, sleep=_no_sleep)
     assert outcome.status == "ok"

@@ -86,14 +86,14 @@ def test_alerts_channel_absent_when_disabled():
     reqs = required_channels(cfg)
     channel_ids = {req.channel_id for req in reqs}
     # No stray alerts requirement sneaks in when there's no alerts channel
-    # configured at all -- alerts.channel_id is None here.
+    # configured at all: alerts.channel_id is None here.
     assert all(req.needed != frozenset({"mention_everyone"}) for req in reqs)
     assert len(channel_ids) == len(cfg.topics) + 1  # + admin channel, no alerts channel
 
 
 def test_alerts_channel_does_not_need_mention_everyone_when_pings_are_off():
     # max_pings_per_day == 0 means pinging is off on purpose (same rule
-    # sweep.py uses to suppress the "cap reached" alert) -- there's no
+    # sweep.py uses to suppress the "cap reached" alert): there's no
     # point flagging a permission that will never actually get used.
     cfg = _cfg(alerts_enabled=True, alerts_channel_id=999999999999999999, max_pings_per_day=0)
     reqs = {req.channel_id: req for req in required_channels(cfg)}
@@ -300,7 +300,7 @@ async def test_check_channels_accepts_a_thread():
 
 async def test_check_channels_still_flags_a_voice_channel():
     # VoiceChannel is technically `Messageable` in discord.py these days,
-    # but it's not what an owner means by "post the digest here" -- it
+    # but it's not what an owner means by "post the digest here": it
     # stays flagged even though it'd otherwise pass the sendable check.
     cfg = _cfg()
     channels = _clean_channels(cfg)
@@ -317,7 +317,7 @@ async def test_check_channels_uses_cache_before_fetching():
     cfg = _cfg()
     channels = _clean_channels(cfg)
     client = FakeClient(channels)
-    # fetch_channel would raise for everything -- get_channel should be
+    # fetch_channel would raise for everything: get_channel should be
     # tried first and succeed, so fetch_channel is never called.
     client._fetch_errors = {cid: RuntimeError("should not be called") for cid in channels}
 
