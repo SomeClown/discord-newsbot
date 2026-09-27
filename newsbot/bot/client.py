@@ -23,6 +23,7 @@ import asyncio
 import logging
 import socket
 import uuid
+from collections.abc import Mapping
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -103,13 +104,13 @@ _HEARTBEAT_INTERVAL_S = 60
 _PENDING_STARTUP_ALERT = (
     "newsbot: found a 'pending' digest row at startup. That usually means "
     "the process crashed mid-run last time -- it may or may not have "
-    "already posted. Check the channel and `/newsbot status`, then "
+    "already posted. Check the game channels and `/newsbot status`, then "
     "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
     "before posting again, since we can't tell whether today already went out."
 )
 _PARTIAL_FAILURE_STARTUP_ALERT = (
     "newsbot: today's digest row is 'failed' but some messages already "
-    "posted before it died. Check the channel and `/newsbot status`, then "
+    "posted before it died. Check the game channels and `/newsbot status`, then "
     "`/newsbot run-now` if you want to retry -- it'll ask you to confirm "
     "before posting again, since part of today's digest is already out there."
 )
@@ -160,15 +161,18 @@ _PING_EVERYONE = discord.AllowedMentions(
 
 
 def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None) -> None:
-    """Classify a send/fetch failure shared by `DiscordPublisher` and `DiscordCodeAlertPoster`.
+    """Classify a send/fetch failure for `DiscordCodeAlertPoster`.
 
     Wraps as `PublishError` (worth retrying: a 5xx, a network blip, a
-    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else) --
-    see `DiscordPublisher._reraise_or_wrap`'s original docstring for why
-    a permissions problem shouldn't burn a retry budget. `posted_ids`
-    only means anything to `DiscordPublisher`'s resumable multi-message
-    publish; `DiscordCodeAlertPoster` posts one message at a time and
-    always passes `None` (which becomes an empty list).
+    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else) -- a
+    permissions problem shouldn't burn a retry budget, and
+    `shift/sweep.py` already has its own claim/post/record bookkeeping
+    that doesn't lean on `PublishError.posted_by_topic` the way
+    `DiscordPublisher` does. `DiscordPublisher` uses the stricter
+    `_classify_publish_error` below instead (design.md §13, D2): unlike a
+    code alert, a digest publish needs every permanent failure to come
+    back as a `PublishError` so `_publish_with_retry` knows to stop
+    retrying it rather than escaping unwrapped.
     """
     if isinstance(exc, discord.HTTPException):
         if exc.status is not None and 400 <= exc.status < 500:
@@ -183,100 +187,121 @@ def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None)
     raise exc
 
 
+def _classify_publish_error(
+    exc: Exception, *, posted_by_topic: Mapping[str, int] | None = None
+) -> None:
+    """Classify a send/fetch failure for `DiscordPublisher`.
+
+    Every failure comes back as a `PublishError` here (design.md §13,
+    fixing a latent v1 bug): a 5xx, a network blip or a timeout is
+    `retryable=True`; a 4xx (`discord.Forbidden` and friends included) is
+    `retryable=False`, since no amount of backoff fixes a permissions
+    problem or a channel that's gone. v1 let a 4xx escape unwrapped
+    instead, on the theory that `_publish_with_retry` only ever caught
+    `PublishError` anyway -- which worked, but meant whatever *did* post
+    before the 4xx only survived if the caller happened to stash it on the
+    exception by hand. `posted_by_topic` carries `DiscordPublisher`'s own
+    progress so far, so a permanent error on one topic's channel doesn't
+    erase what already landed for the topics before it.
+    """
+    if isinstance(exc, discord.HTTPException):
+        retryable = exc.status is None or not (400 <= exc.status < 500)
+        raise PublishError(
+            f"discord send failed: {exc}",
+            posted_by_topic=posted_by_topic,
+            retryable=retryable,
+        ) from exc
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        raise PublishError(f"discord send failed: {exc}", posted_by_topic=posted_by_topic) from exc
+    raise exc
+
+
 class DiscordPublisher:
-    """The `Publisher` the real bot uses: posts the digest, then opens a discussion thread on it.
+    """The `Publisher` the real bot uses: one message per topic, to that topic's own channel.
 
     Implements the same `Publisher` protocol `PrintPublisher` does, so
     `run_daily`'s guard, save and retry logic runs identically whether the
-    digest is heading to a terminal or a channel -- this class's only job
-    is turning a `RenderedDigest` into Discord API calls and message ids.
+    digest is heading to a terminal or a set of channels -- this class's
+    only job is turning a `RenderedDigest` into Discord API calls and
+    topic -> message id results.
 
     One instance is built fresh per run (see `NewsBot.publisher_for_today`
     and the `/newsbot run-now` handler) and then reused across every
     attempt `run.py`'s `_publish_with_retry` makes at it -- that's what
-    makes resumability possible. It tracks which messages it's already
-    gotten an id back for on `self`, so a retried `publish()` call picks
-    up where the last attempt left off instead of reposting the header (and
-    however many embed messages already landed) on every retry. Before
-    this tracking existed, three transient failures in a row meant the
-    channel got the same digest four times.
+    makes resumability possible. `self._posted` remembers which topics
+    already got a message id back, so a retried `publish()` call skips
+    straight past them instead of reposting a game's embed on every retry.
+    Before this tracking existed (v1, one header + N embed-batch messages
+    in a single channel), three transient failures in a row meant the
+    channel got the same digest four times; the unit of progress is now
+    the topic instead of the message, but the reasoning is the same.
     """
 
-    def __init__(self, client: NewsBot, channel_id: int, run_date: date) -> None:
-        # `NewsBot`, not plain `discord.Client`: this needs `.alert()` for
-        # the non-fatal thread-creation path below, which only `NewsBot`
-        # has. Forward-referenced since `NewsBot` is defined later in this
-        # same module.
+    def __init__(self, client: NewsBot) -> None:
+        # `NewsBot`, not plain `discord.Client`: kept for parity with v1 and
+        # in case a future non-fatal side path (the old thread-creation
+        # alert was one) needs `.alert()` again. Forward-referenced since
+        # `NewsBot` is defined later in this same module.
         self._client = client
-        self._channel_id = channel_id
-        self._run_date = run_date
-        self._header_msg: discord.Message | None = None
-        self._thread_created = False
-        self._posted_ids: list[int] = []
+        self._posted: dict[str, int] = {}
+        self._channels: dict[int, discord.abc.Messageable] = {}
 
-    async def publish(self, r: RenderedDigest) -> list[int]:
-        channel = self._client.get_channel(self._channel_id)
-        if channel is None:
-            try:
-                channel = await self._client.fetch_channel(self._channel_id)
-            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
-                self._reraise_or_wrap(exc)
+    @property
+    def posted_ids(self) -> list[int]:
+        """Every message id posted so far, in topic-post order. Read-only on purpose.
 
-        if self._header_msg is None:
-            try:
-                self._header_msg = await channel.send(
-                    r.header, allowed_mentions=discord.AllowedMentions.none()
-                )
-            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
-                self._reraise_or_wrap(exc)
-            self._posted_ids.append(self._header_msg.id)
+        `_run_post`'s cancellation fallback reads this when an exception
+        escapes with no `posted_ids` of its own to report -- a plain list,
+        matching what `digests.posted_message_ids` has always stored,
+        derived from (never mutable alongside) `self._posted`.
+        """
+        return list(self._posted.values())
 
-        if not self._thread_created:
-            # The thread hangs off the header message, not the channel --
-            # that's what makes it show up as a reply thread on today's
-            # digest instead of a bare, disconnected discussion channel.
-            # Losing the thread isn't worth losing the digest over, though:
-            # the header and embeds below are the part anyone's actually
-            # here to read, so a thread failure gets logged and alerted,
-            # not raised.
-            try:
-                await self._header_msg.create_thread(name=f"News {self._run_date.isoformat()}")
-            except Exception as exc:  # noqa: BLE001 -- deliberately swallowed, see above
-                logger.error(
-                    "couldn't create the discussion thread for %s; posting without one",
-                    self._run_date,
-                    exc_info=exc,
-                )
-                await self._client.alert(f"newsbot: couldn't create the discussion thread: {exc}")
-            self._thread_created = True
-
-        # `self._posted_ids` already has the header (and, on a retry, any
-        # embed messages a prior attempt got through) -- skip straight to
-        # the first one this attempt hasn't sent yet.
-        already_sent = len(self._posted_ids) - 1
-        for embeds in r.embed_messages[already_sent:]:
+    async def publish(self, r: RenderedDigest) -> dict[str, int]:
+        for message in r.messages:
+            if message.topic_key in self._posted:
+                continue
+            channel = await self._resolve_channel(message.channel_id)
             try:
                 sent = await channel.send(
-                    embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
+                    embed=message.embed, allowed_mentions=discord.AllowedMentions.none()
                 )
             except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
                 self._reraise_or_wrap(exc)
-            self._posted_ids.append(sent.id)
+            self._posted[message.topic_key] = sent.id
+        return dict(self._posted)
 
-        return list(self._posted_ids)
+    async def _resolve_channel(self, channel_id: int) -> discord.abc.Messageable:
+        cached = self._channels.get(channel_id)
+        if cached is not None:
+            return cached
+        channel = self._client.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(channel_id)
+            except Exception as exc:  # noqa: BLE001 -- classified and re-raised below
+                self._reraise_or_wrap(exc)
+        if not hasattr(channel, "send"):
+            # A voice channel, a category, anything else that isn't
+            # actually sendable -- a misconfigured channel_id, not
+            # something a retry ever fixes (design.md §13, D2).
+            raise PublishError(
+                f"channel {channel_id} can't receive messages (not a text channel)",
+                posted_by_topic=self._posted,
+                retryable=False,
+            )
+        self._channels[channel_id] = channel
+        return channel
 
     def _reraise_or_wrap(self, exc: Exception) -> None:
-        """Classify a send/fetch failure: wrap it as `PublishError` if it's
-        worth retrying, or let it propagate as-is if it isn't.
+        """Classify a send/fetch failure via the shared `_classify_send_error`.
 
-        `discord.Forbidden` and friends (any 4xx) mean the request will
-        never succeed no matter how many times `_publish_with_retry`
-        tries it -- wrapping those would just burn the retry budget on a
-        permissions problem that needs a human, not a backoff timer.
-        Delegates to `_classify_send_error`, shared with
-        `DiscordCodeAlertPoster` below.
+        Every path through here carries `self._posted` -- whatever this
+        publisher already has an id back for -- so a permanent error on
+        one topic's channel doesn't erase what already landed for the
+        topics before it.
         """
-        _classify_send_error(exc, posted_ids=self._posted_ids)
+        _classify_publish_error(exc, posted_by_topic=self._posted)
 
 
 class NullPublisher:
@@ -284,14 +309,14 @@ class NullPublisher:
 
     `/newsbot preview` runs the real pipeline through `run_daily`, which
     always calls `publisher.publish()` -- but a preview is only supposed
-    to go to the admin who asked, as an ephemeral followup, not to the
-    digest channel. This publisher lets `run_daily`'s machinery run
+    to go to the admin who asked, as a set of ephemeral followups, not to
+    the game channels. This publisher lets `run_daily`'s machinery run
     unchanged while the actual sending happens afterwards, from
     `PipelineOutcome.rendered`, in the command handler.
     """
 
-    async def publish(self, r: RenderedDigest) -> list[int]:
-        return []
+    async def publish(self, r: RenderedDigest) -> dict[str, int]:
+        return {}
 
 
 _MISSING_MENTION_PERMISSION_ALERT = (
@@ -669,8 +694,7 @@ class NewsBot(discord.Client):
         await send_alert(self, self.cfg.admin_channel_id, text)
 
     def publisher_for_today(self) -> DiscordPublisher:
-        run_date = local_run_date(datetime.now(UTC), self.cfg.digest.timezone)
-        return DiscordPublisher(self, self.cfg.digest.channel_id, run_date)
+        return DiscordPublisher(self)
 
     async def _daily_job(self, run_kind: RunKind = RunKind.SCHEDULED) -> None:
         try:

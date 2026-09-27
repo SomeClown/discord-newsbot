@@ -475,7 +475,8 @@ async def _run_claimed(
 
     await _record_source_health(deps, results)
 
-    message_ids, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
+    posted_by_topic, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
+    message_ids = list(posted_by_topic.values())
     publish_finished_at = deps.now()
 
     if publish_error is not None:
@@ -525,7 +526,7 @@ async def _run_claimed(
         results=results,
         usage=usage,
         notes=notes,
-        message_ids=message_ids,
+        posted_by_topic=posted_by_topic,
         duration=publish_finished_at - run_started_at,
     )
     # Same reasoning as the failure branch above, mirrored for success:
@@ -546,10 +547,10 @@ async def _maybe_send_run_report(
     results: list[CollectorResult],
     usage: Usage,
     notes: list[str],
-    message_ids: list[int],
+    posted_by_topic: dict[str, int],
     duration: timedelta,
 ) -> None:
-    """Send the admin-channel run report (design.md §6), if this run earns one.
+    """Send the admin-channel run report (design.md §6, §13), if this run earns one.
 
     A no-op whenever there's no `run_kind` (every caller that predates
     this feature, and every test that doesn't set one up), `report_to_admin`
@@ -561,6 +562,11 @@ async def _maybe_send_run_report(
     may change what already landed, so any exception -- a bug in
     `render_run_report`, a Discord hiccup inside `deps.alert` (which
     already swallows its own) -- is caught and logged, never re-raised.
+
+    `posted_by_topic` is exactly what `DiscordPublisher.publish` handed
+    back (or `{}`, for a publisher that predates this or doesn't post
+    anywhere): a topic key -> message id mapping `render_run_report` uses
+    to build each posted topic's own `[jump]` link (design.md §13).
     """
     if deps.run_kind is None or not deps.cfg.digest.report_to_admin:
         return
@@ -579,8 +585,7 @@ async def _maybe_send_run_report(
             duration=duration,
             notes=notes,
             guild_id=deps.cfg.guild_id,
-            channel_id=deps.cfg.digest.channel_id,
-            header_message_id=message_ids[0] if message_ids else None,
+            posted_by_topic=posted_by_topic,
         )
         await deps.alert(text)
     except Exception:
@@ -647,19 +652,23 @@ async def _record_source_health(deps: Deps, results: list[CollectorResult]) -> N
 
 async def _publish_with_retry(
     publisher: Publisher, rendered: RenderedDigest, *, sleep: Callable[[float], Awaitable[None]]
-) -> tuple[list[int], PublishError | None]:
+) -> tuple[dict[str, int], PublishError | None]:
     """Retry `publisher.publish()` on transient failure, with backoff.
 
     Only `PublishError` is caught here -- that's the contract the
     `Publisher` protocol documents, and a resumable publisher (see
     `DiscordPublisher`) is exactly what makes retrying the *same*
     publisher instance safe: each attempt picks up where the last one
-    left off instead of reposting what already made it through. On final
-    failure, the ids returned come from the error itself
-    (`PublishError.posted_ids`), not an empty list -- those ids are real
-    messages sitting in the channel, and `_run_post` needs them to record
-    against the `failed` row so a human (or `needs_confirmation`) knows
-    part of the digest already posted.
+    left off instead of reposting what already made it through. A
+    permanent per-channel error (`exc.retryable is False`, design.md §13's
+    D2 -- a 4xx, a channel that's gone, one lacking permission) stops the
+    loop immediately instead of burning the rest of the backoff schedule
+    on something no amount of waiting fixes. On final failure, the
+    mapping returned comes from the error itself
+    (`PublishError.posted_by_topic`), not an empty one -- those ids are
+    real messages sitting in real channels, and `_run_post` needs them to
+    record against the `failed` row so a human (or `needs_confirmation`)
+    knows part of the digest already posted.
     """
     last_error: PublishError | None = None
     for attempt in range(len(_PUBLISH_BACKOFF_S) + 1):
@@ -667,9 +676,11 @@ async def _publish_with_retry(
             return await publisher.publish(rendered), None
         except PublishError as exc:
             last_error = exc
+            if not exc.retryable:
+                break
             if attempt < len(_PUBLISH_BACKOFF_S):
                 await sleep(_PUBLISH_BACKOFF_S[attempt])
-    return (last_error.posted_ids if last_error else []), last_error
+    return (dict(last_error.posted_by_topic) if last_error else {}), last_error
 
 
 async def _maybe_check_codes(

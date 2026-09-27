@@ -41,7 +41,7 @@ async def _no_sleep(_seconds: float) -> None:
 
 
 class _AlwaysFailsPublisher:
-    async def publish(self, r) -> list[int]:
+    async def publish(self, r) -> dict[str, int]:
         raise PublishError("simulated publish failure")
 
 

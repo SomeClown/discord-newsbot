@@ -402,7 +402,10 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             # made it to the channel. "ok"/"partial" is the unambiguous
             # case -- it definitely posted, this would just post again.
             if existing is not None and existing.status in ("pending", "failed"):
-                prompt = "A previous run may have crashed mid-post; check the channel. Post anyway?"
+                prompt = (
+                    "A previous run may have crashed mid-post; check the game channels. "
+                    "Post anyway?"
+                )
             else:
                 prompt = "Today's digest already posted. Post again?"
             await interaction.response.send_message(prompt, view=view, ephemeral=True)
@@ -416,7 +419,7 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             await interaction.response.defer(ephemeral=True)
 
         deps = bot.build_deps(RunKind.RUN_NOW)
-        publisher = DiscordPublisher(bot, cfg.digest.channel_id, run_date)
+        publisher = DiscordPublisher(bot)
         outcome = await run_daily(deps, publisher, mode=RunMode.POST, force=force)
         await interaction.followup.send(f"Run finished: {outcome.status}", ephemeral=True)
 
@@ -439,9 +442,17 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
                 f"Preview failed: {'; '.join(outcome.notes)}", ephemeral=True
             )
             return
-        await interaction.followup.send(outcome.rendered.header, ephemeral=True)
-        for message in outcome.rendered.embed_messages:
-            await interaction.followup.send(embeds=message, ephemeral=True)
+        if not outcome.rendered.messages:
+            await interaction.followup.send(
+                "Nothing would post today: no game has news.", ephemeral=True
+            )
+            return
+        for message in outcome.rendered.messages:
+            await interaction.followup.send(
+                content=f"Would post in <#{message.channel_id}>:",
+                embed=message.embed,
+                ephemeral=True,
+            )
 
     if cfg.alerts.allow_test_command:
         # Registered only when the config opts in (config.py already logs

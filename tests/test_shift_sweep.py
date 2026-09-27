@@ -704,8 +704,8 @@ async def test_daily_hook_is_a_noop_when_no_poster_configured(db_path, http_clie
 
 
 class _PrintDigestPublisher:
-    async def publish(self, r) -> list[int]:
-        return [1]
+    async def publish(self, r) -> dict[str, int]:
+        return {"digest": 1}
 
 
 # --- run_test_alert ---

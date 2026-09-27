@@ -61,7 +61,7 @@ class _StaticLLM:
 
 
 class _AlwaysFailsPublisher:
-    async def publish(self, r) -> list[int]:
+    async def publish(self, r) -> dict[str, int]:
         raise PublishError("simulated publish failure")
 
 
@@ -148,7 +148,10 @@ async def test_force_replaces_row_and_finds_zero_new_items(db_path, http_client)
     # today's slot.
     second = await run_daily(deps, PrintPublisher(), mode=RunMode.POST, force=True, sleep=_no_sleep)
     assert second.status == "ok"
-    assert "No new stories today." in to_text(second.rendered)
+    # design.md §13: a topic with nothing to say posts nothing at all now,
+    # rather than an embed reading "No new stories today." -- with every
+    # item already known from the first run, every topic has nothing.
+    assert to_text(second.rendered) == "Nothing would post today: no game has news."
 
     items, stories, _story_items, digests = _row_counts(db_path)
     assert items == 3  # unchanged: nothing new to insert
