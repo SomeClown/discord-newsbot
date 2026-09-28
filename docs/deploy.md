@@ -877,9 +877,34 @@ sudo systemctl restart docker   # so containers pick up the working resolver
 ```
 
 The same setup also lost IPv6 (no global `inet6` address; `ping -6`
-says "Network is unreachable"). The bot only needs IPv4, so that's a
-separate job: moving the Droplet onto netplan, see the to-do list in
-`CLAUDE.md`.
+says "Network is unreachable"). The cause turned out to be the old
+`/etc/network/interfaces.d/50-cloud-init.cfg` itself: it has two `iface
+eth0 inet static` blocks (the public IP, then the anchor IP), and 24.04's
+ifupdown gives up at the second one, never reaching the IPv6 block.
+
+**The fix (done 2026-09-28): move the network onto netplan.** Snapshot
+first and keep the DigitalOcean web console handy.
+
+1. Gather what the Droplet should have: the old `.cfg`, `ip -br addr`,
+   `ip route`, the interface MACs (`ip -br link`), and DigitalOcean's
+   own view (`curl -s http://169.254.169.254/metadata/v1.json`, just the
+   `interfaces` section). Check that cloud-init leaves the network alone
+   (`network: {config: disabled}` under `/etc/cloud/`), or it'll write
+   its own netplan file at boot and fight yours.
+2. Write `/etc/netplan/50-droplet.yaml` (mode 600, `renderer: networkd`):
+   `eth0` matched by MAC with the public IPv4, the anchor IP and the IPv6
+   address, IPv4 and IPv6 default routes, `accept-ra: false`, and the DNS
+   servers; `eth1` with the private address. `sudo netplan generate`
+   validates it without touching anything.
+3. `sudo netplan try`, and **from a second, fresh SSH session to the
+   Droplet** (not a local terminal; ask me how I know) check addresses,
+   `ping -6`, DNS and the bot before pressing Enter. It reverts on its own
+   after 120 seconds if you don't.
+4. Retire the old setup: `sudo systemctl disable networking`, move
+   `50-cloud-init.cfg` out of `interfaces.d/` (it's in
+   `/etc/network/retired-2026-09-28/`), and rename the
+   `droplet-dns.conf` workaround above to `.retired`, since netplan now
+   supplies DNS. Then reboot, and check it all comes back on its own.
 
 ### Bring the bot back
 
