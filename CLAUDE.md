@@ -22,7 +22,7 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 
 Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; some may never happen. "Agent time" means build, test and review, plus a short test-guild check.
 
-1. **Second-account permission check** (~2 minutes, owner, no code). Have a regular member try `/newsbot status` in the prod guild; it should be refused.
+Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
 ## Documentation voice (read this before writing a docstring)
 
