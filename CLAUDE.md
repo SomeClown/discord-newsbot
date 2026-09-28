@@ -24,6 +24,17 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
+**Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
+- **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.
+- **AI summaries, web search and SHiFT alerts:** unlocked by the server admin's own API keys (bring your own key), or later by a paid Discord server subscription where the owner covers API costs (about $1 per server per month).
+
+Proposed order:
+1. Multi-server redesign with the free tier (about a week or more).
+2. Bring your own key (2–3 days).
+3. Discord Premium Apps subscription (2–4 days). It can only be switched on after Discord verifies the app, which opens at about 75 servers and includes a Stripe ID check; Discord takes 15% of the first $1M.
+
+Resume with brainstorming, then a `docs/design.md` section, then an `architect` plan. Self-hosting (v2.1) stays as the alternative.
+
 ## Documentation voice (read this before writing a docstring)
 
 The owner wants the code documented thoughtfully, in their own voice: plain,
