@@ -224,8 +224,10 @@ def _get_digest_sync(db_path: str, run_date) -> DigestRow | None:
 
 
 def _quote_posted_today_sync(db_path: str, day: str) -> bool:
+    """Same rule as `claim_quote`: a stored date at or after `day` counts as posted."""
     with closing(connect(db_path)) as conn:
-        return get_lounge_state(conn).last_quote_date == day
+        last = get_lounge_state(conn).last_quote_date
+    return last is not None and last >= day
 
 
 def _status_snapshot_sync(

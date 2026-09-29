@@ -128,6 +128,27 @@ async def test_already_posted_today_loads_nothing(tmp_path, db_path, monkeypatch
     assert spy.alerts == []
 
 
+async def test_a_later_stored_date_counts_as_posted_and_loads_nothing(
+    tmp_path, db_path, monkeypatch
+):
+    # The pre-check follows claim_quote's rule: at or after today is "done".
+    # With `==` a clock that stepped backwards went off to load sources and
+    # only then got told no.
+    spy = Spy()
+    src = _file(tmp_path, "a.txt", ["One.", "Two."])
+    tomorrow = _deps(db_path, [src], spy, day=DAY + timedelta(days=1))
+    assert (await run_daily_quote(tomorrow)).status == "posted"
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("load_source must not be called")
+
+    monkeypatch.setattr(daily, "load_source", boom)
+    out = await run_daily_quote(_deps(db_path, [src], spy, seed=2))
+    assert out.status == "already_posted"
+    assert len(spy.posts) == 1
+    assert _last_day(db_path) == (DAY + timedelta(days=1)).isoformat()
+
+
 async def test_a_new_day_posts_again(tmp_path, db_path):
     spy = Spy()
     src = _file(tmp_path, "a.txt", ["One.", "Two.", "Three."])

@@ -156,8 +156,14 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
 
 
 def _already_posted(db_path: str, day: str) -> bool:
+    """Same rule as `claim_quote`: a stored date at or after `day` counts as posted.
+
+    ISO dates sort as text. `>=` and not `==` so a clock that stepped backwards
+    doesn't send us off to load sources only for the claim to say no anyway.
+    """
     with closing(connect(db_path)) as conn:
-        return get_lounge_state(conn).last_quote_date == day
+        last = get_lounge_state(conn).last_quote_date
+    return last is not None and last >= day
 
 
 def _draw_and_claim(

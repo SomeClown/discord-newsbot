@@ -381,40 +381,60 @@ async def test_midnight_between_the_state_read_and_run_quote_posts_the_new_day(
     assert _last_day(db_path) == "2026-09-30"
 
 
-async def test_last_quote_date_in_the_future_skips_the_prompt_and_is_refused(
-    db_path, tmp_path, monkeypatch
-):
-    # The clock went backwards (or the box was briefly in 2027). The handler
-    # compares for equality, so "tomorrow is done" doesn't look like "today is
-    # done": no prompt, an unforced run_quote, which claim_quote refuses. The
-    # admin gets the ordinary "already posted" and nothing is written or sent.
-    _freeze(monkeypatch, NOON_UTC)
-    _set_last_quote_date(db_path, "2026-10-01")
-    cfg = _lounge_cfg(sources=[_quote_file(tmp_path)])
-    bot = _real_bot(cfg, db_path)
-    interaction = FakeInteraction(_admin(cfg))
-    try:
-        await _handler(cfg, bot).callback(interaction)
-    finally:
-        await bot.http_client.aclose()
+async def _click_through_the_prompt(cfg, bot, monkeypatch, label: str) -> FakeInteraction:
+    """Run the handler and press `label` on the confirm dialog as the invoker."""
+    views: list[ConfirmView] = []
 
-    assert interaction.response.messages == []
-    assert interaction.response.deferred == [True]
-    assert interaction.followup.messages == [("Today's quote already posted.", True)]
-    assert bot.lounge_channel.sent == []
-    assert _last_day(db_path) == "2026-10-01"
-    assert _used_rows(db_path) == 0
+    class Capturing(ConfirmView):
+        def __init__(self, owner_id: int) -> None:
+            super().__init__(owner_id)
+            views.append(self)
+
+    monkeypatch.setattr(commands_module, "ConfirmView", Capturing)
+    interaction = FakeInteraction(_admin(cfg), user_id=111)
+    task = asyncio.create_task(_handler(cfg, bot).callback(interaction))
+    for _ in range(100):
+        if views and interaction.response.messages:
+            break
+        await asyncio.sleep(0)
+    (view,) = views
+    button = next(c for c in view.children if c.label == label)
+    await view._scheduled_task(button, FakeInteraction(_admin(cfg), user_id=111))
+    await asyncio.wait_for(task, 1)
+    return interaction
 
 
-async def test_future_last_quote_date_calls_run_quote_unforced(db_path, monkeypatch):
+async def test_last_quote_date_in_the_future_gets_the_confirm_prompt(db_path, monkeypatch):
+    # Changed from "skips the prompt and is refused". The clock went backwards
+    # (or the box was briefly in 2027). The pre-check used to compare for
+    # equality, so "tomorrow is done" didn't look like "today is done" and the
+    # admin got a bare "already posted" with no way forward. It now uses
+    # claim_quote's rule (a stored date at or after today counts as posted),
+    # so the admin is offered the same "Post another one?" prompt.
     _freeze(monkeypatch, NOON_UTC)
     _set_last_quote_date(db_path, "2026-10-01")
     cfg = _lounge_cfg()
-    bot = SpyBot(db_path, QuoteOutcome("already_posted"))
+    bot = SpyBot(db_path)
 
-    await _handler(cfg, bot).callback(FakeInteraction(_admin(cfg)))
+    interaction = await _click_through_the_prompt(cfg, bot, monkeypatch, "Cancel")
 
-    assert bot.calls == [False]
+    assert interaction.response.messages == [
+        ("Today's quote already posted. Post another one?", True)
+    ]
+    assert bot.calls == []
+
+
+async def test_confirming_the_prompt_for_a_future_last_quote_date_forces_the_run(
+    db_path, monkeypatch
+):
+    _freeze(monkeypatch, NOON_UTC)
+    _set_last_quote_date(db_path, "2026-10-01")
+    cfg = _lounge_cfg()
+    bot = SpyBot(db_path)
+
+    await _click_through_the_prompt(cfg, bot, monkeypatch, "Post again")
+
+    assert bot.calls == [True]
 
 
 # --- run_quote misbehaving ---
