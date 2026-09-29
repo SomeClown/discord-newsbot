@@ -21,8 +21,9 @@ when someone breaks it.
 
 What a page means depends on what kind of page it is, so `parse_page` sorts
 each one into a kind first:
-- **work** (a film, show or book) if it has a "Cast" or "Dialogue" heading, or
-  a title like "Casablanca (film)";
+- **work** (a film, show or game) if it has a "Cast" or "Dialogue" heading, or
+  a title like "Casablanca (film)" or "Some Game (video game)" (it's a gaming
+  server, so game pages get "Character, Title");
 - **theme** ("Friendship") if at least three headings are a single letter A to
   Z, because theme pages are alphabetized by author;
 - **author** otherwise.
@@ -45,6 +46,7 @@ from urllib.parse import quote as url_quote
 import httpx
 
 from newsbot.lounge.quotes import Quote, fits
+from newsbot.text import first_line
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,14 @@ async def fetch_page(http: httpx.AsyncClient, title: str) -> FetchedPage:
     except httpx.HTTPError as exc:
         # str() of an httpx timeout is empty, so the class name does the talking.
         raise WikiquoteError(f"couldn't reach Wikiquote ({type(exc).__name__})") from exc
+    except (UnicodeError, httpx.InvalidURL, httpx.StreamError) as exc:
+        # These aren't HTTPErrors. The usual culprit is a title httpx can't
+        # encode (a lone surrogate; only a hand-escaped config value gets
+        # there), and a fetch that raises anything but WikiquoteError is a
+        # fetch whose caller has to guess.
+        raise WikiquoteError(
+            f"couldn't send the request to Wikiquote ({type(exc).__name__})"
+        ) from exc
     return _unwrap(title, body)
 
 
@@ -171,6 +181,10 @@ def _unwrap(title: str, body: bytes) -> FetchedPage:
         data: Any = json.loads(body)
     except ValueError as exc:
         raise WikiquoteError("Wikiquote's response wasn't valid JSON") from exc
+    except RecursionError as exc:
+        # About 100k nested brackets fit in well under the size cap, and the
+        # stdlib parser answers with a RecursionError instead of a ValueError.
+        raise WikiquoteError("Wikiquote's response was nested too deeply to read") from exc
     if not isinstance(data, dict):
         raise WikiquoteError("Wikiquote's response wasn't a JSON object")
 
@@ -185,7 +199,18 @@ def _unwrap(title: str, body: bytes) -> FetchedPage:
             raise WikiquoteError(f"Wikiquote has no page called {title} (renamed or deleted?)")
         if code == "invalidtitle":
             raise WikiquoteError(f"{title} isn't a valid Wikiquote page title")
-        raise WikiquoteError(f"Wikiquote said {code}: {' '.join(str(info).split())}")
+        if code is None and info is None:
+            # {"error": "boom"} and friends: nothing usable inside, and the
+            # raw body isn't ours to echo.
+            raise WikiquoteError("Wikiquote returned an error it didn't explain")
+        # Both fields are the server's words, so both get one line and a cap
+        # (Discord's limit is 2,000 characters; the response's is 4 MiB).
+        said = [
+            first_line(" ".join(str(part).split()), limit)
+            for part, limit in ((code, 100), (info, 250))
+            if part is not None
+        ]
+        raise WikiquoteError("Wikiquote said " + ": ".join(said))
 
     parse = data.get("parse")
     if not isinstance(parse, dict):
@@ -223,7 +248,7 @@ _SKIP_HEADING_RE = re.compile(
 # Headings that name a section, not a speaker or a work, so they don't belong in an attribution.
 _GENERIC_HEADINGS = frozenset({"quotes", "sourced", "quotations", "dialogue"})
 _WORK_TITLE_RE = re.compile(r"\(([^)]*)\)\s*$")
-_WORK_WORD_RE = re.compile(r"\b(?:film|tv|series)\b", re.IGNORECASE)
+_WORK_WORD_RE = re.compile(r"\b(?:film|tv|series|video game)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -262,6 +287,14 @@ class _PageParser(HTMLParser):
         self.headings_seen: list[tuple[int, str]] = []
 
         self._stack: list[str] = []
+        # Bookkeeping so no tag has to scan the whole stack. The first version
+        # did (`tag in stack`, a filtered copy for every list check) and a
+        # page of 30,000 unclosed <li>s took 54 seconds, because I assumed
+        # Wikimedia's markup would always close what it opens. It doesn't
+        # have to, and a hostile page certainly won't. Now every tag is
+        # pushed once and popped once, and everything else is a lookup.
+        self._open_at: dict[str, list[int]] = {}
+        self._list_at: list[int] = []
         self._ignore_from: int | None = None
         self._chain: list[tuple[int, str]] = []
         self._seen_h2 = False
@@ -299,12 +332,15 @@ class _PageParser(HTMLParser):
                 self._ignore_from = index
             else:
                 self._open(tag, index)
+        self._open_at.setdefault(tag, []).append(index)
+        if tag in _LISTS:
+            self._list_at.append(index)
         self._stack.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _VOID_TAGS or tag not in self._stack:
+        if tag in _VOID_TAGS or not self._open_at.get(tag):
             return
-        self._unwind(len(self._stack) - 1 - self._stack[::-1].index(tag))
+        self._unwind(self._open_at[tag][-1])
 
     def handle_data(self, data: str) -> None:
         if self._ignore_from is not None:
@@ -316,7 +352,13 @@ class _PageParser(HTMLParser):
     # -- State --
 
     def _lists(self) -> list[str]:
-        return [t for t in self._stack if t in _LISTS]
+        """The three outermost open lists' tags, which is all any caller compares.
+
+        Capped so it stays constant-time however deep the nesting goes: a
+        fourth list can't change any answer, since every check is against a
+        shorter list.
+        """
+        return [self._stack[i] for i in self._list_at[:3]]
 
     def _counting(self) -> bool:
         """True where quotes count: after the first h2, outside a skipped section."""
@@ -393,6 +435,10 @@ class _PageParser(HTMLParser):
             self._end_dl()
         if self._ignore_from is not None and self._ignore_from >= index:
             self._ignore_from = None
+        for i in range(len(self._stack) - 1, index - 1, -1):
+            self._open_at[self._stack[i]].pop()
+        while self._list_at and self._list_at[-1] >= index:
+            self._list_at.pop()
         del self._stack[index:]
 
     def _end_heading(self) -> None:
@@ -485,7 +531,14 @@ def parse_page(title: str, html: str) -> ParsedPage:
             dropped_unattributed += 1
             continue
         quote = Quote(raw.text, attribution, link)
-        if len(raw.text) > MAX_WIKIQUOTE_CHARS or not fits(quote):
+        # json.loads happily hands over a lone surrogate, which can't be
+        # UTF-16 encoded, so fits() would raise. Nobody can post it anyway;
+        # it goes in the "too long" pile with the other quotes we can't send.
+        try:
+            sendable = len(raw.text) <= MAX_WIKIQUOTE_CHARS and fits(quote)
+        except UnicodeEncodeError:
+            sendable = False
+        if not sendable:
             dropped_long += 1
             continue
         quotes.append(quote)

@@ -11,8 +11,8 @@ and no real person is quoted.
 Two kinds of test live here. Most pin what the parser does today, including
 a few behaviors the owner might not have picked on purpose (they're named
 `test_documented_...` so a change is a decision, not a surprise). The
-`xfail(strict=True)` ones are real bugs; when the app gets fixed the xfail
-starts failing loudly and somebody deletes the marker.
+bugs it found (quadratic parsing, a lone surrogate) are fixed and their xfail
+markers are gone, so a failure there is a regression.
 """
 
 from __future__ import annotations
@@ -116,14 +116,6 @@ def test_documented_an_item_still_open_at_end_of_input_is_dropped_not_a_crash():
     assert _texts("<ul><li>kept</li><li>tail <b>quote <i>never closed") == ["kept"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "quadratic: every event rescans the whole tag stack (_lists(), 'tag in _stack'), so "
-        "unclosed nested lists cost O(n^2); 8000 of them take about 4s, 30000 take about 54s "
-        "(measured 2026-09-29), and parse_page is synchronous, so it stalls the event loop"
-    ),
-)
 def test_unclosed_nested_list_items_parse_in_linear_time():
     html = "<ul><li>x <b><i>" * 6000
     start = time.perf_counter()
@@ -338,7 +330,9 @@ def test_a_second_skipped_heading_inside_a_skipped_section_does_not_extend_it():
         ("Made Up (filmography)", "", "author"),
         ("Made Up (film) (novel)", "", "author"),
         ("Made Up (novel)", "", "author"),
-        ("Made Up (video game)", "", "author"),
+        # Changed on the owner's lead's call: this is a gaming server, so a
+        # "(video game)" page is a work and gets "Character, Title".
+        ("Made Up (video game)", "", "work"),
         ("Made Up (film) part 2", "", "author"),
         ("Made Up film", "", "author"),
     ],
@@ -357,12 +351,12 @@ def test_documented_a_work_page_without_film_in_the_title_but_with_dialogue_is_a
     assert [q.text for q in page.quotes] == ["hi", "A: one\nB: two"]
 
 
-def test_documented_a_video_game_page_is_treated_as_an_author_page():
-    # "(video game)" isn't in the work-word list, so with no Cast heading a game
-    # page gets the author style: the title first, then headings, then citation.
+def test_documented_a_video_game_page_is_treated_as_a_work_page():
+    # This used to pin the author style. Changed on the owner's lead's call:
+    # it's a gaming server, so a game page's quotes read "Character, Title".
     html = "<h2>Quotes</h2><h3>Some Character</h3><ul><li>line</li></ul>"
     (q,) = parse_page("Made Up (video game)", html).quotes
-    assert q.attribution == "Made Up (video game), Some Character"
+    assert q.attribution == "Some Character, Made Up (video game)"
 
 
 def test_dialogue_on_an_author_or_theme_page_is_not_a_quote():
@@ -518,14 +512,6 @@ def test_every_kept_quote_renders_inside_a_discord_message():
     assert all(fits(q) for q in page.quotes)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'json.loads accepts a lone surrogate escape ("\\ud800"), so a page can hand parse_page '
-        "a str that can't be UTF-16 encoded; fits() (via discord_len) then raises "
-        "UnicodeEncodeError out of parse_page instead of the quote being dropped"
-    ),
-)
 def test_a_lone_surrogate_in_the_page_html_does_not_crash_the_parse():
     import json
 

@@ -9,8 +9,8 @@ or does something else escape? Response bodies must not be echoed into that
 message, with one deliberate exception: the API's own `info` string on an
 error envelope, which is the whole point of the message.
 
-The `xfail(strict=True)` tests are real bugs; when the app gets fixed the xfail
-starts failing loudly and somebody deletes the marker.
+Bugs these found are fixed and their xfail markers are gone; a test that fails
+now is a regression.
 """
 
 from __future__ import annotations
@@ -288,13 +288,6 @@ async def test_valid_or_nearly_valid_json_of_the_wrong_kind_is_a_wikiquote_error
     _assert_one_readable_line(message)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "json.loads raises RecursionError on about 100k nested brackets, which _unwrap only "
-        "guards against ValueError; a 400 KB hostile body escapes fetch_page as a RecursionError"
-    ),
-)
 async def test_deeply_nested_json_is_a_wikiquote_error_not_a_recursion_error():
     body = b"[" * 200_000 + b"]" * 200_000
     message = await _message(httpx.Response(200, content=body, headers=JSON))
@@ -389,9 +382,11 @@ async def test_an_errors_array_from_another_errorformat_is_a_plain_failure():
 
 @pytest.mark.parametrize("error", ["boom", 5, ["a", "b"], True, {}, {"code": None}])
 async def test_an_error_that_is_not_the_documented_object_is_still_a_one_line_failure(error):
+    # This used to expect "Wikiquote said None: None". Changed: a malformed
+    # envelope now gets a plain message that doesn't echo the body.
     message = await _message(_error({"error": error}))
     _assert_one_readable_line(message)
-    assert message.startswith("Wikiquote said")
+    assert message == "Wikiquote returned an error it didn't explain"
 
 
 async def test_a_multi_line_info_is_collapsed_to_one_line():
@@ -409,25 +404,11 @@ async def test_missingtitle_names_the_requested_title_not_the_servers_words():
     assert BODY_MARKER not in message
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the error `code` is put in the admin message as-is (only `info` is whitespace-collapsed), "
-        "so a code with a newline makes the message multi-line"
-    ),
-)
 async def test_an_error_code_with_a_newline_still_gives_a_one_line_message():
     message = await _message(_error({"error": {"code": "bad\ncode", "info": "x"}}))
     _assert_one_readable_line(message)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the error `info` is echoed with no length cap, so a hostile or broken response can "
-        "put up to 4 MiB into an admin message (Discord's limit is 2,000 characters)"
-    ),
-)
 async def test_an_enormous_error_info_is_not_echoed_whole():
     message = await _message(_error({"error": {"code": "x", "info": "Z" * 100_000}}))
     assert len(message) < 500
@@ -485,13 +466,6 @@ async def test_cancellation_is_not_swallowed_as_a_wikiquote_error():
             await task
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "a title httpx can't encode (a lone surrogate) raises UnicodeEncodeError out of "
-        "fetch_page instead of a WikiquoteError; only reachable from a hand-escaped config value"
-    ),
-)
 async def test_an_unencodable_title_is_a_wikiquote_error():
     async with _client(lambda r: httpx.Response(200, content=_envelope(), headers=JSON)) as http:
         with pytest.raises(WikiquoteError):
