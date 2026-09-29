@@ -29,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 # Fallback for a source checkout that was never `pip install -e .`'d, or
 # any other reason importlib.metadata can't find the distribution. Kept in
-# sync with pyproject.toml's [project].version by hand; there's no test
-# for that because there's no code path that would catch it drifting.
-_FALLBACK_VERSION = "2.1.1"
+# sync with pyproject.toml's [project].version by hand. For two releases
+# this comment claimed nothing could catch it drifting, which was true only
+# because nobody had written the three-line test that does; see
+# test_fallback_version_matches_pyproject.
+_FALLBACK_VERSION = "2.2.0"
 
 _REPO_URL = "https://github.com/someclown/discord-newsbot"
 _UNSET_CONTACT = f"{_REPO_URL}, contact unset"

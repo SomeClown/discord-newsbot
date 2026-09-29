@@ -24,7 +24,7 @@ import httpx
 from pydantic import SecretStr
 
 from newsbot.config import Secrets, load_config
-from newsbot.useragent import build_user_agent, warn_if_contact_unset
+from newsbot.useragent import _FALLBACK_VERSION, build_user_agent, warn_if_contact_unset
 
 CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
@@ -39,6 +39,13 @@ def test_installed_version_matches_pyproject():
     # CI instead of quietly shipping a stale User-Agent.
     pyproject_version = tomllib.loads(PYPROJECT_PATH.read_text())["project"]["version"]
     assert version("newsbot") == pyproject_version
+
+
+def test_fallback_version_matches_pyproject():
+    # The fallback is only used when the package metadata is missing, which
+    # is exactly when nobody would notice it had gone stale.
+    pyproject_version = tomllib.loads(PYPROJECT_PATH.read_text())["project"]["version"]
+    assert _FALLBACK_VERSION == pyproject_version
 
 
 def test_user_agent_reports_the_installed_version():
