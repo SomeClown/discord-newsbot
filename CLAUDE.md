@@ -24,19 +24,22 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
-**Future feature: bot-posted welcome messages (discussion stage, 2026-09-29; nothing designed yet).** Members joining the prod server currently get Discord's built-in random welcome, which showed up in the admin channel because that was the server's System Messages Channel. The owner is moving that setting to `#the-speakeasy-lounge` by hand (no code).
+**Future feature: bot-posted welcome messages (discussion stage, 2026-09-29; nothing designed yet).** Discord's built-in welcome used to land in the admin channel because that was the server's System Messages Channel. The owner moved that setting to `#the-speakeasy-lounge` on 2026-09-29 (no code).
 
 Decided so far:
 - **Replace Discord's welcome** with the bot's own, and switch Discord's built-in welcome off in Server Settings → Overview.
 - **The owner writes one static welcome message** that everyone gets on joining.
+- **A separate daily "welcome to the day" message:** one random fortune-style quote, posted once a day, not tied to anyone joining.
+- **Both go to `#the-speakeasy-lounge`**, as a new member-facing channel in config.
+- **Everything else stays in the admin channel,** as today: system, admin, server status and bot status messages, including run reports, health alerts and permission alerts.
 
 Still open:
-- Whether a random fortune-style quote goes with it, and if so where from: a text file (the classic `fortune` format, entries separated by `%` lines) or a URL fetched and cached.
-- The channel: presumably `#the-speakeasy-lounge`, as a new config key.
+- Where the daily quote comes from: a text file (the classic `fortune` format, entries separated by `%` lines), a URL fetched and cached, or both.
+- What time it posts, and whether it repeats quotes before the list runs out.
 
 Known costs:
 - Needs Discord's privileged **Server Members** intent. It's a portal toggle, and no review is needed under 100 servers.
-- The bot must handle member-join events.
+- The bot must handle member-join events (for the welcome only; the daily quote runs on the scheduler).
 - `site/privacy.html` says the bot "doesn't look at the member list", so that has to change.
 - Any quote text from outside is untrusted: escape it, no mentions except the new member, and a length cap.
 
