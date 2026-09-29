@@ -279,8 +279,10 @@ class _Raw:
 
     text: str
     cite: str | None
-    # The last nested line, which is where a theme page keeps its source.
-    last_cite: str | None
+    # What a theme page wants instead of `cite`: the first nested line that
+    # begins with an internal wiki link, else the first non-blank one.
+    linked_cite: str | None
+    first_cite: str | None
     headings: list[str]
     dialogue: bool
 
@@ -288,6 +290,18 @@ class _Raw:
 def _skips_heading(text: str) -> bool:
     text = text.strip()
     return bool(_SKIP_PREFIX_RE.match(text)) or text.casefold() in _SKIP_EXACT
+
+
+def _is_internal_link(attrs: list[tuple[str, str | None]]) -> bool:
+    """True for an `<a>` that points at another Wikiquote page (`/wiki/...`).
+
+    Interwiki links (`class="extiw"`) and external ones go to somebody else's
+    site, and a note that opens with one isn't a source line.
+    """
+    values = dict(attrs)
+    classes = {c.lower() for c in (values.get("class") or "").split()}
+    href = (values.get("href") or "").strip()
+    return href.startswith("/wiki/") and not classes & {"extiw", "external"}
 
 
 def _one_line(parts: list[str]) -> str:
@@ -345,10 +359,14 @@ class _PageParser(HTMLParser):
         self._item_parts: list[str] = []
         self._item_headings: list[str] = []
         self._item_cite: str | None = None
-        self._item_last_cite: str | None = None
+        self._item_linked_cite: str | None = None
+        self._item_first_cite: str | None = None
         self._cite_at: int | None = None
         self._cite_parts: list[str] = []
         self._cite_seen = False
+        # None until the line's first child settles it: True if that child is
+        # an internal wiki link with nothing but whitespace before it.
+        self._cite_linked: bool | None = None
 
         self._dl_at: int | None = None
         self._dl_lines: list[str] = []
@@ -369,7 +387,7 @@ class _PageParser(HTMLParser):
             if self._is_ignored(tag, attrs):
                 self._ignore_from = index
             else:
-                self._open(tag, index)
+                self._open(tag, index, attrs)
         if self._ignore_from is not None and tag in _HEADING_LEVELS:
             if self._hidden_heading_at is None:
                 self._hidden_heading_at = index
@@ -446,7 +464,7 @@ class _PageParser(HTMLParser):
             # ever lands inside one, it still ends the exchange.
             self._flush_dl()
 
-    def _open(self, tag: str, index: int) -> None:
+    def _open(self, tag: str, index: int, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _HEADING_LEVELS:
             self._heading_at, self._heading_level, self._heading_parts = (
                 index,
@@ -460,10 +478,20 @@ class _PageParser(HTMLParser):
                     self._end_item()
                 self._item_at, self._item_parts = index, []
                 self._item_headings, self._item_cite = self._context(), None
-                self._item_last_cite, self._cite_seen = None, False
+                self._item_linked_cite = self._item_first_cite = None
+                self._cite_seen = False
             elif lists == ["ul", "ul"] and self._item_at is not None:
                 if self._cite_at is None:
                     self._cite_at, self._cite_parts = index, []
+                    self._cite_linked = None
+        elif tag == "a":
+            if (
+                self._cite_at is not None
+                and self._lists() == ["ul", "ul"]
+                and self._cite_linked is None
+                and not "".join(self._cite_parts).strip()
+            ):
+                self._cite_linked = _is_internal_link(attrs)
         elif tag == "dl":
             if not self._lists() and self._counting() and self._dl_at is None:
                 self._dl_at, self._dl_lines, self._dl_headings = index, [], self._context()
@@ -516,13 +544,18 @@ class _PageParser(HTMLParser):
         text = _one_line(self._cite_parts)
         if len(text) > _CITATION_MAX_CHARS:
             text = text[: _CITATION_MAX_CHARS - 1].rstrip() + "…"
-        # Author and work pages want the first nested line; theme pages put
-        # the translation first and the source last, so they want the last.
-        # Blank ones don't count as "last", so a stray empty <li> can't wipe a real source.
+        # Author and work pages want the first nested line. Theme pages can
+        # open with a translation, or close with a note ("Variants: ..."), so
+        # they want the first line that starts with a link to another wiki
+        # page, which is how the source line is written. A blank <li> counts
+        # for nothing on a theme page, so a stray one can't hide a real source.
         if not self._cite_seen:
             self._item_cite = text or None
         if text:
-            self._item_last_cite = text
+            if self._item_first_cite is None:
+                self._item_first_cite = text
+            if self._cite_linked and self._item_linked_cite is None:
+                self._item_linked_cite = text
         self._cite_at, self._cite_seen = None, True
 
     def _end_item(self) -> None:
@@ -532,7 +565,8 @@ class _PageParser(HTMLParser):
                 _Raw(
                     text,
                     self._item_cite,
-                    self._item_last_cite,
+                    self._item_linked_cite,
+                    self._item_first_cite,
                     self._item_headings,
                     dialogue=False,
                 )
@@ -549,7 +583,7 @@ class _PageParser(HTMLParser):
     def _flush_dl(self) -> None:
         if self._dl_at is not None and self._dl_lines:
             self.raw.append(
-                _Raw("\n".join(self._dl_lines), None, None, self._dl_headings, dialogue=True)
+                _Raw("\n".join(self._dl_lines), None, None, None, self._dl_headings, dialogue=True)
             )
         self._dl_lines = []
 
@@ -572,7 +606,7 @@ def _page_kind(title: str, headings: list[tuple[int, str]]) -> PageKind:
 def _attribution(kind: PageKind, title: str, raw: _Raw) -> str | None:
     """Build the attribution for one quote, every part of it taken from the page."""
     if kind == "theme":
-        return raw.last_cite
+        return raw.linked_cite or raw.first_cite
     if kind == "work":
         return ", ".join([*raw.headings, title])
     return ", ".join([title, *raw.headings, *([raw.cite] if raw.cite else [])])

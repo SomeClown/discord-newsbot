@@ -401,27 +401,79 @@ def test_a_second_skipped_heading_inside_a_skipped_section_does_not_extend_it():
 _TWO_LINES = "<ul><li>t<ul><li>FIRST</li><li>SECOND</li></ul></li></ul>"
 
 
-def test_theme_page_uses_the_last_nested_line_as_the_citation():
+def _theme(*lines: str):
+    """Parse a one-quote theme page whose nested lines are the given `<li>` bodies."""
+    items = "".join(f"<li>{line}</li>" for line in lines)
+    (q,) = parse_page("Friendship", _letters("ABC") + f"<ul><li>t<ul>{items}</ul></li></ul>").quotes
+    return q
+
+
+_SRC = '<a href="/wiki/Cicero" title="Cicero">Cicero</a>, De Officiis.'
+
+
+def test_theme_page_with_no_linked_line_falls_back_to_the_first():
+    # Was "last line" until the link rule replaced it; plain text has no link to find.
     (q,) = parse_page("Friendship", _letters("ABC") + _TWO_LINES).quotes
-    assert q.attribution == "SECOND"
+    assert q.attribution == "FIRST"
+
+
+def test_theme_page_translation_first_linked_source_second():
+    assert _theme("A translation.", _SRC).attribution == "Cicero, De Officiis."
+
+
+def test_theme_page_linked_source_first_note_second():
+    assert _theme(_SRC, "Variants: something else.").attribution == "Cicero, De Officiis."
+
+
+def test_theme_page_first_linked_line_wins_over_a_later_one():
+    later = '<a href="/wiki/Seneca">Seneca</a>, Letters.'
+    assert _theme("note", _SRC, later).attribution == "Cicero, De Officiis."
+
+
+def test_theme_page_line_that_starts_with_text_then_links_does_not_count():
+    # "As quoted by" comes before the link, so the line doesn't begin with one.
+    quoted = 'As quoted by <a href="/wiki/Seneca">Seneca</a>.'
+    assert _theme(quoted, "second").attribution == "As quoted by Seneca."
+
+
+def test_theme_page_leading_whitespace_before_the_link_is_fine():
+    assert _theme("note", "  \n " + _SRC).attribution == "Cicero, De Officiis."
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        '<a href="https://en.wikipedia.org/wiki/Cicero" class="extiw">Cicero</a>',
+        '<a href="/wiki/Cicero" class="extiw">Cicero</a>',
+        '<a href="https://example.com/x" class="external text">Cicero</a>',
+        '<a href="http://example.com/x">Cicero</a>',
+        '<a href="/wiki/Cicero" class="external">Cicero</a>',
+    ],
+)
+def test_theme_page_interwiki_and_external_links_do_not_count(link):
+    # The second line is the real source; the first only looks like one.
+    assert _theme(f"{link}, first.", _SRC).attribution == "Cicero, De Officiis."
+
+
+def test_theme_page_blank_first_nested_line_is_skipped():
+    assert _theme(" ", "plain second").attribution == "plain second"
+    assert _theme(" ", "note", _SRC).attribution == "Cicero, De Officiis."
 
 
 def test_theme_page_with_one_nested_line_uses_it():
-    (q,) = parse_page(
-        "Friendship", _letters("ABC") + "<ul><li>t<ul><li>ONLY</li></ul></li></ul>"
-    ).quotes
-    assert q.attribution == "ONLY"
+    assert _theme("ONLY").attribution == "ONLY"
 
 
 def test_theme_page_ignores_a_blank_trailing_nested_line():
-    html = _letters("ABC") + "<ul><li>t<ul><li>SOURCE</li><li> </li></ul></li></ul>"
-    (q,) = parse_page("Friendship", html).quotes
-    assert q.attribution == "SOURCE"
+    assert _theme("SOURCE", " ").attribution == "SOURCE"
 
 
-def test_theme_page_last_citation_is_capped_like_the_first():
-    html = _letters("ABC") + f"<ul><li>t<ul><li>a</li><li>{'word ' * 60}</li></ul></li></ul>"
-    (q,) = parse_page("Friendship", html).quotes
+def test_theme_page_citation_is_capped_like_the_author_one():
+    long_line = f'<a href="/wiki/X">{"word " * 60}</a>'
+    q = _theme("a", long_line)
+    assert len(q.attribution) == 150 and q.attribution.endswith("…")
+    # The fallback (no link anywhere) gets the same cap.
+    q = _theme(f"{'word ' * 60}", "b")
     assert len(q.attribution) == 150 and q.attribution.endswith("…")
 
 

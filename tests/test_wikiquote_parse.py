@@ -189,18 +189,19 @@ def test_theme_page_counts(friendship):
 def test_theme_attribution_is_the_citation_alone(friendship):
     q = _by_start(friendship, "Friends are born, not made.")
     assert q.attribution == "Henry Adams, The Education of Henry Adams (1907), Ch. VII."
-    # A theme page keeps the source in the last nested line; anything before
-    # it can be a translation. The Latin item has both.
+    # The citation is the first nested line that begins with an internal wiki
+    # link. "Last line" (e5580cc) fixed the Latin item, whose first line is a
+    # translation, but broke the three whose last line is a note.
     q = _by_start(friendship, "Non nobis solum nati sumus")
     assert q.attribution == "Cicero, De Officiis Book I, section 22."
     assert "We are not born, we do not live" not in q.attribution
-    # Documented cost of "last": these items end in a note, not a source.
     q = _by_start(friendship, "my friend He was quite a dear")
-    assert q.attribution == "2015 - on her Petticoat Junction (1963) co-star Edgar Buchanan"
+    assert q.attribution == "June Lockhart"
     q = _by_start(friendship, "Stay is a charming word")
-    assert (
-        q.attribution == "This quote is often misattributed to Alcott's daughter Louisa May Alcott."
-    )
+    assert q.attribution == "Amos Bronson Alcott, Concord Days (1872), p. 124."
+    q = _by_start(friendship, "The best friend is he that")
+    assert q.attribution == "Aristotle, Nicomachean Ethics (c. 325 BC), Book IX, 1168.b1"
+    assert "Variants" not in q.attribution
 
 
 def test_theme_quotes_with_no_citation_are_dropped_and_counted(friendship):
