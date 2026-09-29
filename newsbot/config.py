@@ -30,8 +30,11 @@ from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, w
 
 Trust = Literal["official", "press", "community"]
 
-_TOPIC_KEY_RE = re.compile(r"^[a-z0-9_]+$")
-_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+# `\Z`, not `$`: in Python, `$` also matches just before a trailing newline,
+# so "08:00\n" (one YAML block scalar away) used to pass as a time. The
+# test-engineer found that one; I'd written `$` out of pure habit.
+_TOPIC_KEY_RE = re.compile(r"^[a-z0-9_]+\Z")
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 # Discord allows 25 choices per slash-command option, and /news recent spends
 # one of them on "All". Hence 24, not the round number I first wrote.
 _MAX_TOPICS = 24

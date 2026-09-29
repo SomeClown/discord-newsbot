@@ -711,10 +711,6 @@ def test_bad_times_are_rejected(tmp_path, t):
     assert "lounge.daily_quote.time" in _errors(tmp_path, {"daily_quote": {"time": t}})
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_TIME_RE ends in `$`, which matches before a trailing newline, so '08:00\\n' loads",
-)
 def test_time_with_trailing_newline_is_rejected(tmp_path):
     assert "lounge.daily_quote.time" in _errors(tmp_path, {"daily_quote": {"time": "08:00\n"}})
 

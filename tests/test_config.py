@@ -750,3 +750,18 @@ alerts:
     with caplog.at_level("WARNING"):
         _load_with(tmp_path, text)
     assert not any("allow_test_command" in record.message for record in caplog.records)
+
+
+def test_digest_time_with_trailing_newline_rejected(tmp_path):
+    # Same `$`-matches-before-newline trap the lounge's time setting had;
+    # both share _TIME_RE, so both get the regression test. The `\n` below
+    # is a real newline inside the YAML double-quoted string.
+    text = f"""
+guild_id: 1
+digest:
+  time: "09:00\\n"
+  timezone: "UTC"
+{VALID_TAIL}
+"""
+    with pytest.raises(ConfigError, match="digest.time"):
+        _load_with(tmp_path, text)
