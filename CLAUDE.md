@@ -24,26 +24,7 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
-**Future feature: bot-posted welcome messages (discussion stage, 2026-09-29; nothing designed yet).** Discord's built-in welcome used to land in the admin channel because that was the server's System Messages Channel. The owner moved that setting to `#the-speakeasy-lounge` on 2026-09-29 (no code).
-
-Decided so far:
-- **Replace Discord's welcome** with the bot's own, and switch Discord's built-in welcome off in Server Settings → Overview.
-- **The owner writes one static welcome message** that everyone gets on joining.
-- **A separate daily "welcome to the day" message:** one random fortune-style quote, posted once a day, not tied to anyone joining.
-- **Both go to `#the-speakeasy-lounge`**, as a new member-facing channel in config.
-- **Everything else stays in the admin channel,** as today: system, admin, server status and bot status messages, including run reports, health alerts and permission alerts.
-
-Still open:
-- Where the daily quote comes from: a text file (the classic `fortune` format, entries separated by `%` lines), a URL fetched and cached, or both.
-- What time it posts, and whether it repeats quotes before the list runs out.
-
-Known costs:
-- Needs Discord's privileged **Server Members** intent. It's a portal toggle, and no review is needed under 100 servers.
-- The bot must handle member-join events (for the welcome only; the daily quote runs on the scheduler).
-- `site/privacy.html` says the bot "doesn't look at the member list", so that has to change.
-- Any quote text from outside is untrusted: escape it, no mentions except the new member, and a length cap.
-
-Path: a `docs/design.md` section, then an `architect` plan.
+**In progress: lounge welcomes and daily quote (v2.2).** Designed in `docs/design.md` §14 (approved 2026-09-29) on branch `feat/lounge`. A bot-posted welcome and a daily fortune-style quote go to `#the-speakeasy-lounge`; everything else stays in the admin channel. Next: an `architect` plan in `docs/plans/`. That includes the open item of where this server's quotes come from, plus a redistributable starter set for self-hosters. The Server Members intent must be enabled in the Developer Portal before deploy.
 
 **Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
 - **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.

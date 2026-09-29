@@ -431,3 +431,66 @@ The combined digest channel goes away. Each game's daily digest posts to its own
 **Unchanged.** `/news recent`, `/news search`, `/newsbot status|run-now|preview` (preview shows what each channel would get), the 09:00 run's SHiFT code check, retention, backups.
 
 **Rollback.** Implementation needed one additive schema change after all: migration 003 adds `alerted_codes.from_roundup` (backfilled from `status='roundup'`), because §13's original plan to reuse `status='posted'` for a roundup-posted code turned out to collide with `/shift codes`'s "from a roundup" marker; nothing else on the row would have distinguished the two. Migration 003 is purely additive, the same shape as 002: v1.3.0 runs unmodified against a v2 database, it just never reads or writes the new column. Rolling back means restoring a v1 `config.yaml` (v1.3.0 requires `digest.channel_id` and rejects unknown `alerts` keys, so the v2-shaped config won't load as-is) along with `TAG=1.3.0`; no database restore is needed either direction.
+
+## 14. Lounge: bot welcomes and a daily quote (approved 2026-09-29)
+
+Two member-facing messages in a new "lounge" channel (`#the-speakeasy-lounge` on the prod server): a welcome for each new member, replacing Discord's built-in random welcome, and one quote a day, fortune style. Everything else stays in the admin channel: system, admin, server status and bot status messages, run reports, health and permission alerts. Owner decisions: replace Discord's welcome with one static welcome the owner writes, kept in `config.yaml` (A); the quote source is a local file or an `https://` address (C); the quote posts at its own configurable time, default 08:00, and a missed day is skipped, not caught up (B); no quote repeats until every quote has been used (B); handle servers with and without rules screening; never welcome bots; welcome a given member at most once per 24 hours. Built into the existing bot, not a separate service. The server's System Messages Channel already points at the lounge (owner, 2026-09-29), so Discord's own welcome lands there until this ships.
+
+**Config.** A new optional top-level block; absent means both features are off.
+```yaml
+lounge:
+  channel_id: 123456789012345678
+  welcome:
+    enabled: true
+    message: |
+      Welcome to the speakeasy, {member}! ...
+  daily_quote:
+    enabled: true
+    time: "08:00"          # HH:MM in digest.timezone
+    source: quotes.txt     # file path, or an https:// address
+```
+- `channel_id` is required when either feature is enabled (validation error otherwise).
+- `welcome.message` supports `{member}` (a mention of the new member) and `{server}` (the server's name). Other `{...}` text is a validation error, so a typo fails at startup instead of posting literally. After substitution with a worst-case mention it must fit Discord's 2,000-character limit, checked at startup.
+- `daily_quote.time` must be a valid `HH:MM`. `source` is a path (relative to the config file's directory) or an `https://` URL; plain `http://` is rejected.
+- A config error of any kind stops the bot at startup with a clear message, the same as every other section.
+
+**Components.**
+- `newsbot/lounge/quotes.py`: load a source, parse it, pick the day's quote. No Discord code.
+- `newsbot/lounge/welcome.py`: render the welcome and decide whether a member should be welcomed now. No Discord I/O beyond what its caller passes in.
+- `newsbot/bot/client.py`: requests the privileged Server Members intent, handles `on_member_join` and `on_member_update`, and schedules the quote job.
+- Migration 004: a `lounge_quotes_used` table (quote hash, used-at timestamp) plus the last-posted date for the once-a-day guard. Purely additive.
+
+**Welcome flow.**
+1. On join: if the member is a bot, stop.
+2. If the member is pending rules screening (`member.pending`), do nothing now; `on_member_update` welcomes them when `pending` goes from true to false. A server without screening never sets `pending`, so its members are welcomed on join. Behavior with Discord's newer Onboarding flow is verified in the test guild before release; if it differs, the plan adjusts this step, not the rest.
+3. If the member was welcomed in the last 24 hours, stop. This is an in-memory map of user ID to time, pruned as it goes and never written to disk; a restart forgets it, which at worst means a second welcome for someone who left and rejoined across the restart.
+4. Post the rendered message to the lounge with `AllowedMentions(users=[member], everyone=False, roles=False)`. The owner's text is trusted and posted as written (formatting, emoji and channel links work). The member appears only as a mention, never as their display name, so a hostile name can't format or ping anything.
+
+**Daily quote flow.**
+1. An APScheduler cron job at `daily_quote.time` in `digest.timezone`, with a small `misfire_grace_time` (a few minutes) and coalescing, so a run missed by longer than that is skipped.
+2. If the database says today's quote already posted, stop (guards a restart near the posting time).
+3. Load the source. A file is read from disk. A URL is fetched through the shared HTTP client (the usual `NEWSBOT_CONTACT` User-Agent) with a 10-second timeout and a 1 MB cap; the response must be text. A good download is saved next to the database as the last good copy; on any failure the last good copy is used instead.
+4. Parse: split on lines consisting only of `%` (the `fortune` format), strip each entry, drop empty entries and any too long to post, and log how many were dropped.
+5. Pick: hash each quote's normalized text. Candidates are current quotes not in `lounge_quotes_used`. If there are none, clear the table (starting a new deck), excluding the most recently posted quote so a reshuffle can't repeat yesterday. Choose at random, record the hash and date, post. Because the deck is keyed by text, adding, removing or reordering quotes needs no bookkeeping: new quotes join the current deck and removed ones never come up.
+6. Post a short header plus the quote. The quote is untrusted (especially from a URL): it goes through `esc()` like news text, and the message is sent with `AllowedMentions.none()`. `-- Author` attribution lines are content and are kept.
+
+**Errors.** Lounge members only ever see a welcome or a quote; problems go to the admin channel.
+- No usable quote (missing file, failed download with no saved copy, or no valid entries): that day is skipped with one admin message saying why.
+- Discord refuses a post: logged and reported to the admin channel. A failed welcome is not retried.
+
+**Permissions and rollout.**
+- The startup permission check adds the lounge channel when either feature is on: View Channel and Send Messages.
+- **The Server Members intent must be enabled in the Discord Developer Portal before deploying**, for the dev bot and the prod bot. Requesting it without that makes Discord refuse the connection, so the bot won't start. `docs/deploy.md` and `docs/self-host.md` say so as the first step.
+- Rollout order: enable the intent, deploy, then switch off Discord's built-in welcome in Server Settings, so there's never a gap with no welcome.
+
+**Privacy.** `site/privacy.html` currently says the bot doesn't look at the member list. It changes to say that the bot notices when someone joins so it can welcome them, remembers that only in memory for up to 24 hours, and stores nothing about them. The quote table holds hashes of quote text only.
+
+**Testing.** Automated: parsing (`%` splitting, blank and oversized entries), the last-good-copy fallback, the deck (no repeats, edits to the list, no repeat across a reshuffle), the welcome decision (bots, pending, 24-hour rule), message safety (`@everyone` in the owner's text and a hostile quote both inert), the once-a-day guard, and missed-means-skipped. Test guild: joins with screening off and on, a quote triggered early, a URL source, and the admin message for a broken source.
+
+**Open items for planning.**
+- **Where this server's quotes come from.** To be discussed with the owner during planning: which collections suit a gaming server's lounge, and where the list lives (a file on the Droplet or a URL the owner can edit).
+- **A starter set for other installs.** Self-hosters need a default `quotes.txt` that works out of the box. Its contents must be ones the project can actually redistribute: owner-written, public domain, or clearly licensed for it. Many quote collections, including parts of the classic `fortune` files, are not.
+- **Exact wording** of the quote header and the owner's welcome text.
+- **A way to trigger a quote early** for testing (an admin command or a CLI flag), decided in planning.
+
+**Rollback.** Migration 004 is additive, so v2.1.1 runs against a v2.2 database untouched. v2.1.1's config loader ignores unrecognized top-level keys, so the `lounge:` block can stay in `config.yaml`. Rolling back is `TAG=2.1.1` plus switching Discord's built-in welcome back on; the Server Members intent can stay enabled.
