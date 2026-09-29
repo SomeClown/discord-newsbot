@@ -152,6 +152,25 @@ class CodeView:
 
 
 @dataclass(frozen=True)
+class LoungeState:
+    """The daily quote's once-a-day guard, read out of `lounge_state`."""
+
+    last_quote_date: str | None
+
+
+@dataclass(frozen=True)
+class QuoteDeckState:
+    """One source's deck: the hashes already used, and the most recent of them.
+
+    `last_hash` is what keeps a reshuffle from serving yesterday's quote
+    again; it's `None` for a source that has never posted.
+    """
+
+    used: frozenset[str]
+    last_hash: str | None
+
+
+@dataclass(frozen=True)
 class StatusSnapshot:
     """Everything `/newsbot status` needs, gathered in one query pass."""
 

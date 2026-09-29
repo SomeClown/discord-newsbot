@@ -28,7 +28,9 @@ from newsbot.store.models import (
     AlertStatus,
     CodeView,
     DigestRow,
+    LoungeState,
     PriorStory,
+    QuoteDeckState,
     SourceHealthRow,
     StatusSnapshot,
     StoredItem,
@@ -672,6 +674,93 @@ def query_codes(
         )
         for row in rows
     ], total
+
+
+# --- Lounge (design.md §14) ---
+#
+# `lounge_quotes_used` is the per-source no-repeat deck and `lounge_state`
+# holds the once-a-day guard. Like the SHiFT tables above, retention
+# (`purge_older_than`) never touches either: a quote used a year ago is
+# still used.
+
+
+def get_lounge_state(conn: sqlite3.Connection) -> LoungeState:
+    """Read `lounge_state`. A missing `last_quote_date` reads as `None`."""
+    row = conn.execute("SELECT value FROM lounge_state WHERE key = 'last_quote_date'").fetchone()
+    return LoungeState(last_quote_date=row["value"] if row else None)
+
+
+def quote_deck_state(conn: sqlite3.Connection, source_key: str) -> QuoteDeckState:
+    """Return the hashes `source_key` has used and the most recent one.
+
+    "Most recent" is the greatest `used_at`, with `rowid` breaking a tie
+    (two claims inside the same clock tick, which only a test with a frozen
+    clock ever manages).
+    """
+    rows = conn.execute(
+        "SELECT quote_hash FROM lounge_quotes_used WHERE source_key = ? "
+        "ORDER BY used_at DESC, rowid DESC",
+        (source_key,),
+    ).fetchall()
+    hashes = [row["quote_hash"] for row in rows]
+    return QuoteDeckState(used=frozenset(hashes), last_hash=hashes[0] if hashes else None)
+
+
+def claim_quote(
+    conn: sqlite3.Connection,
+    *,
+    source_key: str,
+    quote_hash: str,
+    local_day: str,
+    reshuffle: bool,
+    force: bool,
+    now: Callable[[], datetime] | None = None,
+) -> bool:
+    """Record today's quote as used, or say no. True means the caller won and should post.
+
+    Record-then-post, same shape as `claim_codes`: this runs before the
+    Discord call, so a post that fails leaves the quote used and the day
+    done (one admin alert, no retry).
+
+    `local_day` is the date in `cfg.digest.timezone` as ISO text. Unless
+    `force`, a `local_day` that already matches `last_quote_date` refuses
+    and writes nothing. `force` is `/newsbot quote-now` after its
+    confirmation. `reshuffle` deletes only `source_key`'s rows first, so
+    the deck starts over without touching any other source's.
+
+    Runs inside `BEGIN IMMEDIATE` for the reason `claim_codes` does: the
+    scheduled job and `quote-now` can land in the same second, and the
+    loser has to wait for the winner's committed date instead of both
+    reading the same stale one and both posting.
+    """
+    now_iso = _resolve_now(now)
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not force and get_lounge_state(conn).last_quote_date == local_day:
+            conn.execute("ROLLBACK")
+            return False
+        if reshuffle:
+            conn.execute("DELETE FROM lounge_quotes_used WHERE source_key = ?", (source_key,))
+        conn.execute(
+            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_key, quote_hash) DO UPDATE SET used_at = excluded.used_at",
+            (source_key, quote_hash, now_iso),
+        )
+        conn.execute(
+            "INSERT INTO lounge_state (key, value) VALUES ('last_quote_date', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (local_day,),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return True
 
 
 # --- Read path: /news commands and /newsbot status ---
