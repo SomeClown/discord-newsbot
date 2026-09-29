@@ -437,6 +437,23 @@ async def test_confirming_the_prompt_for_a_future_last_quote_date_forces_the_run
     assert bot.calls == [True]
 
 
+@pytest.mark.parametrize("stored", ["2026-09-30", "2027-01-01", "2099-12-31"])
+async def test_any_later_last_quote_date_gets_the_prompt_and_cancel_runs_nothing(
+    db_path, monkeypatch, stored
+):
+    _freeze(monkeypatch, NOON_UTC)
+    _set_last_quote_date(db_path, stored)
+    bot = SpyBot(db_path)
+
+    interaction = await _click_through_the_prompt(_lounge_cfg(), bot, monkeypatch, "Cancel")
+
+    assert interaction.response.messages == [
+        ("Today's quote already posted. Post another one?", True)
+    ]
+    assert bot.calls == []
+    assert _last_day(db_path) == stored
+
+
 # --- run_quote misbehaving ---
 
 
