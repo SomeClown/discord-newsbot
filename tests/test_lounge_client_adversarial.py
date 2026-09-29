@@ -685,6 +685,15 @@ def _no_network_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
 
 
+async def test_the_no_network_client_really_refuses_a_request():
+    client = _no_network_client()
+    try:
+        with pytest.raises(pytest.fail.Exception, match="unexpected HTTP request"):
+            await client.get("https://example.invalid/")
+    finally:
+        await client.aclose()
+
+
 async def test_cancelled_run_releases_the_quote_lock(db_path, monkeypatch):
     bot = _bot(_cfg(welcome=False, quote=True), db_path)
     bot.http_client = _no_network_client()
