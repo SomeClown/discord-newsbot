@@ -1900,6 +1900,11 @@ async def test_url_credentials_and_query_never_show_up_in_the_problem_or_logs(tm
     cache key still uses the full URL, so two tokens are still two sources.
     """
     url = "https://user:hunter2@example.test/q.txt?token=abc123#frag9"
+    # Production turns httpx's own request logging down to WARNING
+    # (logging_setup.py), because it prints every URL whole. Mirror that
+    # here, or this test fails whenever it runs without the rest of the
+    # suite having set the level first.
+    caplog.set_level(logging.WARNING, logger="httpx")
     with caplog.at_level(logging.DEBUG):
         result = await _load(_url(url), tmp_path / "cache", lambda r: httpx.Response(403))
         seeded = await _load(_url(url), tmp_path / "cache2", lambda r: _text_response())

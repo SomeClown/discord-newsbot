@@ -149,8 +149,14 @@ def shown_url(url: str) -> str:
         parts = urlsplit(url.strip())
     except ValueError:
         return "(unreadable address)"
+    # An address typed without its `//` ("https:user:pw@host/x") has no
+    # netloc for urlsplit to find, so the credentials land in the path and
+    # would be echoed right along with it. With no netloc, a path holding an
+    # `@` is treated as holding a secret and isn't shown at all.
+    if not parts.netloc and "@" in parts.path:
+        return f"{parts.scheme}:(address hidden)" if parts.scheme else "(address hidden)"
     host = parts.netloc.rpartition("@")[2]
-    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return urlunsplit((parts.scheme, host, parts.path, "", "")) or "(no address)"
 
 
 def plain_line(text: str, limit: int = 250) -> str:

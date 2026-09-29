@@ -94,15 +94,6 @@ def test_a_config_that_fails_on_a_url_source_never_prints_its_secrets(tmp_path, 
     assert _secrets_in(str(exc_info.value)) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "shown_url echoes the path verbatim, and a URL typed without its double "
-        "slash ('https:user:pw@host/x') has no netloc for urlsplit to strip: the "
-        "whole 'user:pw@host/x' becomes the path. The config error for the "
-        "not-https-looking address then prints the password."
-    ),
-)
 @pytest.mark.parametrize(
     "url",
     [
@@ -140,13 +131,13 @@ def test_shown_url_keeps_scheme_host_port_and_path(url, expected):
 
 
 @pytest.mark.parametrize("url", ["?token=abc", "#frag", "", "   "])
-def test_documented_a_query_or_fragment_alone_shows_as_an_empty_string(url):
-    # Nothing left after the strip. The config error then reads
-    # "... url '' isn't an https:// address", which is unhelpful for the
-    # admin but leaks nothing. A nicer message would be a fine tweak.
-    assert shown_url(url) == ""
+def test_a_query_or_fragment_alone_shows_as_no_address(url):
+    # Changed from showing '': nothing is left after the strip, and
+    # "url '' isn't an https:// address" told the admin nothing. It still
+    # leaks nothing.
+    assert shown_url(url) == "(no address)"
     problem = _source_problem(3, QuoteSourceCfg(kind="url", value=url))
-    assert problem == "lounge.daily_quote.sources[3].url '' isn't an https:// address"
+    assert problem == "lounge.daily_quote.sources[3].url '(no address)' isn't an https:// address"
 
 
 @pytest.mark.parametrize(
@@ -155,7 +146,10 @@ def test_documented_a_query_or_fragment_alone_shows_as_an_empty_string(url):
         ("ftp://u:pw@h.example/x?q=1", "ftp://h.example/x"),
         ("file:///etc/passwd", "file:///etc/passwd"),
         ("javascript:alert(1)", "javascript:alert(1)"),
-        ("mailto:a@b.example?subject=x", "mailto:a@b.example"),
+        # An @ in a netloc-less path now hides the path: it's how a password
+        # in "https:user:pw@host" would have leaked. A mailto address is
+        # collateral, and harmless to hide.
+        ("mailto:a@b.example?subject=x", "mailto:(address hidden)"),
     ],
 )
 def test_non_http_schemes_are_shown_and_refused(url, shown):
