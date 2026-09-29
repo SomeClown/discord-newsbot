@@ -24,6 +24,24 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
+**Future feature: bot-posted welcome messages (discussion stage, 2026-09-29; nothing designed yet).** Members joining the prod server currently get Discord's built-in random welcome, which showed up in the admin channel because that was the server's System Messages Channel. The owner is moving that setting to `#the-speakeasy-lounge` by hand (no code).
+
+Decided so far:
+- **Replace Discord's welcome** with the bot's own, and switch Discord's built-in welcome off in Server Settings → Overview.
+- **The owner writes one static welcome message** that everyone gets on joining.
+
+Still open:
+- Whether a random fortune-style quote goes with it, and if so where from: a text file (the classic `fortune` format, entries separated by `%` lines) or a URL fetched and cached.
+- The channel: presumably `#the-speakeasy-lounge`, as a new config key.
+
+Known costs:
+- Needs Discord's privileged **Server Members** intent. It's a portal toggle, and no review is needed under 100 servers.
+- The bot must handle member-join events.
+- `site/privacy.html` says the bot "doesn't look at the member list", so that has to change.
+- Any quote text from outside is untrusted: escape it, no mentions except the new member, and a length cap.
+
+Path: a `docs/design.md` section, then an `architect` plan.
+
 **Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
 - **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.
 - **AI summaries, web search and SHiFT alerts:** unlocked by the server admin's own API keys (bring your own key), or later by a paid Discord server subscription where the owner covers API costs (about $1 per server per month).
