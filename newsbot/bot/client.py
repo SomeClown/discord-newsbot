@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import socket
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -34,6 +35,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import discord
 import httpx
+from apscheduler.job import Job
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -44,6 +46,9 @@ from newsbot.bot.format import RenderedAlert, RenderedDigest
 from newsbot.bot.permissions import check_channels, render_permission_alert
 from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
+from newsbot.lounge.daily import QuoteDeps, QuoteOutcome, run_daily_quote
+from newsbot.lounge.sources import cache_dir_for
+from newsbot.lounge.welcome import RecentWelcomes, render_welcome, welcome_action
 from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import Deps, RunKind, RunMode, local_run_date, run_daily
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
@@ -136,6 +141,46 @@ def should_catch_up(now_local: datetime, digest_time: dt_time, existing: DigestR
 def _parse_digest_time(time_str: str) -> dt_time:
     hour, minute = (int(part) for part in time_str.split(":"))
     return dt_time(hour, minute)
+
+
+def build_intents(cfg: AppConfig) -> discord.Intents:
+    """The gateway intents: the defaults, plus Server Members only if welcomes are on.
+
+    Server Members is a privileged intent, which means it also has to be
+    switched on in the Developer Portal or Discord closes the connection
+    (`__main__` turns that into a readable message). The daily quote needs
+    nothing privileged, so a bot with welcomes off never asks. Presences and
+    message content stay off; I have no use for either and Discord has
+    opinions about people who ask for things they don't use.
+
+    Member chunking stays at its default: `on_member_update` only fires for
+    members in the cache, and chunking is how they get there.
+    """
+    intents = discord.Intents.default()
+    intents.members = cfg.lounge.welcome.enabled
+    return intents
+
+
+def schedule_daily_quote(
+    scheduler: AsyncIOScheduler, cfg: AppConfig, callback: Callable[[], Awaitable[None]]
+) -> Job:
+    """Add the daily-quote cron job: `daily_quote.time` in `digest.timezone`.
+
+    A five-minute grace and no more. The job store is in memory, so a bot
+    that was down at quote time simply skips the day, and one that wakes up
+    an hour late doesn't post a "morning" quote at lunch. There's no catch-up
+    in `on_ready` either; missed means skipped, on purpose.
+    """
+    tz = ZoneInfo(cfg.digest.timezone)
+    quote_time = _parse_digest_time(cfg.lounge.daily_quote.time)
+    return scheduler.add_job(
+        callback,
+        CronTrigger(hour=quote_time.hour, minute=quote_time.minute, timezone=tz),
+        id="daily-quote",
+        misfire_grace_time=300,
+        coalesce=True,
+        max_instances=1,
+    )
 
 
 # Errors worth retrying: the network blipped, or a request timed out
@@ -459,8 +504,9 @@ class NewsBot(discord.Client):
     """
 
     def __init__(self, cfg: AppConfig, secrets: Secrets, db_path: str) -> None:
-        intents = discord.Intents.default()
-        super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
+        super().__init__(
+            intents=build_intents(cfg), allowed_mentions=discord.AllowedMentions.none()
+        )
         self.cfg = cfg
         self.secrets = secrets
         self.db_path = db_path
@@ -491,6 +537,11 @@ class NewsBot(discord.Client):
         # by the next successful sweep, so a sweep that's failing on every
         # interval pages once instead of once an hour.
         self._sweep_crash_alerted = False
+        # In memory only, on purpose (design.md §14): who was welcomed in the
+        # last day. A restart forgets it.
+        self._recent_welcomes = RecentWelcomes()
+        # The scheduled quote and `/newsbot quote-now` take turns.
+        self._quote_lock = asyncio.Lock()
 
     async def _on_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -645,6 +696,9 @@ class NewsBot(discord.Client):
                 max_instances=1,
                 misfire_grace_time=300,
             )
+
+        if self.cfg.lounge.daily_quote.enabled:
+            schedule_daily_quote(self.scheduler, self.cfg, self._quote_job)
 
         self.scheduler.start()
 
@@ -825,6 +879,122 @@ class NewsBot(discord.Client):
                 self._sweep_crash_alerted = True
                 await self.alert(f"newsbot: SHiFT code sweep crashed: {exc}")
 
+    async def on_member_join(self, member: discord.Member) -> None:
+        if not self.cfg.lounge.welcome.enabled:
+            return
+        await self._maybe_welcome(member, "join")
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        """Welcome a member who just got through rules screening (`pending` true to false).
+
+        Nickname changes, role changes and everything else that fires this
+        event are none of our business.
+        """
+        if not self.cfg.lounge.welcome.enabled:
+            return
+        if before.pending and not after.pending:
+            await self._maybe_welcome(after, "accepted")
+
+    async def _maybe_welcome(self, member: discord.Member, event: str) -> None:
+        """Decide, record, render and post one welcome; problems go to the admin channel.
+
+        The log line carries the event, `pending`, `flags.value` and the
+        decision, and never the user ID or name: I want to see how Onboarding
+        behaves in the test guild without keeping a guest list in the logs.
+        The failure alert doesn't name the member either.
+        """
+        try:
+            action = welcome_action(
+                in_guild=member.guild.id == self.cfg.guild_id,
+                is_bot=member.bot,
+                pending=member.pending,
+            )
+            decision: str = action
+            # No await between the check and the record (they're one call), so
+            # two events for the same member can't both get through.
+            if action == "welcome" and not self._recent_welcomes.check_and_record(
+                member.id, datetime.now(UTC)
+            ):
+                decision = "recent"
+            logger.info(
+                "member event %s: pending=%s flags=%s decision=%s",
+                event,
+                member.pending,
+                member.flags.value,
+                decision,
+                extra={
+                    "welcome_event": event,
+                    "pending": member.pending,
+                    "flags": member.flags.value,
+                    "decision": decision,
+                },
+            )
+            if decision != "welcome":
+                return
+            text = render_welcome(
+                self.cfg.lounge.welcome.message,
+                member_mention=member.mention,
+                server_name=member.guild.name,
+            )
+            channel = await self._lounge_channel()
+            await channel.send(
+                text,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=[member], roles=False, replied_user=False
+                ),
+            )
+        except Exception as exc:
+            logger.exception("welcome failed")
+            await self.alert(
+                f"newsbot: couldn't post a welcome in the lounge ({type(exc).__name__}). "
+                "The details are in the bot's log."
+            )
+
+    async def _lounge_channel(self) -> discord.abc.Messageable:
+        channel_id = self.cfg.lounge.channel_id
+        if channel_id is None:
+            raise RuntimeError("lounge.channel_id is not set")
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            channel = await self.fetch_channel(channel_id)
+        return channel
+
+    def build_quote_deps(self) -> QuoteDeps:
+        """Assemble a fresh `QuoteDeps` for one quote run (the job or `quote-now`)."""
+        sources = self.cfg.lounge.daily_quote.sources
+        if self.http_client is None or sources is None:
+            raise RuntimeError("build_quote_deps() called before setup_hook() finished")
+
+        async def post(text: str) -> int:
+            channel = await self._lounge_channel()
+            sent = await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            return sent.id
+
+        return QuoteDeps(
+            sources=sources,
+            db_path=self.db_path,
+            http=self.http_client,
+            local_day=local_run_date(datetime.now(UTC), self.cfg.digest.timezone),
+            now=lambda: datetime.now(UTC),
+            post=post,
+            alert=self.alert,
+            rng=random.SystemRandom(),
+            cache_dir=cache_dir_for(self.db_path),
+        )
+
+    async def run_quote(self, force: bool) -> QuoteOutcome:
+        """Run the daily quote under the lock, so the job and `quote-now` can't overlap."""
+        async with self._quote_lock:
+            return await run_daily_quote(self.build_quote_deps(), force=force)
+
+    async def _quote_job(self) -> None:
+        try:
+            outcome = await self.run_quote(False)
+            logger.info("quote job finished", extra={"status": outcome.status})
+        except Exception as exc:  # the job boundary: nothing here may take the process down
+            logger.exception("daily quote job crashed at the job boundary")
+            await self.alert(f"newsbot: daily quote job crashed: {exc}")
+
     async def _retention_job(self) -> None:
         try:
             cutoff = datetime.now(UTC) - timedelta(days=_RETENTION_DAYS)
@@ -864,5 +1034,7 @@ __all__ = [
     "DiscordPublisher",
     "NewsBot",
     "NullPublisher",
+    "build_intents",
+    "schedule_daily_quote",
     "should_catch_up",
 ]

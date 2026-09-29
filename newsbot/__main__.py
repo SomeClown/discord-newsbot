@@ -19,6 +19,8 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+import discord
+
 from newsbot.bot.client import NewsBot
 from newsbot.config import ConfigError, load_config, load_secrets
 from newsbot.logging_setup import configure_logging
@@ -53,7 +55,19 @@ def main() -> int:
     # with our own JSON formatter (configure_logging, above); letting
     # discord.py's run() install its own handler on top would mean every
     # gateway log line prints twice, in two different formats.
-    bot.run(secrets.discord_token.get_secret_value(), log_handler=None)
+    try:
+        bot.run(secrets.discord_token.get_secret_value(), log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        # Welcomes ask for the Server Members intent; Discord closes the
+        # connection if the portal switch is off. Say which switch, and which
+        # config key to flip instead, rather than dumping a traceback.
+        print(
+            "newsbot: lounge.welcome.enabled needs the Server Members intent. "
+            "Turn it on in the Discord Developer Portal (Bot page, Privileged "
+            "Gateway Intents), or set lounge.welcome.enabled to false.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
