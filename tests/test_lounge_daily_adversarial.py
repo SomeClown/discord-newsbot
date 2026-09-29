@@ -540,21 +540,16 @@ async def test_a_post_failure_keeps_its_headline_when_the_notes_overflow_the_cap
     assert out.status == "post_failed"
     (text,) = spy.alerts
     assert len(text) <= 1900
-    assert text.startswith(
-        "newsbot: couldn't post today's quote in the lounge: Missing Permissions"
-    )
+    assert text.startswith("newsbot: couldn't post today's quote in the lounge: RuntimeError")
     assert all(len(line) <= 600 for line in text.splitlines()[1:])
 
 
-async def test_a_load_source_that_raises_kills_the_run_without_an_alert(
-    tmp_path, db_path, monkeypatch
-):
-    """`load_source` promises never to raise; if it does, nothing here catches it.
+async def test_a_load_source_that_raises_counts_as_a_failed_source(tmp_path, db_path, monkeypatch):
+    """`load_source` promises never to raise; if it does, that source just failed.
 
-    Documented (task 8's job wrapper is the safety net, and it has to be one):
-    the exception escapes `run_daily_quote`, no admin alert goes out from
-    here, the failed source's healthy neighbor is never tried, and nothing is
-    recorded, so a retry later that day can still post.
+    Changed from "the exception escapes the run": one broken loader shouldn't
+    cost the day, so the run notes it (by exception class name only) and
+    moves on to the healthy neighbor.
     """
     boom, good = _nowhere("boom.txt"), _file(tmp_path, "good.txt", ["One."])
 
@@ -565,10 +560,22 @@ async def test_a_load_source_that_raises_kills_the_run_without_an_alert(
 
     monkeypatch.setattr(daily, "load_source", fake)
     spy = Spy()
-    with pytest.raises(RuntimeError, match="contract"):
-        await run_daily_quote(_deps(db_path, [boom, good], spy, rng=_Ordered()))
+    out = await run_daily_quote(_deps(db_path, [boom, good], spy, rng=_Ordered()))
+    assert out.status == "posted"
+    assert len(spy.posts) == 1
+    assert "RuntimeError" in spy.alerts[0]
+    assert "contract" not in spy.alerts[0]
+
+
+async def test_a_load_source_that_raises_a_base_exception_still_propagates(db_path, monkeypatch):
+    async def fake(src, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(daily, "load_source", fake)
+    spy = Spy()
+    with pytest.raises(asyncio.CancelledError):
+        await run_daily_quote(_deps(db_path, [_nowhere("x.txt")], spy))
     assert spy.posts == [] and spy.alerts == []
-    assert _rows(db_path) == [] and _last_day(db_path) is None
 
 
 async def test_duplicate_sources_are_each_tried_and_each_reported(db_path, monkeypatch):
@@ -809,11 +816,6 @@ async def test_a_hostile_path_in_a_note_stays_on_its_own_line(tmp_path, db_path)
     assert text.splitlines()[1].startswith("file /nowhere/a newsbot: everything is fine b.txt")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="describe(src) isn't flattened in the every-source-failed alert, so a newline in a "
-    "file path splits the one-line '; ' list (daily.py run_daily_quote, `reasons`)",
-)
 async def test_a_hostile_path_cannot_add_lines_to_the_skipped_alert(db_path):
     bad = QuoteSourceCfg(kind="file", value="/nowhere/a\n@here everyone panic\nb.txt")
     spy = Spy()
@@ -823,11 +825,6 @@ async def test_a_hostile_path_cannot_add_lines_to_the_skipped_alert(db_path):
 
 @pytest.mark.parametrize("route", ["skipped", "noted"])
 @pytest.mark.parametrize("hostile", ["@everyone", "<@123456>", "[click](https://evil.example)"])
-@pytest.mark.xfail(
-    strict=True,
-    reason="plain_line only collapses whitespace: mention syntax and markdown links in a source "
-    "path reach the admin text live (safe only because task 8 sends with AllowedMentions.none())",
-)
 async def test_source_names_arrive_inert_in_admin_text(tmp_path, db_path, route, hostile):
     bad = _nowhere(f"{hostile}.txt")
     sources = [bad] if route == "skipped" else [bad, _file(tmp_path, "good.txt", ["One."])]
@@ -836,11 +833,6 @@ async def test_source_names_arrive_inert_in_admin_text(tmp_path, db_path, route,
     assert hostile not in spy.alerts[0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_post_reason passes the first line of the exception through, so an exception "
-    "carrying @everyone puts it in the alert live",
-)
 async def test_a_post_error_mentioning_everyone_is_defused(tmp_path, db_path):
     src = _file(tmp_path, "a.txt", ["One."])
     spy = Spy()
@@ -854,7 +846,8 @@ async def test_a_post_error_mentioning_everyone_is_defused(tmp_path, db_path):
     assert "@everyone" not in spy.alerts[0]
 
 
-async def test_a_post_error_is_one_line_and_at_most_200_characters(tmp_path, db_path):
+async def test_a_post_error_message_never_reaches_the_alert_only_its_class(tmp_path, db_path):
+    """Changed from "first line, at most 200 characters": the message is left out entirely."""
     src = _file(tmp_path, "a.txt", ["One."])
     spy = Spy()
 
@@ -864,11 +857,7 @@ async def test_a_post_error_is_one_line_and_at_most_200_characters(tmp_path, db_
     deps = _deps(db_path, [src], spy)
     deps.post = failing_post
     await run_daily_quote(deps)
-    (text,) = spy.alerts
-    assert "\n" not in text
-    assert "second line" not in text
-    reason = text.removeprefix("newsbot: couldn't post today's quote in the lounge: ")
-    assert reason.startswith("first real line z") and len(reason) == 200 and reason.endswith("…")
+    assert spy.alerts == ["newsbot: couldn't post today's quote in the lounge: RuntimeError"]
 
 
 @pytest.mark.parametrize("message", ["", "   ", "\n\n", "\n \n"])
@@ -927,11 +916,6 @@ async def test_a_one_character_quote_makes_every_post_error_collapse_to_its_clas
         ),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="_post_reason only checks for the whole raw quote text in the exception; an echo of "
-    "the escaped text, one line of it, or the attribution reaches the admin channel",
-)
 async def test_post_error_echoes_of_the_quote_never_reach_the_admin(
     db_path, monkeypatch, quote, echo
 ):
@@ -960,11 +944,6 @@ async def test_combining_characters_keep_the_alert_within_limits(db_path, monkey
     assert discord_len(text) <= 2000
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_cap counts code points, but Discord counts UTF-16 units: 1,900 astral characters "
-    "are 3,800 units, so an emoji-heavy URL path makes an over-length (rejected) admin message",
-)
 async def test_astral_characters_keep_the_alert_within_discords_limit(db_path):
     url = "https://example.test/" + "\U0001f36a" * 1500
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
@@ -1164,14 +1143,11 @@ async def test_a_normal_run_the_day_after_only_forced_runs_posts(tmp_path, db_pa
     assert _last_day(db_path) == "2026-09-30"
 
 
-async def test_the_date_guard_is_equality_not_ordering(tmp_path, db_path):
-    """Documented: a run for an *earlier* day than the recorded one posts, and rewinds the date.
+async def test_the_date_guard_refuses_an_earlier_day_too(tmp_path, db_path):
+    """A run for an *earlier* day than the recorded one is refused, and the date stays put.
 
-    With a sane clock this never happens. With a clock that steps back (or a
-    timezone edit mid-week) the guard sees "not the same day" and lets it
-    through; the day after that lets today through a second time. The owner
-    may want `<=` in `claim_quote`; that's an application change, so it's
-    only pinned here.
+    Changed from "posts and rewinds": `claim_quote`'s guard is now `<=`, so a
+    clock that steps back (or a timezone edit mid-week) can't post extras.
     """
     src = _file(tmp_path, "a.txt", [f"Q{i}." for i in range(6)])
     spy = Spy()
@@ -1180,7 +1156,8 @@ async def test_the_date_guard_is_equality_not_ordering(tmp_path, db_path):
         (await run_daily_quote(_deps(db_path, [src], spy, day=day, seed=i))).status
         for i, day in enumerate(order)
     ]
-    assert statuses == ["posted", "posted", "posted"]
+    assert statuses == ["posted", "already_posted", "already_posted"]
+    assert len(spy.posts) == 1
     assert _last_day(db_path) == DAY.isoformat()
 
 

@@ -282,14 +282,21 @@ def test_force_on_the_same_day_twice_wins_both_times(conn):
     assert repo.get_lounge_state(conn).last_quote_date == DAY1
 
 
-def test_an_earlier_day_after_a_later_one_wins_and_rewinds_last_quote_date(conn):
-    # Documented: the guard is "same day", not "not older than". If the
-    # clock goes backwards, the earlier day is accepted and becomes the
-    # date, so the later day can then win a second time.
+def test_an_earlier_day_after_a_later_one_is_refused_and_writes_nothing(conn):
+    # Changed from "wins and rewinds last_quote_date": the guard is now
+    # "not older than", so a clock stepping backwards can't post extra quotes.
     assert _claim(conn, quote_hash=H1, day=DAY2) is True
-    assert _claim(conn, quote_hash=H2, day=DAY1, m=1) is True
+    assert _claim(conn, quote_hash=H2, day=DAY1, m=1) is False
+    assert repo.get_lounge_state(conn).last_quote_date == DAY2
+    assert set(_rows(conn)) == {(WILDE, H1)}
+    assert _claim(conn, quote_hash=H3, day=DAY2, m=2) is False
+
+
+def test_a_forced_claim_for_an_earlier_day_still_wins_and_rewinds(conn):
+    # Force bypasses the guard and still stores its own day, as before.
+    assert _claim(conn, quote_hash=H1, day=DAY2) is True
+    assert _claim(conn, quote_hash=H2, day=DAY1, force=True, m=1) is True
     assert repo.get_lounge_state(conn).last_quote_date == DAY1
-    assert _claim(conn, quote_hash=H3, day=DAY2, m=2) is True
 
 
 def test_empty_day_is_accepted_once_then_refused_like_any_other_string(conn):

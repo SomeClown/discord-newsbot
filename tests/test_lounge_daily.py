@@ -12,7 +12,9 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import discord
 import httpx
 import pytest
 
@@ -281,7 +283,10 @@ async def test_post_failure_alerts_once_and_keeps_the_quote_used(tmp_path, db_pa
     src = _file(tmp_path, "a.txt", ["The teapot is not a suspect."])
 
     async def failing_post(text: str) -> int:
-        raise RuntimeError("403 Forbidden (error code: 50013): Missing Permissions\nmore detail")
+        raise discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"message": "Missing Permissions", "code": 50013},
+        )
 
     deps = _deps(db_path, [src], spy)
     deps.post = failing_post
@@ -289,7 +294,7 @@ async def test_post_failure_alerts_once_and_keeps_the_quote_used(tmp_path, db_pa
     assert out.status == "post_failed"
     assert spy.alerts == [
         "newsbot: couldn't post today's quote in the lounge: "
-        "403 Forbidden (error code: 50013): Missing Permissions"
+        "Forbidden (HTTP 403, Discord error 50013)"
     ]
     assert _last_day(db_path) == "2026-09-29"
     assert len(_rows(db_path)) == 1

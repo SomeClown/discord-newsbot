@@ -723,10 +723,13 @@ def claim_quote(
     done (one admin alert, no retry).
 
     `local_day` is the date in `cfg.digest.timezone` as ISO text. Unless
-    `force`, a `local_day` that already matches `last_quote_date` refuses
+    `force`, a `local_day` equal to or earlier than `last_quote_date` refuses
     and writes nothing. `force` is `/newsbot quote-now` after its
-    confirmation. `reshuffle` deletes only `source_key`'s rows first, so
-    the deck starts over without touching any other source's.
+    confirmation; it skips the guard entirely, and (unchanged) it still
+    stores its `local_day` as `last_quote_date`, even an earlier one.
+
+    `reshuffle` deletes only `source_key`'s rows first, so the deck starts
+    over without touching any other source's.
 
     Runs inside `BEGIN IMMEDIATE` for the reason `claim_codes` does: the
     scheduled job and `quote-now` can land in the same second, and the
@@ -740,7 +743,13 @@ def claim_quote(
     conn.isolation_level = None
     try:
         conn.execute("BEGIN IMMEDIATE")
-        if not force and get_lounge_state(conn).last_quote_date == local_day:
+        # ISO dates sort correctly as text, so `<=` covers "already done today"
+        # and "the clock jumped backwards" in one comparison. Without the
+        # second half, a backwards step let an earlier day through and the
+        # day after that let today through again, which is two quotes for one
+        # sunrise.
+        last_day = get_lounge_state(conn).last_quote_date
+        if not force and last_day is not None and local_day <= last_day:
             conn.execute("ROLLBACK")
             return False
         if reshuffle:

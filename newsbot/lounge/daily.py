@@ -22,8 +22,10 @@ The order of events, since it's the part that bites:
    post, say so in one admin message afterwards.
 
 Everything an admin sees is built here from source descriptions and problem
-strings that `sources.py` has already defused. Quote text, member names and
-URL credentials never go into it. This module builds no Discord objects: the
+strings, each flattened and escaped again on the way in (`_safe`), so the text
+is inert on its own. A failed post reports the exception's class name and
+Discord's status codes, never its message. Quote text, member names and URL
+credentials never go into it. This module builds no Discord objects: the
 caller injects `post` and `alert`, the way `SweepDeps` does.
 """
 
@@ -39,8 +41,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
+import discord
 import httpx
 
+from newsbot.bot.format import _truncate_utf16, esc
 from newsbot.config import QuoteSourceCfg
 from newsbot.lounge.quotes import QuotePick, choose_quote, render_quote_message
 from newsbot.lounge.sources import LoadedSource, cache_dir_for, describe, load_source
@@ -103,14 +107,24 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
     failures: list[tuple[QuoteSourceCfg, str]] = []
     chosen: tuple[QuoteSourceCfg, LoadedSource] | None = None
     for src in order:
-        loaded = await load_source(src, http=deps.http, cache_dir=cache_dir, now=deps.now())
+        try:
+            loaded = await load_source(src, http=deps.http, cache_dir=cache_dir, now=deps.now())
+        except Exception as exc:
+            # load_source swears it never raises. I believed it, which is why
+            # this used to take the whole day down. Now a broken loader is
+            # just a failed source; the class name is all the admin gets.
+            logger.error("Loading %s raised %s", describe(src), type(exc).__name__, exc_info=True)
+            failures.append((src, type(exc).__name__))
+            continue
         if loaded.quotes:
             chosen = (src, loaded)
             break
         failures.append((src, loaded.problem or "no reason given"))
 
     if chosen is None:
-        reasons = [f"{describe(src)}: {_reason(problem)}" for src, problem in failures]
+        reasons = [
+            f"{_safe(describe(src), _LINE_CHARS)}: {_reason(problem)}" for src, problem in failures
+        ]
         text = "newsbot: no lounge quote today. " + ("; ".join(reasons) or "no sources configured")
         logger.error("No lounge quote for %s: every source failed", day)
         await _tell_admin(deps, _cap(text))
@@ -131,7 +145,7 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
         message_id = await deps.post(render_quote_message(pick.quote))
     except Exception as exc:
         logger.error("Posting the lounge quote failed (%s)", type(exc).__name__, exc_info=True)
-        reason = _post_reason(exc, pick.quote.text)
+        reason = _post_reason(exc)
         lines = [f"newsbot: couldn't post today's quote in the lounge: {reason}", *notes]
         await _tell_admin(deps, _cap("\n".join(lines)))
         return QuoteOutcome("post_failed", source_key=src.key, notes=tuple(notes))
@@ -172,39 +186,75 @@ def _notes(
 ) -> list[str]:
     """The admin lines for a run that found quotes: sources that failed, and a fallback."""
     lines = [
-        plain_line(
-            f"{describe(src)} failed with no saved copy ({_reason(problem)}); used another source.",
+        _truncate_utf16(
+            f"{_safe(describe(src), _LINE_CHARS)} failed with no saved copy "
+            f"({_reason(problem)}); used another source.",
             _LINE_CHARS,
+            suffix="…",
         )
         for src, problem in failures
     ]
     if loaded.origin == "fallback":
         saved = f"its saved copy from {loaded.saved_on}" if loaded.saved_on else "its saved copy"
         lines.append(
-            plain_line(
-                f"{describe(used)} failed ({_reason(loaded.problem or 'no reason given')}); "
-                f"used {saved}.",
+            _truncate_utf16(
+                f"{_safe(describe(used), _LINE_CHARS)} "
+                f"failed ({_reason(loaded.problem or 'no reason given')}); used {saved}.",
                 _LINE_CHARS,
+                suffix="…",
             )
         )
     return lines
 
 
+def _safe(text: str, limit: int) -> str:
+    """Flatten to one line, escape, and cap at `limit` UTF-16 units.
+
+    Config values and exception text go through here before they touch admin
+    text, so the message is inert by itself and not merely because the send
+    happens to use `AllowedMentions.none()`. Flatten first (`esc` doesn't
+    touch newlines), escape second, cap last, because escaping grows the text
+    and Discord counts UTF-16 units, not the codepoints Python's `len` does.
+    """
+    # esc() only defuses mentions with a real-length snowflake; `<@` followed
+    # by anything else sails through it, and I'd rather not argue with Discord
+    # about which IDs count.
+    safe = esc(plain_line(text, limit)).replace("<@", "<\u200b@")
+    return _truncate_utf16(safe, limit, suffix="…")
+
+
 def _reason(problem: str) -> str:
-    return plain_line(problem, _REASON_CHARS)
+    return _safe(problem, _REASON_CHARS)
 
 
-def _post_reason(exc: Exception, quote_text: str) -> str:
-    """A one-line reason for the admin, or just the class name if the message echoes the quote."""
-    lines = [line for line in str(exc).splitlines() if line.strip()]
-    first = plain_line(lines[0], _REASON_CHARS) if lines else ""
-    if not first or (quote_text.strip() and quote_text.strip() in str(exc)):
-        return type(exc).__name__
-    return first
+def _post_reason(exc: Exception) -> str:
+    """The exception's class name, plus HTTP status and Discord code if it has them.
+
+    Never the message. A message can echo whatever we tried to send, and the
+    admin channel is not where the quote should turn up early. The full
+    exception is in the log for anyone who needs it. Attributes are read with
+    `getattr` because tests (and the odd library) raise plain exceptions.
+    """
+    name = esc(type(exc).__name__)
+    if not isinstance(exc, discord.HTTPException):
+        return name
+    status = getattr(exc, "status", None)
+    code = getattr(exc, "code", None)
+    bits = []
+    if isinstance(status, int):
+        bits.append(f"HTTP {status}")
+    if isinstance(code, int) and code:
+        bits.append(f"Discord error {code}")
+    return f"{name} ({', '.join(bits)})" if bits else name
 
 
 def _cap(text: str) -> str:
-    return text if len(text) <= _ALERT_CHARS else text[: _ALERT_CHARS - 1].rstrip() + "…"
+    """The admin message limit, in UTF-16 units: 1,900 of Discord's 2,000.
+
+    Per-line and per-reason caps use the same unit, so nothing here counts
+    codepoints and hopes.
+    """
+    return _truncate_utf16(text, _ALERT_CHARS, suffix="…")
 
 
 async def _tell_admin(deps: QuoteDeps, text: str) -> None:
