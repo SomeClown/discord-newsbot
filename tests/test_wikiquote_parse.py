@@ -189,9 +189,18 @@ def test_theme_page_counts(friendship):
 def test_theme_attribution_is_the_citation_alone(friendship):
     q = _by_start(friendship, "Friends are born, not made.")
     assert q.attribution == "Henry Adams, The Education of Henry Adams (1907), Ch. VII."
+    # A theme page keeps the source in the last nested line; anything before
+    # it can be a translation. The Latin item has both.
+    q = _by_start(friendship, "Non nobis solum nati sumus")
+    assert q.attribution == "Cicero, De Officiis Book I, section 22."
+    assert "We are not born, we do not live" not in q.attribution
+    # Documented cost of "last": these items end in a note, not a source.
     q = _by_start(friendship, "my friend He was quite a dear")
-    assert q.attribution == "June Lockhart"
-    assert "Petticoat Junction" not in _blob(friendship)  # the second nested line
+    assert q.attribution == "2015 - on her Petticoat Junction (1963) co-star Edgar Buchanan"
+    q = _by_start(friendship, "Stay is a charming word")
+    assert (
+        q.attribution == "This quote is often misattributed to Alcott's daughter Louisa May Alcott."
+    )
 
 
 def test_theme_quotes_with_no_citation_are_dropped_and_counted(friendship):
@@ -327,12 +336,13 @@ def test_page_with_no_h2_gives_zero_quotes():
 
 
 def test_skip_heading_needs_a_word_boundary():
-    # "Cast" is a skipped section; "Castiel" is a character. The plan's
-    # "starts with" is read with a word boundary for exactly this reason.
+    # "Disputed" is a skipped prefix; "Disputes" is not the same word. (The
+    # "Cast" pair that used to live here moved: "Cast" is now an exact match,
+    # so "Cast of characters" is no longer skipped. See the adversarial file.)
     html = (
-        '<div class="mw-heading mw-heading2"><h2>Castiel</h2></div>'
+        '<div class="mw-heading mw-heading2"><h2>Disputes</h2></div>'
         "<ul><li>A made-up line.</li></ul>"
-        '<div class="mw-heading mw-heading2"><h2>Cast of characters</h2></div>'
+        '<div class="mw-heading mw-heading2"><h2>Disputed sayings</h2></div>'
         "<ul><li>Not a quote.</li></ul>"
     )
     page = parse_page("Made Up Show (TV series)", html)

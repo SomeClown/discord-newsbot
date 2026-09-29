@@ -102,7 +102,7 @@ def page_url(title: str) -> str:
     return _PAGE_URL_PREFIX + url_quote(title.replace(" ", "_"), safe="()',")
 
 
-# --- Fetching ---
+# Fetching
 
 
 async def fetch_page(http: httpx.AsyncClient, title: str) -> FetchedPage:
@@ -188,9 +188,8 @@ def _unwrap(title: str, body: bytes) -> FetchedPage:
     if not isinstance(data, dict):
         raise WikiquoteError("Wikiquote's response wasn't a JSON object")
 
-    # The standard Action API error envelope is {"error": {"code", "info"}}.
-    # Confirmed from memory of the MediaWiki "API:Errors and warnings" page
-    # (the default errorformat, "bc"), not from a live request.
+    # Per the MediaWiki API errors documentation, the standard Action API
+    # error envelope is {"error": {"code", "info"}}.
     error = data.get("error")
     if error is not None:
         code = error.get("code") if isinstance(error, dict) else None
@@ -223,7 +222,7 @@ def _unwrap(title: str, body: bytes) -> FetchedPage:
     return FetchedPage(resolved, revid, html)
 
 
-# --- Parsing ---
+# Parsing
 
 # Elements whose whole subtree is noise: markup that isn't text, tables,
 # figures (a caption is a pull-quote with no speaker) and reference markers.
@@ -231,6 +230,10 @@ _IGNORED_TAGS = frozenset({"style", "script", "table", "figure", "sup"})
 _IGNORED_CLASSES = frozenset(
     {"noprint", "navbox", "references", "mw-references-wrap", "references-small", "mw-editsection"}
 )
+# Wikiquote's frames around sections it doesn't vouch for. A class token
+# containing one of these marks the whole element as skipped, whether or not
+# a heading is anywhere near it.
+_SKIPPED_FRAME_MARKERS = ("disputed-begin", "misattributed-begin", "attributed-begin")
 _VOID_TAGS = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source"}
     | {"track", "wbr"}
@@ -239,13 +242,30 @@ _LISTS = frozenset({"ul", "ol", "dl"})
 _HEADING_LEVELS = {"h2": 2, "h3": 3, "h4": 4}
 
 # A heading matching this, and everything below it until the next heading at
-# the same or a higher level, is skipped. "Attributed" is in there on
-# purpose: those are secondhand reports, and we post attributions as fact.
-# The `\b` keeps "Cast" from eating a heading like "Castiel".
-_SKIP_HEADING_RE = re.compile(
-    r"(?:disputed|misattributed|attributed|quotes about|about|said about|external links"
-    r"|see also|notes|references|sources|bibliography|further reading|cast|taglines)\b",
+# the same or a higher level, is skipped. These are prefixes (with a word
+# boundary), so "Disputed attributions" and "Quotes about Wilde" go. The
+# secondhand and unverified ones are skipped because we post attributions as
+# fact; "Attributed" is the same story, and "unsourced", "doubtful",
+# "apocryphal" and "spurious" joined it for the same reason.
+_SKIP_PREFIX_RE = re.compile(
+    r"(?:disputed|misattributed|attributed|quotes about|quotations about|about|said about"
+    r"|unsourced|doubtful|apocryphal|spurious)\b",
     re.IGNORECASE,
+)
+# These only count when they're the whole heading. As prefixes they ate real
+# titles: "Notes from Underground", "Cast Away", "Sources of Power".
+_SKIP_EXACT = frozenset(
+    {
+        "notes",
+        "references",
+        "sources",
+        "bibliography",
+        "further reading",
+        "external links",
+        "see also",
+        "cast",
+        "taglines",
+    }
 )
 # Headings that name a section, not a speaker or a work, so they don't belong in an attribution.
 _GENERIC_HEADINGS = frozenset({"quotes", "sourced", "quotations", "dialogue"})
@@ -259,8 +279,15 @@ class _Raw:
 
     text: str
     cite: str | None
+    # The last nested line, which is where a theme page keeps its source.
+    last_cite: str | None
     headings: list[str]
     dialogue: bool
+
+
+def _skips_heading(text: str) -> bool:
+    text = text.strip()
+    return bool(_SKIP_PREFIX_RE.match(text)) or text.casefold() in _SKIP_EXACT
 
 
 def _one_line(parts: list[str]) -> str:
@@ -302,6 +329,14 @@ class _PageParser(HTMLParser):
         self._seen_h2 = False
         self._skip_level: int | None = None
 
+        # A heading inside an ignored subtree (a table, a noprint box) never
+        # joins the attribution, but it still gets to start a skip: a
+        # "Misattributed" heading wrapped in one of those used to slip past
+        # and hand its quotes to the page's subject.
+        self._hidden_heading_at: int | None = None
+        self._hidden_heading_level = 0
+        self._hidden_heading_parts: list[str] = []
+
         self._heading_at: int | None = None
         self._heading_level = 0
         self._heading_parts: list[str] = []
@@ -310,9 +345,10 @@ class _PageParser(HTMLParser):
         self._item_parts: list[str] = []
         self._item_headings: list[str] = []
         self._item_cite: str | None = None
+        self._item_last_cite: str | None = None
         self._cite_at: int | None = None
         self._cite_parts: list[str] = []
-        self._cite_done = False
+        self._cite_seen = False
 
         self._dl_at: int | None = None
         self._dl_lines: list[str] = []
@@ -320,7 +356,7 @@ class _PageParser(HTMLParser):
         self._dd_at: int | None = None
         self._dd_parts: list[str] = []
 
-    # -- HTMLParser hooks --
+    # HTMLParser hooks
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         ignoring = self._ignore_from is not None
@@ -334,6 +370,11 @@ class _PageParser(HTMLParser):
                 self._ignore_from = index
             else:
                 self._open(tag, index)
+        if self._ignore_from is not None and tag in _HEADING_LEVELS:
+            if self._hidden_heading_at is None:
+                self._hidden_heading_at = index
+                self._hidden_heading_level = _HEADING_LEVELS[tag]
+                self._hidden_heading_parts = []
         self._open_at.setdefault(tag, []).append(index)
         if tag in _LISTS:
             self._list_at.append(index)
@@ -346,12 +387,14 @@ class _PageParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if self._ignore_from is not None:
+            if self._hidden_heading_at is not None:
+                self._hidden_heading_parts.append(data)
             return
         sink = self._sink()
         if sink is not None:
             sink.append(data)
 
-    # -- State --
+    # State
 
     def _lists(self) -> list[str]:
         """The three outermost open lists' tags, which is all any caller compares.
@@ -386,8 +429,13 @@ class _PageParser(HTMLParser):
     def _is_ignored(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
         if tag in _IGNORED_TAGS:
             return True
-        classes = set(dict(attrs).get("class", "").split())
-        return bool(classes & _IGNORED_CLASSES) or (tag == "a" and "autonumber" in classes)
+        # `or ""`: a bare `<div class>` parses to a None value, not a missing one.
+        classes = {c.lower() for c in (dict(attrs).get("class") or "").split()}
+        return (
+            bool(classes & _IGNORED_CLASSES)
+            or (tag == "a" and "autonumber" in classes)
+            or any(m in c for c in classes for m in _SKIPPED_FRAME_MARKERS)
+        )
 
     def _void(self, tag: str) -> None:
         sink = self._sink()
@@ -412,9 +460,9 @@ class _PageParser(HTMLParser):
                     self._end_item()
                 self._item_at, self._item_parts = index, []
                 self._item_headings, self._item_cite = self._context(), None
-                self._cite_done = False
+                self._item_last_cite, self._cite_seen = None, False
             elif lists == ["ul", "ul"] and self._item_at is not None:
-                if not self._cite_done and self._cite_at is None:
+                if self._cite_at is None:
                     self._cite_at, self._cite_parts = index, []
         elif tag == "dl":
             if not self._lists() and self._counting() and self._dl_at is None:
@@ -425,6 +473,8 @@ class _PageParser(HTMLParser):
 
     def _unwind(self, index: int) -> None:
         """Close everything opened at or after stack position `index`."""
+        if self._hidden_heading_at is not None and self._hidden_heading_at >= index:
+            self._end_hidden_heading()
         if self._heading_at is not None and self._heading_at >= index:
             self._end_heading()
         if self._dd_at is not None and self._dd_at >= index:
@@ -451,20 +501,42 @@ class _PageParser(HTMLParser):
         if self._skip_level is not None and level <= self._skip_level:
             self._skip_level = None
         self._chain = [h for h in self._chain if h[0] < level] + [(level, text)]
-        if self._skip_level is None and _SKIP_HEADING_RE.match(text):
+        if self._skip_level is None and _skips_heading(text):
             self._skip_level = level
+
+    def _end_hidden_heading(self) -> None:
+        # Only ever starts a skip. It can't end one: a heading nobody can see
+        # has no say in where a visible section stops.
+        text = _one_line(self._hidden_heading_parts)
+        if self._skip_level is None and _skips_heading(text):
+            self._skip_level = self._hidden_heading_level
+        self._hidden_heading_at = None
 
     def _end_cite(self) -> None:
         text = _one_line(self._cite_parts)
         if len(text) > _CITATION_MAX_CHARS:
             text = text[: _CITATION_MAX_CHARS - 1].rstrip() + "…"
-        self._item_cite = text or None
-        self._cite_at, self._cite_done = None, True
+        # Author and work pages want the first nested line; theme pages put
+        # the translation first and the source last, so they want the last.
+        # Blank ones don't count as "last", so a stray empty <li> can't wipe a real source.
+        if not self._cite_seen:
+            self._item_cite = text or None
+        if text:
+            self._item_last_cite = text
+        self._cite_at, self._cite_seen = None, True
 
     def _end_item(self) -> None:
         text = _lines(self._item_parts)
         if text:
-            self.raw.append(_Raw(text, self._item_cite, self._item_headings, dialogue=False))
+            self.raw.append(
+                _Raw(
+                    text,
+                    self._item_cite,
+                    self._item_last_cite,
+                    self._item_headings,
+                    dialogue=False,
+                )
+            )
         self._item_at = None
         self._cite_at = None
 
@@ -476,7 +548,9 @@ class _PageParser(HTMLParser):
 
     def _flush_dl(self) -> None:
         if self._dl_at is not None and self._dl_lines:
-            self.raw.append(_Raw("\n".join(self._dl_lines), None, self._dl_headings, dialogue=True))
+            self.raw.append(
+                _Raw("\n".join(self._dl_lines), None, None, self._dl_headings, dialogue=True)
+            )
         self._dl_lines = []
 
     def _end_dl(self) -> None:
@@ -498,7 +572,7 @@ def _page_kind(title: str, headings: list[tuple[int, str]]) -> PageKind:
 def _attribution(kind: PageKind, title: str, raw: _Raw) -> str | None:
     """Build the attribution for one quote, every part of it taken from the page."""
     if kind == "theme":
-        return raw.cite
+        return raw.last_cite
     if kind == "work":
         return ", ".join([*raw.headings, title])
     return ", ".join([title, *raw.headings, *([raw.cite] if raw.cite else [])])

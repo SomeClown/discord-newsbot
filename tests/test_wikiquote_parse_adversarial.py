@@ -203,12 +203,85 @@ def test_a_table_is_ignored_wherever_it_sits():
     assert _texts(html) == ["one", "two"]
 
 
-def test_a_heading_inside_a_table_does_not_start_or_end_a_section():
+def test_a_heading_inside_a_table_starts_a_skip_but_never_ends_one():
+    # This used to pin "a hidden heading does nothing". QA found that a hidden
+    # "Disputed" heading then handed its quotes to the page's subject, so it
+    # may now start a skip. It still can't end one: see the next test.
     html = (
         "<ul><li>one</li></ul>"
         "<table><tr><td><h2>Disputed</h2></td></tr></table>"
         "<ul><li>two</li></ul>"
     )
+    assert _texts(html) == ["one"]
+
+
+def test_a_harmless_heading_inside_a_table_does_not_start_or_end_a_section():
+    html = (
+        "<ul><li>one</li></ul><table><tr><td><h2>Trivia</h2></td></tr></table><ul><li>two</li></ul>"
+    )
+    assert _texts(html) == ["one", "two"]
+
+
+def test_a_hidden_heading_does_not_end_a_visible_skipped_section():
+    html = (
+        "<h2>Disputed</h2><ul><li>HIDDEN</li></ul>"
+        "<table><tr><td><h2>Trivia</h2></td></tr></table>"
+        "<ul><li>ALSO HIDDEN</li></ul>"
+        "<h2>Back</h2><ul><li>shown</li></ul>"
+    )
+    assert _texts(html) == ["shown"]
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        '<div class="noprint">{}</div>',
+        '<div class="navbox">{}</div>',
+        "<table><tr><td>{}</td></tr></table>",
+        "<figure>{}</figure>",
+    ],
+)
+@pytest.mark.parametrize("word", ["Misattributed", "Disputed", "Quotes about Somebody"])
+def test_a_skip_heading_hidden_in_an_ignored_subtree_still_skips(wrapper, word):
+    html = "<ul><li>one</li></ul>" + wrapper.format(f"<h2>{word}</h2>") + "<ul><li>HIDDEN</li></ul>"
+    assert _texts(html) == ["one"]
+
+
+def test_a_hidden_skip_heading_ends_at_the_next_visible_heading_of_its_level():
+    html = (
+        '<div class="noprint"><h3>Misattributed</h3></div><ul><li>HIDDEN</li></ul>'
+        "<h4>Deeper</h4><ul><li>ALSO HIDDEN</li></ul>"
+        "<h3>Fine</h3><ul><li>shown</li></ul>"
+    )
+    assert _texts(html) == ["shown"]
+
+
+def test_a_hidden_heading_never_joins_the_attribution():
+    html = '<div class="noprint"><h3>Trivia</h3></div><ul><li>kept</li></ul>'
+    (q,) = _parse(html).quotes
+    assert q.attribution == "Made Up Person"
+
+
+def test_a_skipped_heading_that_is_itself_the_ignored_element_still_skips():
+    html = '<h2 class="noprint">Disputed</h2><ul><li>HIDDEN</li></ul>'
+    assert _texts("<ul><li>one</li></ul>" + html) == ["one"]
+
+
+@pytest.mark.parametrize(
+    "frame", ["disputed-begin", "misattributed-begin", "attributed-begin", "x Disputed-Begin y"]
+)
+def test_a_frame_marked_by_class_is_skipped_without_any_heading(frame):
+    html = (
+        "<ul><li>one</li></ul>"
+        f'<div class="{frame}"><ul><li>HIDDEN</li></ul></div>'
+        "<ul><li>two</li></ul>"
+    )
+    assert _texts(html) == ["one", "two"]
+
+
+def test_a_class_with_no_value_does_not_crash():
+    # `<div class>` parses to a None value, and None.split() is an AttributeError.
+    html = "<div class><ul><li>one</li></ul></div><p class>x</p><ul class><li>two</li></ul>"
     assert _texts(html) == ["one", "two"]
 
 
@@ -248,9 +321,14 @@ def test_quote_text_before_the_first_h2_is_never_a_quote():
         "<h2>Mis<b>attributed</b></h2>",
         "<h2>Mis<!-- x -->attributed</h2>",
         "<h2>Quotes about <i>Somebody</i></h2>",
-        "<h2>Notes:</h2>",
-        "<h2>Cast of characters</h2>",
+        "<h2>Notes</h2>",
+        "<h2>  Cast  </h2>",
         "<h2>See<br>also</h2>",
+        "<h2>Apocryphal</h2>",
+        "<h2>Unsourced attributions</h2>",
+        "<h2>Doubtful</h2>",
+        "<h2>Spurious quotes</h2>",
+        "<h2>About a Boy</h2>",
         "<h3>Disputed</h3>",
         "<h4>Disputed</h4>",
     ],
@@ -275,6 +353,27 @@ def test_lookalike_headings_do_not_skip(heading):
     assert _texts(html) == ["ok", "SHOWN"]
 
 
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "<h2>Notes on Democracy</h2>",
+        "<h2>Notes from Underground</h2>",
+        "<h2>Cast Away</h2>",
+        "<h2>Cast of characters</h2>",
+        "<h2>Sources of Power</h2>",
+        "<h2>Notes:</h2>",
+        "<h2>See also the moon</h2>",
+        "<h2>External links and you</h2>",
+    ],
+)
+def test_the_exact_match_words_only_skip_when_they_are_the_whole_heading(heading):
+    # These used to be prefixes ("notes" ate "Notes from Underground"). The
+    # owner's call: the section-name words must be the entire heading, while
+    # the secondhand-report words stay prefixes.
+    html = f"<ul><li>ok</li></ul>{heading}<ul><li>SHOWN</li></ul>"
+    assert _texts(html) == ["ok", "SHOWN"]
+
+
 def test_a_skipped_h3_ends_at_the_next_h3_and_not_at_an_h4():
     html = (
         "<h3>Disputed</h3><ul><li>HIDDEN ONE</li></ul>"
@@ -295,6 +394,45 @@ def test_a_second_skipped_heading_inside_a_skipped_section_does_not_extend_it():
         "<h2>Back</h2><ul><li>shown</li></ul>"
     )
     assert _texts(html) == ["shown"]
+
+
+# --- Which nested line is the citation ---
+
+_TWO_LINES = "<ul><li>t<ul><li>FIRST</li><li>SECOND</li></ul></li></ul>"
+
+
+def test_theme_page_uses_the_last_nested_line_as_the_citation():
+    (q,) = parse_page("Friendship", _letters("ABC") + _TWO_LINES).quotes
+    assert q.attribution == "SECOND"
+
+
+def test_theme_page_with_one_nested_line_uses_it():
+    (q,) = parse_page(
+        "Friendship", _letters("ABC") + "<ul><li>t<ul><li>ONLY</li></ul></li></ul>"
+    ).quotes
+    assert q.attribution == "ONLY"
+
+
+def test_theme_page_ignores_a_blank_trailing_nested_line():
+    html = _letters("ABC") + "<ul><li>t<ul><li>SOURCE</li><li> </li></ul></li></ul>"
+    (q,) = parse_page("Friendship", html).quotes
+    assert q.attribution == "SOURCE"
+
+
+def test_theme_page_last_citation_is_capped_like_the_first():
+    html = _letters("ABC") + f"<ul><li>t<ul><li>a</li><li>{'word ' * 60}</li></ul></li></ul>"
+    (q,) = parse_page("Friendship", html).quotes
+    assert len(q.attribution) == 150 and q.attribution.endswith("…")
+
+
+def test_author_page_keeps_the_first_nested_line_as_the_citation():
+    (q,) = _parse(_TWO_LINES).quotes
+    assert q.attribution == "Made Up Person, FIRST"
+
+
+def test_work_page_still_ignores_nested_lines():
+    (q,) = _parse(_TWO_LINES, title="Made Up Show (TV series)", pre=H2).quotes
+    assert q.attribution == "Made Up Show (TV series)"
 
 
 # --- Page kind detection ---

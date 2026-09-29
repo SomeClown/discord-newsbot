@@ -95,7 +95,7 @@ def split_fortune(raw: str) -> tuple[list[str], int]:
     message, which is not the same as the raw text being short: escaping
     can double a run of asterisks.
     """
-    raw = raw.removeprefix("﻿")
+    raw = raw.removeprefix("\ufeff")
     entries: list[str] = []
     current: list[str] = []
     for line in [*raw.splitlines(), "%"]:
