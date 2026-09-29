@@ -571,14 +571,11 @@ async def test_logs_at_every_level_carry_no_name_id_nick_or_mention(db_path, cap
         assert USER_NAME not in blob and USER_NICK not in blob
 
 
-async def test_traceback_in_the_failure_log_repeats_the_exception_message(db_path, caplog):
-    # Documented: `logger.exception` records the traceback, and a traceback
-    # ends with the exception's own message. If discord.py or our code ever
-    # puts a member's name in an exception message, that name lands in the
-    # log through this door even though the log *line* is clean. Today the
-    # only exceptions here are Discord API errors, which name channels and
-    # permissions, not people. If the owner wants a hard guarantee, log
-    # `type(exc).__name__` and drop `exc_info`.
+async def test_failure_log_has_no_traceback_and_no_exception_message(db_path, caplog):
+    # The failure log used to be `logger.exception`, whose traceback ends with
+    # the exception's message: a member's name in an exception would have
+    # walked into the log through that door. Now it's the class name only
+    # (plus status and code for Discord errors), so the promise is a hard one.
     cfg = _cfg()
     channel = FakeChannel()
     channel.next_error = RuntimeError(f"failed for {USER_NAME} {USER_ID}")
@@ -587,10 +584,28 @@ async def test_traceback_in_the_failure_log_repeats_the_exception_message(db_pat
 
     await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
 
-    (failure,) = [r for r in caplog.records if r.getMessage() == "welcome failed"]
-    assert USER_NAME not in failure.getMessage()
-    formatted = logging.Formatter("%(message)s").format(failure)
-    assert USER_NAME in formatted and str(USER_ID) in formatted
+    (failure,) = [r for r in caplog.records if r.getMessage().startswith("welcome failed")]
+    assert failure.getMessage() == "welcome failed: RuntimeError"
+    assert failure.levelno == logging.ERROR
+    assert failure.exc_info is None
+    for record in caplog.records:
+        formatted = logging.Formatter("%(message)s").format(record)
+        assert "Traceback" not in formatted
+        assert USER_NAME not in formatted and str(USER_ID) not in formatted
+
+
+async def test_failure_log_for_a_discord_error_carries_status_and_code_only(db_path, caplog):
+    cfg = _cfg()
+    channel = FakeChannel()
+    channel.next_error = discord.Forbidden(_Resp(403), f"Missing Access for {USER_NAME}")
+    bot = _bot(cfg, db_path, lounge=channel)
+    caplog.set_level(logging.DEBUG)
+
+    await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
+
+    (failure,) = [r for r in caplog.records if r.getMessage().startswith("welcome failed")]
+    assert failure.getMessage().startswith("welcome failed: Forbidden (status=403, code=")
+    assert USER_NAME not in logging.Formatter("%(message)s").format(failure)
 
 
 # --- the quote job ---
@@ -634,28 +649,21 @@ async def test_hostile_exception_text_in_the_crash_alert_cannot_ping(db_path):
     _mentions_are_none(mentions)
 
 
-async def test_crash_alert_passes_the_exception_text_through_unescaped(db_path):
-    # Documented: `{exc}` goes in as written, so the admin channel shows a
-    # clickable masked link and a second line. `AllowedMentions.none()` is
-    # what makes it harmless, and the admin channel is admin-only. The daily
-    # and sweep jobs do the same. If it should be one plain line, that's a
-    # `plain_line`-style pass in `_quote_job`, like the source reasons get.
+async def test_crash_alert_shows_the_exception_text_as_one_escaped_line(db_path):
+    # This used to pin the text going in as written (clickable masked link,
+    # second line). Now the job boundary runs it through `plain_line` and
+    # `esc`, so it's one inert line; the daily, sweep and retention jobs
+    # share the helper.
     admin = await _crash_with(db_path, _hostile_quote_error())
 
     ((text, _),) = admin.sent
-    assert "[click](https://evil.example)" in text
-    assert "\n" in text
+    assert "[click](https://evil.example)" not in text
+    assert "https://evil.example" not in text  # esc() puts a zero-width space in the scheme
+    assert "@everyone" not in text
+    assert "\n" not in text
+    assert "second line" in text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "_quote_job puts str(exc) into the alert with no length cap; a 5,000 character "
-        "exception message makes Discord refuse the send (2,000 limit), send_alert "
-        "swallows the error, and the admin never hears the quote job crashed. "
-        "Same pattern in _daily_job and _sweep_job."
-    ),
-)
 async def test_a_huge_exception_message_still_produces_a_deliverable_alert(db_path):
     admin = await _crash_with(db_path, _hostile_quote_error(5000))
 

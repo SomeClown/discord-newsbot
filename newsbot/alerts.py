@@ -18,6 +18,8 @@ import logging
 
 import discord
 
+from newsbot.bot.format import _ALERT_CONTENT_LIMIT, _truncate_utf16
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,9 +31,16 @@ async def send_alert(client: discord.Client, admin_channel_id: int | None, text:
     `send_alert` is usually already in an exception handler, and an alert
     system that can knock over its own caller defeats the point of having
     one.
+
+    Anything over Discord's 2,000-unit message limit is cut (ellipsis
+    included) before sending. Discord refuses an oversized message outright,
+    and refusing is the one thing an alert can't be allowed to have happen to
+    it: the crash alert with a huge exception in it is exactly the one
+    somebody needs to see.
     """
     if admin_channel_id is None:
         return
+    text = _truncate_utf16(text, _ALERT_CONTENT_LIMIT, suffix="\u2026")
     try:
         channel = client.get_channel(admin_channel_id)
         if channel is None:

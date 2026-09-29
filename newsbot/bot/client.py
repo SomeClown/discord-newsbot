@@ -42,7 +42,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from discord import app_commands
 
 from newsbot.alerts import send_alert
-from newsbot.bot.format import RenderedAlert, RenderedDigest
+from newsbot.bot.format import RenderedAlert, RenderedDigest, esc
 from newsbot.bot.permissions import check_channels, render_permission_alert
 from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
@@ -56,6 +56,7 @@ from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store.db import connect
 from newsbot.store.models import DigestRow
 from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
+from newsbot.text import plain_line
 from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,24 @@ _HOSTNAME = socket.gethostname()
 # "Interaction has already been acknowledged").
 _TWO_INSTANCE_ERROR_CODES = frozenset({10062, 40060})
 _TWO_INSTANCE_ALERT_COOLDOWN = timedelta(hours=1)
+
+
+def _alert_reason(exc: BaseException) -> str:
+    """One inert line of `exc`'s text for a job-boundary crash alert.
+
+    Exception messages are whatever the code that raised them felt like
+    writing: multi-line, markdown, the occasional @everyone. Flatten it,
+    cap it, escape it. (`send_alert` also truncates the whole message, as
+    the backstop; this keeps the alert readable before it gets that far.)
+    """
+    return esc(plain_line(str(exc), 250))
+
+
+def _http_detail(exc: BaseException) -> str:
+    """` (status=..., code=...)` for a `discord.HTTPException`, else an empty string."""
+    if not isinstance(exc, discord.HTTPException):
+        return ""
+    return f" (status={getattr(exc, 'status', None)}, code={getattr(exc, 'code', None)})"
 
 
 def _should_alert_two_instances(
@@ -845,7 +864,7 @@ class NewsBot(discord.Client):
             )
         except Exception as exc:  # the job boundary: nothing here may take the process down
             logger.exception("daily job crashed at the job boundary")
-            await self.alert(f"newsbot: daily job crashed: {exc}")
+            await self.alert(f"newsbot: daily job crashed: {_alert_reason(exc)}")
 
     async def _sweep_job(self) -> None:
         """The job boundary for the hourly SHiFT alert sweep (design.md §12).
@@ -877,7 +896,7 @@ class NewsBot(discord.Client):
             logger.exception("code sweep crashed at the job boundary")
             if not self._sweep_crash_alerted:
                 self._sweep_crash_alerted = True
-                await self.alert(f"newsbot: SHiFT code sweep crashed: {exc}")
+                await self.alert(f"newsbot: SHiFT code sweep crashed: {_alert_reason(exc)}")
 
     async def on_member_join(self, member: discord.Member) -> None:
         if not self.cfg.lounge.welcome.enabled:
@@ -944,7 +963,11 @@ class NewsBot(discord.Client):
                 ),
             )
         except Exception as exc:
-            logger.exception("welcome failed")
+            # No traceback, on purpose: it ends with the exception's message,
+            # and the design promises nothing about members reaches the logs.
+            # The class name and (for Discord) the status and code are enough
+            # to tell what happened, and none of it can name a person.
+            logger.error("welcome failed: %s%s", type(exc).__name__, _http_detail(exc))
             await self.alert(
                 f"newsbot: couldn't post a welcome in the lounge ({type(exc).__name__}). "
                 "The details are in the bot's log."
@@ -993,7 +1016,7 @@ class NewsBot(discord.Client):
             logger.info("quote job finished", extra={"status": outcome.status})
         except Exception as exc:  # the job boundary: nothing here may take the process down
             logger.exception("daily quote job crashed at the job boundary")
-            await self.alert(f"newsbot: daily quote job crashed: {exc}")
+            await self.alert(f"newsbot: daily quote job crashed: {_alert_reason(exc)}")
 
     async def _retention_job(self) -> None:
         try:
@@ -1005,7 +1028,7 @@ class NewsBot(discord.Client):
             )
         except Exception as exc:
             logger.exception("retention job crashed")
-            await self.alert(f"newsbot: retention job crashed: {exc}")
+            await self.alert(f"newsbot: retention job crashed: {_alert_reason(exc)}")
 
     def _purge_sync(self, cutoff: datetime) -> tuple[int, int]:
         with closing(connect(self.db_path)) as conn:
