@@ -24,7 +24,7 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
-**In progress: lounge welcomes and daily quote (v2.2).** Designed in `docs/design.md` §14 (approved 2026-09-29) on branch `feat/lounge`. A bot-posted welcome and a daily fortune-style quote go to `#the-speakeasy-lounge`; everything else stays in the admin channel. Next: an `architect` plan in `docs/plans/`. That includes the open item of where this server's quotes come from, plus a redistributable starter set for self-hosters. The Server Members intent must be enabled in the Developer Portal before deploy.
+**In progress: lounge welcomes and daily quote (v2.2).** Designed in `docs/design.md` §14 (approved 2026-09-29) on branch `feat/lounge`. A bot-posted welcome and a daily fortune-style quote go to `#the-speakeasy-lounge`; everything else stays in the admin channel. Plan: `docs/plans/2026-09-29-lounge.md` (11 tasks), awaiting owner review and answers to its checkpoints: A (this server's quote source), B (wording), C (does prod use Community, Onboarding or rules screening?), plus Q5 to Q8. The Server Members intent must be enabled in the Developer Portal before deploy.
 
 **Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
 - **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.
