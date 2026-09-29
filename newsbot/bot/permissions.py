@@ -59,7 +59,10 @@ def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
     design.md §13: game channels need View Channel, Send Messages, Embed
     Links; the SHiFT channel (only when alerts are enabled) additionally
     needs Mention @everyone; the admin channel needs View Channel and Send
-    Messages. "Topics sharing a channel" is an owner-approved shape (§5 of
+    Messages. The lounge channel (design.md §14; only when a lounge
+    feature is on and `channel_id` is set) needs View Channel and Send
+    Messages: a welcome or a quote is plain text, so no Embed Links.
+    "Topics sharing a channel" is an owner-approved shape (§5 of
     the plan), so requirements are merged by channel id rather than
     reported once per topic that names it: two topics pointed at the
     same channel end up as one requirement with the union of what either
@@ -98,6 +101,10 @@ def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
 
     if cfg.admin_channel_id is not None:
         _add(cfg.admin_channel_id, "admin", frozenset({"view_channel", "send_messages"}))
+
+    lounge = cfg.lounge
+    if (lounge.welcome.enabled or lounge.daily_quote.enabled) and lounge.channel_id is not None:
+        _add(lounge.channel_id, "lounge", frozenset({"view_channel", "send_messages"}))
 
     return list(by_channel.values())
 

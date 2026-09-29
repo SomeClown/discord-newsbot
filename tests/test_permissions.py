@@ -366,3 +366,69 @@ def test_channel_requirement_is_a_plain_dataclass_shape():
     assert req.channel_id == 1
     assert req.purpose == "Borderlands 4"
     assert req.needed == frozenset({"view_channel"})
+
+
+# --- lounge channel (design.md §14) ---
+
+_LOUNGE_ID = 555000000000000001
+
+
+def _lounge_cfg(*, welcome: bool = False, quote: bool = False, channel_id: int | None = _LOUNGE_ID):
+    from newsbot.config import DailyQuoteCfg, LoungeCfg, QuoteSourceCfg, WelcomeCfg
+
+    cfg = _cfg()
+    lounge = LoungeCfg(
+        channel_id=channel_id,
+        welcome=WelcomeCfg(enabled=welcome, message="Hi {member}"),
+        daily_quote=DailyQuoteCfg(
+            enabled=quote, sources=[QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")]
+        ),
+    )
+    return cfg.model_copy(update={"lounge": lounge})
+
+
+def _lounge_reqs(cfg) -> list[ChannelRequirement]:
+    return [r for r in required_channels(cfg) if r.channel_id == _LOUNGE_ID]
+
+
+def test_lounge_requirement_present_when_welcome_on():
+    (req,) = _lounge_reqs(_lounge_cfg(welcome=True))
+    assert req.purpose == "lounge"
+    assert req.needed == frozenset({"view_channel", "send_messages"})
+
+
+def test_lounge_requirement_present_when_quote_on():
+    (req,) = _lounge_reqs(_lounge_cfg(quote=True))
+    assert req.needed == frozenset({"view_channel", "send_messages"})
+
+
+def test_lounge_requirement_absent_when_both_off():
+    assert _lounge_reqs(_lounge_cfg()) == []
+
+
+def test_lounge_requirement_absent_without_a_channel_id():
+    cfg = _lounge_cfg(welcome=True, channel_id=None)
+    assert {r.purpose for r in required_channels(cfg)}.isdisjoint({"lounge"})
+
+
+def test_lounge_requirement_merges_with_admin_channel_on_shared_id():
+    cfg = _lounge_cfg(quote=True, channel_id=_cfg().admin_channel_id)
+    matches = [r for r in required_channels(cfg) if r.channel_id == cfg.admin_channel_id]
+    assert len(matches) == 1
+    assert matches[0].purpose == "admin / lounge"
+    assert matches[0].needed == frozenset({"view_channel", "send_messages"})
+
+
+async def test_permission_alert_names_the_lounge_when_send_messages_is_missing():
+    cfg = _lounge_cfg(welcome=True)
+    channels = _clean_channels(cfg)
+    no_send = discord.Permissions.all()
+    no_send.send_messages = False
+    channels[_LOUNGE_ID] = FakeTextChannel(FakeGuild(_GUILD_ID), no_send)
+
+    problems = await check_channels(FakeClient(channels), cfg)
+
+    assert len(problems) == 1
+    assert "lounge" in problems[0]
+    assert "Send Messages" in problems[0]
+    assert "lounge" in render_permission_alert(problems)
