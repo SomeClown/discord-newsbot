@@ -133,3 +133,19 @@ def first_line(html_or_text: str, limit: int = 120) -> str:
         if candidate:
             return _truncate(candidate, limit)
     return ""
+
+
+def plain_line(text: str, limit: int = 250) -> str:
+    """Collapse whitespace in `text` to single spaces and cap it at `limit`, ellipsis included.
+
+    The admin-facing sibling of `first_line`. That one strips HTML and
+    unescapes entities, which is right for a news headline and wrong for an
+    address: `?a=1&region=us` comes out as `?a=1\u00aeion=us`, and the admin is
+    shown a URL that isn't the one that failed. This never interprets
+    markup, so what goes in is what comes out, minus the whitespace. A cut
+    result is at most `limit` characters long (the ellipsis counts).
+    """
+    flat = re.sub(r"\s+", " ", text).strip()
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(limit - 1, 0)].rstrip() + "\u2026"

@@ -46,7 +46,7 @@ from urllib.parse import quote as url_quote
 import httpx
 
 from newsbot.lounge.quotes import Quote, fits
-from newsbot.text import first_line
+from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,10 @@ def _unwrap(title: str, body: bytes) -> FetchedPage:
             raise WikiquoteError("Wikiquote returned an error it didn't explain")
         # Both fields are the server's words, so both get one line and a cap
         # (Discord's limit is 2,000 characters; the response's is 4 MiB).
+        # plain_line, not first_line: the info text is prose that can hold
+        # `&` and `<`, and it shouldn't be "cleaned" into something it wasn't.
         said = [
-            first_line(" ".join(str(part).split()), limit)
+            plain_line(str(part), limit)
             for part, limit in ((code, 100), (info, 250))
             if part is not None
         ]

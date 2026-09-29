@@ -47,9 +47,8 @@ TEXT_HEADERS = {"content-type": "text/plain; charset=utf-8"}
 FORTUNE = "The teapot is not a suspect.\n%\nMabel Quince knew where the biscuits were.\n"
 MARKER = "BODY_MARKER-9f3a-DO-NOT-ECHO"
 MIB = 1_048_576
-# first_line(..., 250) truncates and then appends an ellipsis, so a cut
-# message is 251 characters. See test_problem_stays_within_the_250_character_cap.
-HARD_MAX_PROBLEM = 251
+# The cap on a problem, ellipsis included (plain_line counts it).
+HARD_MAX_PROBLEM = 250
 
 _running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
 needs_non_root = pytest.mark.skipif(_running_as_root, reason="root ignores file permissions")
@@ -909,20 +908,18 @@ async def test_url_https_to_https_redirect_makes_two_requests(tmp_path):
     assert seen == [("https", "/quotes.txt"), ("https", "/final.txt")]
 
 
-async def test_url_http_hop_in_the_middle_is_requested_and_the_chain_is_followed(tmp_path):
-    """Documenting exactly what leaves the machine for an https, http, https chain.
+async def test_url_http_hop_in_the_middle_is_never_requested(tmp_path):
+    """An https, http, https chain stops at the http Location; the transport never sees it.
 
-    httpx follows the whole chain before handing us the final response, so
-    the plain-http hop *is* requested (in the clear) and so is the last https
-    URL; only then does the hop check reject the load. The check keeps a
-    stretch of clear-text trip from being trusted; it doesn't prevent one.
+    Changed from "is requested and the chain is followed": redirects are now
+    followed by hand and each Location is checked before the request, so no
+    clear-text request leaves the machine (and the last https URL isn't
+    requested either).
     """
 
     def routes(request):
         if request.url.path == "/quotes.txt":
             return httpx.Response(302, headers={"location": "http://example.test/mid.txt"})
-        if request.url.path == "/mid.txt":
-            return httpx.Response(302, headers={"location": "https://example.test/end.txt"})
         return _text_response()
 
     seen, handler = _seen(routes)
@@ -931,11 +928,13 @@ async def test_url_http_hop_in_the_middle_is_requested_and_the_chain_is_followed
     _assert_clean_failure(result)
     assert "non-https" in result.problem
     assert "http://example.test/mid.txt" in result.problem
-    assert seen == [("https", "/quotes.txt"), ("http", "/mid.txt"), ("https", "/end.txt")]
+    assert seen == [("https", "/quotes.txt")]
     assert _cache_files(tmp_path / "cache") == []
 
 
-async def test_url_redirect_ending_on_http_is_rejected_after_two_requests(tmp_path):
+async def test_url_redirect_ending_on_http_is_rejected_after_one_request(tmp_path):
+    """Changed from two requests: the http Location is refused before it's requested."""
+
     def routes(request):
         if request.url.scheme == "https":
             return httpx.Response(302, headers={"location": "http://example.test/end.txt"})
@@ -945,15 +944,16 @@ async def test_url_redirect_ending_on_http_is_rejected_after_two_requests(tmp_pa
     result = await _load(_url(), tmp_path / "cache", handler)
     _assert_clean_failure(result)
     assert "non-https" in result.problem
-    assert seen == [("https", "/quotes.txt"), ("http", "/end.txt")]
+    assert seen == [("https", "/quotes.txt")]
 
 
-async def test_url_plain_http_source_is_requested_once_then_rejected(tmp_path):
-    """Documenting: an `http://` source URL still sends its one request."""
+async def test_url_plain_http_source_is_rejected_without_a_request(tmp_path):
+    """Changed from "sends its one request": an `http://` source URL makes no request at all."""
     seen, handler = _seen(lambda r: _text_response())
     result = await _load(_url("http://example.test/q.txt"), tmp_path / "cache", handler)
     _assert_clean_failure(result)
-    assert seen == [("http", "/q.txt")]
+    assert "non-https" in result.problem
+    assert seen == []
 
 
 async def test_url_http_hop_falls_back_to_the_saved_copy(tmp_path):
@@ -981,18 +981,21 @@ def _chain(length: int, scheme: str = "https") -> Callable[[httpx.Request], http
     return routes
 
 
-async def test_url_a_long_redirect_chain_is_cut_off_by_httpx(tmp_path):
+async def test_url_a_long_redirect_chain_is_cut_off_after_five_hops(tmp_path):
+    """Changed from "cut off by httpx" (its limit of 20): we follow five hops ourselves."""
     seen, handler = _seen(_chain(50))
     result = await _load(_url("https://example.test/0"), tmp_path / "cache", handler)
     _assert_clean_failure(result)
-    assert "TooManyRedirects" in result.problem
-    # httpx's default is 20 redirects; anything wildly above that is a regression.
-    assert len(seen) <= 25
+    assert "redirected more than 5 times" in result.problem
+    assert len(seen) == 6  # the first request plus five hops
 
 
-async def test_url_a_chain_within_httpx_limits_still_loads(tmp_path):
-    result = await _load(_url("https://example.test/0"), tmp_path / "cache", _chain(10))
-    assert len(result.quotes) == 2
+async def test_url_a_chain_of_five_hops_still_loads_and_six_does_not(tmp_path):
+    ok = await _load(_url("https://example.test/0"), tmp_path / "a", _chain(5))
+    assert len(ok.quotes) == 2
+    over = await _load(_url("https://example.test/0"), tmp_path / "b", _chain(6))
+    _assert_clean_failure(over)
+    assert "redirected more than 5 times" in over.problem
 
 
 async def test_url_a_redirect_loop_terminates(tmp_path):
@@ -1001,8 +1004,54 @@ async def test_url_a_redirect_loop_terminates(tmp_path):
     )
     result = await _load(_url(), tmp_path / "cache", handler)
     _assert_clean_failure(result)
-    assert "TooManyRedirects" in result.problem
-    assert len(seen) <= 25
+    assert "redirected more than 5 times" in result.problem
+    assert len(seen) == 6
+
+
+async def test_url_relative_location_is_resolved_against_the_current_url(tmp_path):
+    def routes(request):
+        if request.url.path == "/a/quotes.txt":
+            return httpx.Response(302, headers={"location": "../b/final.txt"})
+        return _text_response()
+
+    seen, handler = _seen(routes)
+    result = await _load(_url("https://example.test/a/quotes.txt"), tmp_path / "cache", handler)
+    assert len(result.quotes) == 2
+    assert seen == [("https", "/a/quotes.txt"), ("https", "/b/final.txt")]
+
+
+async def test_url_scheme_relative_location_stays_on_https(tmp_path):
+    def routes(request):
+        if request.url.path == "/quotes.txt":
+            return httpx.Response(302, headers={"location": "//cdn.test/final.txt"})
+        return _text_response()
+
+    result = await _load(_url(), tmp_path / "cache", routes)
+    assert len(result.quotes) == 2
+
+
+async def test_url_redirect_problems_do_not_echo_credentials(tmp_path):
+    url = "https://user:hunter2@example.test/quotes.txt?token=abc123"
+
+    def routes(request):
+        return httpx.Response(
+            302, headers={"location": "http://user:hunter2@evil.test/x?token=abc123"}
+        )
+
+    result = await _load(_url(url), tmp_path / "cache", routes)
+    _assert_clean_failure(result)
+    assert "non-https" in result.problem
+    assert "hunter2" not in result.problem
+    assert "abc123" not in result.problem
+
+
+async def test_url_redirect_to_an_invalid_location_fails(tmp_path):
+    result = await _load(
+        _url(),
+        tmp_path / "cache",
+        lambda r: httpx.Response(302, headers={"location": "https://exa mple.test:99999999/x"}),
+    )
+    _assert_clean_failure(result)
 
 
 async def test_url_redirect_without_a_location_is_a_plain_status_failure(tmp_path):
@@ -1803,71 +1852,65 @@ async def test_file_fallback_uses_the_copy_even_when_the_file_is_now_a_fifo(tmp_
 # --- messages ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "first_line(..., 250) cuts at 250 and then appends an ellipsis, so a cut problem is "
-        "251 characters; the plan and _PROBLEM_CHARS both say 250 (harmless, but off by one)"
-    ),
-)
 async def test_problem_stays_within_the_250_character_cap_inclusive_of_the_ellipsis(tmp_path):
-    """The plan cuts problems with `first_line(..., 250)`; `_truncate` then adds an ellipsis.
+    """A cut problem is at most 250 characters, the ellipsis included.
 
-    A cut message is therefore 251 characters. One character over is
-    harmless to Discord, but the constant and the plan both say 250.
+    This was an off-by-one (251) while problems went through `first_line`.
     """
     result = await _load(
         _url("https://example.test/" + "a" * 400), tmp_path / "c", lambda r: httpx.Response(404)
     )
     assert len(result.problem) <= 250
+    assert result.problem.endswith("\u2026")
 
 
 @pytest.mark.parametrize(
     "value",
     [
-        "https://example.test/q?a=1&region=us",
-        "https://example.test/q?x=1&section=2",
-        "https://example.test/q?x=1&notify=1",
+        "https://example.test/q&region=us/x.txt",
+        "https://example.test/q&section=2/x.txt",
+        "https://example.test/q&notify=1/x.txt",
         "https://example.test/<b>bold</b>/q.txt",
-        "https://example.test/q?a=1&amp;b=2",
+        "https://example.test/q&amp;b=2/x.txt",
     ],
     ids=["region-entity", "section-entity", "notify-entity", "tags", "literal-amp-entity"],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "_failed() runs the message through first_line(), which strips HTML and unescapes "
-        "entities, so a URL with `&region=` shows as `®ion=` and `<b>` vanishes: the admin "
-        "is shown an address that isn't the one that failed"
-    ),
-)
 async def test_problem_shows_the_configured_url_unaltered(tmp_path, value):
+    """Markup-looking characters in the path come back as typed, not "cleaned".
+
+    These used to carry the entities in the query string; the query is now
+    dropped from problems on purpose (see the credentials test), so the same
+    characters moved into the path, which is still shown.
+    """
     result = await _load(_url(value), tmp_path / "cache", lambda r: httpx.Response(404))
     assert value in result.problem
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="same first_line() markup stripping mangles a file path that contains `&region` or tags",
-)
 async def test_problem_shows_a_file_path_unaltered(tmp_path):
     path = tmp_path / "a&region<b>x</b>.txt"
     result = await _load(_file(path), tmp_path / "cache")
     assert str(path) in result.problem
 
 
-async def test_url_credentials_in_the_source_show_up_in_the_problem(tmp_path):
-    """Documenting: the source address is echoed as configured, userinfo and all.
+async def test_url_credentials_and_query_never_show_up_in_the_problem_or_logs(tmp_path, caplog):
+    """Changed from "they show up": a secret in a URL must not reach the admin channel.
 
-    The problem ends up in the admin channel, so a secret in the URL (a
-    `user:pass@` or a `?token=`) is posted there in the clear when the fetch
-    fails. It's the owner's own URL in the owner's own channel, but a raw
-    gist link with a token in it is a plausible thing to configure.
+    A raw gist link with a `user:pass@` or a `?token=` is a plausible thing to
+    configure, so problems and logs show scheme, host and path only. The
+    cache key still uses the full URL, so two tokens are still two sources.
     """
-    url = "https://user:hunter2@example.test/q.txt?token=abc123"
-    result = await _load(_url(url), tmp_path / "cache", lambda r: httpx.Response(403))
-    assert "hunter2" in result.problem
-    assert "abc123" in result.problem
+    url = "https://user:hunter2@example.test/q.txt?token=abc123#frag9"
+    with caplog.at_level(logging.DEBUG):
+        result = await _load(_url(url), tmp_path / "cache", lambda r: httpx.Response(403))
+        seeded = await _load(_url(url), tmp_path / "cache2", lambda r: _text_response())
+        failed = await _load(_url(url), tmp_path / "cache2", lambda r: httpx.Response(500), now=NOW)
+    for text in (result.problem, failed.problem, describe(_url(url)), caplog.text):
+        for secret in ("hunter2", "user:", "abc123", "frag9", "token="):
+            assert secret not in text
+    assert result.problem == "https://example.test/q.txt returned HTTP 403"
+    assert seeded.problem is None
+    assert describe(_url(url)) == "url https://example.test/q.txt"
+    assert _url(url).key.endswith(url)
 
 
 @pytest.mark.parametrize(

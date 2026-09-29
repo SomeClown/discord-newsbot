@@ -43,13 +43,14 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from newsbot.config import QuoteSourceCfg
 from newsbot.lounge.quotes import Quote, split_fortune
 from newsbot.lounge.wikiquote import fetch_page, parse_page
-from newsbot.text import first_line
+from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ URL_TIMEOUT_S = 10.0
 WIKIQUOTE_REFRESH = timedelta(days=7)
 _CACHE_VERSION = 1
 _PROBLEM_CHARS = 250
+# Redirect hops we'll follow by hand. Five is plenty for a raw-file link.
+MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 Origin = Literal["fresh", "saved-weekly", "fallback"]
 
@@ -112,7 +116,29 @@ def describe(src: QuoteSourceCfg) -> str:
     """A short name for admin lines: `Wikiquote "Oscar Wilde"`, `file /data/quotes.txt`, `url https://...`."""
     if src.kind == "wikiquote":
         return f'Wikiquote "{_wikiquote_title(src)}"'
+    if src.kind == "url":
+        return f"url {_shown_url(src.value)}"
     return f"{src.kind} {src.value.strip()}"
+
+
+def _shown_url(url: str) -> str:
+    """`url` as scheme, host and path only, for admin lines and logs.
+
+    Raw links to private gists carry their secret in the userinfo or the
+    query string, and the admin channel is not where a secret should end up.
+    The cache key still uses the whole URL; only what we say out loud changes.
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return "(unreadable address)"
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _log_name(src: QuoteSourceCfg) -> str:
+    """`src.key`, except a URL source's key holds the whole URL, secrets and all."""
+    return f"url:{_shown_url(src.value)}" if src.kind == "url" else src.key
 
 
 def _wikiquote_title(src: QuoteSourceCfg) -> str:
@@ -132,13 +158,16 @@ async def load_source(
             return await _load_wikiquote(src, http, cache_file, now)
         return await _load_plain(src, http, cache_file, now)
     except Exception as exc:
-        logger.warning("Loading %s failed unexpectedly", src.key, exc_info=True)
+        logger.warning("Loading %s failed unexpectedly", _log_name(src), exc_info=True)
         return _failed(exc)
 
 
 def _failed(exc: BaseException) -> LoadedSource:
     # str() of a timeout is empty; the class name is better than nothing.
-    problem = first_line(str(exc), _PROBLEM_CHARS) or type(exc).__name__
+    # First non-blank line only: a multi-line message is somebody's traceback
+    # or somebody's response body, and neither belongs in the admin channel.
+    lines = [line for line in str(exc).splitlines() if line.strip()]
+    problem = (plain_line(lines[0], _PROBLEM_CHARS) if lines else "") or type(exc).__name__
     return LoadedSource([], "fresh", problem)
 
 
@@ -162,7 +191,7 @@ async def _load_plain(
             if quotes:
                 logger.info(
                     "Source %s: origin=fallback quotes=%d saved=%s",
-                    src.key,
+                    _log_name(src),
                     len(quotes),
                     cache.fetched_at.date(),
                 )
@@ -173,7 +202,9 @@ async def _load_plain(
         await asyncio.to_thread(
             _write_cache, cache_file, src.key, _Cache(now, now, body, None, None)
         )
-    logger.info("Source %s: origin=fresh quotes=%d dropped_long=%d", src.key, len(quotes), too_long)
+    logger.info(
+        "Source %s: origin=fresh quotes=%d dropped_long=%d", _log_name(src), len(quotes), too_long
+    )
     return LoadedSource(quotes, "fresh")
 
 
@@ -207,48 +238,80 @@ def _read_file_sync(path: Path) -> str:
 
 
 async def _fetch_url(http: httpx.AsyncClient, url: str) -> str:
+    shown = _shown_url(url)
     try:
         async with asyncio.timeout(URL_TIMEOUT_S):
-            return await _get_text(http, url)
+            return await _get_text(http, url, shown)
     except TimeoutError:
-        raise SourceError(f"{url} didn't answer within {URL_TIMEOUT_S:g} seconds") from None
+        raise SourceError(f"{shown} didn't answer within {URL_TIMEOUT_S:g} seconds") from None
     except httpx.HTTPError as exc:
-        raise SourceError(f"couldn't reach {url} ({type(exc).__name__})") from exc
+        raise SourceError(f"couldn't reach {shown} ({type(exc).__name__})") from exc
 
 
-async def _get_text(http: httpx.AsyncClient, url: str) -> str:
-    # httpx's own timeout is per operation, so the caller's asyncio.timeout is
-    # what makes ten seconds mean ten seconds.
-    async with http.stream("GET", url, timeout=URL_TIMEOUT_S, follow_redirects=True) as response:
-        # Every hop, not just the last: https to http and back to https is
-        # still a stretch of the trip taken in the clear.
-        for hop in [*response.history, response]:
-            if hop.url.scheme != "https":
-                raise SourceError(f"{url} redirects through a non-https address ({hop.url})")
-        if response.status_code != 200:
-            raise SourceError(f"{url} returned HTTP {response.status_code}")
-        media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        if media_type == "text/html":
+async def _get_text(http: httpx.AsyncClient, url: str, shown: str) -> str:
+    """Fetch `url`, following redirects by hand so no hop is ever requested over plain http.
+
+    I let httpx follow redirects at first and checked the hops afterwards,
+    which is the bouncer inspecting your ID after you've already walked the
+    dodgy alley. Now the `Location` is checked before the request, so a
+    downgrade is refused instead of merely noticed.
+    """
+    current = httpx.URL(url)
+    # Config load already refuses http://, but this is the function that
+    # sends the request, so it checks too.
+    if current.scheme != "https":
+        raise SourceError(f"{shown} is a non-https address")
+    for hop in range(MAX_REDIRECTS + 1):
+        # httpx's own timeout is per operation, so the caller's asyncio.timeout
+        # is what makes ten seconds mean ten seconds.
+        async with http.stream(
+            "GET", current, timeout=URL_TIMEOUT_S, follow_redirects=False
+        ) as response:
+            if response.status_code not in _REDIRECT_STATUSES:
+                return await _read_final(response, shown)
+            target = response.headers.get("location")
+            status = response.status_code
+        if not target:
+            raise SourceError(f"{shown} answered HTTP {status} with no Location to follow")
+        if hop == MAX_REDIRECTS:
+            raise SourceError(f"{shown} redirected more than {MAX_REDIRECTS} times")
+        try:
+            current = current.join(target)
+        except httpx.InvalidURL:
+            raise SourceError(f"{shown} redirected to an address that isn't a valid URL") from None
+        if current.scheme != "https":
             raise SourceError(
-                f"{url} is a web page, not plain text; use the raw link (a raw file link, "
-                "not the page that displays it)"
+                f"{shown} redirects to a non-https address ({_shown_url(str(current))})"
             )
-        if media_type != "text/plain":
-            raise SourceError(
-                f"{url} answered with {media_type or 'no content type'}, not text/plain"
-            )
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > MAX_SOURCE_BYTES:
-                raise SourceError(f"{url} is over {MAX_SOURCE_BYTES // (1024 * 1024)} MiB")
-            chunks.append(chunk)
-        encoding = response.charset_encoding or "utf-8"
+    raise AssertionError("unreachable: the loop returns or raises")
+
+
+async def _read_final(response: httpx.Response, shown: str) -> str:
+    """Check the last response's status and type, then read its body under the size cap."""
+    if response.status_code != 200:
+        raise SourceError(f"{shown} returned HTTP {response.status_code}")
+    media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type == "text/html":
+        raise SourceError(
+            f"{shown} is a web page, not plain text; use the raw link (a raw file link, "
+            "not the page that displays it)"
+        )
+    if media_type != "text/plain":
+        raise SourceError(
+            f"{shown} answered with {media_type or 'no content type'}, not text/plain"
+        )
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_SOURCE_BYTES:
+            raise SourceError(f"{shown} is over {MAX_SOURCE_BYTES // (1024 * 1024)} MiB")
+        chunks.append(chunk)
+    encoding = response.charset_encoding or "utf-8"
     try:
         return b"".join(chunks).decode(encoding)
     except UnicodeDecodeError, LookupError:
-        raise SourceError(f"{url} couldn't be read as {encoding} text") from None
+        raise SourceError(f"{shown} couldn't be read as {encoding} text") from None
 
 
 # --- Wikiquote ---

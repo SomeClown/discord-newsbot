@@ -561,3 +561,8 @@ async def test_fetch_page_adds_no_user_agent_of_its_own():
     ((name, value),) = useragent.user_agent_headers({}).items()
     assert value not in request.headers.get(name, "")
     assert "discord-newsbot" not in request.headers.get(name, "")
+
+
+async def test_an_info_with_ampersands_and_angle_brackets_is_shown_as_sent():
+    message = await _message(_error({"error": {"code": "x", "info": "a&region=us <b>hi</b>"}}))
+    assert message == "Wikiquote said x: a&region=us <b>hi</b>"
