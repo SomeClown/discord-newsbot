@@ -671,9 +671,23 @@ async def test_a_huge_exception_message_still_produces_a_deliverable_alert(db_pa
     assert len(admin.sent[0][0].encode("utf-16-le")) // 2 <= 2000
 
 
+def _no_network_client() -> httpx.AsyncClient:
+    """A client whose transport fails the test if anything tries to use it.
+
+    These tests use file sources or never load one, so a request means the
+    code went somewhere it shouldn't. A bare `AsyncClient()` would have gone
+    to the real network to find out.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"unexpected HTTP request to {request.url}")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
 async def test_cancelled_run_releases_the_quote_lock(db_path, monkeypatch):
     bot = _bot(_cfg(welcome=False, quote=True), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
 
     async def cancelled(deps, *, force: bool = False):
         raise asyncio.CancelledError
@@ -716,7 +730,7 @@ async def test_racing_job_and_forced_run_agree_with_the_database(
 ):
     _freeze(monkeypatch, datetime(2026, 9, 29, 16, 0, tzinfo=UTC))
     bot = _bot(_cfg(welcome=False, quote=True, sources=[_quote_file(tmp_path)]), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         outcomes = await asyncio.gather(*(bot.run_quote(force) for force in order))
     finally:
@@ -739,7 +753,7 @@ async def test_explicit_source_list_reaches_the_deps_in_order(db_path):
         SOURCE,
     ]
     bot = _bot(_cfg(quote=True, sources=sources), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         assert bot.build_quote_deps().sources == sources
     finally:
@@ -754,7 +768,7 @@ async def test_an_unresolved_source_list_reads_as_not_ready_yet(db_path):
     cfg = load_config(CONFIG_PATH)
     lounge = LoungeCfg(channel_id=LOUNGE_ID, daily_quote=DailyQuoteCfg(enabled=True, sources=None))
     bot = NewsBot(cfg.model_copy(update={"lounge": lounge}), _secrets(), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         with pytest.raises(RuntimeError, match="setup_hook"):
             bot.build_quote_deps()
@@ -779,7 +793,7 @@ async def test_local_day_follows_digest_timezone_not_utc(
 ):
     _freeze(monkeypatch, utc_moment)
     bot = _bot(_cfg(quote=True), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         deps = bot.build_quote_deps()
     finally:
@@ -794,7 +808,7 @@ async def test_local_day_is_fixed_when_the_deps_are_built(db_path, monkeypatch):
     # run that starts at 23:59:59 and finishes after midnight is still "yesterday's".
     clock = _freeze(monkeypatch, datetime(2026, 9, 30, 6, 59, 59, tzinfo=UTC))
     bot = _bot(_cfg(quote=True), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         deps = bot.build_quote_deps()
         clock.current += timedelta(seconds=5)
@@ -812,7 +826,7 @@ async def test_double_fire_on_the_fall_back_day_still_posts_one_quote(
     # tests below). The once-a-day guard is what keeps the lounge to one quote.
     clock = _freeze(monkeypatch, datetime(2026, 11, 1, 8, 30, tzinfo=UTC))  # 01:30 PDT
     bot = _bot(_cfg(welcome=False, quote=True, sources=[_quote_file(tmp_path)]), db_path)
-    bot.http_client = httpx.AsyncClient()
+    bot.http_client = _no_network_client()
     try:
         await bot._quote_job()
         clock.current = datetime(2026, 11, 1, 9, 30, tzinfo=UTC)  # 01:30 PST
