@@ -8,9 +8,9 @@ racing each other, a failure halfway through a reshuffle, a connection that
 was already mid-transaction, dates that are wrong in creative ways, keys
 and hashes that are weird but legal. Anything surprising is pinned as
 written and labelled "documented", because a behavior nobody wrote down
-just gets rediscovered later, at a worse hour. The two things that are
+just gets rediscovered later, at a worse hour. The two things that were
 genuinely wrong (both latent, neither reachable with the production clock)
-are strict xfails so the day someone fixes them the suite says so.
+were strict xfails until they got fixed; now they're plain tests.
 """
 
 from __future__ import annotations
@@ -318,15 +318,6 @@ def test_equal_timestamps_break_ties_by_insertion_order(conn):
     assert repo.quote_deck_state(conn, WILDE).last_hash == H3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Re-claiming an existing hash at the same used_at keeps its ORIGINAL rowid (the upsert "
-        "updates in place), so the rowid tiebreak in quote_deck_state ranks it older than "
-        "rows inserted after it. Only visible with a frozen or coarse clock; with real "
-        "microsecond timestamps used_at differs and the ordering is right."
-    ),
-)
 def test_reclaiming_an_old_hash_in_the_same_tick_makes_it_the_latest_again(conn):
     _claim(conn, quote_hash=H1, day=DAY1, m=0)
     _claim(conn, quote_hash=H2, day=DAY1, force=True, m=0)
@@ -334,15 +325,6 @@ def test_reclaiming_an_old_hash_in_the_same_tick_makes_it_the_latest_again(conn)
     assert repo.quote_deck_state(conn, WILDE).last_hash == H1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "used_at is stored as the caller's isoformat() text and sorted as text, so a `now` "
-        "returning a non-UTC aware datetime sorts by local wall time, not by instant "
-        "(06:00-07:00 sorts before 12:00+00:00 though it is 13:00 UTC). Production passes "
-        "UTC, so it's latent; _utc_iso() exists in this module and isn't used here."
-    ),
-)
 def test_a_non_utc_now_still_orders_by_instant(conn):
     pdt = timezone(timedelta(hours=-7))
     _claim(conn, quote_hash=H1, day=DAY1, now=lambda: datetime(2026, 9, 29, 12, tzinfo=UTC))

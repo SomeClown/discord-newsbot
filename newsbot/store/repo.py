@@ -733,7 +733,9 @@ def claim_quote(
     loser has to wait for the winner's committed date instead of both
     reading the same stale one and both posting.
     """
-    now_iso = _resolve_now(now)
+    # Through _utc_iso, not the caller's raw isoformat(): used_at is sorted as
+    # text, and a non-UTC offset sorts by wall clock instead of by instant.
+    now_iso = _utc_iso((now or (lambda: datetime.now(UTC)))())
     old_isolation = conn.isolation_level
     conn.isolation_level = None
     try:
@@ -743,9 +745,15 @@ def claim_quote(
             return False
         if reshuffle:
             conn.execute("DELETE FROM lounge_quotes_used WHERE source_key = ?", (source_key,))
+        # Delete-then-insert rather than an upsert: an upsert keeps the old
+        # rowid, so a re-claimed hash inside one clock tick would still rank
+        # as older than rows inserted after it. A fresh insert gets a fresh rowid.
         conn.execute(
-            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(source_key, quote_hash) DO UPDATE SET used_at = excluded.used_at",
+            "DELETE FROM lounge_quotes_used WHERE source_key = ? AND quote_hash = ?",
+            (source_key, quote_hash),
+        )
+        conn.execute(
+            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?)",
             (source_key, quote_hash, now_iso),
         )
         conn.execute(

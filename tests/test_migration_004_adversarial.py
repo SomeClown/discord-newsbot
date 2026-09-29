@@ -120,15 +120,6 @@ def test_a_failed_004_never_leaves_a_half_built_v4_that_reports_success(v3_path)
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "db.migrate() reads user_version before taking the write lock, so two openers "
-        "of a v3 file both run 004 and the loser dies with 'table lounge_quotes_used "
-        "already exists'. Pre-existing in migrate(), not specific to 004; harmless while "
-        "one process opens the DB at startup."
-    ),
-)
 def test_several_processes_opening_a_v3_file_at_once_all_end_up_on_v4(v3_path):
     barrier = threading.Barrier(6)
     versions: list[int] = []

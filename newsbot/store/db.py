@@ -52,16 +52,42 @@ def migrate(conn: sqlite3.Connection) -> int:
         version = int(path.name.split("_", 1)[0])
         if version <= current:
             continue
-        sql = path.read_text()
-        with conn:
-            conn.executescript(sql)
-            # executescript issues an implicit COMMIT before running, so
-            # user_version has to be set inside the same `with` block to
-            # stay covered by its own transaction, not the script's.
-            conn.execute(f"PRAGMA user_version = {version}")
-        current = version
+        current = _apply(conn, path, version, current)
 
     return current
+
+
+def _apply(conn: sqlite3.Connection, path: Path, version: int, current: int) -> int:
+    """Run one migration under the write lock; return the version afterwards.
+
+    `user_version` gets re-read after `BEGIN IMMEDIATE`, not trusted from
+    before it. I originally checked once up front, which is fine right up
+    until several processes open the same old file at once: they all see
+    the old version, all run the migration, and the losers die with
+    "already exists". Under the lock, a loser sees the winner's version and
+    skips. `autocommit` is on for the duration because `executescript`
+    would otherwise commit first and quietly hand the lock back.
+    """
+    old_autocommit = conn.autocommit
+    conn.commit()
+    conn.autocommit = True
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            latest = conn.execute("PRAGMA user_version").fetchone()[0]
+            if latest >= version:
+                conn.execute("ROLLBACK")
+                return latest
+            conn.executescript(path.read_text())
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.autocommit = old_autocommit
+    return version
 
 
 def assert_fts5(conn: sqlite3.Connection) -> None:
