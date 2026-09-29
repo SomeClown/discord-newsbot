@@ -1044,6 +1044,8 @@ def _wire_main(monkeypatch, tmp_path, run) -> None:
         ),
     )
     monkeypatch.setattr(entrypoint, "NewsBot", StubBot)
+    # The refused-intent path now waits ten minutes before exiting.
+    monkeypatch.setattr(entrypoint, "INTENT_EXIT_DELAY_S", 0)
 
 
 @pytest.mark.parametrize("shard_id", [None, 3])

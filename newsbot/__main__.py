@@ -14,8 +14,11 @@ logs`.
 
 from __future__ import annotations
 
+import logging
 import os
+import signal
 import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -25,6 +28,41 @@ from newsbot.bot.client import NewsBot
 from newsbot.config import ConfigError, load_config, load_secrets
 from newsbot.logging_setup import configure_logging
 from newsbot.store.db import assert_fts5, connect, migrate
+
+logger = logging.getLogger(__name__)
+
+# How long to sit on a "the intent switch is off" failure before exiting.
+# Discord resets a bot's token after about 1,000 logins in 24 hours, and
+# `restart: unless-stopped` with Docker's backoff (roughly one start a minute
+# once it settles) could plausibly get there in under a day. I haven't
+# confirmed whether a login the gateway refuses with 4014 counts toward that,
+# and I'd rather not find out by having the token reset at 3 a.m. So we wait
+# before exiting, which turns the crash loop into a slow drip. Module level so
+# a test can set it to zero instead of sleeping for ten real minutes.
+INTENT_EXIT_DELAY_S = 600
+
+
+def _wait_before_exit() -> None:
+    """Sleep `INTENT_EXIT_DELAY_S`, but wake straight away on SIGTERM or SIGINT.
+
+    A bare `time.sleep` isn't good enough. Once `bot.run` has returned,
+    discord.py's handlers are gone, and the container's main process is PID 1,
+    which the kernel never delivers a signal to unless the process installed
+    a handler for it. So `docker stop` would get ten seconds of silence and
+    then a SIGKILL. Handlers that set an event make the wait end when asked.
+    """
+    stop = threading.Event()
+
+    def wake(signum: int, frame: object) -> None:
+        stop.set()
+
+    signals = (signal.SIGTERM, signal.SIGINT)
+    previous = {sig: signal.signal(sig, wake) for sig in signals}
+    try:
+        stop.wait(INTENT_EXIT_DELAY_S)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def main() -> int:
@@ -67,6 +105,11 @@ def main() -> int:
             "Gateway Intents), or set lounge.welcome.enabled to false.",
             file=sys.stderr,
         )
+        logger.warning(
+            "Waiting %d seconds before exiting, so a restart loop can't spend the bot's logins",
+            INTENT_EXIT_DELAY_S,
+        )
+        _wait_before_exit()
         return 2
     return 0
 
