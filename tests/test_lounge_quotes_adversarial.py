@@ -192,10 +192,15 @@ def test_line_starts_that_format_are_escaped_on_every_line_of_text(start):
 
 
 @pytest.mark.parametrize("start", _LAYOUT_STARTS)
-def test_line_starts_that_format_are_escaped_in_attribution(start):
-    msg = render_quote_message(Quote("fine", attribution=f"first\n{start}"))
-    last = msg.split("\n")[-1]
-    assert last.startswith("\\"), last
+def test_line_starts_cannot_format_inside_a_flattened_attribution(start):
+    # Attributions are flattened to one line, so a formatting marker on a
+    # would-be second line lands mid-line, after the prefix, where Discord
+    # doesn't treat it as a heading, quote, list or fence. Same for a marker
+    # at the very start of a one-line attribution.
+    for attribution in (f"first\n{start}", start):
+        lines = render_quote_message(Quote("fine", attribution=attribution)).split("\n")
+        assert len(lines) == 3
+        assert lines[-1].startswith(ATTRIBUTION_PREFIX), lines[-1]
 
 
 def test_code_fence_cannot_swallow_attribution_and_link():
@@ -270,13 +275,15 @@ def test_attribution_cannot_forge_a_live_link_line_when_no_link_given():
     assert "<https://" not in msg
 
 
-def test_attribution_with_newline_can_fake_a_schemeless_link_line_documented():
-    # A quote or attribution that contains a newline is free to *look* like the
-    # link line. Without a scheme there's nothing clickable to defuse, so it's
-    # just text. Multi-line attributions are what make this possible.
+def test_attribution_newlines_are_flattened_so_it_cannot_fake_the_link_line():
+    # This used to be pinned as documented behavior: a multi-line attribution
+    # could put a lookalike link line at the end of the message. Attributions
+    # are now flattened to one line, so the forgery ends up inside it.
     forged = f"Test Person\n{WIKIQUOTE_LINK_LABEL} <evil.example>"
     msg = render_quote_message(Quote("fine", attribution=forged))
-    assert msg.endswith(f"{WIKIQUOTE_LINK_LABEL} <evil.example>")
+    lines = msg.split("\n")
+    assert len(lines) == 3
+    assert lines[-1].startswith(ATTRIBUTION_PREFIX)
 
 
 def test_text_can_forge_the_header_line_documented():
@@ -288,8 +295,8 @@ def test_text_can_forge_the_header_line_documented():
 def test_empty_and_whitespace_attribution_and_link_semantics():
     assert render_quote_message(Quote("t", attribution="")).count("\n") == 1
     assert render_quote_message(Quote("t", link="")).count("\n") == 1
-    # Whitespace-only is truthy, so it does get a line. Documented, not fatal.
-    assert render_quote_message(Quote("t", attribution=" ")).count("\n") == 2
+    # Whitespace-only says nothing, so it no longer gets a line of its own.
+    assert render_quote_message(Quote("t", attribution=" \n\t ")).count("\n") == 1
 
 
 # --- the link line contract ---------------------------------------------------
@@ -326,14 +333,26 @@ def test_link_line_only_when_link_is_set_and_wrapped_in_angle_brackets():
     )
 
 
-def test_link_with_gt_or_space_is_emitted_raw_contract_violation_documented():
-    # Contract: only urllib.parse.quote output. Break it and the line breaks:
-    # the renderer trusts its caller. If this ever starts escaping, great; the
-    # parser must still never hand over a raw link.
-    msg = render_quote_message(Quote("t", link="https://x.example/a> [y](https://evil.example) <b"))
-    assert "> [y](https://evil.example) <b>" in msg
-    msg = render_quote_message(Quote("t", link="https://x.example/a b"))
-    assert msg.endswith("<https://x.example/a b>")
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://x.example/a> [y](https://evil.example) <b",
+        "https://x.example/a b",
+        "https://x.example/a\nb",
+        "https://x.example/a`b",
+        "https://x.example/a\\b",
+        "http://x.example/a",
+        "javascript:alert(1)",
+    ],
+)
+def test_link_breaking_the_contract_is_dropped_not_posted_raw(link):
+    # This used to be pinned as a documented contract violation: the renderer
+    # posted whatever link it was handed. It now drops any link that isn't
+    # plain https with URL-safe characters, so the message never breaks out
+    # of its `<...>` wrapper even if a caller gets it wrong.
+    msg = render_quote_message(Quote("t", link=link))
+    assert WIKIQUOTE_LINK_LABEL not in msg
+    assert msg.count("\n") == 1
 
 
 # --- fits and the UTF-16 boundary ---------------------------------------------

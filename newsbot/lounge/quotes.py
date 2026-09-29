@@ -33,6 +33,10 @@ ATTRIBUTION_PREFIX = "~ "
 WIKIQUOTE_LINK_LABEL = "From Wikiquote:"
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# What `urllib.parse.quote` output can look like after an https:// prefix:
+# URL-safe characters only. No whitespace, `<`, `>`, backslash, backtick,
+# quote marks or pipes, any of which could break out of the `<...>` wrapper.
+_SAFE_LINK_RE = re.compile(r"https://[A-Za-z0-9._~%/()',:@!$&*+;=?#-]+")
 
 
 @dataclass(frozen=True)
@@ -61,9 +65,17 @@ def render_quote_message(quote: Quote) -> str:
     ever come from `urllib.parse.quote` output, which can't contain `>`.
     """
     lines = [QUOTE_HEADER, esc(quote.text)]
-    if quote.attribution:
-        lines.append(f"{ATTRIBUTION_PREFIX}{esc(quote.attribution)}")
-    if quote.link:
+    # One line, always. A multi-line attribution could otherwise dress its
+    # last line up as the link line, and a whitespace-only one would earn a
+    # line of its own for saying nothing.
+    attribution = " ".join((quote.attribution or "").split())
+    if attribution:
+        lines.append(f"{ATTRIBUTION_PREFIX}{esc(attribution)}")
+    # The link isn't escaped (escaping would break it), so it has to prove
+    # it's the kind of link the contract promises before it gets a line.
+    # Anything with a space, a bracket or a backtick is dropped rather than
+    # posted raw; belt and suspenders on top of the parser using quote().
+    if quote.link and _SAFE_LINK_RE.fullmatch(quote.link):
         lines.append(f"{WIKIQUOTE_LINK_LABEL} <{quote.link}>")
     return "\n".join(lines)
 
