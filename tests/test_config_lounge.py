@@ -122,7 +122,7 @@ def test_source_that_is_not_a_one_key_mapping_fails(tmp_path, entry):
 
 def test_unknown_source_key_is_named(tmp_path):
     msg = _errors(tmp_path, _sources_block("{feed: x}"))
-    assert "sources[0] has an unknown key 'feed'; use wikiquote, file or url" in msg
+    assert "sources[0] has an unknown key 'feed' (use wikiquote, file or url)" in msg
 
 
 @pytest.mark.parametrize("value", ['""', '"   "', "5", "[a]"])
@@ -131,22 +131,28 @@ def test_blank_or_non_string_value_fails(tmp_path, value):
     assert "lounge.daily_quote.sources[0].wikiquote must be a non-empty string" in msg
 
 
-@pytest.mark.parametrize(
-    "title",
-    [
-        "https://en.wikiquote.org/wiki/Oscar_Wilde",
-        "http://x",
-        "Bad|Title",
-        "Bad<Title",
-        "Bad#Title",
-        "Bad[Title]",
-        "Bad{Title}",
-        "x" * 256,
-    ],
-)
-def test_bad_wikiquote_titles_fail(tmp_path, title):
+@pytest.mark.parametrize("title", ["https://en.wikiquote.org/wiki/Oscar_Wilde", "http://x"])
+def test_wikiquote_urls_fail_with_the_not_a_url_wording(tmp_path, title):
     msg = _errors(tmp_path, _sources_block(f'{{wikiquote: "{title}"}}'))
-    assert "isn't a page title" in msg
+    assert "isn't a page title" in msg and "not a URL" in msg
+
+
+@pytest.mark.parametrize(
+    "title", ["Bad|Title", "Bad<Title", "Bad#Title", "Bad[Title]", "Bad{Title}"]
+)
+def test_wikiquote_titles_with_forbidden_characters_say_so(tmp_path, title):
+    msg = _errors(tmp_path, _sources_block(f'{{wikiquote: "{title}"}}'))
+    assert "has a character a Wikiquote page title can't have (one of # < > [ ] { } |)" in msg
+    assert "not a URL" not in msg
+
+
+def test_too_long_wikiquote_title_says_how_long_without_echoing_it(tmp_path):
+    msg = _errors(tmp_path, _sources_block(f'{{wikiquote: "{"x" * 256}"}}'))
+    assert (
+        "lounge.daily_quote.sources[0].wikiquote is 256 characters long; "
+        "a Wikiquote page title can be 255 at most"
+    ) in msg
+    assert "xxxx" not in msg and "not a URL" not in msg
 
 
 def test_a_255_character_title_is_fine(tmp_path):
@@ -191,7 +197,7 @@ def test_several_value_problems_arrive_in_one_config_error(tmp_path):
         _sources_block('{url: "http://x.invalid"}', '{wikiquote: "a|b"}', '{url: "https://"}'),
     )
     assert "plain http" in msg
-    assert "isn't a page title" in msg
+    assert "has a character a Wikiquote page title can't have" in msg
     assert "isn't an https:// address" in msg
 
 
@@ -199,7 +205,7 @@ def test_shapes_are_checked_even_while_the_feature_is_disabled(tmp_path):
     lounge = (
         "lounge:\n  daily_quote:\n    enabled: false\n    sources:\n      - {wikiquote: 'a|b'}\n"
     )
-    assert "isn't a page title" in _errors(tmp_path, lounge)
+    assert "has a character a Wikiquote page title can't have" in _errors(tmp_path, lounge)
 
 
 # --- keys ---

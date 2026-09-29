@@ -315,7 +315,7 @@ def test_non_string_or_blank_values_are_rejected(tmp_path, kind, value):
 
 def test_unknown_kind_is_rejected_with_the_allowed_list(tmp_path):
     msg = _errors(tmp_path, _quote([{"Wikiquote": "Oscar Wilde"}]))
-    assert "unknown key 'Wikiquote'" in msg and "wikiquote, file or url" in msg
+    assert "unknown key 'Wikiquote' (use wikiquote, file or url)" in msg
 
 
 def test_non_string_key_in_entry_is_rejected(tmp_path):
@@ -371,17 +371,56 @@ def test_sources_that_is_not_a_list_is_a_shape_error(tmp_path, value):
     assert "lounge.daily_quote.sources" in _errors(tmp_path, _quote(value))
 
 
+# --- config errors never echo a URL's secrets ---
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://u:tok@h.example/x?secret=1",
+        "https://?token=abc123",
+        "https://u:tok@/x?token=abc123",
+        "ftp://u:tok@h.example/x?secret=1",
+        "https://[bad:tok@h?token=abc123",
+    ],
+)
+def test_url_errors_never_echo_credentials_or_the_query(tmp_path, url):
+    msg = _errors(tmp_path, _quote([{"url": url}]))
+    assert "lounge.daily_quote.sources[0].url" in msg
+    for secret in ("tok", "secret=1", "abc123", "u:"):
+        assert secret not in msg, secret
+
+
+def test_plain_http_error_still_names_the_host_and_path(tmp_path):
+    msg = _errors(tmp_path, _quote([{"url": "http://u:tok@h.example/x?secret=1"}]))
+    assert "'http://h.example/x' uses plain http; only https:// addresses are allowed" in msg
+
+
+# --- the lounge's own messages read cleanly ---
+
+
+def test_lounge_validator_messages_lose_the_value_error_prefix_and_the_doubled_path(tmp_path):
+    msg = _errors(tmp_path, {"daily_quote": {"time": "99:99", "sources": ["bad"]}})
+    assert "  - lounge.daily_quote.time '99:99' is not HH:MM (24-hour)" in msg
+    assert (
+        "  - lounge.daily_quote.sources[0] must have exactly one of wikiquote, file or url" in msg
+    )
+    assert "Value error" not in msg
+    assert "time: lounge" not in msg and "sources: lounge" not in msg
+
+
 # --- wikiquote titles ---
 
 
 @pytest.mark.parametrize("ch", list("#<>[]{}|"))
 def test_wikiquote_title_with_mediawiki_illegal_character_is_rejected(tmp_path, ch):
-    assert "isn't a page title" in _errors(tmp_path, _quote([{"wikiquote": f"Oscar{ch}Wilde"}]))
+    msg = _errors(tmp_path, _quote([{"wikiquote": f"Oscar{ch}Wilde"}]))
+    assert "has a character a Wikiquote page title can't have" in msg
 
 
 def test_title_full_of_illegal_characters_is_one_error(tmp_path):
     msg = _errors(tmp_path, _quote([{"wikiquote": "|#[]{}<>"}]))
-    assert msg.count("isn't a page title") == 1
+    assert msg.count("has a character a Wikiquote page title can't have") == 1
 
 
 @pytest.mark.parametrize(
@@ -399,7 +438,7 @@ def test_wikiquote_title_that_merely_starts_with_http_is_rejected(tmp_path):
 
 def test_wikiquote_length_limit_is_255_characters(tmp_path):
     assert _load(tmp_path, _quote([{"wikiquote": "a" * 255}]))
-    assert "isn't a page title" in _errors(tmp_path, _quote([{"wikiquote": "a" * 256}]))
+    assert "256 characters long" in _errors(tmp_path, _quote([{"wikiquote": "a" * 256}]))
 
 
 def test_wikiquote_length_limit_counts_characters_not_bytes(tmp_path):
@@ -793,7 +832,7 @@ def test_all_cross_check_errors_are_reported_together(tmp_path):
         "lounge.channel_id is required",
         "{nope}",
         "limit is 2000",
-        "isn't a page title",
+        "has a character a Wikiquote page title can't have",
         "uses plain http",
         "sources[3] repeats sources[2]",
     ]:

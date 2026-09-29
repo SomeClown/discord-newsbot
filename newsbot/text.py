@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from urllib.parse import urlsplit, urlunsplit
 
 # Tags whose start or end implies a line break in the rendered text. This
 # list doesn't need to be exhaustive: worst case a missed tag just joins
@@ -133,6 +134,23 @@ def first_line(html_or_text: str, limit: int = 120) -> str:
         if candidate:
             return _truncate(candidate, limit)
     return ""
+
+
+def shown_url(url: str) -> str:
+    """`url` as scheme, host and path only, for admin lines, logs and error messages.
+
+    Raw links to private gists carry their secret in the userinfo or the
+    query string, and neither the admin channel nor a config error that gets
+    pasted into a bug report is where a secret should end up. Lives here and
+    not in the lounge code because `config.py` needs it too, and config can't
+    import anything that imports config.
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return "(unreadable address)"
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def plain_line(text: str, limit: int = 250) -> str:

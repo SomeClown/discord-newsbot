@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, HttpUrl, SecretStr, ValidationError, fiel
 
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
+from newsbot.text import shown_url
 
 Trust = Literal["official", "press", "community"]
 
@@ -295,7 +296,7 @@ class DailyQuoteCfg(BaseModel, extra="forbid"):
                 continue
             ((kind, value),) = entry.items()
             if kind not in _SOURCE_KINDS:
-                problems.append(f"{where} has an unknown key {kind!r}; use wikiquote, file or url")
+                problems.append(f"{where} has an unknown key {kind!r} (use wikiquote, file or url)")
             elif not isinstance(value, str) or not value.strip():
                 problems.append(f"{where}.{kind} must be a non-empty string")
             else:
@@ -353,6 +354,13 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
     game they forgot.
     """
     loc = error["loc"]
+    message = error["msg"]
+    # The lounge validators write their own complete messages, path included.
+    # Left alone they'd come out as "lounge.daily_quote.time: Value error,
+    # lounge.daily_quote.time '99:99' is not HH:MM", which says the path twice
+    # and the words "Value error" once too often.
+    if error["type"] == "value_error" and message.startswith("Value error, lounge."):
+        return message.removeprefix("Value error, ")
     if (
         len(loc) == 3
         and loc[0] == "topics"
@@ -370,7 +378,7 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
             f"topics[{idx}] ({key}): channel_id is required "
             "(each game posts to its own channel as of v2.0)"
         )
-    return f"{'.'.join(str(p) for p in loc)}: {error['msg']}"
+    return f"{'.'.join(str(p) for p in loc)}: {message}"
 
 
 def _source_problem(i: int, src: QuoteSourceCfg) -> str | None:
@@ -378,20 +386,32 @@ def _source_problem(i: int, src: QuoteSourceCfg) -> str | None:
     where = f"lounge.daily_quote.sources[{i}].{src.kind}"
     if src.kind == "wikiquote":
         v = src.value
-        if len(v) > 255 or any(c in v for c in "#<>[]{}|") or v.lower().startswith("http"):
+        if v.lower().startswith("http"):
             return (
                 f'{where} {v!r} isn\'t a page title (use the title, like "Oscar Wilde", not a URL)'
             )
+        if len(v) > 255:
+            # No echo: 256 characters of it wouldn't help anyone find the entry.
+            return f"{where} is {len(v)} characters long; a Wikiquote page title can be 255 at most"
+        if any(c in v for c in "#<>[]{}|"):
+            return (
+                f"{where} {v!r} has a character a Wikiquote page title can't have "
+                "(one of # < > [ ] { } |)"
+            )
     elif src.kind == "url":
+        # Whatever we echo goes through shown_url: a raw link to a private gist
+        # carries its secret in the userinfo or query, and a config error is
+        # exactly what gets pasted into a chat when asking for help.
+        shown = shown_url(src.value)
         try:
             parts = urlsplit(src.value)
             scheme, host = parts.scheme.lower(), parts.hostname
         except ValueError:
-            return f"{where} {src.value!r} isn't an https:// address"
+            return f"{where} {shown!r} isn't an https:// address"
         if scheme == "http":
-            return f"{where} {src.value!r} uses plain http; only https:// addresses are allowed"
+            return f"{where} {shown!r} uses plain http; only https:// addresses are allowed"
         if scheme != "https" or not host:
-            return f"{where} {src.value!r} isn't an https:// address"
+            return f"{where} {shown!r} isn't an https:// address"
     return None
 
 

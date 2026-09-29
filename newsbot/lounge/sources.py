@@ -43,14 +43,13 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from newsbot.config import QuoteSourceCfg
 from newsbot.lounge.quotes import Quote, split_fortune
 from newsbot.lounge.wikiquote import fetch_page, parse_page
-from newsbot.text import plain_line
+from newsbot.text import plain_line, shown_url
 
 logger = logging.getLogger(__name__)
 
@@ -117,28 +116,13 @@ def describe(src: QuoteSourceCfg) -> str:
     if src.kind == "wikiquote":
         return f'Wikiquote "{_wikiquote_title(src)}"'
     if src.kind == "url":
-        return f"url {_shown_url(src.value)}"
+        return f"url {shown_url(src.value)}"
     return f"{src.kind} {src.value.strip()}"
-
-
-def _shown_url(url: str) -> str:
-    """`url` as scheme, host and path only, for admin lines and logs.
-
-    Raw links to private gists carry their secret in the userinfo or the
-    query string, and the admin channel is not where a secret should end up.
-    The cache key still uses the whole URL; only what we say out loud changes.
-    """
-    try:
-        parts = urlsplit(url.strip())
-    except ValueError:
-        return "(unreadable address)"
-    host = parts.netloc.rpartition("@")[2]
-    return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def _log_name(src: QuoteSourceCfg) -> str:
     """`src.key`, except a URL source's key holds the whole URL, secrets and all."""
-    return f"url:{_shown_url(src.value)}" if src.kind == "url" else src.key
+    return f"url:{shown_url(src.value)}" if src.kind == "url" else src.key
 
 
 def _wikiquote_title(src: QuoteSourceCfg) -> str:
@@ -238,7 +222,7 @@ def _read_file_sync(path: Path) -> str:
 
 
 async def _fetch_url(http: httpx.AsyncClient, url: str) -> str:
-    shown = _shown_url(url)
+    shown = shown_url(url)
     try:
         async with asyncio.timeout(URL_TIMEOUT_S):
             return await _get_text(http, url, shown)
@@ -281,7 +265,7 @@ async def _get_text(http: httpx.AsyncClient, url: str, shown: str) -> str:
             raise SourceError(f"{shown} redirected to an address that isn't a valid URL") from None
         if current.scheme != "https":
             raise SourceError(
-                f"{shown} redirects to a non-https address ({_shown_url(str(current))})"
+                f"{shown} redirects to a non-https address ({shown_url(str(current))})"
             )
     raise AssertionError("unreachable: the loop returns or raises")
 
