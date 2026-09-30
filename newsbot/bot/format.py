@@ -937,12 +937,28 @@ def _headline_sort_key(item: HeadlineItem) -> tuple[int, int, float]:
     )
 
 
+# One headline is one line, and one line is allowed only so much of the embed. A
+# title is flattened and cut to `_MAX_HEADLINE_TITLE` UTF-16 units (before
+# escaping, which can nearly double it); a URL longer than `_MAX_HEADLINE_URL` is
+# dropped rather than cut, since half a URL is a link to somewhere else. (The URL
+# cap is generous on purpose: a non-ASCII path is percent-encoded at up to twelve
+# characters per character.) With both caps one line tops out under 1,700 units, so
+# no single item can crowd the other headlines, or the "+N more" line, out of 4096.
+_MAX_HEADLINE_TITLE = 300
+_MAX_HEADLINE_URL = 1000
+
+
 def _headline_line(item: HeadlineItem) -> str | None:
     safe_url = _safe_link(item.url)
-    if safe_url is None:
+    if safe_url is None or discord_len(safe_url) > _MAX_HEADLINE_URL:
         return None
+    # Titles come from feeds and social posts, and a Bluesky post has line
+    # breaks. Left alone, one could start its own line in this list and pose as
+    # an official headline, or as the renderer's own "+N more". split() with no
+    # argument breaks on every kind of whitespace, so this flattens all of it.
+    title = _truncate_utf16(" ".join(item.title.split()), _MAX_HEADLINE_TITLE, suffix="…")
     marker = f"{_OFFICIAL_MARKER} · " if item.trust == "official" else ""
-    return f"• {marker}{esc(item.title)} — <{safe_url}>"
+    return f"• {marker}{esc(title)} — <{safe_url}>"
 
 
 def render_headlines_embed(
@@ -952,8 +968,9 @@ def render_headlines_embed(
 
     Ordered by D4 (see `_headline_sort_key`), with a `🟢 OFFICIAL` marker on official
     items only; a community item gets no "rumor" label, since a headline list makes no
-    claim about whether it's true. Titles go through `esc()` and URLs through
-    `_safe_link`, same as the stories render. When the list doesn't fit under the
+    claim about whether it's true. Titles are flattened to one line and capped, then go
+    through `esc()`; URLs go through `_safe_link` and a URL that's too long is dropped
+    like an unusable one (see `_headline_line`). When the list doesn't fit under the
     4096-unit description limit, whole lines are shed from the bottom and the last line
     says `+N more, use /news`. Returns `None` when there's nothing to list (no items, or
     none with a usable URL): a game with nothing posts nothing (design.md §13), so the

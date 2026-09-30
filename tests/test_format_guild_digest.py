@@ -130,7 +130,9 @@ def test_the_limit_counts_utf16_units_not_characters():
 
 
 def test_one_enormous_title_is_hard_truncated_not_dropped():
-    embed = render_headlines_embed(BL4, [item("y" * 6000)])
+    # The URL is given explicitly: `item()` builds it from the title, and a 6000-character
+    # URL is (rightly, since the per-line caps) dropped as unusable rather than cut.
+    embed = render_headlines_embed(BL4, [item("y" * 6000, url="https://example.com/enormous")])
     assert embed is not None and discord_len(str(embed.description)) <= 4096
 
 

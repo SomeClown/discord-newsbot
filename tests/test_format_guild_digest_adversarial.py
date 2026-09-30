@@ -9,8 +9,9 @@ forged badge). Two, the arithmetic on the way out is exact: Discord counts
 UTF-16 code units, "+N more" has to be the number actually cut, and a link
 that can't be made safe is dropped rather than counted.
 
-Pure functions; no database, no network. Strict xfails are real holes, each
-says what it found.
+Pure functions; no database, no network. The holes this found (forged lines
+from multi-line titles, one oversized item swallowing the list) are fixed, and
+their xfail markers are gone.
 """
 
 from __future__ import annotations
@@ -69,7 +70,9 @@ def shown_count(embed) -> int:
 
 
 def more_count(embed) -> int:
-    found = re.search(r"\+(\d+) more, use /news", str(embed.description))
+    # Only a line of its own counts: that's the renderer's "+N more". The same words inside
+    # a flattened title are just text in a headline, and can't pass for the real thing.
+    found = re.search(r"^\+(\d+) more, use /news", str(embed.description), re.MULTILINE)
     return int(found.group(1)) if found else 0
 
 
@@ -111,29 +114,15 @@ def test_a_hostile_title_renders_with_no_live_syntax_and_one_real_link(title):
     assert not re.search(r"(?<![\\\w])(discord\.gg|discord\.com/invite)/", text)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "esc() leaves newlines alone, so a title with a line break can start its own line in "
-        "the list, including a forged '🟢 OFFICIAL' one. Bluesky posts are multi-line, so "
-        "real titles do this. The fix is to flatten whitespace (text.plain_line) before "
-        "building the line."
-    ),
-)
 def test_a_title_with_a_newline_cannot_forge_an_official_line():
     forged = "normal\n• 🟢 OFFICIAL · Free V-Bucks here"
     embed = render_headlines_embed(BL4, [item(forged, trust="community")])
+    # One line, and it's a community line: the text survives inline, but it can't start a
+    # line of its own, which is what a forged official headline needs.
     assert len(body(embed)) == 1
-    assert "🟢 OFFICIAL" not in str(embed.description)
+    assert not any(line.startswith("• 🟢 OFFICIAL") for line in body(embed))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Same cause: a title can carry its own '+99 more, use /news' line and impersonate "
-        "the renderer's count."
-    ),
-)
 def test_a_title_cannot_forge_the_more_line():
     embed = render_headlines_embed(BL4, [item("x\n\n+99 more, use /news")])
     assert more_count(embed) == 0
@@ -266,9 +255,13 @@ def test_extreme_or_naive_published_dates_do_not_crash_the_sort(when):
 # --- the limit, exactly ---
 
 
-def _titled_with_total(total_units: int, *, astral: bool, n: int = 8):
-    """`n` items whose description is exactly `total_units` UTF-16 units once rendered."""
-    base = [item(f"headline {i:03d} " + "w" * 120, age_h=2.0 + i) for i in range(n - 1)]
+def _titled_with_total(total_units: int, *, astral: bool, n: int = 12):
+    """`n` items whose description is exactly `total_units` UTF-16 units once rendered.
+
+    Twelve long-ish titles rather than a few giant ones: a line is capped (a title at 300
+    units), so the padding has to fit under that cap on the last item.
+    """
+    base = [item(f"headline {i:03d} " + "w" * 270, age_h=2.0 + i) for i in range(n - 1)]
 
     def make(pad: int):
         if astral:
@@ -280,8 +273,10 @@ def _titled_with_total(total_units: int, *, astral: bool, n: int = 8):
     def size(pad: int) -> int:
         return discord_len(str(render_headlines_embed(BL4, make(pad)).description))
 
-    pad = total_units - size(0)
-    assert pad >= 0, "fixture too big"
+    # Measured from one character of padding, not none: the title is flattened, so a bare
+    # "last " loses its trailing space and would be off by one.
+    pad = total_units - size(1) + 1
+    assert pad >= 1, "fixture too big"
     items = make(pad)
     return items
 
@@ -289,17 +284,17 @@ def _titled_with_total(total_units: int, *, astral: bool, n: int = 8):
 @pytest.mark.parametrize("astral", [False, True])
 def test_a_description_of_exactly_4096_units_is_not_cut_and_4097_cuts_exactly_one(astral):
     # Build at a size where nothing is shed, so `size` is the true unshed length.
-    items = _titled_with_total(LIMIT, astral=astral, n=8)
-    assert len(items) == 8
+    items = _titled_with_total(LIMIT, astral=astral)
+    assert len(items) == 12
     fits = render_headlines_embed(BL4, items)
     assert discord_len(str(fits.description)) == LIMIT
-    assert more_count(fits) == 0 and shown_count(fits) == 8
+    assert more_count(fits) == 0 and shown_count(fits) == 12
 
-    over = _titled_with_total(LIMIT, astral=astral, n=8)
+    over = _titled_with_total(LIMIT, astral=astral)
     over[-1] = item(over[-1].title + "p", age_h=50.0, url="https://example.com/last")
     cut = render_headlines_embed(BL4, over)
     assert discord_len(str(cut.description)) <= LIMIT
-    assert more_count(cut) == 1 and shown_count(cut) == 7
+    assert more_count(cut) == 1 and shown_count(cut) == 11
     assert str(cut.description).endswith("\n\n+1 more, use /news")
 
 
@@ -357,16 +352,6 @@ def test_a_long_note_with_many_items_keeps_the_note_and_counts_more_against_item
     assert shown_count(embed) + more_count(embed) == 200
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Shedding walks down from 'keep every line' and stops at the first prefix that fits. "
-        "If the very first line is longer than the whole embed (a giant title or URL on the "
-        "newest top-tier item) no prefix fits, and the fallback hard-truncates that one line "
-        "and drops every other headline without a '+N more'. One oversized item swallows "
-        "the game's whole digest."
-    ),
-)
 @pytest.mark.parametrize("giant", ["title", "url"])
 def test_one_oversized_item_does_not_swallow_the_rest_of_the_list(giant):
     if giant == "title":
@@ -376,6 +361,24 @@ def test_one_oversized_item_does_not_swallow_the_rest_of_the_list(giant):
     rest = [item(f"normal {n}", age_h=2 + n) for n in range(10)]
     embed = render_headlines_embed(BL4, [first, *rest])
     assert "normal 0" in str(embed.description)
+
+
+def test_a_long_title_is_cut_to_the_line_cap_and_a_long_url_line_is_dropped_and_not_counted():
+    long_title = item("t" * 1000, age_h=0.1, url="https://example.com/ok")
+    long_url = item("fine title", age_h=0.2, url="https://example.com/" + "u" * 1500)
+    rest = [item(f"normal {n}", age_h=2 + n) for n in range(3)]
+    embed = render_headlines_embed(BL4, [long_title, long_url, *rest])
+    first, *others = body(embed)
+    assert discord_len(first) < 500 and first.endswith("… — <https://example.com/ok>")
+    assert shown_count(embed) == 4 and more_count(embed) == 0  # the long URL isn't "unshown"
+    assert "fine title" not in str(embed.description)
+    assert all("normal" in line for line in others)
+
+
+@pytest.mark.parametrize("space", ["\n", "\r\n", "\t", "\u2028", "\x85", "  "])
+def test_every_kind_of_whitespace_in_a_title_is_flattened_to_one_space(space):
+    embed = render_headlines_embed(BL4, [item(f"one{space}two", url="https://example.com/x")])
+    assert body(embed) == ["• one two — <https://example.com/x>"]
 
 
 def test_embed_total_stays_under_discords_6000_even_with_a_full_description_and_footer():
