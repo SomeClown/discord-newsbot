@@ -1467,6 +1467,30 @@ def recent_notices(conn: sqlite3.Connection, guild_id: int, limit: int = 20) -> 
     ]
 
 
+def failing_sources(conn: sqlite3.Connection, min_failures: int = 1) -> list[SourceHealthRow]:
+    """Every source with at least `min_failures` failed collections in a row, worst first.
+
+    For the owner's daily report (D8): the alert fires once at 12, but the
+    report lists everything that's currently failing, at any count.
+    """
+    rows = conn.execute(
+        "SELECT source_name, last_success_at, last_error_at, last_error, consecutive_failures "
+        "FROM source_health WHERE consecutive_failures >= ? "
+        "ORDER BY consecutive_failures DESC, source_name",
+        (max(1, min_failures),),
+    ).fetchall()
+    return [
+        SourceHealthRow(
+            source_name=r["source_name"],
+            last_success_at=_parse_dt(r["last_success_at"]),
+            last_error_at=_parse_dt(r["last_error_at"]),
+            last_error=r["last_error"],
+            consecutive_failures=r["consecutive_failures"],
+        )
+        for r in rows
+    ]
+
+
 def app_state_get(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None

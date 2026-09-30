@@ -39,10 +39,13 @@ from newsbot.store.models import (
     AlertStatus,
     CodeView,
     HeadlineItem,
+    Notice,
+    SourceHealthRow,
     StatusSnapshot,
     StoryView,
     Usage,
 )
+from newsbot.text import plain_line
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -1326,7 +1329,90 @@ def to_text(r: RenderedDigest) -> str:
     return "\n".join(parts).rstrip()
 
 
+# --- Owner report and server status (design.md §15, plan task 8) ---
+
+_MAX_FAILING_SOURCES_SHOWN = 10
+
+
+@dataclass(frozen=True)
+class DigestOutcome:
+    """One server's digest for the day, boiled down for the owner's one-liner.
+
+    `reason` is a short category for a failure ("missing permissions",
+    "Claude error"), not the raw error; it's ignored when `posted` is True.
+    """
+
+    posted: bool
+    reason: str = ""
+
+
+def render_digest_summary_line(outcomes: Sequence[DigestOutcome]) -> str:
+    """The owner's daily one-liner.
+
+    For example: `digests posted to 37 of 38 servers; 1 failed (missing permissions)`.
+
+    Failures are grouped by reason; with more than one reason each gets its
+    count, most common first ("3 failed (2 missing permissions, 1 Claude
+    error)"). No digests due at all reads as such instead of "0 of 0".
+    """
+    total = len(outcomes)
+    if total == 0:
+        return "no server digests were due today"
+    posted = sum(1 for o in outcomes if o.posted)
+    noun = "server" if total == 1 else "servers"
+    line = f"digests posted to {posted} of {total} {noun}"
+    failed = [o for o in outcomes if not o.posted]
+    if not failed:
+        return line
+    counts: dict[str, int] = {}
+    for o in failed:
+        reason = esc(plain_line(o.reason, 40)) or "unknown reason"
+        counts[reason] = counts.get(reason, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ranked) == 1:
+        detail = ranked[0][0]
+    else:
+        detail = ", ".join(f"{n} {reason}" for reason, n in ranked)
+    return f"{line}; {len(failed)} failed ({detail})"
+
+
+def render_owner_report(
+    outcomes: Sequence[DigestOutcome], failing: Sequence[SourceHealthRow]
+) -> str:
+    """The owner's daily report: the summary line, then every source that's currently failing (D8).
+
+    Capped at Discord's message limit; the source list is cut at 10 with a
+    "+N more" line so the summary line at the top always survives.
+    """
+    lines = [f"newsbot daily: {render_digest_summary_line(outcomes)}"]
+    if not failing:
+        lines.append("All sources are healthy.")
+    else:
+        lines.append(f"{len(failing)} failing source{'s' if len(failing) != 1 else ''}:")
+        for row in failing[:_MAX_FAILING_SOURCES_SHOWN]:
+            error = f": {esc(plain_line(row.last_error, 120))}" if row.last_error else ""
+            lines.append(
+                f"- {esc(plain_line(row.source_name, 60))} "
+                f"({row.consecutive_failures} in a row){error}"
+            )
+        extra = len(failing) - _MAX_FAILING_SOURCES_SHOWN
+        if extra > 0:
+            lines.append(f"+{extra} more")
+    return _truncate_utf16("\n".join(lines), _ALERT_CONTENT_LIMIT, suffix="…")
+
+
+def render_guild_status(notices: Sequence[Notice], *, limit: int = 5) -> str:
+    """A server's recent problem notes for `/newsbot status`, newest first."""
+    if not notices:
+        return "No problems recorded lately."
+    lines = [
+        f"- {n.created_at:%Y-%m-%d %H:%M} UTC: {plain_line(n.text, 300)}" for n in notices[:limit]
+    ]
+    return _truncate_utf16("\n".join(lines), _MAX_FIELD_VALUE, suffix="…")
+
+
 __all__ = [
+    "DigestOutcome",
     "RenderedAlert",
     "RenderedDigest",
     "TopicMessage",
@@ -1334,9 +1420,12 @@ __all__ = [
     "render_code_alerts",
     "render_code_page",
     "render_digest",
+    "render_digest_summary_line",
     "render_guild_digest",
     "render_guild_run_report",
+    "render_guild_status",
     "render_headlines_embed",
+    "render_owner_report",
     "render_roundup_alerts",
     "render_run_report",
     "render_status",

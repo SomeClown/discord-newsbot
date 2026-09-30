@@ -23,6 +23,27 @@ from newsbot.bot.format import _ALERT_CONTENT_LIMIT, _truncate_utf16
 logger = logging.getLogger(__name__)
 
 
+async def send_to_channel(client: discord.Client, channel_id: int, text: str) -> bool:
+    """Post `text` to `channel_id` with no mentions, capped at Discord's limit. Never raises.
+
+    The shared plumbing under every admin-ish message: `send_alert` (v2's
+    owner path) and the per-server router in `newsbot.guilds.notify`. True
+    if the message went out, False if anything went wrong (the failure is
+    logged, not raised). The cap and `AllowedMentions.none()` live here so
+    no caller can forget them.
+    """
+    text = _truncate_utf16(text, _ALERT_CONTENT_LIMIT, suffix="\u2026")
+    try:
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            channel = await client.fetch_channel(channel_id)
+        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        logger.exception("failed to send admin alert", extra={"admin_channel_id": channel_id})
+        return False
+    return True
+
+
 async def send_alert(client: discord.Client, admin_channel_id: int | None, text: str) -> None:
     """Post `text` to the admin channel, if one is configured. Never raises.
 
@@ -40,14 +61,7 @@ async def send_alert(client: discord.Client, admin_channel_id: int | None, text:
     """
     if admin_channel_id is None:
         return
-    text = _truncate_utf16(text, _ALERT_CONTENT_LIMIT, suffix="\u2026")
-    try:
-        channel = client.get_channel(admin_channel_id)
-        if channel is None:
-            channel = await client.fetch_channel(admin_channel_id)
-        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
-    except Exception:
-        logger.exception("failed to send admin alert", extra={"admin_channel_id": admin_channel_id})
+    await send_to_channel(client, admin_channel_id, text)
 
 
-__all__ = ["send_alert"]
+__all__ = ["send_alert", "send_to_channel"]

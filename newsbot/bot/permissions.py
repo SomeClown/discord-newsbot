@@ -16,13 +16,22 @@ lot less annoying than a bot that refuses to come up at all because
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+import sqlite3
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import closing
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import discord
 
-from newsbot.bot.format import _truncate_utf16
+from newsbot.bot.format import _truncate_utf16, esc
 from newsbot.config import AppConfig
+from newsbot.store import repo
+from newsbot.store.db import connect
+from newsbot.store.models import GuildGame, GuildSettings, LoungeSettings, ShiftSettings
+from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +60,37 @@ class ChannelRequirement:
     channel_id: int
     purpose: str
     needed: frozenset[str]
+    # A SHiFT channel whose ping is a role id. Whether that role needs
+    # Mention @everyone depends on `role.mentionable`, which only the live
+    # guild can answer, so the pure requirement just carries the id.
+    ping_role_id: int | None = None
+
+
+def _add_requirement(
+    by_channel: dict[int, ChannelRequirement],
+    channel_id: int,
+    purpose: str,
+    needed: frozenset[str],
+    ping_role_id: int | None = None,
+) -> None:
+    """Add a requirement, merging with any earlier one for the same channel.
+
+    Two features pointed at one channel end up as one requirement with the
+    union of what either needs, not two alerts about the same channel.
+    """
+    existing = by_channel.get(channel_id)
+    if existing is None:
+        by_channel[channel_id] = ChannelRequirement(channel_id, purpose, needed, ping_role_id)
+        return
+    merged_purpose = (
+        existing.purpose if purpose in existing.purpose else f"{existing.purpose} / {purpose}"
+    )
+    by_channel[channel_id] = ChannelRequirement(
+        channel_id,
+        merged_purpose,
+        existing.needed | needed,
+        existing.ping_role_id if existing.ping_role_id is not None else ping_role_id,
+    )
 
 
 def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
@@ -71,16 +111,7 @@ def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
     by_channel: dict[int, ChannelRequirement] = {}
 
     def _add(channel_id: int, purpose: str, needed: frozenset[str]) -> None:
-        existing = by_channel.get(channel_id)
-        if existing is None:
-            by_channel[channel_id] = ChannelRequirement(channel_id, purpose, needed)
-            return
-        merged_purpose = (
-            existing.purpose if purpose in existing.purpose else f"{existing.purpose} / {purpose}"
-        )
-        by_channel[channel_id] = ChannelRequirement(
-            channel_id, merged_purpose, existing.needed | needed
-        )
+        _add_requirement(by_channel, channel_id, purpose, needed)
 
     for topic in cfg.topics:
         _add(
@@ -148,31 +179,67 @@ def _is_sendable_guild_channel(channel: object) -> bool:
     )
 
 
-async def _check_one(client: discord.Client, guild_id: int, req: ChannelRequirement) -> str | None:
-    """Return one problem line for `req`, or None if the channel checks out clean."""
+@dataclass(frozen=True)
+class ChannelProblem:
+    """One broken channel, in a shape a command reply can use.
+
+    `kind` is one of `not_found`, `wrong_guild`, `not_text`, `unknown_self`,
+    `missing_permissions`, `no_role` or `check_failed`; `missing` holds the
+    permission labels for the `missing_permissions` kind. `text` is the
+    one-line human version (the same line `check_channels` has always
+    produced).
+    """
+
+    channel_id: int
+    purpose: str
+    kind: str
+    missing: tuple[str, ...]
+    text: str
+
+
+async def _inspect(
+    client: discord.Client, guild_id: int, req: ChannelRequirement
+) -> ChannelProblem | None:
+    """Return what's wrong with `req`'s channel, or None if it checks out clean."""
+    cid, purpose = req.channel_id, req.purpose
+
+    def problem(kind: str, text: str, names: tuple[str, ...] = ()) -> ChannelProblem:
+        return ChannelProblem(cid, purpose, kind, names, f"{purpose} channel <#{cid}>: {text}")
+
     try:
-        channel = await _resolve_channel(client, req.channel_id)
+        channel = await _resolve_channel(client, cid)
     except discord.NotFound, discord.Forbidden:
-        return f"{req.purpose} channel <#{req.channel_id}>: not found or not visible to the bot"
+        return problem("not_found", "not found or not visible to the bot")
 
     guild = getattr(channel, "guild", None)
     if guild is None or guild.id != guild_id:
-        return f"{req.purpose} channel <#{req.channel_id}>: not in the configured guild"
+        return problem("wrong_guild", "not in the configured guild")
     if not _is_sendable_guild_channel(channel):
-        return f"{req.purpose} channel <#{req.channel_id}>: not a text channel"
+        return problem("not_text", "not a text channel")
 
     me = guild.me
     if me is None:
-        return (
-            f"{req.purpose} channel <#{req.channel_id}>: "
-            "can't tell this bot's own permissions there"
-        )
+        return problem("unknown_self", "can't tell this bot's own permissions there")
 
-    missing_flags = missing(channel.permissions_for(me), req.needed)
+    perms = channel.permissions_for(me)
+    needed = req.needed
+    if req.ping_role_id is not None:
+        role = guild.get_role(req.ping_role_id)
+        if role is None:
+            return problem("no_role", f"the role to ping (<@&{req.ping_role_id}>) no longer exists")
+        if not role.mentionable:
+            needed = needed | {"mention_everyone"}
+    missing_flags = missing(perms, needed)
     if not missing_flags:
         return None
-    names = ", ".join(_PERMISSION_LABELS[flag] for flag in missing_flags)
-    return f"{req.purpose} channel <#{req.channel_id}>: missing {names}"
+    names = tuple(_PERMISSION_LABELS[flag] for flag in missing_flags)
+    return problem("missing_permissions", f"missing {', '.join(names)}", names)
+
+
+async def _check_one(client: discord.Client, guild_id: int, req: ChannelRequirement) -> str | None:
+    """Return one problem line for `req`, or None if the channel checks out clean."""
+    found = await _inspect(client, guild_id, req)
+    return found.text if found is not None else None
 
 
 async def check_channels(client: discord.Client, cfg: AppConfig) -> list[str]:
@@ -193,7 +260,10 @@ async def check_channels(client: discord.Client, cfg: AppConfig) -> list[str]:
             problem = await _check_one(client, cfg.guild_id, req)
         except Exception as exc:  # noqa: BLE001 (one bad channel must not stop the rest)
             logger.exception("permission check failed for channel %d", req.channel_id)
-            problem = f"{req.purpose} channel <#{req.channel_id}>: permission check failed ({exc})"
+            problem = (
+                f"{req.purpose} channel <#{req.channel_id}>: "
+                f"permission check failed ({esc(plain_line(str(exc), 100))})"
+            )
         if problem is not None:
             problems.append(problem)
     return problems
@@ -215,10 +285,235 @@ def render_permission_alert(problems: list[str]) -> str:
     return _truncate_utf16("\n".join(lines), _ALERT_LIMIT, suffix="…")
 
 
+# --- Per guild (design.md §15, plan task 8) ---
+#
+# The same checks, but the list of channels comes from one server's database
+# rows instead of config.yaml, and the answer is a structure instead of a
+# flat list of strings, so a command can reply "I can't post in <#id>:
+# missing Send Messages" the moment an admin changes a setting.
+
+
+def required_channels_for_guild(
+    guild: GuildSettings,
+    games: list[GuildGame],
+    shift: ShiftSettings | None,
+    lounge: LoungeSettings | None,
+    *,
+    game_names: Mapping[str, str] | None = None,
+) -> list[ChannelRequirement]:
+    """Every channel one server's settings point at, and what each needs. Pure.
+
+    Game channels need View Channel, Send Messages and Embed Links. The
+    SHiFT channel (only when enabled) needs View and Send, plus Mention
+    @everyone when the ping is `everyone`; a role ping carries the role id
+    so the live check can add Mention @everyone if that role isn't
+    mentionable. The admin channel (if set) and the lounge channel (if a
+    lounge row exists) need View and Send. Channels shared between features
+    merge into one requirement.
+    """
+    names = game_names or {}
+    by_channel: dict[int, ChannelRequirement] = {}
+    for game in games:
+        _add_requirement(
+            by_channel,
+            game.channel_id,
+            names.get(game.game_key, game.game_key),
+            frozenset({"view_channel", "send_messages", "embed_links"}),
+        )
+    if shift is not None and shift.enabled and shift.channel_id is not None:
+        needed = {"view_channel", "send_messages"}
+        role_id: int | None = None
+        if shift.ping == "everyone":
+            needed.add("mention_everyone")
+        elif shift.ping.isdigit():
+            role_id = int(shift.ping)
+        _add_requirement(by_channel, shift.channel_id, "SHiFT codes", frozenset(needed), role_id)
+    if guild.admin_channel_id is not None:
+        _add_requirement(
+            by_channel,
+            guild.admin_channel_id,
+            "admin",
+            frozenset({"view_channel", "send_messages"}),
+        )
+    if lounge is not None:
+        _add_requirement(
+            by_channel, lounge.channel_id, "lounge", frozenset({"view_channel", "send_messages"})
+        )
+    return list(by_channel.values())
+
+
+def requirements_from_db(
+    conn: sqlite3.Connection, guild_id: int, *, game_names: Mapping[str, str] | None = None
+) -> list[ChannelRequirement]:
+    """`required_channels_for_guild` for `guild_id`'s stored settings; empty if no such guild."""
+    guild = repo.get_guild(conn, guild_id)
+    if guild is None:
+        return []
+    return required_channels_for_guild(
+        guild,
+        repo.list_guild_games(conn, guild_id),
+        repo.get_shift(conn, guild_id),
+        repo.get_lounge(conn, guild_id),
+        game_names=game_names,
+    )
+
+
+@dataclass(frozen=True)
+class GuildCheck:
+    """The result of checking one server: empty `problems` means all clear."""
+
+    guild_id: int
+    problems: tuple[ChannelProblem, ...] = field(default_factory=tuple)
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    def lines(self) -> list[str]:
+        """One human-readable line per problem, in requirement order."""
+        return [p.text for p in self.problems]
+
+
+async def check_guild_channels(
+    client: discord.Client, guild_id: int, requirements: list[ChannelRequirement]
+) -> GuildCheck:
+    """Check `requirements` against Discord for `guild_id`. Never raises.
+
+    Same policy as `check_channels`: one channel blowing up becomes its own
+    problem instead of hiding the rest. A channel that belongs to another
+    server is reported as a problem and its permissions are never read, so
+    one server can't learn anything about another's.
+    """
+    found: list[ChannelProblem] = []
+    for req in requirements:
+        try:
+            problem = await _inspect(client, guild_id, req)
+        except Exception as exc:  # noqa: BLE001 (one bad channel must not stop the rest)
+            logger.exception("permission check failed for channel %d", req.channel_id)
+            text = (
+                f"{req.purpose} channel <#{req.channel_id}>: "
+                f"permission check failed ({esc(plain_line(str(exc), 100))})"
+            )
+            problem = ChannelProblem(req.channel_id, req.purpose, "check_failed", (), text)
+        if problem is not None:
+            found.append(problem)
+    return GuildCheck(guild_id, tuple(found))
+
+
+async def check_guild(
+    client: discord.Client,
+    db_path: str | Path,
+    guild_id: int,
+    *,
+    game_names: Mapping[str, str] | None = None,
+) -> GuildCheck:
+    """Read `guild_id`'s settings from the database and check them: what commands call."""
+
+    def load() -> list[ChannelRequirement]:
+        with closing(connect(db_path)) as conn:
+            return requirements_from_db(conn, guild_id, game_names=game_names)
+
+    requirements = await asyncio.to_thread(load)
+    return await check_guild_channels(client, guild_id, requirements)
+
+
+def render_guild_permission_notice(problems: list[str]) -> str:
+    """The text a server's admin channel and `/newsbot status` get. Empty if no problems."""
+    if not problems:
+        return ""
+    lines = ["newsbot: I can't do everything I'm set up to do here:"]
+    lines.extend(f"- {p}" for p in problems)
+    return _truncate_utf16("\n".join(lines), _ALERT_LIMIT, suffix="…")
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """What a startup sweep found, in counts only (the owner never sees channel names)."""
+
+    checked: int = 0
+    with_problems: int = 0
+    notified: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
+def render_sweep_counts(result: SweepResult) -> str:
+    """The owner's one line, or an empty string when every server is fine."""
+    if result.with_problems == 0:
+        return ""
+    return f"newsbot: permission problems in {result.with_problems} of {result.checked} servers"
+
+
+async def sweep_guild_permissions(
+    client: discord.Client,
+    db_path: str | Path,
+    notify_guild: Callable[[int, str], Awaitable[None]],
+    *,
+    game_names: Mapping[str, str] | None = None,
+) -> SweepResult:
+    """Check every set-up server; tell each one (only on change) and count for the owner.
+
+    A server is told when its problem text differs from the one stored in
+    `guilds.permission_problems`, so a redeploy doesn't re-post the same
+    complaint. Coming back clean clears the stored text, so a recurrence is
+    news again. A server the bot can't currently see (an outage, or it was
+    kicked and the leave event hasn't been processed) is skipped, not
+    flagged. One server's check crashing never stops the walk.
+    """
+
+    def load() -> list[GuildSettings]:
+        with closing(connect(db_path)) as conn:
+            return repo.list_set_up_guilds(conn)
+
+    def store(guild_id: int, text: str | None) -> None:
+        with closing(connect(db_path)) as conn:
+            repo.update_guild_settings(conn, guild_id, permission_problems=text)
+
+    checked = with_problems = notified = skipped = failed = 0
+    for guild in await asyncio.to_thread(load):
+        try:
+            if client.get_guild(guild.guild_id) is None:
+                skipped += 1
+                continue
+
+            def reqs(gid: int = guild.guild_id) -> list[ChannelRequirement]:
+                with closing(connect(db_path)) as conn:
+                    return requirements_from_db(conn, gid, game_names=game_names)
+
+            result = await check_guild_channels(
+                client, guild.guild_id, await asyncio.to_thread(reqs)
+            )
+            checked += 1
+            text = render_guild_permission_notice(result.lines()) or None
+            if text is not None:
+                with_problems += 1
+            if text != guild.permission_problems:
+                if text is not None:
+                    await notify_guild(guild.guild_id, text)
+                    notified += 1
+                await asyncio.to_thread(store, guild.guild_id, text)
+        except Exception:
+            logger.exception(
+                "permission sweep failed for a guild", extra={"guild_id": guild.guild_id}
+            )
+            failed += 1
+    return SweepResult(checked, with_problems, notified, skipped, failed)
+
+
 __all__ = [
+    "ChannelProblem",
     "ChannelRequirement",
+    "GuildCheck",
+    "SweepResult",
     "check_channels",
+    "check_guild",
+    "check_guild_channels",
     "missing",
+    "render_guild_permission_notice",
     "render_permission_alert",
+    "render_sweep_counts",
     "required_channels",
+    "required_channels_for_guild",
+    "requirements_from_db",
+    "sweep_guild_permissions",
 ]
