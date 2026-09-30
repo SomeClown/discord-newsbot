@@ -45,7 +45,7 @@ from newsbot.store.models import (
     StoryView,
     Usage,
 )
-from newsbot.text import plain_line
+from newsbot.text import plain_line, shown_url
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -1346,6 +1346,11 @@ class DigestOutcome:
     reason: str = ""
 
 
+# Five reasons of at most 40 characters each, plus counts and the lead-in,
+# comes to roughly 300 characters: still a one-liner.
+_MAX_SUMMARY_REASONS = 5
+
+
 def render_digest_summary_line(outcomes: Sequence[DigestOutcome]) -> str:
     """The owner's daily one-liner.
 
@@ -1353,7 +1358,9 @@ def render_digest_summary_line(outcomes: Sequence[DigestOutcome]) -> str:
 
     Failures are grouped by reason; with more than one reason each gets its
     count, most common first ("3 failed (2 missing permissions, 1 Claude
-    error)"). No digests due at all reads as such instead of "0 of 0".
+    error)"). Only the top few reasons by count are shown, then "+N more
+    reasons", so the one-liner stays one line. No digests due at all reads
+    as such instead of "0 of 0".
     """
     total = len(outcomes)
     if total == 0:
@@ -1372,8 +1379,29 @@ def render_digest_summary_line(outcomes: Sequence[DigestOutcome]) -> str:
     if len(ranked) == 1:
         detail = ranked[0][0]
     else:
-        detail = ", ".join(f"{n} {reason}" for reason, n in ranked)
+        shown = ", ".join(f"{n} {reason}" for reason, n in ranked[:_MAX_SUMMARY_REASONS])
+        more = len(ranked) - _MAX_SUMMARY_REASONS
+        detail = f"{shown}, +{more} more reasons" if more > 0 else shown
     return f"{line}; {len(failed)} failed ({detail})"
+
+
+_URL_IN_TEXT = re.compile(r"https?://\S+")
+
+
+def _redact_urls(text: str) -> str:
+    """`text` with each http(s) URL cut down to scheme, host and path (see `shown_url`).
+
+    Trailing quotes and brackets belong to the sentence, not the address
+    (httpx wraps the URL in single quotes), so they're kept outside it.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        url = match.group(0)
+        tail = len(url) - len(url.rstrip("'\")>]}.,;"))
+        shown = shown_url(url[: len(url) - tail] if tail else url)
+        return shown + (url[len(url) - tail :] if tail else "")
+
+    return _URL_IN_TEXT.sub(one, text)
 
 
 def render_owner_report(
@@ -1382,7 +1410,9 @@ def render_owner_report(
     """The owner's daily report: the summary line, then every source that's currently failing (D8).
 
     Capped at Discord's message limit; the source list is cut at 10 with a
-    "+N more" line so the summary line at the top always survives.
+    "+N more" line so the summary line at the top always survives. Every URL
+    in an error goes through `shown_url` first: httpx puts the whole address
+    in its messages, credentials and token query strings included.
     """
     lines = [f"newsbot daily: {render_digest_summary_line(outcomes)}"]
     if not failing:
@@ -1390,7 +1420,9 @@ def render_owner_report(
     else:
         lines.append(f"{len(failing)} failing source{'s' if len(failing) != 1 else ''}:")
         for row in failing[:_MAX_FAILING_SOURCES_SHOWN]:
-            error = f": {esc(plain_line(row.last_error, 120))}" if row.last_error else ""
+            error = (
+                f": {esc(_redact_urls(plain_line(row.last_error, 120)))}" if row.last_error else ""
+            )
             lines.append(
                 f"- {esc(plain_line(row.source_name, 60))} "
                 f"({row.consecutive_failures} in a row){error}"

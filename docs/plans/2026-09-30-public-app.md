@@ -855,6 +855,8 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 
 **Change:** §3.7, except the setup wizard (task 10).
 
+**Channel ownership, at write time too (added after task 8's fixes).** The router now refuses, at send time, to post into a channel that isn't in the guild being notified (`send_to_guild_channel`; see `newsbot/guilds/notify.py`). That's the backstop. The commands must also reject a foreign channel when it's written: `/newsbot settings admin_channel:`, the SHiFT channel option and the follow channel option each check that the chosen channel's `guild.id` equals the invoking guild and refuse with a plain reply otherwise. Belt and braces: a bad id should never reach the database, and if one does, it should never reach Discord.
+
 **Tests** (extending `tests/test_command_registration.py`; new `tests/test_guild_admin_commands.py`, `tests/test_member_commands_scoped.py`):
 - global vs guild-scoped sync by `command_guild_ids`; `/owner` only in the home guild; `/lounge` only in lounge guilds;
 - the hash skip (no sync on a second start);
@@ -864,6 +866,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 - autocomplete: catalog minus followed, followed only, zone substring, 25 at most;
 - `follow` at 10 is refused;
 - `settings` validation (a bad zone or time);
+- `settings admin_channel:`, the SHiFT channel and the follow channel refuse a channel from another guild;
 - `shift` with `ping=role` and no role is an error, and the Borderlands 4 hint;
 - **member commands see only followed games** (a story for an unfollowed game never appears, even with a crafted `game` value);
 - the not-set-up replies;

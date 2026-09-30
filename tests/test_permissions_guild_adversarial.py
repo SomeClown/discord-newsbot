@@ -5,9 +5,9 @@ a sentence, what won't work. The sweep has another: do that for every server
 at startup without telling anybody twice, without telling anybody the wrong
 thing, and without one server's bad day taking the walk down. These tests
 throw every channel type at the first, and five hundred servers (some of
-which crash, some of which flip-flop) at the second. A few strict xfails mark
-places where the code does something I'd call a bug if I were reviewing it
-and not, awkwardly, also the person who'd have to fix it.
+which crash, some of which flip-flop) at the second. The places where the
+code did something I'd call a bug used to be strict xfails; they're fixed,
+and their markers are gone.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 import discord
 import pytest
 
+from newsbot.bot import permissions
 from newsbot.bot.permissions import (
     ChannelRequirement,
     SweepResult,
@@ -291,14 +292,6 @@ def test_three_features_on_one_channel_merge_into_one_requirement():
         assert purpose in req.purpose
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "_add_requirement merges purposes with a substring test, so a purpose that happens "
-        "to be contained in an earlier one (a game 'Path of Exile' after 'Path of Exile 2') "
-        "is silently dropped from the problem line."
-    ),
-)
 def test_merged_purpose_names_every_feature_even_when_one_name_contains_another():
     reqs = required_channels_for_guild(
         _guild_row(),
@@ -311,14 +304,6 @@ def test_merged_purpose_names_every_feature_even_when_one_name_contains_another(
     assert req.purpose.split(" / ") == ["Path of Exile 2", "Path of Exile"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A lounge row is required whether or not welcome or quote is on, so a server that "
-        "switched the lounge off still gets told about its lounge channel. v2's "
-        "required_channels only checks the lounge while a lounge feature is enabled."
-    ),
-)
 def test_a_switched_off_lounge_is_not_required():
     lounge = LoungeSettings(GUILD, 70, False, "hi", False, "08:00", [], None)
     assert required_channels_for_guild(_guild_row(), [], None, lounge) == []
@@ -340,8 +325,12 @@ async def test_check_guild_for_a_guild_with_nothing_configured_is_clean(db_path)
     assert result.ok and result.lines() == []
 
 
-async def test_check_guild_for_an_unknown_guild_is_clean_not_a_crash(db_path):
-    assert (await check_guild(FakeClient(), db_path, 404)).ok
+async def test_check_guild_for_an_unknown_guild_says_not_set_up_not_ok(db_path):
+    """Changed from "clean": a server we have no row for isn't all clear, it's unknown."""
+    result = await check_guild(FakeClient(), db_path, 404)
+    assert not result.ok
+    assert [p.kind for p in result.problems] == ["not_set_up"]
+    assert "isn't set up" in result.lines()[0]
 
 
 async def test_check_guild_problems_come_back_in_requirement_order(db_path):
@@ -461,7 +450,11 @@ async def test_sweep_of_500_servers_with_crashes_and_dead_notifiers_keeps_walkin
         checked=400, with_problems=300, notified=200, skipped=0, failed=200
     )
     assert sorted(told) == sorted(g for g in range(1, 501) if g % 5 in (1, 2))
-    assert render_sweep_counts(result) == "newsbot: permission problems in 300 of 400 servers"
+    # Changed: the 200 failed guilds are in the line now, not silently dropped from it.
+    assert render_sweep_counts(result) == (
+        "newsbot: permission problems in 300 of 400 servers; "
+        "permission check failed for 200 of 600 servers"
+    )
 
 
 async def test_sweep_skips_guilds_that_are_not_set_up_and_guilds_the_bot_cannot_see(db_path):
@@ -477,14 +470,8 @@ async def test_sweep_skips_guilds_that_are_not_set_up_and_guilds_the_bot_cannot_
     assert _stored_problems(db_path, 1) is None and _stored_problems(db_path, 2) is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The sweep has no per-guild timeout: one guild whose channel lookup hangs stalls the "
-        "walk (and so startup's permission pass) for every server after it."
-    ),
-)
-async def test_a_hanging_lookup_does_not_stall_the_whole_sweep(db_path):
+async def test_a_hanging_lookup_does_not_stall_the_whole_sweep(db_path, monkeypatch):
+    monkeypatch.setattr(permissions, "_GUILD_TIMEOUT_S", 0.1)  # the real one is a minute
     _add_guild(db_path, 1, [10])
     _add_guild(db_path, 2, [20])
     client = FakeClient(guilds={1: FakeGuild(1), 2: FakeGuild(2)}, hang=[10])
@@ -493,17 +480,11 @@ async def test_a_hanging_lookup_does_not_stall_the_whole_sweep(db_path):
     async def notify(guild_id, text):
         told.append(guild_id)
 
-    await asyncio.wait_for(sweep_guild_permissions(client, db_path, notify), timeout=0.5)
+    result = await asyncio.wait_for(sweep_guild_permissions(client, db_path, notify), timeout=2)
     assert 2 in told
+    assert result.failed == 1  # the hung guild is counted, not skipped
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A sweep where every guild's check or notice crashes counts them as `failed`, but "
-        "render_sweep_counts only mentions with_problems, so the owner hears nothing."
-    ),
-)
 def test_owner_hears_when_the_sweep_itself_is_failing():
     assert render_sweep_counts(SweepResult(checked=0, failed=38)) != ""
 
@@ -515,10 +496,20 @@ def test_sweep_counts_wording_is_counts_only():
     )
 
 
-def test_sweep_counts_wording_for_one_server_is_plural_anyway():
-    """Documented wart: 'in 1 of 1 servers'. Harmless, slightly ungrammatical."""
+def test_sweep_counts_wording_for_one_server_is_singular():
+    """Changed from the old "1 of 1 servers" wart; the summary line was already singular."""
     line = render_sweep_counts(SweepResult(checked=1, with_problems=1))
-    assert line == "newsbot: permission problems in 1 of 1 servers"
+    assert line == "newsbot: permission problems in 1 of 1 server"
+
+
+def test_sweep_counts_include_failed_guilds_alongside_problems():
+    assert render_sweep_counts(SweepResult(checked=0, failed=38)) == (
+        "newsbot: permission check failed for 38 of 38 servers"
+    )
+    assert render_sweep_counts(SweepResult(checked=3, with_problems=1, failed=1)) == (
+        "newsbot: permission problems in 1 of 3 servers; permission check failed for 1 of 4 servers"
+    )
+    assert render_sweep_counts(SweepResult(checked=0, failed=1)).endswith("1 of 1 server")
 
 
 # --- sweep through the real router ---
@@ -556,14 +547,6 @@ async def test_sweep_through_the_real_router_keeps_each_guilds_problems_in_that_
     assert owner.sent == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Cross-server leak: the sweep's notice about 'admin channel is in another guild' "
-        "is delivered by Router.notify_guild into that other guild's channel, because "
-        "nothing between the stored admin_channel_id and Discord verifies ownership."
-    ),
-)
 async def test_sweep_does_not_announce_a_server_problem_inside_another_server(db_path):
     with closing(connect(db_path)) as conn:
         repo.create_guild(conn, 1, set_up=True)

@@ -4,11 +4,11 @@ The router has three doors and one promise: a server's problem stays in that
 server, and the owner's problem stays out of every server. These tests try
 every door with the other doors' channel ids lying around, feed them text
 that would love to ping somebody, and hand them a Discord that throws every
-exception it knows. A couple are strict xfails because the router trusts the
-channel id it finds in the database and never asks Discord whether that
-channel lives in the server it's talking about. I've read the code three
-times and I can't find the check. I'd be delighted to be wrong; see git log
-for how often that goes.
+exception it knows. The router used to trust the channel id it found in the
+database and never ask Discord whether that channel lived in the server it
+was talking about; it couldn't find the check because there wasn't one. Those
+tests (and the hang and blank-text ones) were strict xfails until they got
+fixed, and now they're plain tests.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import pytest
 
 from newsbot.alerts import send_alert, send_to_channel
 from newsbot.bot.format import _truncate_utf16, discord_len
+from newsbot.guilds import notify
 from newsbot.guilds.notify import Router, client_sender
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
@@ -151,15 +152,6 @@ async def test_the_notice_is_written_before_the_post_goes_out(db_path):
     assert seen_during_send == [["write first"]]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Router.notify_guild posts to whatever admin_channel_id is stored, through "
-        "client_sender -> send_to_channel, and nothing checks that the channel belongs to "
-        "the guild. A server whose admin_channel_id holds another server's channel id "
-        "delivers its notices there."
-    ),
-)
 async def test_notice_is_not_posted_into_a_channel_of_another_guild(db_path):
     foreign = Chan(guild_id=2)  # guild 2's channel...
     with closing(connect(db_path)) as conn:
@@ -169,13 +161,6 @@ async def test_notice_is_not_posted_into_a_channel_of_another_guild(db_path):
     assert foreign.sent == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Same root cause: a non-home guild whose admin_channel_id is the owner's channel "
-        "id gets its notices posted into the owner's admin channel (home guild)."
-    ),
-)
 async def test_non_home_guild_cannot_aim_its_notices_at_the_owner_channel(db_path):
     owner_chan = Chan(guild_id=HOME)
     with closing(connect(db_path)) as conn:
@@ -185,13 +170,6 @@ async def test_non_home_guild_cannot_aim_its_notices_at_the_owner_channel(db_pat
     assert owner_chan.sent == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "send_report ignores its guild_id argument entirely and posts to whatever channel "
-        "it's handed, including one in a different server."
-    ),
-)
 async def test_report_is_not_posted_into_a_channel_of_another_guild(db_path):
     foreign = Chan(guild_id=2)
     client = Client({A2: foreign})
@@ -314,13 +292,6 @@ async def test_blank_notice_posts_nothing_and_records_nothing(db_path, text):
     assert _notices(db_path, 1) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "alert_owner and send_report hand blank text straight to Discord, which rejects an "
-        "empty message with a 400; notify_guild drops blanks but these two don't."
-    ),
-)
 @pytest.mark.parametrize("door", ["owner", "report"])
 @pytest.mark.parametrize("text", ["", "\x00", "   "])
 async def test_blank_text_is_not_sent_to_discord(db_path, door, text):
@@ -416,15 +387,9 @@ async def test_channel_without_a_send_method_is_a_false_not_a_crash():
     assert await send_to_channel(C(), 1, "hi") is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Router._deliver and send_to_channel have no timeout: a Discord send that hangs "
-        "blocks alert_owner/notify_guild (and so a digest run or a sweep) forever."
-    ),
-)
 @pytest.mark.parametrize("door", ["owner", "guild", "report"])
-async def test_a_hanging_send_does_not_hang_the_caller(db_path, door):
+async def test_a_hanging_send_does_not_hang_the_caller(db_path, door, monkeypatch):
+    monkeypatch.setattr(notify, "_SEND_TIMEOUT_S", 0.05)  # the real one is 15 s; I'm not waiting
     router = Router(db_path, Spy(hang=True), OWNER)
     call = {
         "owner": lambda: router.alert_owner("x"),
@@ -544,3 +509,56 @@ async def test_send_alert_falls_back_to_fetch_when_the_cache_misses():
     client = _RecClient(chan, cached=False)
     await send_alert(client, 5, "hi")
     assert client.fetched and [c[0] for c in chan.calls] == ["hi"]
+
+
+# --- the send-time ownership check on the owner door ---
+
+
+async def test_owner_alert_is_refused_if_the_channel_is_in_a_guild_other_than_home(db_path):
+    elsewhere = Chan(guild_id=2)
+    client = Client({OWNER: elsewhere})
+    await Router(db_path, client_sender(client), OWNER, home_guild_id=HOME).alert_owner("x")
+    assert elsewhere.sent == []
+
+
+async def test_owner_alert_goes_out_when_the_channel_is_in_the_home_guild(db_path):
+    home = Chan(guild_id=HOME)
+    client = Client({OWNER: home})
+    await Router(db_path, client_sender(client), OWNER, home_guild_id=HOME).alert_owner("x")
+    assert [t for t, _ in home.sent] == ["x"]
+
+
+async def test_owner_alert_still_goes_out_when_the_guild_cannot_be_verified(db_path):
+    """The owner channel is the owner's own setting: no `guild` attribute is not a refusal."""
+    chan = SimpleNamespace(sent=[])
+
+    async def send(text, **kwargs):
+        chan.sent.append(text)
+
+    chan.send = send
+    client = Client({OWNER: chan})
+    await Router(db_path, client_sender(client), OWNER, home_guild_id=HOME).alert_owner("x")
+    assert chan.sent == ["x"]
+
+
+async def test_guild_notice_with_an_unverifiable_channel_is_not_posted_but_is_recorded(db_path):
+    chan = SimpleNamespace(sent=[])
+
+    async def send(text, **kwargs):
+        chan.sent.append(text)
+
+    chan.send = send
+    client = Client({A1: chan})
+    await Router(db_path, client_sender(client), OWNER).notify_guild(1, "hello?")
+    assert chan.sent == []
+    assert [n.text for n in _notices(db_path, 1)] == ["hello?"]
+
+
+async def test_a_refused_post_logs_a_warning_with_ids_only(db_path, caplog):
+    foreign = Chan(guild_id=2)
+    client = Client({A1: foreign})
+    with caplog.at_level("WARNING"):
+        await Router(db_path, client_sender(client), OWNER).notify_guild(1, "secret words")
+    assert foreign.sent == []
+    assert any(r.levelname == "WARNING" and str(A1) in r.getMessage() for r in caplog.records)
+    assert "secret words" not in caplog.text

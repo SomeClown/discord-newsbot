@@ -75,17 +75,12 @@ def test_reasons_cannot_ping(reason):
     assert "<#123456789012345678>" not in line
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "render_digest_summary_line lists every distinct reason with no cap; 200 distinct "
-        "reasons make a line far past Discord's 2000-unit limit (it only survives because "
-        "whoever sends it truncates). A one-liner should stay one line."
-    ),
-)
 def test_summary_line_stays_short_however_many_reasons_there_are():
     outcomes = [DigestOutcome(False, f"reason number {i:04d} " + "x" * 30) for i in range(200)]
-    assert discord_len(render_digest_summary_line(outcomes)) <= 2000
+    line = render_digest_summary_line(outcomes)
+    assert len(line) <= 300
+    assert line.endswith(", +195 more reasons)")
+    assert line.startswith("digests posted to 0 of 200 servers; 200 failed (1 reason number 0000")
 
 
 # --- the report ---
@@ -144,15 +139,6 @@ def test_source_errors_cannot_ping_or_link(error):
     assert "](https://" not in report and "discord.gg/" not in report
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "render_owner_report escapes the stored last_error but never runs URLs in it through "
-        "shown_url, so credentials and query-string tokens in a failing source's error "
-        "(httpx puts the whole URL in its messages) land in the admin channel. The v2 "
-        "run report has the same gap."
-    ),
-)
 @pytest.mark.parametrize(
     "secret_error",
     [
@@ -163,6 +149,7 @@ def test_source_errors_cannot_ping_or_link(error):
 def test_secrets_in_error_urls_are_redacted_with_shown_url(secret_error):
     report = render_owner_report([DigestOutcome(True)], [_src("feed", 2, secret_error)])
     assert "hunter2" not in report and "SECRET123" not in report
+    assert "feeds.example/x" in report  # host and path stay; that's the useful part
 
 
 # --- failing_sources ---
@@ -195,11 +182,11 @@ def test_failing_sources_are_worst_first_with_name_breaking_ties(conn):
     ]
 
 
-def test_tie_order_is_binary_so_capitals_sort_before_lowercase(conn):
-    """Documented wart: the v2 status view sorts by casefold, this sorts by byte."""
-    for name in ("alpha", "Zed"):
+def test_tie_order_is_casefolded_like_the_v2_status_view(conn):
+    """Changed from a binary sort ("Zed" before "alpha") to match v2's status view."""
+    for name in ("alpha", "Zed", "Beta"):
         _health(conn, name, 2)
-    assert [r.source_name for r in repo.failing_sources(conn)] == ["Zed", "alpha"]
+    assert [r.source_name for r in repo.failing_sources(conn)] == ["alpha", "Beta", "Zed"]
 
 
 @pytest.mark.parametrize("floor", [0, -5, 1])

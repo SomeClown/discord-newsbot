@@ -1470,6 +1470,9 @@ def recent_notices(conn: sqlite3.Connection, guild_id: int, limit: int = 20) -> 
 def failing_sources(conn: sqlite3.Connection, min_failures: int = 1) -> list[SourceHealthRow]:
     """Every source with at least `min_failures` failed collections in a row, worst first.
 
+    Ties sort by casefolded name, like v2's status view. That's done here
+    and not in SQL because SQLite's `LOWER` only knows ASCII.
+
     For the owner's daily report (D8): the alert fires once at 12, but the
     report lists everything that's currently failing, at any count.
     """
@@ -1479,6 +1482,7 @@ def failing_sources(conn: sqlite3.Connection, min_failures: int = 1) -> list[Sou
         "ORDER BY consecutive_failures DESC, source_name",
         (max(1, min_failures),),
     ).fetchall()
+    rows.sort(key=lambda r: (-r["consecutive_failures"], r["source_name"].casefold()))
     return [
         SourceHealthRow(
             source_name=r["source_name"],

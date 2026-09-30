@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 # constant module felt like overkill for one int.
 _ALERT_LIMIT = 2000
 
+# How long the startup sweep spends on one server (its channel lookups, the
+# notice, the bookkeeping) before calling it failed and moving on. Generous:
+# a healthy server takes well under a second.
+_GUILD_TIMEOUT_S = 60.0
+
 # Every permission flag this module ever asks about, in a fixed order so
 # "missing X, Y" reads the same way every time instead of shuffling with
 # whatever order a frozenset happens to iterate in this process.
@@ -82,9 +87,10 @@ def _add_requirement(
     if existing is None:
         by_channel[channel_id] = ChannelRequirement(channel_id, purpose, needed, ping_role_id)
         return
-    merged_purpose = (
-        existing.purpose if purpose in existing.purpose else f"{existing.purpose} / {purpose}"
-    )
+    # Exact match on the split parts, not `in`: "Path of Exile" is a substring
+    # of "Path of Exile 2", and the second feature shouldn't vanish over it.
+    parts = existing.purpose.split(" / ")
+    merged_purpose = existing.purpose if purpose in parts else f"{existing.purpose} / {purpose}"
     by_channel[channel_id] = ChannelRequirement(
         channel_id,
         merged_purpose,
@@ -335,7 +341,8 @@ def required_channels_for_guild(
             "admin",
             frozenset({"view_channel", "send_messages"}),
         )
-    if lounge is not None:
+    # Like v2: a lounge with both features off needs no channel.
+    if lounge is not None and (lounge.welcome_enabled or lounge.quote_enabled):
         _add_requirement(
             by_channel, lounge.channel_id, "lounge", frozenset({"view_channel", "send_messages"})
         )
@@ -407,13 +414,23 @@ async def check_guild(
     *,
     game_names: Mapping[str, str] | None = None,
 ) -> GuildCheck:
-    """Read `guild_id`'s settings from the database and check them: what commands call."""
+    """Read `guild_id`'s settings from the database and check them: what commands call.
 
-    def load() -> list[ChannelRequirement]:
+    A server with no row at all isn't "all clear", it's a server we've never
+    heard of, so that comes back as one `not_set_up` problem (channel id 0,
+    since there's no channel to point at).
+    """
+
+    def load() -> list[ChannelRequirement] | None:
         with closing(connect(db_path)) as conn:
+            if repo.get_guild(conn, guild_id) is None:
+                return None
             return requirements_from_db(conn, guild_id, game_names=game_names)
 
     requirements = await asyncio.to_thread(load)
+    if requirements is None:
+        text = "this server isn't set up yet (run /newsbot setup)"
+        return GuildCheck(guild_id, (ChannelProblem(0, "server", "not_set_up", (), text),))
     return await check_guild_channels(client, guild_id, requirements)
 
 
@@ -438,10 +455,23 @@ class SweepResult:
 
 
 def render_sweep_counts(result: SweepResult) -> str:
-    """The owner's one line, or an empty string when every server is fine."""
-    if result.with_problems == 0:
+    """The owner's one line, or an empty string when every checked server was clean.
+
+    Servers whose check crashed or timed out (`failed`) count too: a sweep
+    that's itself broken is exactly what the owner needs to hear about, and
+    "0 problems" from a sweep that checked nothing is a lie of omission.
+    """
+    parts = []
+    if result.with_problems:
+        noun = "server" if result.checked == 1 else "servers"
+        parts.append(f"permission problems in {result.with_problems} of {result.checked} {noun}")
+    if result.failed:
+        total = result.checked + result.failed
+        noun = "server" if total == 1 else "servers"
+        parts.append(f"permission check failed for {result.failed} of {total} {noun}")
+    if not parts:
         return ""
-    return f"newsbot: permission problems in {result.with_problems} of {result.checked} servers"
+    return "newsbot: " + "; ".join(parts)
 
 
 async def sweep_guild_permissions(
@@ -472,27 +502,29 @@ async def sweep_guild_permissions(
     checked = with_problems = notified = skipped = failed = 0
     for guild in await asyncio.to_thread(load):
         try:
-            if client.get_guild(guild.guild_id) is None:
-                skipped += 1
-                continue
+            # One server's hung lookup shouldn't hold up the other 37.
+            async with asyncio.timeout(_GUILD_TIMEOUT_S):
+                if client.get_guild(guild.guild_id) is None:
+                    skipped += 1
+                    continue
 
-            def reqs(gid: int = guild.guild_id) -> list[ChannelRequirement]:
-                with closing(connect(db_path)) as conn:
-                    return requirements_from_db(conn, gid, game_names=game_names)
+                def reqs(gid: int = guild.guild_id) -> list[ChannelRequirement]:
+                    with closing(connect(db_path)) as conn:
+                        return requirements_from_db(conn, gid, game_names=game_names)
 
-            result = await check_guild_channels(
-                client, guild.guild_id, await asyncio.to_thread(reqs)
-            )
-            checked += 1
-            text = render_guild_permission_notice(result.lines()) or None
-            if text is not None:
-                with_problems += 1
-            if text != guild.permission_problems:
+                result = await check_guild_channels(
+                    client, guild.guild_id, await asyncio.to_thread(reqs)
+                )
+                checked += 1
+                text = render_guild_permission_notice(result.lines()) or None
                 if text is not None:
-                    await notify_guild(guild.guild_id, text)
-                    notified += 1
-                await asyncio.to_thread(store, guild.guild_id, text)
-        except Exception:
+                    with_problems += 1
+                if text != guild.permission_problems:
+                    if text is not None:
+                        await notify_guild(guild.guild_id, text)
+                        notified += 1
+                    await asyncio.to_thread(store, guild.guild_id, text)
+        except Exception:  # includes TimeoutError from the guard above
             logger.exception(
                 "permission sweep failed for a guild", extra={"guild_id": guild.guild_id}
             )
