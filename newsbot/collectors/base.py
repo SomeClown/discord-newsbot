@@ -23,6 +23,7 @@ import httpx
 from newsbot.config import (
     AppConfig,
     BlueskySource,
+    GameInfo,
     RssSource,
     Secrets,
     SteamSource,
@@ -237,4 +238,67 @@ def build_collectors(
             collectors.append(
                 WebSearchCollector(source, cfg.topics, secrets.brave_api_key.get_secret_value())
             )
+    return collectors
+
+
+def build_catalog_collectors(
+    cfg: AppConfig,
+    secrets: Secrets,
+    *,
+    include_web_search: bool = True,
+    web_search_games: Sequence[GameInfo] | None = None,
+) -> list[Collector]:
+    """Build a collector for every catalog and shared source, each tagged with its game.
+
+    A source listed under a game gets that game as its `topics`, so its
+    items are confident matches for it (design.md §4, unchanged). A shared
+    source gets its `games` restriction as `topics`, or none, and the keyword
+    matcher decides. `build_collectors` stays for the v2 path until the
+    cutover.
+
+    Web search is built only if `BRAVE_API_KEY` is set (same second line of
+    defense as above), and searches `web_search_games`, which defaults to
+    the whole catalog; the daily job narrows it to comped servers' games.
+    """
+    from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
+    from newsbot.collectors.rss import RssCollector
+    from newsbot.collectors.steam import SteamCollector
+    from newsbot.collectors.web_search import WebSearchCollector
+
+    bluesky_session = None
+    if secrets.bluesky_handle and secrets.bluesky_app_password:
+        bluesky_session = BlueskySession(
+            secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
+        )
+
+    def one(source: RssSource | SteamSource | BlueskySource) -> Collector:
+        if isinstance(source, RssSource):
+            return RssCollector(source)
+        if isinstance(source, SteamSource):
+            return SteamCollector(source)
+        return BlueskyCollector(source, bluesky_session)
+
+    collectors: list[Collector] = []
+    for game in cfg.catalog:
+        for source in game.sources:
+            if isinstance(source, WebSearchSource):
+                continue  # load_config already rejected this; belt and braces
+            collectors.append(one(source.model_copy(update={"topics": [game.key]})))
+    for shared in cfg.shared_sources:
+        if isinstance(shared, WebSearchSource):
+            continue
+        collectors.append(one(shared.model_copy(update={"topics": shared.games})))
+
+    if include_web_search and cfg.web_search is not None and secrets.brave_api_key:
+        as_source = WebSearchSource(
+            type="web_search",
+            name=cfg.web_search.name,
+            queries_per_topic=cfg.web_search.queries_per_game,
+            query_templates=cfg.web_search.query_templates,
+            trust=cfg.web_search.trust,
+        )
+        games = cfg.catalog if web_search_games is None else web_search_games
+        collectors.append(
+            WebSearchCollector(as_source, games, secrets.brave_api_key.get_secret_value())
+        )
     return collectors

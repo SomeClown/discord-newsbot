@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from newsbot.collectors.base import RawItem
-from newsbot.config import Topic
+from newsbot.config import GameInfo
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 _MATCH_RANK = {"confident": 0, "uncertain": 1}
@@ -54,10 +55,14 @@ def _terms_pattern(terms: list[str]) -> re.Pattern[str] | None:
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
 
 
-def build_matchers(topics: list[Topic]) -> dict[str, TopicMatcher]:
+def build_matchers(topics: Sequence[GameInfo]) -> dict[str, TopicMatcher]:
     return {
         topic.key: TopicMatcher(
-            confident_re=_terms_pattern([topic.name, *topic.aliases]),
+            # A game named like an ordinary word (Rust, Apex) matches on its
+            # aliases only; the bare name would hit every rusty gate in the news.
+            confident_re=_terms_pattern(
+                [topic.name, *topic.aliases] if topic.match_name else list(topic.aliases)
+            ),
             entity_re=_terms_pattern(topic.entities),
         )
         for topic in topics
@@ -77,7 +82,7 @@ def _cap_key(topic_item: TopicItem) -> tuple[int, int, float]:
 
 
 def filter_items(
-    items: list[RawItem], topics: list[Topic], max_per_topic: int
+    items: list[RawItem], topics: Sequence[GameInfo], max_per_topic: int
 ) -> dict[str, list[TopicItem]]:
     """Match every item to the topics it belongs to, then cap each topic's list.
 

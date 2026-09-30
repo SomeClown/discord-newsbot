@@ -11,14 +11,14 @@ for "the whole run got 429'd because we fired six requests at once".
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 import httpx
 
 from newsbot import text
 from newsbot.collectors.base import QuotaExceeded, RawItem
-from newsbot.config import Topic, WebSearchSource
+from newsbot.config import GameInfo, WebSearchSource
 
 _NEWS_URL = "https://api.search.brave.com/res/v1/news/search"
 _QUERY_GAP_S = 1.1
@@ -41,7 +41,7 @@ class WebSearchCollector:
     def __init__(
         self,
         source: WebSearchSource,
-        topics: list[Topic],
+        topics: Sequence[GameInfo],
         api_key: str,
         *,
         sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -64,7 +64,7 @@ class WebSearchCollector:
                 items.extend(await self._search(http, query, topic.key))
         return items
 
-    def _queries_for(self, topic: Topic) -> list[str]:
+    def _queries_for(self, topic: GameInfo) -> list[str]:
         # A topic with its own search_queries (BL4's press coverage never
         # says "Borderlands 4 news" the way the default template guesses)
         # skips the templates entirely, still capped at queries_per_topic.

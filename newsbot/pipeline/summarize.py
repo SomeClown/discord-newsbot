@@ -17,14 +17,14 @@ from __future__ import annotations
 import asyncio
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
-from newsbot.config import Topic
+from newsbot.config import GameInfo
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.prompts import build_prompt
@@ -336,12 +336,12 @@ def postprocess(
 
 async def summarize_topic(
     llm: LLMClient,
-    topic: Topic,
+    topic: GameInfo,
     items: list[TopicItem],
     prior: list[PriorStory],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    all_topics: list[Topic] | None = None,
+    all_topics: Sequence[GameInfo] | None = None,
     subject: str = "video games",
 ) -> TopicSummary:
     """Summarize one topic's items, with retry and a fallback on repeated failure.
