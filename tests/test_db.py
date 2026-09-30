@@ -20,9 +20,9 @@ def test_migrate_fresh_db_reaches_version_four(db_path):
     # database picks up all three migrations at once.
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-    assert version == 4
+    assert version == 5
     with closing(connect(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_migrate_twice_is_a_noop(db_path):
@@ -30,7 +30,7 @@ def test_migrate_twice_is_a_noop(db_path):
         first = migrate(conn)
     with closing(connect(db_path)) as conn:
         second = migrate(conn)
-    assert first == second == 4
+    assert first == second == 5
 
 
 def test_migrate_v1_database_with_data_upgrades_intact(db_path):
@@ -54,7 +54,7 @@ def test_migrate_v1_database_with_data_upgrades_intact(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 4
+        assert version == 5
         assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0

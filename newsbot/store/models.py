@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 Trust = Literal["official", "press", "community"]
 Label = Literal["official", "reported", "rumor"]
+Tier = Literal["free", "comped"]
 
 
 @dataclass(frozen=True)
@@ -180,3 +181,132 @@ class StatusSnapshot:
     stories_last_24h: int
     month_input_tokens: int
     month_output_tokens: int
+
+
+# --- Guilds (design.md §15) ---
+#
+# One frozen dataclass per table the public app added in migration 005. Same
+# rule as everything above: no behavior, just the columns. Timestamps come
+# back as datetimes; the 0/1 flag columns come back as bools.
+
+
+@dataclass(frozen=True)
+class GuildSettings:
+    """One row of `guilds`: a server and its digest schedule, tier and admin channel."""
+
+    guild_id: int
+    digest_time: str
+    timezone: str
+    admin_channel_id: int | None
+    tier: Tier
+    set_up: bool
+    joined_at: datetime
+    imported_at: datetime | None
+    permission_problems: str | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class GuildGame:
+    """A game a server follows and the channel its digest post goes to."""
+
+    guild_id: int
+    game_key: str
+    channel_id: int
+
+
+@dataclass(frozen=True)
+class ShiftSettings:
+    """A server's SHiFT alert settings.
+
+    `ping` is `none`, `everyone`, or a role id as digits. `ping_day` and
+    `ping_count` are that server's own daily ping budget; like the global
+    one in `alert_state`, the count only means something alongside its day.
+    """
+
+    guild_id: int
+    enabled: bool
+    channel_id: int | None
+    ping: str
+    enabled_at: datetime | None
+    ping_day: str | None
+    ping_count: int
+
+
+@dataclass(frozen=True)
+class LoungeSettings:
+    """A server's lounge (welcome message and daily quote) settings.
+
+    `quote_sources` is the already-resolved JSON list of `{"kind", "value"}`
+    dicts, parsed. `last_quote_date` is the once-a-day guard.
+    """
+
+    guild_id: int
+    channel_id: int
+    welcome_enabled: bool
+    welcome_message: str
+    quote_enabled: bool
+    quote_time: str
+    quote_sources: list[dict[str, str]]
+    last_quote_date: str | None
+
+
+@dataclass(frozen=True)
+class GuildDigestRow:
+    """A `digests` row with the per-guild columns migration 005 added."""
+
+    id: int
+    guild_id: int | None
+    run_date: date
+    status: str
+    posted_message_ids: list[int]
+    posted_by_game: dict[str, Any]
+    window_start: datetime | None
+    window_end: datetime | None
+    attempts: int
+    error_notes: str | None
+
+
+@dataclass(frozen=True)
+class GameSummaryRow:
+    """One Claude summary for one game on one local day, shared by every comped guild."""
+
+    id: int
+    game_key: str
+    run_date: date
+    status: Literal["ok", "fallback"]
+    window_start: datetime
+    window_end: datetime
+    coverage_notes: list[str]
+    note: str | None
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A problem note kept for a server's `/newsbot status`."""
+
+    id: int
+    guild_id: int
+    created_at: datetime
+    text: str
+
+
+@dataclass(frozen=True)
+class ItemView:
+    """A stored item as a free server sees it through `/news recent` or `/news search`.
+
+    `topic_keys` is only the games this server follows; an item can match
+    others, and those aren't this server's business.
+    """
+
+    id: int
+    url: str
+    title: str
+    excerpt: str
+    source_name: str
+    trust: Trust
+    published_at: datetime | None
+    collected_at: datetime
+    topic_keys: list[str]

@@ -441,10 +441,13 @@ def test_non_string_hash_of_the_wrong_length_never_lands(conn):
 def test_a_deck_of_five_thousand_stays_correct(conn):
     hashes = [f"{i:064x}" for i in range(5000)]
     conn.executemany(
-        "INSERT INTO lounge_quotes_used VALUES (?, ?, ?)",
+        "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?)",
         [(WILDE, h, (T0 + timedelta(seconds=i)).isoformat()) for i, h in enumerate(hashes)],
     )
-    conn.execute("INSERT INTO lounge_quotes_used VALUES (?, ?, ?)", (TWAIN, H1, T0.isoformat()))
+    conn.execute(
+        "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?)",
+        (TWAIN, H1, T0.isoformat()),
+    )
     conn.commit()
 
     deck = repo.quote_deck_state(conn, WILDE)

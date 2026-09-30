@@ -24,9 +24,9 @@ def db_path(tmp_path):
 def test_fresh_db_reaches_user_version_four(db_path):
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-    assert version == 4
+    assert version == 5
     with closing(connect(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_from_roundup_column_exists_and_defaults_to_zero(db_path):
@@ -78,7 +78,7 @@ def test_existing_roundup_rows_are_backfilled_to_from_roundup_true(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 4
+        assert version == 5
 
         rows = {
             row["code"]: row["from_roundup"]
