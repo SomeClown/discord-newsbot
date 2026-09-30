@@ -33,7 +33,7 @@ Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot s
 - the friend's server imported as the first, comped-premium server;
 - per-server settings in the database.
 
-It uses hourly shared collection with per-server digests. Parts 2 (bring your own key) and 3 (a paid Discord subscription, possible only after verification at about 75 servers) come later. Next: an `architect` plan in `docs/plans/`. Self-hosting keeps working the same way.
+It uses hourly shared collection with per-server digests. Parts 2 (bring your own key) and 3 (a paid Discord subscription, possible only after verification at about 75 servers) come later. Plan: `docs/plans/2026-09-30-public-app.md` (18 tasks, about 13 agent days plus 1 to 2 days of catalog research in parallel), awaiting owner review and decisions D1 to D11 (D1 and D6 block task 1). Self-hosting keeps working the same way.
 
 ## Documentation voice (read this before writing a docstring)
 
