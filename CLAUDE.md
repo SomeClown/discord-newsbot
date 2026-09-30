@@ -22,7 +22,7 @@ and Diablo IV, plus `/news recent` and `/news search` commands.
 
 Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; some may never happen. "Agent time" means build, test and review, plus a short test-guild check.
 
-Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
+1. **Investigate: prod SHiFT alerts no longer ping `@everyone`** (owner report, 2026-09-30, v2.2.0). Under v2.2's rules, a code posts unpinged when all of its sources are untrusted (not `ping_trust` official/press), when it comes from a roundup, when the daily cap of 3 is spent, or when the bot lacks Mention @everyone in `#shift-codes`. Check the prod logs and the `alerted_codes` `pinged`/`from_roundup` values on the Droplet (read-only), then decide whether it's working as designed or a bug. Fix it before the v3 cutover, because the v3 import carries the friend's SHiFT settings over unchanged.
 
 **Lounge rollout done (2026-09-30).** v2.2.0's welcome was verified with a real join in the test guild (the join event arrived with Server Members intent on, and the welcome posted); prod runs the same code. Discord's built-in welcome is off on the prod server and its System Messages Channel points at the admin channel again. Deploy window: never 09:00–09:15 America/Los_Angeles, and avoid about 07:55–08:05 (quote time).
 
