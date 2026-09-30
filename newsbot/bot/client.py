@@ -329,13 +329,31 @@ class DiscordPublisher:
     the topic instead of the message, but the reasoning is the same.
     """
 
-    def __init__(self, client: NewsBot) -> None:
+    def __init__(
+        self,
+        client: NewsBot,
+        *,
+        nonce_scope: str | None = None,
+        on_posted: Callable[[str, int], Awaitable[None]] | None = None,
+        already_posted: Mapping[str, int] | None = None,
+        skip_permanent: bool = False,
+    ) -> None:
         # `NewsBot`, not plain `discord.Client`: kept for parity with v1 and
         # in case a future non-fatal side path (the old thread-creation
         # alert was one) needs `.alert()` again. Forward-referenced since
         # `NewsBot` is defined later in this same module.
         self._client = client
-        self._posted: dict[str, int] = {}
+        # The four keyword arguments are the per-server digest's (design.md
+        # §15, plan task 6); left alone, this behaves exactly as v2.2 did.
+        # `already_posted` preloads a resume's finished games, `on_posted`
+        # hears about each one as it lands so the caller can write it through
+        # to the database, and `skip_permanent` turns a dead channel into "skip
+        # that game and carry on" (recorded in `skipped`) instead of ending the
+        # whole server's digest.
+        self._posted: dict[str, int] = dict(already_posted or {})
+        self._on_posted = on_posted
+        self._skip_permanent = skip_permanent
+        self.skipped: dict[str, str] = {}
         self._channels: dict[int, discord.abc.Messageable] = {}
         # One salt per instance, not per send: a retry on *this* instance
         # (the same run, backing off after a transient failure) reuses the
@@ -343,7 +361,16 @@ class DiscordPublisher:
         # dedup catch a send that actually landed before the retry thought
         # it failed. A confirmed run-now builds a fresh `DiscordPublisher`,
         # hence a fresh salt: that repost is deliberate, not a dupe.
-        self._nonce_salt = uuid.uuid4().hex
+        # With a `nonce_scope` (`"{guild_id}|{run_date}"`) the salt is that
+        # instead, stable across a restart, so a resume after a crash mid-send
+        # can be deduplicated by Discord too. (A forced re-run passes a fresh
+        # scope: that repost is deliberate.)
+        self._nonce_salt = nonce_scope if nonce_scope is not None else uuid.uuid4().hex
+
+    @property
+    def posted_by_game(self) -> dict[str, int]:
+        """Game key -> message id for everything posted so far, including a resume's preload."""
+        return dict(self._posted)
 
     @property
     def posted_ids(self) -> list[int]:
@@ -358,21 +385,35 @@ class DiscordPublisher:
 
     async def publish(self, r: RenderedDigest) -> dict[str, int]:
         for message in r.messages:
-            if message.topic_key in self._posted:
+            if message.topic_key in self._posted or message.topic_key in self.skipped:
                 continue
-            channel = await self._resolve_channel(message.channel_id)
-            nonce = hashlib.sha256(f"{self._nonce_salt}|{message.topic_key}".encode()).hexdigest()[
-                :25
-            ]
             try:
-                sent = await channel.send(
-                    embed=message.embed,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                    nonce=nonce,
-                )
-            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
-                self._reraise_or_wrap(exc)
+                channel = await self._resolve_channel(message.channel_id)
+                nonce = hashlib.sha256(
+                    f"{self._nonce_salt}|{message.topic_key}".encode()
+                ).hexdigest()[:25]
+                try:
+                    sent = await channel.send(
+                        embed=message.embed,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        nonce=nonce,
+                    )
+                except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
+                    self._reraise_or_wrap(exc)
+            except PublishError as exc:
+                if not (self._skip_permanent and not exc.retryable):
+                    raise
+                self.skipped[message.topic_key] = str(exc)
+                continue
             self._posted[message.topic_key] = sent.id
+            if self._on_posted is not None:
+                try:
+                    await self._on_posted(message.topic_key, sent.id)
+                except Exception:
+                    # The message is out; failing the publish over a bookkeeping
+                    # hiccup would post it again on the retry. The final save
+                    # writes the full set anyway.
+                    logger.exception("write-through of a posted game failed")
         return dict(self._posted)
 
     async def _resolve_channel(self, channel_id: int) -> discord.abc.Messageable:

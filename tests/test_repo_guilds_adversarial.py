@@ -23,7 +23,7 @@ import itertools
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -239,6 +239,14 @@ _MUTATIONS = {
         c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"]
     ),
     "fail_queued_guild_codes": lambda c, g: repo.fail_queued_guild_codes(c, g),
+    "claim_guild_digest": lambda c, g: [
+        repo.claim_guild_digest(
+            c, g, date(2026, 9, 30), force=True, window=(SINCE, SINCE + timedelta(days=1))
+        ),
+        repo.claim_guild_digest(
+            c, g, date(2026, 10, 1), force=False, window=(SINCE, SINCE + timedelta(days=1))
+        ),
+    ],
 }
 
 _READS = {
@@ -265,6 +273,12 @@ _OTHER_COVERAGE = {
     "backfill_lounge_quotes_guild",
     "guild_posted_codes",  # see the test just below
     "queued_guild_codes",  # likewise, and it returns codes rather than guild ids
+    # The per-guild digest reads: tests/test_repo_guild_digest.py pins that each
+    # only sees its own guild's rows (items_for_window through guild_games,
+    # last_window_end and get_guild_digest through the digests guild_id).
+    "get_guild_digest",
+    "last_window_end",
+    "items_for_window",
 }
 
 

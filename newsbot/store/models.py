@@ -323,3 +323,60 @@ class QueuedCode:
     golden: bool
     trusted: bool
     queued_at: datetime
+
+
+# --- Per-guild digests (design.md §15, plan task 6) ---
+
+
+@dataclass(frozen=True)
+class HeadlineItem:
+    """A stored item as a free server's digest lists it, for one game.
+
+    `uncertain` is per game (an entity-only match; see `pipeline/filter.py`):
+    the same item can be confident for one game and uncertain for another.
+    """
+
+    url: str
+    title: str
+    source_name: str
+    trust: Trust
+    published_at: datetime | None
+    collected_at: datetime
+    uncertain: bool
+
+
+@dataclass(frozen=True)
+class DueCandidate:
+    """One set-up guild and its latest digest row, as the due check wants them.
+
+    The `run_date` and everything after it describe the guild's newest `digests`
+    row and are `None` (or empty) when it has never had one. `posted_any` is
+    true when that row records any posted message at all, in either the per-game
+    map or v2.2's flat id list (an adopted v2.2 row only has the list).
+    """
+
+    guild_id: int
+    digest_time: str
+    timezone: str
+    tier: Tier
+    run_date: date | None = None
+    status: str | None = None
+    posted_any: bool = False
+    attempts: int = 0
+    updated_at: datetime | None = None
+    window_end: datetime | None = None
+
+
+@dataclass(frozen=True)
+class GuildClaim:
+    """What a successful claim hands back: the row's id, its window, and what already posted.
+
+    `posted_by_game` is non-empty only on a resume (or a retry of a failed row that
+    had posted something): those games are done and must not be posted again.
+    """
+
+    digest_id: int
+    window_start: datetime
+    window_end: datetime
+    posted_by_game: dict[str, int]
+    resumed: bool

@@ -29,8 +29,13 @@ from newsbot.store.models import (
     AlertStatus,
     CodeView,
     DigestRow,
+    DueCandidate,
+    GameSummaryRow,
+    GuildClaim,
+    GuildDigestRow,
     GuildGame,
     GuildSettings,
+    HeadlineItem,
     ItemView,
     LoungeSettings,
     LoungeState,
@@ -1965,3 +1970,363 @@ def search_items(
         # lone surrogate that can't be bound as UTF-8.
         return [], 0
     return _rows_to_item_views(conn, guild_id, rows), total
+
+
+# --- Per-guild digests (design.md §13 and §15, plan task 6) ---
+#
+# The v2 guard, keyed on `(guild_id, run_date)` instead of `run_date` alone:
+# claim a `pending` row before anything slow, post, write each game's message
+# id through as it lands (D7), then save the final status. The v2 functions
+# above stay as they are; the running bot still uses them until the cutover.
+
+_GUILD_DIGEST_COLUMNS = (
+    "id, guild_id, run_date, status, posted_message_ids, posted_by_game, "
+    "window_start, window_end, attempts, error_notes"
+)
+
+
+def _guild_digest_from_row(row: sqlite3.Row) -> GuildDigestRow:
+    return GuildDigestRow(
+        id=row["id"],
+        guild_id=row["guild_id"],
+        run_date=date.fromisoformat(row["run_date"]),
+        status=row["status"],
+        posted_message_ids=json.loads(row["posted_message_ids"]),
+        posted_by_game=json.loads(row["posted_by_game"]),
+        window_start=_parse_dt(row["window_start"]),
+        window_end=_parse_dt(row["window_end"]),
+        attempts=row["attempts"],
+        error_notes=row["error_notes"],
+    )
+
+
+def get_guild_digest(
+    conn: sqlite3.Connection, guild_id: int, run_date: date
+) -> GuildDigestRow | None:
+    row = conn.execute(
+        f"SELECT {_GUILD_DIGEST_COLUMNS} FROM digests "  # noqa: S608
+        "WHERE guild_id = ? AND run_date = ?",
+        (guild_id, run_date.isoformat()),
+    ).fetchone()
+    return _guild_digest_from_row(row) if row else None
+
+
+def _parse_dt_or_none(value: str | None) -> datetime | None:
+    # One guild's unreadable timestamp must not take the whole tick down with it.
+    try:
+        return _parse_dt(value)
+    except ValueError:
+        return None
+
+
+def due_candidates(conn: sqlite3.Connection) -> list[DueCandidate]:
+    """Every set-up guild that follows a game, with its newest digest row.
+
+    SQLite can't do IANA time zones, so this only fetches; `guilds.schedule.due_guilds`
+    decides. A guild with no digest yet comes back with the row fields empty.
+    """
+    rows = conn.execute(
+        "SELECT g.guild_id, g.digest_time, g.timezone, g.tier, "
+        "d.run_date, d.status, d.attempts, d.updated_at, d.window_end, "
+        "(d.posted_by_game != '{}' OR d.posted_message_ids != '[]') AS posted_any "
+        "FROM guilds g "
+        "LEFT JOIN digests d ON d.id = ("
+        "SELECT id FROM digests WHERE guild_id = g.guild_id ORDER BY run_date DESC LIMIT 1) "
+        "WHERE g.set_up = 1 AND EXISTS ("
+        "SELECT 1 FROM guild_games WHERE guild_id = g.guild_id) "
+        "ORDER BY g.guild_id"
+    ).fetchall()
+    return [
+        DueCandidate(
+            guild_id=row["guild_id"],
+            digest_time=row["digest_time"],
+            timezone=row["timezone"],
+            tier=row["tier"],
+            run_date=date.fromisoformat(row["run_date"]) if row["run_date"] else None,
+            status=row["status"],
+            posted_any=bool(row["posted_any"]),
+            attempts=row["attempts"] or 0,
+            updated_at=_parse_dt_or_none(row["updated_at"]),
+            window_end=_parse_dt_or_none(row["window_end"]),
+        )
+        for row in rows
+    ]
+
+
+def last_window_end(
+    conn: sqlite3.Connection, guild_id: int, *, exclude_run_date: date
+) -> datetime | None:
+    """Where the previous digest's window ended, for chaining the next one onto it.
+
+    Counts only digests that posted something (`ok`, `partial`, or a failure that got
+    some games out), and never `exclude_run_date`'s own row: a forced re-run of a
+    day covers that day's window again instead of starting after itself.
+    """
+    rows = conn.execute(
+        "SELECT window_end FROM digests WHERE guild_id = ? AND run_date != ? "
+        "AND window_end IS NOT NULL AND (status IN ('ok', 'partial') OR posted_by_game != '{}') "
+        "ORDER BY run_date DESC LIMIT 5",
+        (guild_id, exclude_run_date.isoformat()),
+    ).fetchall()
+    ends = [datetime.fromisoformat(row["window_end"]) for row in rows]
+    return max(ends) if ends else None
+
+
+def claim_guild_digest(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    run_date: date,
+    *,
+    force: bool,
+    window: tuple[datetime, datetime],
+    resume: bool = False,
+    now: Callable[[], datetime] | None = None,
+) -> GuildClaim | None:
+    """`claim_digest`, for one server: reserve `(guild_id, run_date)` or say no.
+
+    Runs under `BEGIN IMMEDIATE`, so two claimers can't both see "no row".
+    Same meanings as v2:
+    - no row: insert `pending` with `window`;
+    - `ok`, `partial`, or `pending` without `force`: refused (`None`), except that
+      a `pending` row with a stored window *resumes* when `resume` is true (D7: the
+      process that started it died). A resume keeps the row's window and whatever
+      it already posted, so the caller posts only the missing games;
+    - `failed`: reclaimable. If it had posted games and has a window it continues
+      like a resume; a clean failure starts over with `window`;
+    - `force`: replaces the row in place, keeping its id, with `window` and nothing
+      posted. (A confirmed run-now; the admin was asked first.)
+    Every successful claim increments `attempts`.
+    """
+    now_iso = _resolve_now(now)
+    new_start, new_end = (_utc_iso(moment) for moment in window)
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, status, posted_by_game, window_start, window_end FROM digests "
+            "WHERE guild_id = ? AND run_date = ?",
+            (guild_id, run_date.isoformat()),
+        ).fetchone()
+        if row is None:
+            cur = conn.execute(
+                "INSERT INTO digests (guild_id, run_date, status, window_start, window_end, "
+                "attempts, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, 1, ?, ?)",
+                (guild_id, run_date.isoformat(), new_start, new_end, now_iso, now_iso),
+            )
+            claim = GuildClaim(cur.lastrowid, window[0], window[1], {}, False)
+        else:
+            status = row["status"]
+            posted: dict[str, int] = json.loads(row["posted_by_game"])
+            stored = (
+                (
+                    datetime.fromisoformat(row["window_start"]),
+                    datetime.fromisoformat(row["window_end"]),
+                )
+                if row["window_start"] and row["window_end"]
+                else None
+            )
+            if force:
+                claim = GuildClaim(row["id"], window[0], window[1], {}, False)
+            elif status in ("ok", "partial") or (status == "pending" and not resume):
+                claim = None
+            elif status == "pending" and stored is None:
+                claim = None  # v2.2 wrote it and nobody knows what it posted
+            elif (status == "pending" or posted) and stored is not None:
+                claim = GuildClaim(row["id"], stored[0], stored[1], posted, True)
+            else:
+                claim = GuildClaim(row["id"], window[0], window[1], {}, False)
+            if claim is not None:
+                start_iso, end_iso = _utc_iso(claim.window_start), _utc_iso(claim.window_end)
+                conn.execute(
+                    "UPDATE digests SET status = 'pending', window_start = ?, window_end = ?, "
+                    "attempts = attempts + 1, updated_at = ?, "
+                    "posted_by_game = CASE WHEN ? THEN '{}' ELSE posted_by_game END "
+                    "WHERE id = ?",
+                    (start_iso, end_iso, now_iso, int(force), row["id"]),
+                )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return claim
+
+
+def record_posted_game(
+    conn: sqlite3.Connection,
+    digest_id: int,
+    game_key: str,
+    message_id: int,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """Write one posted game's message id through to its digest row (D7).
+
+    Called as each game lands, so a crash later in the same digest leaves an
+    honest record of what already went out. Keeps the flat `posted_message_ids`
+    list (v2.2's shape) in step.
+    """
+    now_iso = _resolve_now(now)
+    with conn:
+        row = conn.execute(
+            "SELECT posted_by_game FROM digests WHERE id = ?", (digest_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"digest {digest_id} doesn't exist")
+        posted = json.loads(row["posted_by_game"])
+        posted[game_key] = message_id
+        conn.execute(
+            "UPDATE digests SET posted_by_game = ?, posted_message_ids = ?, updated_at = ? "
+            "WHERE id = ?",
+            (json.dumps(posted), json.dumps(list(posted.values())), now_iso, digest_id),
+        )
+
+
+def save_guild_digest(
+    conn: sqlite3.Connection,
+    digest_id: int,
+    status: str,
+    posted_by_game: Mapping[str, int],
+    notes: str | None,
+    window: tuple[datetime, datetime],
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """Record a finished digest: its status, what posted, the notes and the window."""
+    with conn:
+        conn.execute(
+            "UPDATE digests SET status = ?, posted_by_game = ?, posted_message_ids = ?, "
+            "error_notes = ?, window_start = ?, window_end = ?, updated_at = ? WHERE id = ?",
+            (
+                status,
+                json.dumps(dict(posted_by_game)),
+                json.dumps(list(posted_by_game.values())),
+                notes,
+                _utc_iso(window[0]),
+                _utc_iso(window[1]),
+                _resolve_now(now),
+                digest_id,
+            ),
+        )
+
+
+def mark_guild_digest_failed(
+    conn: sqlite3.Connection,
+    digest_id: int,
+    notes: str,
+    posted_by_game: Mapping[str, int] | None = None,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """Record that a digest's publish step failed, keeping everything that did post.
+
+    `posted_by_game` is merged into what the row already has (write-through may
+    already have recorded most of it); nothing is ever removed, for the reason
+    `mark_digest_failed` gives: forgetting a posted game is how it gets posted twice.
+    """
+    with conn:
+        row = conn.execute(
+            "SELECT posted_by_game FROM digests WHERE id = ?", (digest_id,)
+        ).fetchone()
+        posted = json.loads(row["posted_by_game"]) if row else {}
+        posted.update(posted_by_game or {})
+        conn.execute(
+            "UPDATE digests SET status = 'failed', error_notes = ?, posted_by_game = ?, "
+            "posted_message_ids = ?, updated_at = ? WHERE id = ?",
+            (
+                notes,
+                json.dumps(posted),
+                json.dumps(list(posted.values())),
+                _resolve_now(now),
+                digest_id,
+            ),
+        )
+
+
+def items_for_window(
+    conn: sqlite3.Connection, guild_id: int, start: datetime, end: datetime
+) -> dict[str, list[HeadlineItem]]:
+    """Stored items collected in `(start, end]`, per game `guild_id` follows, newest first.
+
+    Only games the guild follows come back, so another server's games can't
+    leak into its digest. An item matching two followed games appears under both.
+    """
+    rows = conn.execute(
+        "SELECT item_topics.topic_key, item_topics.uncertain, items.url, items.title, "
+        "items.source_name, items.trust, items.published_at, items.collected_at "
+        "FROM item_topics JOIN items ON items.id = item_topics.item_id "
+        "WHERE item_topics.topic_key IN (SELECT game_key FROM guild_games WHERE guild_id = ?) "
+        "AND items.collected_at > ? AND items.collected_at <= ? "
+        "ORDER BY items.collected_at DESC, items.id DESC",
+        (guild_id, _utc_iso(start), _utc_iso(end)),
+    ).fetchall()
+    by_game: dict[str, list[HeadlineItem]] = {}
+    for row in rows:
+        by_game.setdefault(row["topic_key"], []).append(
+            HeadlineItem(
+                url=row["url"],
+                title=row["title"],
+                source_name=row["source_name"],
+                trust=row["trust"],
+                published_at=_parse_dt(row["published_at"]),
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                uncertain=bool(row["uncertain"]),
+            )
+        )
+    return by_game
+
+
+# How far a stored summary may sit from a digest's due instant and still be the
+# one it reuses (plan §3.6): computed up to a day before, or a little after
+# (the prepare job runs ahead of the earliest digest, and a later guild is
+# still inside the same local day's summary).
+_SUMMARY_REUSE_BEFORE = timedelta(hours=24)
+_SUMMARY_REUSE_AFTER = timedelta(minutes=30)
+
+
+def get_game_summary(
+    conn: sqlite3.Connection, game_key: str, due_at: datetime
+) -> GameSummaryRow | None:
+    """The newest stored summary for `game_key` ending in `(due_at - 24h, due_at + 30min]`.
+
+    That is the reuse rule for a comped digest: computed once per game per day,
+    shared by every comped guild following it. `None` means nobody has made one.
+    """
+    row = conn.execute(
+        "SELECT id, game_key, run_date, status, window_start, window_end, coverage_notes, "
+        "note, input_tokens, output_tokens FROM game_summaries "
+        "WHERE game_key = ? AND window_end > ? AND window_end <= ? "
+        "ORDER BY window_end DESC, id DESC LIMIT 1",
+        (
+            game_key,
+            _utc_iso(due_at - _SUMMARY_REUSE_BEFORE),
+            _utc_iso(due_at + _SUMMARY_REUSE_AFTER),
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    return GameSummaryRow(
+        id=row["id"],
+        game_key=row["game_key"],
+        run_date=date.fromisoformat(row["run_date"]),
+        status=row["status"],
+        window_start=datetime.fromisoformat(row["window_start"]),
+        window_end=datetime.fromisoformat(row["window_end"]),
+        coverage_notes=json.loads(row["coverage_notes"]),
+        note=row["note"],
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+    )
+
+
+def summary_stories(conn: sqlite3.Connection, summary_id: int) -> list[StoryView]:
+    """The stories saved against `summary_id`, in the order they were written."""
+    rows = conn.execute(
+        "SELECT id, topic_key, headline, summary, label, created_at, is_update_of "
+        "FROM stories WHERE summary_id = ? ORDER BY id",
+        (summary_id,),
+    ).fetchall()
+    return _rows_to_story_views(conn, rows)

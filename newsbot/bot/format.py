@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -29,13 +29,20 @@ from zoneinfo import ZoneInfo
 import discord
 
 from newsbot.collectors.base import CollectorResult
-from newsbot.config import Topic
+from newsbot.config import GameInfo, Topic
 from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
 from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
-from newsbot.store.models import AlertStatus, CodeView, StatusSnapshot, StoryView, Usage
+from newsbot.store.models import (
+    AlertStatus,
+    CodeView,
+    HeadlineItem,
+    StatusSnapshot,
+    StoryView,
+    Usage,
+)
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -214,7 +221,7 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
     return _truncate_utf16(text, limit, suffix="…")
 
 
-def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
+def _topic_embed(topic: GameInfo, stories: list[StoryDraft]) -> discord.Embed:
     # By the time this is called, render_digest has already decided this
     # topic has something to say (design.md §13: a topic with nothing posts
     # nothing, rather than an embed reading "No new stories today."): this
@@ -913,6 +920,118 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 # for the same reason the header is plain text: nobody needs a colored
 # sidebar to read "it worked."
 
+_HEADLINE_TRUST_RANK = {"official": 0, "press": 1, "community": 2}
+_OFFICIAL_MARKER = "🟢 OFFICIAL"
+
+
+def _headline_sort_key(item: HeadlineItem) -> tuple[int, int, float]:
+    # design.md §15, owner decision D4: official, then press, then community;
+    # within a trust level, confident matches before entity-only ones; then
+    # newest first. (The published time if the source gave one, else when we
+    # collected it: an undated item is as new as the day we found it.)
+    moment = item.published_at or item.collected_at
+    return (
+        _HEADLINE_TRUST_RANK.get(item.trust, len(_HEADLINE_TRUST_RANK)),
+        int(item.uncertain),
+        -moment.timestamp(),
+    )
+
+
+def _headline_line(item: HeadlineItem) -> str | None:
+    safe_url = _safe_link(item.url)
+    if safe_url is None:
+        return None
+    marker = f"{_OFFICIAL_MARKER} · " if item.trust == "official" else ""
+    return f"• {marker}{esc(item.title)} — <{safe_url}>"
+
+
+def render_headlines_embed(
+    game: GameInfo, items: Sequence[HeadlineItem], note: str | None = None
+) -> discord.Embed | None:
+    """One game's headline list, for a free server (and for a comped one's fallback).
+
+    Ordered by D4 (see `_headline_sort_key`), with a `🟢 OFFICIAL` marker on official
+    items only; a community item gets no "rumor" label, since a headline list makes no
+    claim about whether it's true. Titles go through `esc()` and URLs through
+    `_safe_link`, same as the stories render. When the list doesn't fit under the
+    4096-unit description limit, whole lines are shed from the bottom and the last line
+    says `+N more, use /news`. Returns `None` when there's nothing to list (no items, or
+    none with a usable URL): a game with nothing posts nothing (design.md §13), so the
+    caller skips it rather than posting "No new stories today."
+
+    `note` (the comped fallback's "Summary unavailable" line) goes on top and isn't
+    counted in the "+N more".
+    """
+    lines = [
+        line for item in sorted(items, key=_headline_sort_key) if (line := _headline_line(item))
+    ]
+    if not lines:
+        return None
+    head = [esc(note)] if note else []
+    kept = len(lines)
+    while kept > 0:
+        cut = len(lines) - kept
+        description = "\n".join([*head, *lines[:kept]])
+        if cut:
+            description += f"\n\n+{cut} more, use /news"
+        if discord_len(description) <= _DESCRIPTION_LIMIT:
+            break
+        kept -= 1
+    else:
+        # One line longer than the whole embed is allowed to be: a title the
+        # size of a short story. Hard-truncate rather than post nothing.
+        description = _truncate_description("\n".join([*head, lines[0]]))
+    return discord.Embed(
+        title=_truncate_utf16(esc(game.name), _TITLE_LIMIT),
+        description=description,
+        color=_topic_color(game.key),
+    )
+
+
+def render_guild_digest(
+    run_date: date,
+    games: Sequence[GameInfo],
+    channels: Mapping[str, int],
+    *,
+    stories_by_game: Mapping[str, list[StoryDraft]],
+    items_by_game: Mapping[str, Sequence[HeadlineItem]],
+    notes_by_game: Mapping[str, str | None],
+    coverage_notes: list[str],
+) -> RenderedDigest:
+    """One server's digest: a `TopicMessage` for each followed game that has something to say.
+
+    `games` are the server's followed games in catalog order and `channels` maps each
+    game key to its channel. A game whose key is in `stories_by_game` has a stored
+    summary (comped): its stories are rendered as v2's embed, and an empty list means
+    the summary found nothing, so nothing posts. Every other game gets its headlines
+    from `items_by_game`, with `notes_by_game[key]` on top if there is one. A game with
+    nothing to show is left out.
+    """
+    footer = _coverage_footer(coverage_notes)
+    messages = []
+    for game in games:
+        if game.key in stories_by_game:
+            stories = stories_by_game[game.key]
+            embed = _topic_embed(game, stories) if stories else None
+        else:
+            embed = render_headlines_embed(
+                game, items_by_game.get(game.key, []), notes_by_game.get(game.key)
+            )
+        if embed is None:
+            continue
+        if footer:
+            embed.set_footer(text=footer)
+        messages.append(
+            TopicMessage(
+                topic_key=game.key,
+                topic_name=game.name,
+                channel_id=channels[game.key],
+                embed=embed,
+            )
+        )
+    return RenderedDigest(run_date=run_date, messages=messages, coverage_notes=coverage_notes)
+
+
 _REPORT_HEADER_EMOJI = {"ok": "✅", "partial": "⚠️"}
 _REPORT_HEADER_VERB = {"ok": "Digest posted", "partial": "Digest posted with gaps"}
 # How many failed/skipped sources get spelled out by name before the report
@@ -1096,6 +1215,76 @@ def render_run_report(
     return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
 
 
+def render_guild_run_report(
+    *,
+    status: Literal["ok", "partial"],
+    run_date: date,
+    run_kind: Literal["scheduled", "catch-up", "run-now"],
+    games: Sequence[GameInfo],
+    counts: Mapping[str, int],
+    channels: Mapping[str, int],
+    posted_by_game: Mapping[str, int],
+    skipped: Mapping[str, str],
+    duration: timedelta,
+    notes: list[str],
+    guild_id: int,
+) -> str:
+    """The per-server run report, for that server's admin channel (plan §3.5): one plain message.
+
+    Like `render_run_report`, minus everything a server has no business seeing: no
+    source health (that's the owner's) and no spend. It has a per-game count with a
+    `[jump]` link for each game that posted, any skipped game with its reason, and how
+    long the digest took. Kept under `_ALERT_CONTENT_LIMIT` by shedding the reasons,
+    then the links, then a flat truncation.
+    """
+
+    def stories_line(with_links: bool) -> str:
+        parts = []
+        for game in games:
+            part = f"{esc(game.name)} {counts.get(game.key, 0)}"
+            message_id = posted_by_game.get(game.key) if with_links else None
+            if message_id is not None:
+                link = _report_jump_link(guild_id, channels[game.key], message_id)
+                part += f" [jump](<{link}>)"
+            parts.append(part)
+        return f"{sum(counts.get(g.key, 0) for g in games)} items: " + " · ".join(parts)
+
+    def skipped_line(with_reasons: bool) -> str | None:
+        if not skipped:
+            return None
+        names = {g.key: g.name for g in games}
+        parts = [
+            f"{esc(names.get(key, key))}" + (f" ({esc(reason)})" if with_reasons else "")
+            for key, reason in skipped.items()
+        ]
+        return "Skipped: " + "; ".join(parts)
+
+    header_line = (
+        f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
+        f"{_report_date(run_date)} ({run_kind})"
+    )
+    took_line = f"Took {_report_duration_str(duration)}"
+    notes_line = "Notes: " + esc("; ".join(notes)) if status == "partial" and notes else None
+
+    def build(with_links: bool, with_reasons: bool, with_notes: bool) -> str:
+        lines = [header_line, stories_line(with_links), skipped_line(with_reasons)]
+        if with_notes:
+            lines.append(notes_line)
+        lines.append(took_line)
+        return "\n".join(line for line in lines if line)
+
+    for with_links, with_reasons, with_notes in (
+        (True, True, True),
+        (True, True, False),
+        (True, False, False),
+        (False, False, False),
+    ):
+        content = build(with_links, with_reasons, with_notes)
+        if discord_len(content) <= _ALERT_CONTENT_LIMIT:
+            return content
+    return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
+
+
 def to_text(r: RenderedDigest) -> str:
     """Render a `RenderedDigest` as plain text, for the CLI's `PrintPublisher`.
 
@@ -1128,6 +1317,9 @@ __all__ = [
     "render_code_alerts",
     "render_code_page",
     "render_digest",
+    "render_guild_digest",
+    "render_guild_run_report",
+    "render_headlines_embed",
     "render_roundup_alerts",
     "render_run_report",
     "render_status",
