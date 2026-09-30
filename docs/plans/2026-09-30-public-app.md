@@ -951,6 +951,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 - At startup, call `deliver_queued_codes(deps, startup=True)`. That fails every stale `pending` row with a per-guild notice, then delivers anything still `queued`.
 - Schedule the collection job with `collection_job_options(cfg)` (`max_instances=1`, `coalesce`).
 - From task 6: build the real `publisher_for` as `DiscordPublisher(bot, nonce_scope=scope, on_posted=cb, already_posted=already, skip_permanent=True)`. `send_report` and `notify_guild` come from task 8's routing. The every-minute `run_due_guilds` job must only start after `on_ready`.
+- From task 6 fixes: the command layer (task 9) must catch `GuildTimeZoneError` from `todays_guild_digest` / `preview_guild_digest` / `run_guild_digest` and reply "your time zone setting is invalid; fix it with /newsbot settings". Pass no overrides for `guild_timeout_s` / `heartbeat_s`. `send_report` must use `AllowedMentions.none()`. A pending digest resumes only after its 10-minute lease goes stale, so a restart can delay a resume by up to 10 minutes.
 - Known limit: delivery runs inside the hook's 120 s timeout, so at about 170 or more SHiFT-enabled guilds a big code drop drains over several hourly passes. Moving delivery into its own job would fix this if the bot ever gets that big (a load-test item, task 14).
 
 ### Task 14: Load test
