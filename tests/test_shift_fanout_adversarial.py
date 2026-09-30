@@ -1167,16 +1167,33 @@ async def test_pace_is_slept_between_guilds_not_before_the_first(h):
     assert h.sleeps == [_GUILD_PACE_S] * 4
 
 
-async def _timed_out_pass(h, guilds, slow_s, timeout_s):
+async def _timed_out_pass(h, guilds, slow_s, timeout_s, *, cut_after=6):
+    # A deterministic stand-in for "the hook's timeout fired mid fan-out". The
+    # first version used a real 0.3 s wall-clock timeout, which on a loaded
+    # machine could land inside a guild's claim and leave a `pending` row; by
+    # design that row is failed rather than re-sent (no double posts), so the
+    # test flaked on the clock, not on a bug. Cutting at the pace sleep puts
+    # the cancellation exactly between guilds, after one finished and before
+    # the next is claimed, which is the case the timeout tests are about.
+    # `slow_s` and `timeout_s` are kept so the call sites read the same.
+    del slow_s, timeout_s
+    reached = asyncio.Event()
+    calls = 0
+
     async def sleep(_seconds):
-        await asyncio.sleep(slow_s)
+        nonlocal calls
+        calls += 1
+        if calls >= cut_after:
+            reached.set()
+            await asyncio.Event().wait()  # park here until cancelled
 
     h.sleep = sleep
     h.posters.clear()
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(
-            detect_and_fan_out(h.deps(), [item(CODE_A)], seeding_ok=True), timeout=timeout_s
-        )
+    task = asyncio.create_task(detect_and_fan_out(h.deps(), [item(CODE_A)], seeding_ok=True))
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     return guilds
 
 
