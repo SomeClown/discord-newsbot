@@ -1,6 +1,6 @@
 # PROPOSED catalog entries for the v3 public app (plan task 17).
 #
-# These are proposals pending owner approval (decision D11). Nothing here is
+# APPROVED by the owner on 2026-09-30 (decision D11), with Evercold dropped. Nothing here is
 # live: after approval, task 18 copies the approved entries into
 # config.example.yaml's catalog:, and the owner adds them to prod config.yaml
 # during rollout step 5. The full findings, verification counts and rejects
@@ -159,9 +159,9 @@ catalog:
 
   - key: ffxiv
     name: "Final Fantasy XIV"
-    # "Evercold" comes from a 2026-09 PCGamesN headline ("Ahead of FF14
-    # Evercold"); it reads as the next expansion's name. Owner to confirm.
-    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail", "Evercold"]
+    # "Evercold" (from one PCGamesN headline) was dropped on 2026-09-30:
+    # nobody could confirm what it is, and an unverified alias is noise.
+    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail"]
     entities: ["Naoki Yoshida"]               # "Square Enix" dropped: every other Square Enix game
     search_queries:
       - "\"Final Fantasy XIV\" OR FFXIV news"

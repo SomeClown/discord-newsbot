@@ -227,7 +227,7 @@ Plan task 17: sources, aliases and search queries for the 12 games joining the p
 - r/Warframe: 25 items (after one 429 and a retry).
 - Rejected: the forum's News section feed (`166-news.xml`) doesn't parse (invalid XML at line 149).
 
-**Final Fantasy XIV** (`ffxiv`). Aliases `FFXIV`, `FF14`, `Final Fantasy 14`, `Dawntrail`, `Evercold`; entity `Naoki Yoshida`. `Evercold` comes from a PCGamesN headline ("Ahead of FF14 Evercold") and looks like the next expansion's name; the owner should confirm it. `Square Enix` is left out.
+**Final Fantasy XIV** (`ffxiv`). Aliases `FFXIV`, `FF14`, `Final Fantasy 14`, `Dawntrail`; entity `Naoki Yoshida`. `Evercold` (from one PCGamesN headline, possibly the next expansion) was proposed and dropped on 2026-09-30, since nobody could confirm it. `Square Enix` is left out.
 - Final Fantasy XIV Steam (39210): 20 items, 0 in 7d. Mostly event and patch note posts.
 - FFXIV Lodestone Topics (`https://na.finalfantasyxiv.com/lodestone/news/topics.xml`): 20 items, 1 in 7d. Announcements and events.
 - FFXIV Lodestone News (`.../lodestone/news/news.xml`): 20 items, 5 in 7d. Maintenance, server issues and update notices; more housekeeping, but that's what players check.
@@ -265,5 +265,5 @@ Plan task 17: sources, aliases and search queries for the 12 games joining the p
 1. Approve the 12 entries as proposed, including Aniimo and WARDOGS (both met the bar: official Steam posts, no match noise).
 2. Accept Fortnite and VALORANT going out with only a subreddit as their dedicated source.
 3. Accept the short entity lists, trading some press recall for clean free-tier headlines.
-4. Confirm `Evercold` as a Final Fantasy XIV alias.
+4. ~~Confirm `Evercold`~~: dropped (owner, 2026-09-30).
 5. Accept 12 more subreddits (15 in all, about 9 minutes of each hourly pass), or pick some to drop now.
