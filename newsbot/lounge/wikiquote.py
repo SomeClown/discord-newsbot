@@ -271,6 +271,17 @@ _SKIP_EXACT = frozenset(
 _GENERIC_HEADINGS = frozenset({"quotes", "sourced", "quotations", "dialogue"})
 _WORK_TITLE_RE = re.compile(r"\(([^)]*)\)\s*$")
 _WORK_WORD_RE = re.compile(r"\b(?:film|tv|series|video game)\b", re.IGNORECASE)
+# A locator is a short "where in the work" line: a locator word, then a number
+# (arabic, or a roman numeral spelled with i, v, x and l). Requiring the whole
+# numeral token is what keeps "Book lovers unite" a sentence, and leaving out
+# "c" keeps "Book civil" one too. Deliberately narrow: a miss only means a
+# locator gets posted as a quote's citation, the way it always was.
+_LOCATOR_RE = re.compile(
+    r"(?:lines?|canto|act|scene|chapter|ch\.|book|part|section|p\.|pp\.|page|stanza|st\."
+    r"|verse|vol\.)\s*(?:[0-9]+|[ivxl]+)\b",
+    re.IGNORECASE,
+)
+_LOCATOR_MAX_CHARS = 40
 
 
 @dataclass
@@ -302,6 +313,12 @@ def _is_internal_link(attrs: list[tuple[str, str | None]]) -> bool:
     classes = {c.lower() for c in (values.get("class") or "").split()}
     href = (values.get("href") or "").strip()
     return href.startswith("/wiki/") and not classes & {"extiw", "external"}
+
+
+def _is_locator(text: str) -> bool:
+    """True for a short line like "Lines 1–3" or "Canto IV", which is a place, not a translation."""
+    text = text.strip()
+    return len(text) <= _LOCATOR_MAX_CHARS and bool(_LOCATOR_RE.match(text))
 
 
 def _one_line(parts: list[str]) -> str:
@@ -361,6 +378,11 @@ class _PageParser(HTMLParser):
         self._item_cite: str | None = None
         self._item_linked_cite: str | None = None
         self._item_first_cite: str | None = None
+        # Every non-blank nested line as (text with breaks, capped one-liner,
+        # starts with an internal link), plus whether the item's own text was
+        # italic. Together they're how a translated quote gets spotted.
+        self._item_lines: list[tuple[str, str, bool]] = []
+        self._item_italic_text = self._item_plain_text = False
         self._cite_at: int | None = None
         self._cite_parts: list[str] = []
         self._cite_seen = False
@@ -411,6 +433,8 @@ class _PageParser(HTMLParser):
         sink = self._sink()
         if sink is not None:
             sink.append(data)
+            if sink is self._item_parts and data.strip():
+                self._note_item_text()
 
     # State
 
@@ -442,6 +466,23 @@ class _PageParser(HTMLParser):
         if self._item_at is not None and lists == ["ul"]:
             return self._item_parts
         return None
+
+    def _note_item_text(self) -> None:
+        """Record whether the quote's own text just showed up inside `<i>` or `<em>`.
+
+        Only an italic tag opened after the item's `<li>` counts, so one that
+        somehow wraps the whole list can't make every quote look like a
+        foreign original.
+        """
+        if self._item_at is None:
+            return
+        italic = any(
+            self._open_at.get(tag) and self._open_at[tag][-1] > self._item_at for tag in ("i", "em")
+        )
+        if italic:
+            self._item_italic_text = True
+        else:
+            self._item_plain_text = True
 
     @staticmethod
     def _is_ignored(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
@@ -479,6 +520,8 @@ class _PageParser(HTMLParser):
                 self._item_at, self._item_parts = index, []
                 self._item_headings, self._item_cite = self._context(), None
                 self._item_linked_cite = self._item_first_cite = None
+                self._item_lines = []
+                self._item_italic_text = self._item_plain_text = False
                 self._cite_seen = False
             elif lists == ["ul", "ul"] and self._item_at is not None:
                 if self._cite_at is None:
@@ -556,21 +599,42 @@ class _PageParser(HTMLParser):
                 self._item_first_cite = text
             if self._cite_linked and self._item_linked_cite is None:
                 self._item_linked_cite = text
+            self._item_lines.append((_lines(self._cite_parts), text, bool(self._cite_linked)))
         self._cite_at, self._cite_seen = None, True
 
     def _end_item(self) -> None:
         text = _lines(self._item_parts)
         if text:
-            self.raw.append(
-                _Raw(
-                    text,
-                    self._item_cite,
-                    self._item_linked_cite,
-                    self._item_first_cite,
-                    self._item_headings,
-                    dialogue=False,
-                )
+            raw = _Raw(
+                text,
+                self._item_cite,
+                self._item_linked_cite,
+                self._item_first_cite,
+                self._item_headings,
+                dialogue=False,
             )
+            # A foreign original in italics, then its translation, then the
+            # real citation. With fewer than two lines the one there is stays
+            # the citation, since it might be all we've got. Some pages put a
+            # locator ("Lines 1-3") ahead of the translations, so the
+            # translation is the first line that isn't one; if they all are,
+            # nothing is swapped.
+            if self._item_italic_text and not self._item_plain_text and len(self._item_lines) >= 2:
+                pick = next(
+                    (
+                        i
+                        for i, (_, short, _) in enumerate(self._item_lines)
+                        if not _is_locator(short)
+                    ),
+                    None,
+                )
+                if pick is not None:
+                    translation = self._item_lines[pick][0]
+                    rest = self._item_lines[:pick] + self._item_lines[pick + 1 :]
+                    raw.text = translation
+                    raw.first_cite = raw.cite = rest[0][1]
+                    raw.linked_cite = next((short for _, short, linked in rest if linked), None)
+            self.raw.append(raw)
         self._item_at = None
         self._cite_at = None
 

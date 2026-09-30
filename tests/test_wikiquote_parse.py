@@ -192,9 +192,15 @@ def test_theme_attribution_is_the_citation_alone(friendship):
     # The citation is the first nested line that begins with an internal wiki
     # link. "Last line" (e5580cc) fixed the Latin item, whose first line is a
     # translation, but broke the three whose last line is a note.
-    q = _by_start(friendship, "Non nobis solum nati sumus")
+    q = _by_start(friendship, "We are not born, we do not live for ourselves alone")
+    assert q.text == (
+        "We are not born, we do not live for ourselves alone; "
+        "our country, our friends, have a share in us."
+    )
     assert q.attribution == "Cicero, De Officiis Book I, section 22."
     assert "We are not born, we do not live" not in q.attribution
+    # The italic Latin original is only the original: it doesn't get posted.
+    assert not [x for x in friendship.quotes if x.text.startswith("Non nobis")]
     q = _by_start(friendship, "my friend He was quite a dear")
     assert q.attribution == "June Lockhart"
     q = _by_start(friendship, "Stay is a charming word")
@@ -449,3 +455,175 @@ def test_page_url_percent_encodes_awkward_characters():
     assert (
         page_url("A>B <c> `d` e|f") == "https://en.wikiquote.org/wiki/A%3EB_%3Cc%3E_%60d%60_e%7Cf"
     )
+
+
+# --- Translations ---
+#
+# Wikiquote shows a foreign-language original in italics, then the English
+# translation as the first nested line, then the real citation. The fixture is
+# made up (fake Italian, a book that doesn't exist); the tests below poke at
+# the same rule with inline pages.
+
+
+def _author(item: str) -> ParsedPage:
+    html = f'<div class="mw-heading mw-heading2"><h2>Quotes</h2></div><ul>{item}</ul>'
+    return parse_page("Person", html)
+
+
+def _theme(item: str) -> ParsedPage:
+    letters = "".join(f'<div class="mw-heading mw-heading2"><h2>{c}</h2></div>' for c in "ABC")
+    return parse_page("Friendship", f"{letters}<ul>{item}</ul>")
+
+
+def _pair(page: ParsedPage) -> tuple[str, str | None]:
+    (q,) = page.quotes
+    return q.text, q.attribution
+
+
+_LINKED = '<a href="/wiki/Cicero" title="Cicero">Cicero</a>, De Fake.'
+
+
+def test_translation_fixture_posts_the_english_with_the_citation_after_it():
+    page = parse_page("Fake Book", _load("synthetic_translation.html"))
+    where = "Fake Book, Il Libro Finto, Canto I"
+    assert [(q.text, q.attribution) for q in page.quotes] == [
+        (
+            "The sun never shines\nabove the roof of the soup\nwhen the cat sleeps.",
+            f"{where}, Lines 1–3 (tr. A. Nobody)",
+        ),
+        ("The moon drinks the tea.", f"{where}, Line 4 (tr. A. Nobody)"),
+        (
+            "The cat dreams of soup.\n(tr. Nobody)",
+            f"{where}, Lines 6–7",
+        ),
+        ("An English line that was never in italics.", f"{where}, Line 5"),
+    ]
+
+
+@pytest.mark.parametrize("tag", ["i", "em"])
+def test_author_italic_original_translation_and_citation(tag):
+    page = _author(
+        f"<li><{tag}>Ciao mondo.</{tag}><ul><li>Hello world.</li><li>Cite A</li></ul></li>"
+    )
+    assert _pair(page) == ("Hello world.", "Person, Cite A")
+
+
+@pytest.mark.parametrize("tag", ["i", "em"])
+def test_theme_italic_original_translation_and_citation(tag):
+    item = f"<li><{tag}>Ciao mondo.</{tag}><ul><li>Hello world.</li><li>{_LINKED}</li></ul></li>"
+    assert _pair(_theme(item)) == ("Hello world.", "Cicero, De Fake.")
+
+
+def test_author_italic_original_with_an_extra_note_line_uses_the_line_after_the_translation():
+    page = _author("<li><i>Ciao.</i><ul><li>Hello.</li><li>Cite A</li><li>A note.</li></ul></li>")
+    assert _pair(page) == ("Hello.", "Person, Cite A")
+
+
+def test_theme_italic_original_with_an_extra_note_line():
+    # The linked line wins over the note that follows it, as it does today.
+    item = f"<li><i>Ciao.</i><ul><li>Hello.</li><li>{_LINKED}</li><li>Variants: x.</li></ul></li>"
+    assert _pair(_theme(item)) == ("Hello.", "Cicero, De Fake.")
+    # With no link among the remaining lines, the first remaining line wins.
+    item = "<li><i>Ciao.</i><ul><li>Hello.</li><li>Cite A</li><li>A note.</li></ul></li>"
+    assert _pair(_theme(item)) == ("Hello.", "Cite A")
+
+
+def test_theme_translation_is_never_picked_up_as_the_linked_citation():
+    # The translation itself opens with a wiki link; it's still the quote.
+    link = '<a href="/wiki/Cicero">Cicero</a> said it.'
+    page = _theme(f"<li><i>Ciao.</i><ul><li>{link}</li><li>Book I</li></ul></li>")
+    assert _pair(page) == ("Cicero said it.", "Book I")
+
+
+def test_italic_original_with_one_nested_line_is_unchanged():
+    item = "<li><i>Ciao.</i><ul><li>Cite A</li></ul></li>"
+    assert _pair(_author(item)) == ("Ciao.", "Person, Cite A")
+    assert _pair(_theme(item)) == ("Ciao.", "Cite A")
+
+
+def test_italic_original_with_a_blank_line_and_one_real_line_is_unchanged():
+    page = _theme("<li><i>Ciao.</i><ul><li> </li><li>Cite A</li></ul></li>")
+    assert _pair(page) == ("Ciao.", "Cite A")
+
+
+def test_partly_italic_text_is_unchanged():
+    item = "<li><i>Ciao</i> mondo.<ul><li>Hello world.</li><li>Cite A</li></ul></li>"
+    assert _pair(_author(item)) == ("Ciao mondo.", "Person, Hello world.")
+    assert _pair(_theme(item)) == ("Ciao mondo.", "Hello world.")
+
+
+def test_plain_text_after_the_nested_list_makes_it_partly_italic():
+    item = "<li><i>Ciao</i><ul><li>Hello.</li><li>Cite A</li></ul>mondo.</li>"
+    assert _pair(_author(item)) == ("Ciaomondo.", "Person, Hello.")
+
+
+def test_author_blank_first_nested_line_then_translation_and_citation():
+    page = _author("<li><i>Ciao.</i><ul><li> </li><li>Hello.</li><li>Cite A</li></ul></li>")
+    assert _pair(page) == ("Hello.", "Person, Cite A")
+
+
+def test_theme_blank_first_nested_line_then_translation_and_citation():
+    item = f"<li><i>Ciao.</i><ul><li> </li><li>Hello.</li><li>{_LINKED}</li></ul></li>"
+    assert _pair(_theme(item)) == ("Hello.", "Cicero, De Fake.")
+
+
+def test_translation_keeps_its_line_breaks():
+    page = _author("<li><i>Uno<br />due.</i><ul><li>One<br />two.</li><li>Cite A</li></ul></li>")
+    assert _pair(page) == ("One\ntwo.", "Person, Cite A")
+
+
+def test_length_check_applies_to_the_translation_not_the_original():
+    original = "<i>" + "parola " * 100 + "</i>"
+    page = _author(f"<li>{original}<ul><li>Short.</li><li>Cite A</li></ul></li>")
+    assert _pair(page) == ("Short.", "Person, Cite A")
+    page = _author(f"<li><i>Ciao.</i><ul><li>{'word ' * 100}</li><li>Cite A</li></ul></li>")
+    assert page.quotes == [] and page.dropped_long == 1
+
+
+def test_translation_is_not_capped_like_a_citation():
+    translation = "word " * 60
+    page = _author(f"<li><i>Ciao.</i><ul><li>{translation}</li><li>Cite A</li></ul></li>")
+    assert _pair(page) == (translation.strip(), "Person, Cite A")
+
+
+# A locator ("Lines 1-3") sometimes sits ahead of the translations. It's a
+# citation, never the quote.
+
+
+def test_locator_first_structure_posts_the_first_translation_and_cites_the_locator():
+    item = (
+        "<li><i>Ciao.</i><ul><li>Lines 1–3</li>"
+        "<li><b>Hello.</b><br />(tr. Ann)</li><li>Hi.<br />(tr. Bob)</li></ul></li>"
+    )
+    assert _pair(_author(item)) == ("Hello.\n(tr. Ann)", "Person, Lines 1–3")
+    assert _pair(_theme(item)) == ("Hello.\n(tr. Ann)", "Lines 1–3")
+
+
+def test_theme_locator_first_still_prefers_a_linked_remaining_line():
+    item = f"<li><i>Ciao.</i><ul><li>Lines 1–3</li><li>Hello.</li><li>{_LINKED}</li></ul></li>"
+    assert _pair(_theme(item)) == ("Hello.", "Cicero, De Fake.")
+
+
+def test_all_locator_lines_are_unchanged():
+    item = "<li><i>Ciao.</i><ul><li>Lines 1–3</li><li>Canto IV</li></ul></li>"
+    assert _pair(_author(item)) == ("Ciao.", "Person, Lines 1–3")
+    assert _pair(_theme(item)) == ("Ciao.", "Lines 1–3")
+
+
+def test_a_locator_word_without_a_numeral_is_not_a_locator():
+    for line in ("Book lovers unite", "Book civil war", "Part of the plan"):
+        item = f"<li><i>Ciao.</i><ul><li>{line}</li><li>Cite A</li></ul></li>"
+        assert _pair(_author(item)) == (line, "Person, Cite A")
+
+
+def test_a_long_line_starting_with_lines_is_not_a_locator():
+    line = "Lines 1 to 3 as they were rendered by somebody who wasn't there"
+    assert len(line) > 40
+    item = f"<li><i>Ciao.</i><ul><li>{line}</li><li>Cite A</li></ul></li>"
+    assert _pair(_author(item)) == (line, "Person, Cite A")
+
+
+@pytest.mark.parametrize("locator", ["Canto IV", "canto xii", "Ch. 3", "p. 124", "Act II, scene 1"])
+def test_locators_with_roman_or_arabic_numerals(locator):
+    item = f"<li><i>Ciao.</i><ul><li>{locator}</li><li>Hello.</li></ul></li>"
+    assert _pair(_author(item)) == ("Hello.", f"Person, {locator}")

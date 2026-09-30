@@ -615,6 +615,8 @@ caution applies. I'm not a lawyer, and this is not legal advice.
 - Pages whose title ends in a parenthetical mentioning film, TV, series or
   video game are treated as works and attributed "Character, Title". On
   theme pages, a quote with no cited source is dropped.
+  When Wikiquote shows a quote in its original language (in italics) with an
+  English translation under it, the translation is what gets posted.
 
 **8. How a quote looks.** A header (`🥃 **Today's pour**`), the quote, and an
 attribution line starting with `~ `. Wikiquote quotes add a `From
