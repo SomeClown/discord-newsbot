@@ -1288,7 +1288,7 @@ def make_guild_admin_group(
     `digest_deps` returns the one shared `GuildDigestDeps` (its per-server locks live in
     it, so it must be the same object every call). The default is
     `bot.guild_digest_deps`, which the cutover task adds; without either, `preview` and
-    `run-now` say they're not available. `/newsbot setup` is the wizard's (task 10).
+    `run-now` say they're not available. `/newsbot setup` hands off to the wizard in `setup_views`.
     """
     db_path = bot.db_path
     names = {game.key: game.name for game in cfg.catalog}
@@ -1335,6 +1335,36 @@ def make_guild_admin_group(
         have = {g.game_key for g in games}
         keys = have if followed else {g.key for g in cfg.catalog} - have
         return game_choices(cfg.catalog, keys, current)
+
+    @group.command(
+        name="setup", description="Guided setup: time zone, digest time, games and a channel."
+    )
+    async def setup(interaction: discord.Interaction) -> None:
+        # Imported here because setup_views borrows this module's helpers at import
+        # time, and two modules can't both go first.
+        from newsbot.bot.setup_views import SetupView  # noqa: PLC0415
+
+        guild_id = await gate(interaction)
+        if guild_id is None:
+            return
+        await interaction.response.defer(ephemeral=True)
+        # Read-only on purpose: a missing row isn't created until Save, so opening the
+        # wizard and walking away leaves no trace.
+        guild, followed = await asyncio.to_thread(_guild_state_sync, db_path, guild_id)
+        view = SetupView(
+            cfg=cfg,
+            bot=bot,
+            db_path=db_path,
+            owner_id=interaction.user.id,
+            guild_id=guild_id,
+            tier=_tier_for(cfg, guild_id),
+            guild=guild,
+            followed=followed,
+            origin=interaction,
+        )
+        await interaction.followup.send(
+            view.render(), view=view, ephemeral=True, allowed_mentions=_none_mentions()
+        )
 
     @group.command(
         name="follow", description="Follow a game: its digest posts in the channel you pick."

@@ -1311,6 +1311,65 @@ def set_guild_games(conn: sqlite3.Connection, guild_id: int, games: list[tuple[s
         )
 
 
+def apply_guild_setup(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    *,
+    digest_time: str,
+    timezone: str,
+    games: list[tuple[str, int]],
+    tier: Tier = "free",
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """What `/newsbot setup` saves, in one transaction: the row, the schedule and the games.
+
+    Creates the guild's row if a missed join left it without one (an existing row keeps
+    its tier, so a comped server stays comped), sets the time and zone and `set_up = 1`,
+    drops every followed game not in `games`, and points the rest at their channels,
+    following any that are new. Unlike `set_guild_games` this doesn't wipe and refill, so
+    a game that stays keeps its place in the order it was added. Any failure rolls the
+    lot back: more than 10 games raises `GameLimitError` and a repeated key raises
+    `ValueError`, both before anything is written.
+    """
+    if len(games) > MAX_GAMES_PER_GUILD:
+        raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
+    keys = [key for key, _ in games]
+    if len(set(keys)) != len(keys):
+        raise ValueError("Duplicate game key.")
+    now_iso = _resolve_now(now)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO guilds (guild_id, digest_time, timezone, tier, set_up, joined_at, "
+                "updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(guild_id) DO NOTHING",
+                (guild_id, digest_time, timezone, tier, now_iso, now_iso),
+            )
+            conn.execute(
+                "UPDATE guilds SET digest_time = ?, timezone = ?, set_up = 1, updated_at = ? "
+                "WHERE guild_id = ?",
+                (digest_time, timezone, now_iso, guild_id),
+            )
+            marks = ", ".join("?" for _ in keys)
+            conn.execute(
+                f"DELETE FROM guild_games WHERE guild_id = ? AND game_key NOT IN ({marks})",  # noqa: S608
+                (guild_id, *keys),
+            )
+            for key, channel_id in games:
+                cur = conn.execute(
+                    "UPDATE guild_games SET channel_id = ? WHERE guild_id = ? AND game_key = ?",
+                    (channel_id, guild_id, key),
+                )
+                if not cur.rowcount:
+                    conn.execute(
+                        "INSERT INTO guild_games (guild_id, game_key, channel_id) VALUES (?, ?, ?)",
+                        (guild_id, key, channel_id),
+                    )
+    except sqlite3.IntegrityError as exc:
+        if "at most 10 games" in str(exc):
+            raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.") from exc
+        raise
+
+
 def follow_game(conn: sqlite3.Connection, guild_id: int, game_key: str, channel_id: int) -> bool:
     """Follow `game_key` in `channel_id`. True if newly followed, False if it just moved channels.
 

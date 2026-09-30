@@ -111,6 +111,7 @@ def test_the_group_shape(admin, v3_cfg):
     assert group.default_permissions.manage_guild is True
     assert group.allowed_installs.guild is True and group.allowed_installs.user is False
     assert {c.name for c in group.commands} == {
+        "setup",
         "follow",
         "unfollow",
         "games",

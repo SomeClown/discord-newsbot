@@ -212,6 +212,9 @@ _MUTATIONS = {
         permission_problems="nope",
     ),
     "set_guild_games": lambda c, g: repo.set_guild_games(c, g, [("z1", 9), ("z2", 9)]),
+    "apply_guild_setup": lambda c, g: repo.apply_guild_setup(
+        c, g, digest_time="23:45", timezone="Asia/Tokyo", games=[("z1", 9), ("bl4", 8)]
+    ),
     "follow_game": lambda c, g: (
         repo.follow_game(c, g, "bl4", 99),
         repo.follow_game(c, g, "new", 99),
