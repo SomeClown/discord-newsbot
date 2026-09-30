@@ -219,6 +219,24 @@ _PING_EVERYONE = discord.AllowedMentions(
 )
 
 
+def mentions_for(ping: str | None) -> discord.AllowedMentions:
+    """The one place a server's ping choice becomes an `AllowedMentions`.
+
+    `"everyone"` hands back `_PING_EVERYONE` itself (never a second
+    `everyone=True`; the tripwire test holds that line), a string of digits is
+    a role id and pings only that role, and anything else (`"none"`, `None`,
+    garbage) pings nobody. Failing closed on garbage is deliberate: a bad
+    value in the database should cost a notification, not wake a server up.
+    """
+    if ping == "everyone":
+        return _PING_EVERYONE
+    if ping and ping.isdigit() and int(ping) > 0:
+        return discord.AllowedMentions(
+            everyone=False, users=False, roles=[discord.Object(id=int(ping))], replied_user=False
+        )
+    return discord.AllowedMentions.none()
+
+
 def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None) -> None:
     """Classify a send/fetch failure for `DiscordCodeAlertPoster`.
 
@@ -404,6 +422,14 @@ _MISSING_MENTION_PERMISSION_ALERT = (
     "want the next one to actually notify anyone."
 )
 
+_MISSING_ROLE_PERMISSION_ALERT = (
+    "newsbot: a SHiFT code alert wanted to ping your chosen role, but that role "
+    "isn't mentionable and this bot's role is missing 'Mention @everyone, @here, "
+    "and All Roles' in the SHiFT codes channel: Discord posts the message but "
+    "silently drops the ping. Posted anyway; make the role mentionable (or grant "
+    "the permission) if you want the next one to actually notify anyone."
+)
+
 
 class DiscordCodeAlertPoster:
     """The `CodeAlertPoster` (`shift/sweep.py`) the real bot uses: one message per alert.
@@ -427,9 +453,21 @@ class DiscordCodeAlertPoster:
     would otherwise notice.
     """
 
-    def __init__(self, client: NewsBot, channel_id: int) -> None:
+    def __init__(
+        self,
+        client: NewsBot,
+        channel_id: int,
+        ping_choice: str = "everyone",
+        notify: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self._client = client
         self._channel_id = channel_id
+        # v3: one poster per server, so the ping is that server's choice
+        # ("everyone", a role id, or "none") and a missing-permission note goes
+        # to that server's admin channel via `notify`, never to the owner. The
+        # defaults are exactly v2's: @everyone, told to the admin channel.
+        self._ping_choice = ping_choice
+        self._notify = notify if notify is not None else client.alert
         # Dedupes the missing-permission admin alert within one sweep
         # (design.md §12 step 8): `begin_batch()` resets this at the start
         # of every `shift/sweep.py._apply_plan` call, so a batch that
@@ -470,20 +508,20 @@ class DiscordCodeAlertPoster:
 
         mentions = discord.AllowedMentions.none()
         if alert.ping:
-            if self._can_mention_everyone(channel):
-                mentions = _PING_EVERYONE
-            else:
-                # Still posts with _PING_EVERYONE's intent: Discord just
-                # drops the actual notification on its end when the role
-                # lacks the permission, same as the plan's owner checklist
-                # describes. Using .none() here instead would be strictly
-                # worse: it changes nothing about who gets notified (still
-                # nobody) but throws away the chance the permission gets
-                # granted *before* the next code shows up.
-                mentions = _PING_EVERYONE
-                if not self._missing_permission_alerted:
-                    self._missing_permission_alerted = True
-                    await self._client.alert(_MISSING_MENTION_PERMISSION_ALERT)
+            # Posts with the ping's intent either way: Discord just drops the
+            # actual notification on its end when the bot's role lacks the
+            # permission, same as the plan's owner checklist describes. Using
+            # .none() instead would be strictly worse: it changes nothing about
+            # who gets notified (still nobody) but throws away the chance the
+            # permission gets granted *before* the next code shows up.
+            mentions = mentions_for(self._ping_choice)
+            if not self._can_ping(channel) and not self._missing_permission_alerted:
+                self._missing_permission_alerted = True
+                await self._notify(
+                    _MISSING_MENTION_PERMISSION_ALERT
+                    if self._ping_choice == "everyone"
+                    else _MISSING_ROLE_PERMISSION_ALERT
+                )
 
         try:
             message = await channel.send(
@@ -492,6 +530,19 @@ class DiscordCodeAlertPoster:
         except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
             _classify_send_error(exc)
         return message.id
+
+    def _can_ping(self, channel: object) -> bool:
+        """Whether this poster's ping choice can actually notify anyone in `channel`."""
+        if self._ping_choice == "everyone":
+            return self._can_mention_everyone(channel)
+        if self._can_mention_everyone(channel):
+            return True  # that permission covers every role, mentionable or not
+        guild = getattr(channel, "guild", None)
+        get_role = getattr(guild, "get_role", None)
+        if get_role is None or not self._ping_choice.isdigit():
+            return False
+        role = get_role(int(self._ping_choice))
+        return bool(role is not None and getattr(role, "mentionable", False))
 
     @staticmethod
     def _can_mention_everyone(channel: object) -> bool:

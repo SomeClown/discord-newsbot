@@ -170,13 +170,21 @@ def _strip_ping(alert: RenderedAlert) -> RenderedAlert:
     doesn't have; only the already-rendered `RenderedAlert` does).
     """
     content = alert.content
-    if content.startswith(_PING_PREFIX):
-        content = content[len(_PING_PREFIX) :]
-    return dataclasses.replace(alert, content=content, ping=False)
+    prefix = alert.ping_prefix or _PING_PREFIX
+    if content.startswith(prefix):
+        content = content[len(prefix) :]
+    return dataclasses.replace(alert, content=content, ping=False, ping_prefix="")
 
 
 async def _post_with_retry(
     deps: SweepDeps, alert: RenderedAlert
+) -> tuple[int | None, Exception | None]:
+    """The v2 entry point: `post_alert_with_retry` against `deps`' one poster."""
+    return await post_alert_with_retry(deps.poster, deps.sleep, alert)
+
+
+async def post_alert_with_retry(
+    poster: CodeAlertPoster, sleep: Callable[[float], Awaitable[None]], alert: RenderedAlert
 ) -> tuple[int | None, Exception | None]:
     """Post one message, retrying only on `PublishError`, up to `_POST_BACKOFF_S`'s length.
 
@@ -204,14 +212,14 @@ async def _post_with_retry(
     last_error: Exception | None = None
     for attempt in range(len(_POST_BACKOFF_S) + 1):
         try:
-            message_id = await deps.poster.post(current)
+            message_id = await poster.post(current)
             return message_id, None
         except PublishError as exc:
             last_error = exc
             if current.ping:
                 current = _strip_ping(current)
             if attempt < len(_POST_BACKOFF_S):
-                await deps.sleep(_POST_BACKOFF_S[attempt])
+                await sleep(_POST_BACKOFF_S[attempt])
         except Exception as exc:  # non-PublishError: final immediately, no retry
             return None, exc
     return None, last_error
@@ -575,6 +583,7 @@ __all__ = [
     "CodeCheckOutcome",
     "PrintCodeAlertPoster",
     "SweepDeps",
+    "post_alert_with_retry",
     "process_items",
     "run_code_sweep",
     "run_test_alert",

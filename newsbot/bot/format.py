@@ -632,6 +632,11 @@ class RenderedAlert:
     # retry of *this* message reuse the *same* nonce instead of minting a
     # fresh one that Discord has never seen before.
     nonce: str = ""
+    # The exact text a ping put in front of the header ("@everyone " or
+    # "<@&123> "), empty when nothing pinged. `shift/sweep.py`'s retry strips
+    # precisely this, so a role ping comes off as cleanly as @everyone does
+    # (a retry must never risk a second live ping of either kind).
+    ping_prefix: str = ""
 
 
 def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
@@ -682,7 +687,11 @@ def _alert_block(
 
 
 def render_code_alerts(
-    candidates: list[CodeCandidate], *, ping: bool, test: bool = False
+    candidates: list[CodeCandidate],
+    *,
+    ping: bool,
+    ping_mention: str | None = None,
+    test: bool = False,
 ) -> list[RenderedAlert]:
     """Render a batch of new SHiFT codes into one or more alert messages.
 
@@ -693,14 +702,19 @@ def render_code_alerts(
     golden/non-golden batches (A3) keep the plain "New SHiFT code(s)"
     title but prefix each golden entry with "Golden Key:" so it doesn't
     read as an ordinary code.
+
+    `ping_mention` is the text a ping starts with: `"@everyone"` (the
+    default, which is all v2 ever used) or a role mention like `"<@&123>"`
+    for a server that picked a role. It only matters when `ping` is true.
     """
     if not candidates:
         return []
 
+    ping_prefix = f"{ping_mention or '@everyone'} " if ping else ""
     mixed = any(c.golden for c in candidates) and not all(c.golden for c in candidates)
     title = _alert_title(candidates, plural=len(candidates) > 1)
     test_prefix = "[TEST] " if test else ""
-    first_header = ("@everyone " if ping else "") + f"**{test_prefix}{title}**"
+    first_header = ping_prefix + f"**{test_prefix}{title}**"
 
     # The most room any one entry can ever count on: alone in its own
     # message, under whichever header is longer (always the first
@@ -755,7 +769,13 @@ def render_code_alerts(
         batch_codes = [code for code, _ in batch]
         nonce = hashlib.sha256(f"{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
         rendered.append(
-            RenderedAlert(content=content, codes=batch_codes, ping=ping and i == 0, nonce=nonce)
+            RenderedAlert(
+                content=content,
+                codes=batch_codes,
+                ping=ping and i == 0,
+                nonce=nonce,
+                ping_prefix=ping_prefix if i == 0 else "",
+            )
         )
     return rendered
 

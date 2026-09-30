@@ -107,6 +107,11 @@ def world(conn):
             "from_roundup) VALUES ('AAAAA-AAAAA-AAAAA-AAAAA-AAAA1', 'n', 'Feed', 'https://e/c', "
             "'posted', 0)"
         )
+        conn.execute(  # released but claimed by no guild yet, for claim_guild_codes to take
+            "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, status, "
+            "from_roundup) VALUES ('AAAAA-AAAAA-AAAAA-AAAAA-AAAA2', 'n', 'Feed', 'https://e/d', "
+            "'posted', 0)"
+        )
         conn.execute(
             "INSERT INTO game_summaries (game_key, run_date, status, window_start, window_end, "
             "created_at) VALUES ('bl4', '2026-09-30', 'ok', 'a', 'b', 'c')"
@@ -216,6 +221,15 @@ _MUTATIONS = {
     "add_notice": lambda c, g: [repo.add_notice(c, g, f"n{i}") for i in range(25)],
     "adopt_orphan_digests": lambda c, g: repo.adopt_orphan_digests(c, g),
     "delete_guild": lambda c, g: repo.delete_guild(c, g),
+    "claim_guild_codes": lambda c, g: repo.claim_guild_codes(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"], pinged=True, local_day="2026-09-30", max_pings=3
+    ),
+    "mark_guild_codes_posted": lambda c, g: repo.mark_guild_codes_posted(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"], message_id=7
+    ),
+    "mark_guild_codes_failed": lambda c, g: repo.mark_guild_codes_failed(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
+    ),
 }
 
 _READS = {
@@ -239,6 +253,7 @@ _OTHER_COVERAGE = {
     "adopt_orphan_digests_in_tx",
     "backfill_guild_code_posts",
     "backfill_lounge_quotes_guild",
+    "guild_posted_codes",  # see the test just below
 }
 
 
@@ -264,6 +279,14 @@ def test_a_guild_mutation_never_changes_the_other_guilds_rows(world, name, mine,
 @pytest.mark.parametrize("gid", [G1, G2])
 def test_a_guild_read_only_ever_returns_that_guilds_rows(world, name, gid):
     assert set(_READS[name](world, gid)) == {gid}
+
+
+def test_guild_posted_codes_only_reports_that_guilds_posts(world):
+    code = "AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"
+    with world:
+        world.execute("DELETE FROM guild_code_posts WHERE guild_id = ?", (G2,))
+    assert repo.guild_posted_codes(world, G1, [code]) == {code}
+    assert repo.guild_posted_codes(world, G2, [code]) == set()
 
 
 def test_the_sweep_knows_about_every_repo_function_that_takes_a_guild_id():

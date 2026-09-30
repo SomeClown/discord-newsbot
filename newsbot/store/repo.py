@@ -1512,6 +1512,187 @@ def backfill_lounge_quotes_guild(conn: sqlite3.Connection, guild_id: int) -> int
     return cur.rowcount
 
 
+# --- SHiFT per guild (design.md §12 and §15) ---
+#
+# Detection is global (`alerted_codes` above: one row per code, ever); what a
+# server has been told lives in `guild_code_posts`. The two are joined by the
+# fan-out in `shift/fanout.py`, which is the only caller of everything here.
+
+
+def record_released_codes(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, str, str, bool]],
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> list[str]:
+    """Record globally-new codes as released: `(code, source_name, item_url, from_roundup)`.
+
+    `status='posted'` here means "released to post"; whether any given server
+    actually got it is `guild_code_posts`' business. Writing the row keeps v2.2's
+    once-per-code check and `/shift codes` honest. Returns the codes this call
+    really inserted: a code some other writer recorded first is left alone and
+    left out, so it never fans out twice.
+    """
+    now_iso = _resolve_now(now)
+    inserted: list[str] = []
+    with conn:
+        for code, source_name, item_url, from_roundup in rows:
+            cur = conn.execute(
+                "INSERT INTO alerted_codes "
+                "(code, first_seen_at, source_name, item_url, pinged, from_roundup, status) "
+                "VALUES (?, ?, ?, ?, 0, ?, 'posted') ON CONFLICT(code) DO NOTHING",
+                (code, now_iso, source_name, item_url, int(from_roundup)),
+            )
+            if cur.rowcount == 1:
+                inserted.append(code)
+    return inserted
+
+
+def eligible_shift_guilds(
+    conn: sqlite3.Connection, games: list[str], now: datetime
+) -> list[tuple[GuildSettings, ShiftSettings]]:
+    """Servers that should hear about a code released at `now`, in guild id order.
+
+    Set up, alerts on with a channel, `enabled_at` not in the future, and (when
+    `games` is non-empty) following at least one of them. Empty `games` means
+    every game, same as `shift.games` always has.
+    """
+    rows = conn.execute(
+        "SELECT g.guild_id FROM guilds g JOIN guild_shift s ON s.guild_id = g.guild_id "
+        "WHERE g.set_up = 1 AND s.enabled = 1 AND s.channel_id IS NOT NULL "
+        "ORDER BY g.guild_id"
+    ).fetchall()
+    eligible: list[tuple[GuildSettings, ShiftSettings]] = []
+    for row in rows:
+        guild = get_guild(conn, row["guild_id"])
+        shift = get_shift(conn, row["guild_id"])
+        if guild is None or shift is None or shift.channel_id is None:
+            continue
+        if shift.enabled_at is None or shift.enabled_at > now:
+            continue
+        if games:
+            followed = {g.game_key for g in list_guild_games(conn, guild.guild_id)}
+            if not followed & set(games):
+                continue
+        eligible.append((guild, shift))
+    return eligible
+
+
+def guild_posted_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> set[str]:
+    """The subset of `codes` this guild already has a `guild_code_posts` row for, any status."""
+    found: set[str] = set()
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # Literal "?"s sized to the chunk; the values are bound below.
+        query = (
+            "SELECT code FROM guild_code_posts "  # noqa: S608
+            f"WHERE guild_id = ? AND code IN ({placeholders})"
+        )
+        found.update(row["code"] for row in conn.execute(query, [guild_id, *chunk]))
+    return found
+
+
+def claim_guild_codes(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    codes: list[str],
+    *,
+    pinged: bool,
+    local_day: str,
+    now: Callable[[], datetime] | None = None,
+    max_pings: int | None = None,
+    from_roundup: bool = False,
+) -> bool:
+    """`claim_codes`, for one server: claim `codes` as `pending` and spend its ping budget.
+
+    Same record-then-post shape and the same `BEGIN IMMEDIATE` reasoning as
+    `claim_codes`, but the budget is the server's own (`guild_shift.ping_day` and
+    `ping_count`), and `local_day` is that server's local date. A plain INSERT, so
+    a code the server already has aborts the whole claim. Returns whether the
+    ping was really spent (the cap is re-checked under the write lock).
+    """
+    if not codes:
+        return False
+    now_iso = _resolve_now(now)
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT ping_day, ping_count FROM guild_shift WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"guild {guild_id} has no SHiFT settings to claim against")
+        count = row["ping_count"] if row["ping_day"] == local_day else 0
+        actual_pinged = pinged
+        if max_pings is not None and pinged and count >= max_pings:
+            actual_pinged = False
+        if actual_pinged:
+            count += 1
+        conn.execute(
+            "UPDATE guild_shift SET ping_day = ?, ping_count = ? WHERE guild_id = ?",
+            (local_day, count, guild_id),
+        )
+        for code in codes:
+            conn.execute(
+                "INSERT INTO guild_code_posts "
+                "(guild_id, code, status, pinged, from_roundup, claimed_at) "
+                "VALUES (?, ?, 'pending', ?, ?, ?)",
+                (guild_id, code, int(actual_pinged), int(from_roundup), now_iso),
+            )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return actual_pinged
+
+
+def mark_guild_codes_posted(
+    conn: sqlite3.Connection, guild_id: int, codes: list[str], *, message_id: int | None
+) -> None:
+    """Flip this guild's `pending` `codes` to `posted`, all sharing one message id."""
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE guild_code_posts SET status = 'posted', message_id = ? "
+                "WHERE guild_id = ? AND code = ?",
+                (message_id, guild_id, code),
+            )
+
+
+def mark_guild_codes_failed(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
+    """Flip this guild's `codes` to `failed` after a send that never landed."""
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE guild_code_posts SET status = 'failed' WHERE guild_id = ? AND code = ?",
+                (guild_id, code),
+            )
+
+
+def fail_pending_guild_codes(conn: sqlite3.Connection) -> dict[int, list[str]]:
+    """Flip every `pending` guild code to `failed`; return the codes per guild.
+
+    The startup crash-recovery step, per server: a `pending` row means a process
+    claimed a code (and a ping) for that server and died before the send was
+    confirmed. The caller tells each affected server, and the owner only a count.
+    """
+    with conn:
+        rows = conn.execute(
+            "SELECT guild_id, code FROM guild_code_posts WHERE status = 'pending' "
+            "ORDER BY guild_id, claimed_at, code"
+        ).fetchall()
+        by_guild: dict[int, list[str]] = {}
+        for row in rows:
+            by_guild.setdefault(row["guild_id"], []).append(row["code"])
+        if rows:
+            conn.execute("UPDATE guild_code_posts SET status = 'failed' WHERE status = 'pending'")
+    return by_guild
+
+
 # --- Free servers' /news: item headlines (design.md §15, owner decision D2) ---
 #
 # Stories only exist for games a comped server follows, so a free server
