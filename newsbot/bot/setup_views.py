@@ -8,6 +8,11 @@ database error all leave the server exactly as it was, which is the whole point 
 keeping a draft: a half-finished wizard should be as harmless as a half-finished
 grocery list.
 
+Save also notices when it's out of date. The wizard fingerprints the server's settings
+when it opens; if the time, zone or followed games have moved by the time Save lands
+(another admin, a `/newsbot follow`), it writes nothing and says so, rather than
+cheerfully undoing someone else's afternoon.
+
 Running it again starts from the server's current settings instead of a blank
 form, so the wizard doubles as the "edit everything" screen. Games that already
 post somewhere keep posting there unless the channel select is touched, in which
@@ -26,7 +31,7 @@ import asyncio
 import logging
 import sqlite3
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from contextlib import closing
 from datetime import UTC, datetime
 
@@ -94,6 +99,21 @@ MSG_TIMED_OUT = (
 MSG_SAVE_FAILED = (
     "I couldn't save that, and nothing was changed. Press Save to try again, or Cancel."
 )
+MSG_TIMED_OUT_SAVE_LOST = (
+    "Setup timed out and that last save didn't go through, so nothing was saved. "
+    "Run /newsbot setup again."
+)
+MSG_BOT_GONE = "I'm not in this server anymore, so nothing was saved."
+MSG_STALE = (
+    "Someone changed this server's settings while setup was open, so I didn't save. "
+    "Run /newsbot setup again to start from the current settings."
+)
+MSG_TOO_MANY_GAMES = (
+    "That's more games than a server can follow, so nothing was saved. Run /newsbot setup again."
+)
+MSG_REFUSED = (
+    "The server wouldn't accept those picks, so nothing was saved. Run /newsbot setup again."
+)
 MSG_BROKEN = "Something went wrong and nothing was saved. Run /newsbot setup to start over."
 
 _FOLLOW_HINT = "Use /newsbot follow to give a game its own channel."
@@ -103,8 +123,16 @@ def _none_mentions() -> discord.AllowedMentions:
     return discord.AllowedMentions.none()
 
 
-def most_used_channel(followed: Sequence[GuildGame]) -> int | None:
-    """The channel most followed games post to (the first one added wins a tie), or None."""
+def most_used_channel(
+    followed: Sequence[GuildGame], known: Collection[str] | None = None
+) -> int | None:
+    """The channel most followed games post to (the first one added wins a tie), or None.
+
+    With `known` (the catalog's keys), games that have left the catalog don't get a vote:
+    the wizard drops them on Save, so their channel shouldn't pick the default.
+    """
+    if known is not None:
+        followed = [g for g in followed if g.game_key in known]
     if not followed:
         return None
     counts = Counter(g.channel_id for g in followed)
@@ -120,10 +148,17 @@ def _save_setup_sync(
     digest_time: str,
     timezone: str,
     games: list[tuple[str, int]],
+    expected_fingerprint: str,
 ) -> None:
     with closing(connect(db_path)) as conn:
         repo.apply_guild_setup(
-            conn, guild_id, digest_time=digest_time, timezone=timezone, games=games, tier=tier
+            conn,
+            guild_id,
+            digest_time=digest_time,
+            timezone=timezone,
+            games=games,
+            tier=tier,
+            expected_fingerprint=expected_fingerprint,
         )
 
 
@@ -170,11 +205,14 @@ class SetupView(discord.ui.View):
             g.game_key: g.channel_id for g in followed if g.game_key in self.names
         }
         self.game_keys = [g.game_key for g in followed if g.game_key in self.names]
-        self.channel_id: int | None = most_used_channel(followed)
+        self.channel_id: int | None = most_used_channel(followed, self.names)
+        # What the server looked like when we opened; Save refuses if that has moved.
+        self.fingerprint = repo.setup_fingerprint(guild, followed)
         self.channel_touched = False
 
         self.note = ""
         self.finished = False
+        self.timed_out = False
         self._busy = False
 
         self.zone_select = self._build_zone_select()
@@ -338,7 +376,12 @@ class SetupView(discord.ui.View):
         return True
 
     async def on_timeout(self) -> None:
-        if self.finished or self._busy:
+        if self._busy:
+            # discord.py has already stopped the view, so a failed save can't offer a
+            # retry; on_save reads this flag and says so instead.
+            self.timed_out = True
+            return
+        if self.finished:
             return
         self.finished = True
         try:
@@ -465,6 +508,10 @@ class SetupView(discord.ui.View):
         # The permission check below can take a moment; acknowledge now, edit after.
         await interaction.response.defer()
         games = self.final_games()
+        if self.bot.get_guild(self.guild_id) is None:
+            # Removed since the wizard opened. The write would happily re-create the row.
+            await self._end(interaction, MSG_BOT_GONE)
+            return
         try:
             await asyncio.to_thread(
                 _save_setup_sync,
@@ -474,10 +521,26 @@ class SetupView(discord.ui.View):
                 digest_time=self.digest_time,
                 timezone=self.zone,
                 games=games,
+                expected_fingerprint=self.fingerprint,
             )
-        except sqlite3.Error, StoreError, ValueError:
+        except repo.StaleSetupError:
+            await self._end(interaction, MSG_STALE)
+            return
+        except repo.GameLimitError:
+            logger.exception("setup save hit the game limit", extra={"guild_id": self.guild_id})
+            await self._end(interaction, MSG_TOO_MANY_GAMES)
+            return
+        except ValueError, sqlite3.IntegrityError:
+            # Repeating the same picks can't work, so don't offer to.
+            logger.exception("setup save was refused", extra={"guild_id": self.guild_id})
+            await self._end(interaction, MSG_REFUSED)
+            return
+        except sqlite3.Error, StoreError:
             # The write is one transaction, so a failure means nothing changed.
             logger.exception("setup save failed", extra={"guild_id": self.guild_id})
+            if self.timed_out:
+                await self._end(interaction, MSG_TIMED_OUT_SAVE_LOST)
+                return
             self._busy = False
             self.note = MSG_SAVE_FAILED
             await interaction.edit_original_response(
@@ -494,6 +557,18 @@ class SetupView(discord.ui.View):
             )
         except discord.HTTPException:
             logger.warning("setup saved but the summary couldn't be shown", exc_info=True)
+
+    async def _end(self, interaction: discord.Interaction, message: str) -> None:
+        """Finish the wizard with `message`: nothing was saved and nothing more can be."""
+        self.finished = True
+        self._busy = False
+        self.stop()
+        try:
+            await interaction.edit_original_response(
+                content=message, view=None, allowed_mentions=_none_mentions()
+            )
+        except discord.HTTPException:
+            logger.warning("setup ended but the message couldn't be shown", exc_info=True)
 
     async def _summary(self, games: list[tuple[str, int]]) -> str:
         """What got saved, what the bot still can't do, and where to go next."""

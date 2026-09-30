@@ -11,12 +11,14 @@ loads the forged values into the select, calls `interaction_check`, then the cal
 That way a test that says "a stranger pressed Cancel" really exercised the guard the
 gateway would have.
 
-Two findings are pinned as strict xfails, each with its reason: a Save that lands after
-the bot left the server re-creates the server's row, and a timeout that fires during a
-failing Save leaves a retry message on a view that has already stopped listening. Other
+Two findings were first pinned as strict xfails and have since been fixed: a Save that
+lands after the bot left the server used to re-create the server's row, and a timeout
+that fires during a failing Save used to leave a retry message on a view that had
+already stopped listening. A third, a stale draft overwriting concurrent `/newsbot
+follow` and `settings` edits, became a behavior change: Save now refuses instead. Other
 behaviors are pinned as they are, with a comment where the owner might want them
-different (a stale draft overwrites concurrent `/newsbot follow` and `settings` edits,
-mostly). Nothing here touches the network; the slow ones sleep for a tenth of a second.
+different. Nothing here touches the network; the slow ones sleep for a tenth of a
+second.
 """
 
 from __future__ import annotations
@@ -49,9 +51,14 @@ from newsbot.bot.permissions import ChannelProblem, GuildCheck
 from newsbot.bot.setup_views import (
     CURATED_ZONES,
     HOUR_TIMES,
+    MSG_BOT_GONE,
     MSG_BROKEN,
     MSG_FINISHED,
     MSG_NOT_YOURS,
+    MSG_REFUSED,
+    MSG_STALE,
+    MSG_TIMED_OUT_SAVE_LOST,
+    MSG_TOO_MANY_GAMES,
     OTHER_ZONE,
     SetupView,
     most_used_channel,
@@ -139,7 +146,7 @@ def make_view(cfg, db_path, *, guild_id=GUILD_A, owner_id=1, tier="free", bot=No
     origin = FakeInteraction(guild_id=guild_id, user_id=owner_id)
     view = SetupView(
         cfg=cfg,
-        bot=bot if bot is not None else SimpleNamespace(),
+        bot=bot if bot is not None else SimpleNamespace(get_guild=lambda guild_id: object()),
         db_path=db_path,
         owner_id=owner_id,
         guild_id=guild_id,
@@ -236,7 +243,9 @@ async def test_two_admins_saving_at_once_leave_exactly_one_of_the_two_drafts(
     assert got in (first, second)
 
 
-async def test_the_later_save_replaces_the_earlier_one_whole(v3_cfg, v3_db, perm_lines):
+async def test_the_later_save_is_refused_and_the_earlier_one_stands(v3_cfg, v3_db, perm_lines):
+    # Changed from "the later save replaces the earlier one whole": the second wizard's
+    # snapshot is stale once the first has saved, so it now refuses instead of clobbering.
     one = make_view(v3_cfg, v3_db, owner_id=1)
     two = make_view(v3_cfg, v3_db, owner_id=2)
     await one.on_zone(click(), ["Asia/Tokyo"])
@@ -244,17 +253,18 @@ async def test_the_later_save_replaces_the_earlier_one_whole(v3_cfg, v3_db, perm
     await two.on_zone(click(user_id=2), ["Europe/Paris"])
     await pick(two, games=["borderlands4"], ch=CH2)
     await dispatch(one, one.save_button, click(user_id=1))
-    await dispatch(two, two.save_button, click(user_id=2))
+    late = await dispatch(two, two.save_button, click(user_id=2))
     guild, games = state(v3_db)
-    assert guild.timezone == "Europe/Paris"
-    assert [(g.game_key, g.channel_id) for g in games] == [("borderlands4", CH2)]
+    assert guild.timezone == "Asia/Tokyo"
+    assert [(g.game_key, g.channel_id) for g in games] == [("palworld", CH1), ("rust", CH1)]
+    assert summary_of(late) == MSG_STALE
 
 
 async def test_the_first_admins_view_does_not_notice_the_second_admin_saving(
     v3_cfg, v3_db, perm_lines
 ):
-    # Nothing tells the first wizard its draft went stale; it stays open and its Save
-    # still works, which is the last-write-wins the plan wants. Pinned, not endorsed.
+    # Nothing tells the first wizard its draft went stale; it stays open until its Save,
+    # which is where the stale check refuses (see the test above).
     one = make_view(v3_cfg, v3_db, owner_id=1)
     two = make_view(v3_cfg, v3_db, owner_id=2)
     await pick(two, games=["rust"], ch=CH2)
@@ -264,53 +274,58 @@ async def test_the_first_admins_view_does_not_notice_the_second_admin_saving(
 
 
 # Everything below: the wizard opened, somebody else changed the server with the ordinary
-# commands, and then Save landed. Save writes the draft it was seeded with.
+# commands, and then Save landed. Changed from "Save writes the draft it was seeded with,
+# undoing the other change": Save now compares against what it saw when it opened and, if
+# anything moved, writes nothing and ends with MSG_STALE.
 
 
-async def test_a_stale_save_moves_a_game_back_over_a_concurrent_follow(v3_cfg, v3_db, perm_lines):
+async def test_a_stale_save_refuses_to_move_a_game_back_over_a_concurrent_follow(
+    v3_cfg, v3_db, perm_lines
+):
     make_guild(v3_db, games=[("palworld", CH1)])
     view = make_view(v3_cfg, v3_db)
     with closing(connect(v3_db)) as conn:
         repo.follow_game(conn, GUILD_A, "palworld", CH3)  # another admin: /newsbot follow
-    await dispatch(view, view.save_button, click())
-    # Owner note: the channel select was never touched, so Save re-asserts the channel the
-    # wizard saw when it opened and quietly undoes the other admin's move.
-    assert [(g.game_key, g.channel_id) for g in state(v3_db)[1]] == [("palworld", CH1)]
+    save = await dispatch(view, view.save_button, click())
+    assert [(g.game_key, g.channel_id) for g in state(v3_db)[1]] == [("palworld", CH3)]
+    assert summary_of(save) == MSG_STALE and view.finished is True
 
 
-async def test_a_stale_save_drops_a_game_followed_while_the_wizard_was_open(
+async def test_a_stale_save_refuses_to_drop_a_game_followed_while_the_wizard_was_open(
     v3_cfg, v3_db, perm_lines
 ):
     make_guild(v3_db, games=[("palworld", CH1)])
     view = make_view(v3_cfg, v3_db)
     with closing(connect(v3_db)) as conn:
         repo.follow_game(conn, GUILD_A, "rust", CH2)
-    await dispatch(view, view.save_button, click())
-    assert [g.game_key for g in state(v3_db)[1]] == ["palworld"]
+    save = await dispatch(view, view.save_button, click())
+    assert [g.game_key for g in state(v3_db)[1]] == ["palworld", "rust"]
+    assert summary_of(save) == MSG_STALE
 
 
-async def test_a_stale_save_refollows_a_game_unfollowed_while_the_wizard_was_open(
+async def test_a_stale_save_refuses_to_refollow_a_game_unfollowed_while_the_wizard_was_open(
     v3_cfg, v3_db, perm_lines
 ):
     make_guild(v3_db, games=[("palworld", CH1), ("rust", CH2)])
     view = make_view(v3_cfg, v3_db)
     with closing(connect(v3_db)) as conn:
         repo.unfollow_game(conn, GUILD_A, "rust")
-    await dispatch(view, view.save_button, click())
-    assert [(g.game_key, g.channel_id) for g in state(v3_db)[1]] == [
-        ("palworld", CH1),
-        ("rust", CH2),
-    ]
+    save = await dispatch(view, view.save_button, click())
+    assert [(g.game_key, g.channel_id) for g in state(v3_db)[1]] == [("palworld", CH1)]
+    assert summary_of(save) == MSG_STALE
 
 
-async def test_a_stale_save_overwrites_a_concurrent_settings_change(v3_cfg, v3_db, perm_lines):
+async def test_a_stale_save_refuses_to_overwrite_a_concurrent_settings_change(
+    v3_cfg, v3_db, perm_lines
+):
     make_guild(v3_db, digest_time="06:00", timezone="Europe/Paris", games=[("palworld", CH1)])
     view = make_view(v3_cfg, v3_db)
     with closing(connect(v3_db)) as conn:
         repo.update_guild_settings(conn, GUILD_A, digest_time="18:00", timezone="Asia/Tokyo")
-    await dispatch(view, view.save_button, click())
+    save = await dispatch(view, view.save_button, click())
     guild, _ = state(v3_db)
-    assert (guild.digest_time, guild.timezone) == ("06:00", "Europe/Paris")
+    assert (guild.digest_time, guild.timezone) == ("18:00", "Asia/Tokyo")
+    assert summary_of(save) == MSG_STALE
 
 
 async def test_a_stale_save_leaves_the_admin_channel_and_shift_settings_alone(
@@ -334,7 +349,7 @@ async def test_a_stale_save_leaves_the_admin_channel_and_shift_settings_alone(
         assert len(repo.recent_notices(conn, GUILD_A, 5)) == 1
 
 
-async def test_a_save_with_ten_brand_new_games_beats_a_concurrently_full_server(
+async def test_a_save_against_a_concurrently_filled_server_is_refused_not_a_limit_error(
     v3_cfg, v3_db, perm_lines
 ):
     cfg = v3_cfg.model_copy(update={"catalog": catalog_of(v3_cfg, 25)})
@@ -344,9 +359,11 @@ async def test_a_save_with_ten_brand_new_games_beats_a_concurrently_full_server(
         for i in range(10, 19):  # the other admin fills the server to ten
             repo.follow_game(conn, GUILD_A, f"game{i}", CH2)
     await view.on_games(click(), [f"game{i}" for i in range(1, 11)])
-    await dispatch(view, view.save_button, click())
-    # The write deletes before it inserts, so the ten-game trigger never sees eleven.
-    assert sorted(g.game_key for g in state(v3_db)[1]) == sorted(f"game{i}" for i in range(1, 11))
+    save = await dispatch(view, view.save_button, click())
+    # Changed: this used to succeed (the write deletes before it inserts, so the ten-game
+    # trigger never sees eleven). Now the concurrent follows make the draft stale first.
+    assert summary_of(save) == MSG_STALE
+    assert len(state(v3_db)[1]) == 10
 
 
 # --- Save: doubled, raced, failed ---
@@ -416,17 +433,7 @@ async def test_a_timeout_just_before_save_means_save_is_refused_and_nothing_is_w
     assert state(v3_db) == (None, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "on_timeout skips its edit while a save is in flight, but discord.py has already "
-        "stopped the view and dropped it from dispatch. If that save then fails, "
-        "on_save re-shows the wizard with 'Press Save to try again' on a dead view: the "
-        "buttons answer 'interaction failed'. The timeout should win, or the view should "
-        "be re-registered."
-    ),
-)
-async def test_a_failed_save_after_a_mid_save_timeout_leaves_a_retry_that_can_work(
+async def test_a_failed_save_after_a_mid_save_timeout_ends_with_the_timed_out_message(
     v3_cfg, v3_db, perm_lines, monkeypatch
 ):
     slow_write(monkeypatch, fail=True)
@@ -438,8 +445,10 @@ async def test_a_failed_save_after_a_mid_save_timeout_leaves_a_retry_that_can_wo
     view._dispatch_timeout()  # the timer fires mid-save, as it would after ten idle minutes
     await saving
     await asyncio.sleep(0)
-    assert save.original_edits[-1]["view"] is view  # we offered a retry
-    assert not view.is_finished()  # ...so the view had better still be listening
+    # The view stopped listening when the timer fired, so no retry is offered.
+    assert save.original_edits[-1]["content"] == MSG_TIMED_OUT_SAVE_LOST
+    assert save.original_edits[-1]["view"] is None
+    assert view.finished is True and state(v3_db) == (None, [])
 
 
 async def test_a_failed_save_leaves_the_view_usable_for_the_next_click(
@@ -477,7 +486,7 @@ async def test_a_failure_that_is_not_a_database_error_replies_and_keeps_the_draf
     assert state(v3_db)[0].set_up is True
 
 
-async def test_a_game_limit_error_from_the_write_is_reported_as_a_failed_save(
+async def test_a_game_limit_error_from_the_write_ends_the_wizard_with_no_retry(
     v3_cfg, v3_db, perm_lines, monkeypatch
 ):
     def limit(*args, **kwargs):
@@ -487,22 +496,32 @@ async def test_a_game_limit_error_from_the_write_is_reported_as_a_failed_save(
     view = make_view(v3_cfg, v3_db)
     await pick(view)
     save = await dispatch(view, view.save_button, click())
-    assert "nothing was changed" in summary_of(save)
-    assert view.finished is False
+    # Changed from a "Press Save to try again" prompt: the same picks would fail again.
+    assert summary_of(save) == MSG_TOO_MANY_GAMES
+    assert save.original_edits[-1]["view"] is None and view.finished is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("Duplicate game key."), sqlite3.IntegrityError("CHECK constraint failed")],
+)
+async def test_other_deterministic_write_errors_end_the_wizard_with_no_retry(
+    v3_cfg, v3_db, perm_lines, monkeypatch, error
+):
+    def refuse(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(setup_views, "_save_setup_sync", refuse)
+    view = make_view(v3_cfg, v3_db)
+    await pick(view)
+    save = await dispatch(view, view.save_button, click())
+    assert summary_of(save) == MSG_REFUSED
+    assert save.original_edits[-1]["view"] is None and view.finished is True
 
 
 # --- the bot left the server ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "apply_guild_setup inserts the row when it's missing (meant for a missed join), so "
-        "a Save that lands after the bot was removed re-creates the server with set_up = 1 "
-        "and its games. The hourly digest job will then try to post to a server the bot "
-        "isn't in. The view should refuse when bot.get_guild(guild_id) is None."
-    ),
-)
 async def test_saving_after_the_bot_was_removed_does_not_recreate_the_server(
     v3_cfg, v3_db, perm_lines
 ):
@@ -512,8 +531,86 @@ async def test_saving_after_the_bot_was_removed_does_not_recreate_the_server(
     await pick(view, games=["rust"], ch=CH2)
     with closing(connect(v3_db)) as conn:
         repo.delete_guild(conn, GUILD_A)  # on_guild_remove
-    await dispatch(view, view.save_button, click())
+    save = await dispatch(view, view.save_button, click())
     assert state(v3_db) == (None, [])
+    assert summary_of(save) == MSG_BOT_GONE and view.finished is True
+
+
+def _fingerprint(db_path):
+    with closing(connect(db_path)) as conn:
+        return repo.setup_fingerprint(
+            repo.get_guild(conn, GUILD_A), repo.list_guild_games(conn, GUILD_A)
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: repo.follow_game(c, GUILD_A, "palworld", CH3),
+        lambda c: repo.follow_game(c, GUILD_A, "rust", CH3),
+        lambda c: repo.unfollow_game(c, GUILD_A, "palworld"),
+        lambda c: repo.update_guild_settings(c, GUILD_A, digest_time="18:00"),
+        lambda c: repo.update_guild_settings(c, GUILD_A, timezone="Asia/Tokyo"),
+        lambda c: repo.delete_guild(c, GUILD_A),
+    ],
+)
+def test_the_repo_refuses_a_setup_whose_fingerprint_no_longer_matches(v3_db, change):
+    make_guild(v3_db, games=[("palworld", CH1)])
+    expected = _fingerprint(v3_db)
+    with closing(connect(v3_db)) as conn:
+        change(conn)
+    before = every_table(v3_db)
+    with closing(connect(v3_db)) as conn:
+        with pytest.raises(repo.StaleSetupError):
+            repo.apply_guild_setup(conn, GUILD_A, expected_fingerprint=expected, **SETUP_KWARGS)
+        assert conn.in_transaction is False
+    assert every_table(v3_db) == before
+
+
+def test_the_repo_writes_when_the_fingerprint_matches_and_ignores_game_order(v3_db):
+    make_guild(v3_db, games=[("palworld", CH1), ("rust", CH2)])
+    with closing(connect(v3_db)) as conn:
+        expected = repo.setup_fingerprint(
+            repo.get_guild(conn, GUILD_A), list(reversed(repo.list_guild_games(conn, GUILD_A)))
+        )
+        repo.apply_guild_setup(conn, GUILD_A, expected_fingerprint=expected, **SETUP_KWARGS)
+    assert state(v3_db)[0].timezone == "Asia/Tokyo"
+
+
+def test_the_fingerprint_check_holds_the_write_lock_before_it_looks(v3_db):
+    # The race-free claim: once a setup has started its check, nobody else can write until
+    # it commits. A second connection with no busy timeout is turned away at once.
+    make_guild(v3_db, games=[("palworld", CH1)])
+    expected = _fingerprint(v3_db)
+    seen = []
+
+    class Watcher:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self):
+            return self.conn.__enter__()
+
+        def __exit__(self, *exc):
+            return self.conn.__exit__(*exc)
+
+        def execute(self, sql, params=()):
+            if sql.startswith("SELECT") and not seen:
+                rival = sqlite3.connect(v3_db, timeout=0)
+                try:
+                    rival.execute("UPDATE guilds SET digest_time = '22:00'")
+                    seen.append("rival wrote")
+                except sqlite3.OperationalError:
+                    seen.append("rival locked out")
+                finally:
+                    rival.close()
+            return self.conn.execute(sql, params)
+
+    with closing(connect(v3_db)) as conn:
+        watched = Watcher(conn)
+        repo.apply_guild_setup(watched, GUILD_A, expected_fingerprint=expected, **SETUP_KWARGS)  # type: ignore[arg-type]
+    assert seen == ["rival locked out"]
+    assert state(v3_db)[0].digest_time == "05:00"
 
 
 def test_apply_setup_on_a_missing_row_creates_only_that_server(v3_db):
@@ -797,7 +894,11 @@ async def test_the_same_display_name_is_not_the_same_person(v3_cfg, v3_db, write
 
 @pytest.fixture
 def setup_cmd(v3_cfg, v3_db, perm_lines):
-    group = make_guild_admin_group(v3_cfg, SimpleNamespace(db_path=v3_db), digest_deps=lambda: None)
+    group = make_guild_admin_group(
+        v3_cfg,
+        SimpleNamespace(db_path=v3_db, get_guild=lambda guild_id: object()),
+        digest_deps=lambda: None,
+    )
     return command(group, "setup")
 
 
@@ -1172,18 +1273,20 @@ async def test_a_followed_game_missing_from_the_catalog_is_dropped_on_save(
     assert [g.game_key for g in state(v3_db)[1]] == ["palworld"]
 
 
-def test_the_default_channel_counts_games_the_catalog_no_longer_has():
-    # Pinned: the preselected channel is the busiest one across everything the server
-    # follows, retired games included, so two retired games can outvote a live one.
+def test_the_default_channel_ignores_games_the_catalog_no_longer_has():
+    # Changed: retired games used to count, so two of them could outvote a live one. With
+    # the catalog's keys passed in they no longer vote (without them, everything counts).
     followed = [
         GuildGame(1, "retired1", CH1),
         GuildGame(1, "retired2", CH1),
         GuildGame(1, "a", CH2),
     ]
+    assert most_used_channel(followed, {"a"}) == CH2
+    assert most_used_channel(followed, set()) is None
     assert most_used_channel(followed) == CH1
 
 
-async def test_a_retired_games_channel_becomes_the_default_for_a_new_game(
+async def test_a_retired_games_channel_no_longer_becomes_the_default_for_a_new_game(
     v3_cfg, v3_db, perm_lines
 ):
     make_guild(v3_db, games=[("retired1", CH1), ("retired2", CH1), ("palworld", CH2)])
@@ -1192,7 +1295,7 @@ async def test_a_retired_games_channel_becomes_the_default_for_a_new_game(
     await dispatch(view, view.save_button, click())
     assert [(g.game_key, g.channel_id) for g in state(v3_db)[1]] == [
         ("palworld", CH2),
-        ("rust", CH1),
+        ("rust", CH2),  # changed: was CH1, the retired games' channel
     ]
 
 
@@ -1206,13 +1309,22 @@ async def test_only_retired_games_followed_means_save_needs_a_fresh_pick(
     assert writes == []
 
 
-async def test_a_free_row_stays_free_even_when_the_config_now_comps_it(v3_cfg, v3_db, perm_lines):
-    # Pinned: the tier a server joined with is the tier it keeps; setup never upgrades it.
+async def test_a_free_row_becomes_comped_when_the_config_comps_it(v3_cfg, v3_db, perm_lines):
+    # Changed from "setup never upgrades": D6 says comped is set at join and at startup,
+    # and Save now counts too, so an admin can't be stuck on free while listed as comped.
     make_guild(v3_db, tier="free", set_up=False)
     view = make_view(v3_cfg, v3_db, tier="comped")
     await pick(view)
     await dispatch(view, view.save_button, click())
-    assert state(v3_db)[0].tier == "free"
+    assert state(v3_db)[0].tier == "comped"
+
+
+async def test_a_comped_row_is_never_downgraded_by_a_save(v3_cfg, v3_db, perm_lines):
+    make_guild(v3_db, tier="comped", set_up=False)
+    view = make_view(v3_cfg, v3_db, tier="free")
+    await pick(view)
+    await dispatch(view, view.save_button, click())
+    assert state(v3_db)[0].tier == "comped"
 
 
 async def test_save_moves_updated_at_but_not_joined_at(v3_cfg, v3_db, perm_lines):

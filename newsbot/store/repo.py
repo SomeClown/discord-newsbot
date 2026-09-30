@@ -17,10 +17,11 @@ a good one).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -1129,6 +1130,10 @@ class GameLimitError(StoreError):
     """Raised when a guild would end up following more than 10 games."""
 
 
+class StaleSetupError(StoreError):
+    """Raised when a server's settings changed after the setup wizard took its snapshot."""
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
@@ -1311,6 +1316,23 @@ def set_guild_games(conn: sqlite3.Connection, guild_id: int, games: list[tuple[s
         )
 
 
+def setup_fingerprint(guild: GuildSettings | None, games: Sequence[GuildGame]) -> str:
+    """A stable digest of what `/newsbot setup` edits: the time, the zone and the followed games.
+
+    The wizard takes one when it opens and `apply_guild_setup` takes another inside the
+    write's transaction; if they differ, somebody else got there first. Games are sorted,
+    so the order they were added in doesn't matter, but their channels do. A missing row
+    has a fingerprint too (it just never matches a real one). `updated_at` would be
+    shorter, but `follow` and `unfollow` don't touch it, which I found out by reading
+    them rather than by trusting the column name.
+    """
+    snapshot = [
+        None if guild is None else [guild.digest_time, guild.timezone],
+        sorted([g.game_key, g.channel_id] for g in games),
+    ]
+    return hashlib.sha256(json.dumps(snapshot).encode()).hexdigest()
+
+
 def apply_guild_setup(
     conn: sqlite3.Connection,
     guild_id: int,
@@ -1319,17 +1341,25 @@ def apply_guild_setup(
     timezone: str,
     games: list[tuple[str, int]],
     tier: Tier = "free",
+    expected_fingerprint: str | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> None:
     """What `/newsbot setup` saves, in one transaction: the row, the schedule and the games.
 
     Creates the guild's row if a missed join left it without one (an existing row keeps
-    its tier, so a comped server stays comped), sets the time and zone and `set_up = 1`,
+    its tier, so a comped server stays comped; passing `tier="comped"` upgrades a free
+    row, and nothing ever downgrades), sets the time and zone and `set_up = 1`,
     drops every followed game not in `games`, and points the rest at their channels,
     following any that are new. Unlike `set_guild_games` this doesn't wipe and refill, so
     a game that stays keeps its place in the order it was added. Any failure rolls the
     lot back: more than 10 games raises `GameLimitError` and a repeated key raises
     `ValueError`, both before anything is written.
+
+    With `expected_fingerprint` (from `setup_fingerprint`) the write is compare-and-set:
+    the transaction takes the write lock first (`BEGIN IMMEDIATE`), then re-reads the
+    server's settings, and raises `StaleSetupError` without writing if they no longer
+    match. Nobody can change anything between the check and the write, because nobody
+    else can hold the lock in between.
     """
     if len(games) > MAX_GAMES_PER_GUILD:
         raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
@@ -1339,6 +1369,15 @@ def apply_guild_setup(
     now_iso = _resolve_now(now)
     try:
         with conn:
+            # Python would otherwise start the transaction at the first write, after the
+            # fingerprint read. Starting it ourselves takes the lock before we look.
+            conn.execute("BEGIN IMMEDIATE")
+            if expected_fingerprint is not None:
+                current = setup_fingerprint(
+                    get_guild(conn, guild_id), list_guild_games(conn, guild_id)
+                )
+                if current != expected_fingerprint:
+                    raise StaleSetupError("This server's settings changed after setup opened.")
             conn.execute(
                 "INSERT INTO guilds (guild_id, digest_time, timezone, tier, set_up, joined_at, "
                 "updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) ON CONFLICT(guild_id) DO NOTHING",
@@ -1349,6 +1388,8 @@ def apply_guild_setup(
                 "WHERE guild_id = ?",
                 (digest_time, timezone, now_iso, guild_id),
             )
+            if tier == "comped":
+                conn.execute("UPDATE guilds SET tier = 'comped' WHERE guild_id = ?", (guild_id,))
             marks = ", ".join("?" for _ in keys)
             conn.execute(
                 f"DELETE FROM guild_games WHERE guild_id = ? AND game_key NOT IN ({marks})",  # noqa: S608

@@ -65,7 +65,7 @@ def make_view(cfg, db_path, *, guild_id=GUILD_A, owner_id=1, tier="free", **kwar
     origin = FakeInteraction(guild_id=guild_id, user_id=owner_id)
     view = SetupView(
         cfg=cfg,
-        bot=SimpleNamespace(),
+        bot=SimpleNamespace(get_guild=lambda guild_id: object()),
         db_path=db_path,
         owner_id=owner_id,
         guild_id=guild_id,
@@ -679,7 +679,7 @@ async def test_an_unexpected_error_replies_and_writes_nothing(v3_cfg, v3_db):
 
 @pytest.fixture
 def setup_cmd(v3_cfg, v3_db, perm_lines):
-    bot = SimpleNamespace(db_path=v3_db)
+    bot = SimpleNamespace(db_path=v3_db, get_guild=lambda guild_id: object())
     group = make_guild_admin_group(v3_cfg, bot, digest_deps=lambda: None)
     return command(group, "setup")
 
@@ -730,7 +730,11 @@ async def test_setup_refuses_a_dm(setup_cmd):
 async def test_setup_keeps_a_comped_server_comped(v3_cfg, v3_db, perm_lines):
     cfg = v3_cfg.model_copy(update={"comped_guild_ids": [GUILD_A]})
     make_guild(v3_db, tier="comped", set_up=False)
-    group = make_guild_admin_group(cfg, SimpleNamespace(db_path=v3_db), digest_deps=lambda: None)
+    group = make_guild_admin_group(
+        cfg,
+        SimpleNamespace(db_path=v3_db, get_guild=lambda guild_id: object()),
+        digest_deps=lambda: None,
+    )
     i = FakeInteraction()
     await command(group, "setup").callback(i)
     view = i.sent[-1]["view"]
