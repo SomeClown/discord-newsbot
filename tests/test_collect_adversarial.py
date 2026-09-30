@@ -417,21 +417,63 @@ async def test_the_same_story_from_two_sources_in_one_pass_is_stored_once_offici
     assert [tuple(r) for r in rows] == [("https://ex.com/x", "Official", "official")]
 
 
-async def test_pin_a_duplicate_that_loses_the_trust_contest_takes_its_game_tags_with_it(
+async def test_a_duplicate_that_loses_the_trust_contest_still_contributes_its_game_tags(
     cfg, db_path, http, alerts
 ):
-    # Behavior the owner may want changed: a community feed dedicated to
-    # palworld and an official shared feed that only mentions Borderlands 4
-    # both carry one URL. The official copy wins, so the palworld tag from
-    # the losing copy is never stored.
+    # Changed from a pin (the losing copy's palworld tag used to vanish with
+    # it): a community feed dedicated to palworld and an official shared feed
+    # that only mentions Borderlands 4 both carry one URL. The official copy's
+    # content wins, and the stored item carries both tags.
     community = Scripted(
         "Reddit", [item("https://ex.com/x", "Crossover", topics=("palworld",), trust="community")]
     )
     official = Scripted(
-        "Official", [item("https://ex.com/x?ref=feed", "Borderlands 4 crossover", trust="official")]
+        "Official",
+        [
+            item(
+                "https://ex.com/x?ref=feed",
+                "Borderlands 4 crossover",
+                source="Official",
+                trust="official",
+            )
+        ],
     )
     await run_collection(make_deps(cfg, db_path, http, [community, official], alerts))
-    assert tags(db_path) == {"https://ex.com/x": {"borderlands4": False}}
+    assert tags(db_path) == {"https://ex.com/x": {"borderlands4": False, "palworld": False}}
+    with closing(connect(db_path)) as conn:
+        rows = conn.execute("SELECT source_name, trust FROM items").fetchall()
+    assert [tuple(r) for r in rows] == [("Official", "official")]
+
+
+async def test_a_losing_copy_that_matches_a_game_the_winner_does_not_still_stores_the_item(
+    cfg, db_path, http, alerts
+):
+    # The winner (official, shared, no game named) matches nothing on its own;
+    # the dedicated community copy is the only thing that tags it.
+    community = Scripted(
+        "Reddit", [item("https://ex.com/y", "Crossover", topics=("palworld",), trust="community")]
+    )
+    official = Scripted(
+        "Official", [item("https://ex.com/y", "Something", source="Official", trust="official")]
+    )
+    outcome = await run_collection(make_deps(cfg, db_path, http, [community, official], alerts))
+    assert outcome.new_items == 1
+    assert tags(db_path) == {"https://ex.com/y": {"palworld": False}}
+    with closing(connect(db_path)) as conn:
+        assert conn.execute("SELECT source_name FROM items").fetchone()[0] == "Official"
+
+
+async def test_a_confident_losing_copy_upgrades_an_uncertain_winning_tag(
+    cfg, db_path, http, alerts
+):
+    official = Scripted(
+        "Official", [item("https://ex.com/z", "Take-Two earnings", trust="official")]
+    )
+    community = Scripted(
+        "Reddit", [item("https://ex.com/z", "Borderlands 4 thread", trust="community")]
+    )
+    await run_collection(make_deps(cfg, db_path, http, [official, community], alerts))
+    assert tags(db_path)["https://ex.com/z"].get("borderlands4") is False
 
 
 @pytest.mark.parametrize(
@@ -679,12 +721,6 @@ def test_store_items_counts_a_url_repeated_in_one_call_once(db_path):
     assert tags(db_path) == {"https://ex.com/a": {"palworld": False, "rust": False}}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="store_items counts new rows as COUNT(*) after minus COUNT(*) before, and the "
-    "'before' read runs outside the write transaction, so a concurrent writer (web search "
-    "takes no lock) inflates the reported new_items",
-)
 def test_store_items_count_ignores_a_concurrent_writers_rows(db_path):
     mine = StoredItem("https://ex.com/mine", "t", "e", "s", "press", NOW, {"palworld": False})
 
@@ -700,18 +736,20 @@ def test_store_items_count_ignores_a_concurrent_writers_rows(db_path):
                 return conn.__exit__(*exc)
 
             def execute(self, sql, *args):
-                cursor = real_execute(sql, *args)
-                if state["armed"] and sql.startswith("SELECT COUNT(*)"):
+                # The rival writes just before our first insert, which is after
+                # any "how many rows are there now" read the old COUNT-based
+                # code did, and before any read-after it did. (Changed with the
+                # fix: the old trigger keyed on SELECT COUNT(*), which the code
+                # no longer runs, so it would have passed without testing anything.)
+                if state["armed"] and sql.startswith("INSERT INTO items"):
                     state["armed"] = False
-                    first = cursor.fetchone()
                     with rival:
                         rival.execute(
                             "INSERT INTO items (url, title, excerpt, source_name, trust, "
                             "published_at, collected_at) VALUES "
                             "('https://ex.com/theirs', 't', 'e', 's', 'press', NULL, 'x')"
                         )
-                    return real_execute("SELECT ?", (first[0],))
-                return cursor
+                return real_execute(sql, *args)
 
         assert repo.store_items(Proxy(), [mine], lambda: NOW) == 1  # type: ignore[arg-type]
 
@@ -772,11 +810,6 @@ async def test_two_sources_crossing_the_threshold_together_each_get_one_alert(
     assert len(alerts) == 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a failing health write (locked db, say) raises out of _health_and_store and "
-    "aborts the pass: nothing is stored, the SHiFT hook never runs, no sweep is recorded",
-)
 async def test_a_health_write_failure_does_not_abort_the_pass(
     cfg, db_path, http, alerts, monkeypatch
 ):
@@ -818,11 +851,6 @@ async def test_the_alert_is_one_line_and_carries_no_error_text_or_url(cfg, db_pa
     assert "SECRET" not in sweep_summary(db_path)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the alert embeds the source name uncapped, so an absurdly long name (config-owned, "
-    "so low severity) makes a message Discord would refuse at 2000 characters",
-)
 async def test_the_alert_is_capped_for_an_absurdly_long_source_name(cfg, db_path, http, alerts):
     bad = Scripted("N" * 5000)
     bad.error = "boom"
@@ -948,20 +976,48 @@ async def test_a_hook_that_trims_its_input_cannot_change_what_was_stored(
     assert list(tags(db_path)) == ["https://ex.com/1"]
 
 
-async def test_pin_a_persistently_broken_hook_alerts_the_owner_every_single_pass(
+async def test_a_persistently_broken_hook_alerts_once_and_re_arms_after_a_good_pass(
     cfg, db_path, http, alerts
 ):
-    # Behavior the owner may want changed: unlike source health, hook failures
-    # have no once-until-recovery rule, so a bug in the detector is 24 pings a day.
+    # Changed from a pin (it used to alert every pass, 24 pings a day): like
+    # source health, the owner hears once, and a success re-arms it.
+    broken = {"on": True}
+
     async def hook(items, results):
-        raise ValueError("regex on fire")
+        if broken["on"]:
+            raise ValueError("regex on fire")
+        return 0
 
     feed = Scripted("A", [])
     deps = make_deps(cfg, db_path, http, [feed], alerts, shift_hook=hook)
     for _ in range(3):
         outcome = await run_collection(deps)
         assert outcome.new_codes == 0
-    assert len(alerts) == 3 and sweep_summary(db_path) is not None
+    assert len(alerts) == 1 and sweep_summary(db_path) is not None
+    broken["on"] = False
+    await run_collection(deps)
+    broken["on"] = True
+    await run_collection(deps)
+    assert len(alerts) == 2
+
+
+async def test_a_hung_hook_times_out_and_frees_the_lock_but_keeps_the_items(
+    cfg, db_path, http, alerts, monkeypatch
+):
+    monkeypatch.setattr(collect_mod, "_SHIFT_HOOK_TIMEOUT_S", 0.05)
+
+    async def hook(items, results):
+        await asyncio.sleep(3600)
+        return 1
+
+    feed = Scripted("A", [item("https://ex.com/1", "Palworld news")])
+    deps = make_deps(cfg, db_path, http, [feed], alerts, shift_hook=hook)
+    outcome = await run_collection(deps)
+    assert outcome.new_codes == 0 and outcome.new_items == 1
+    assert len(alerts) == 1 and sweep_summary(db_path) is not None
+    assert list(tags(db_path)) == ["https://ex.com/1"]
+    assert not (await run_collection(deps)).skipped  # the lock is free again
+    assert len(alerts) == 1  # a second timeout stays quiet
 
 
 # --- web search ---

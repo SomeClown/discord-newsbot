@@ -52,10 +52,11 @@ from newsbot.collectors.base import (
 from newsbot.config import AppConfig, Secrets, WebSearchSource
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import run_lock_or_skip
-from newsbot.pipeline.normalize import normalize
+from newsbot.pipeline.normalize import canonicalize_items, normalize
 from newsbot.store.db import connect
 from newsbot.store.models import StoredItem
 from newsbot.store.repo import existing_urls, record_source_result, record_sweep, store_items
+from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,15 @@ logger = logging.getLogger(__name__)
 SOURCE_FAILURE_ALERT_THRESHOLD = 12
 
 _COLLECT_TIMEOUT_S = 20.0
+
+# The SHiFT hook reads pages and talks to Discord, and a hook that never
+# comes back would hold the run lock (and every later pass) hostage. Two
+# minutes is generous for work that's mostly regex; past it, it's a failure.
+_SHIFT_HOOK_TIMEOUT_S = 120.0
+
+# A source name goes into an owner alert verbatim, and names are config, so
+# the cap is for the day somebody pastes a paragraph in there.
+_ALERT_NAME_CAP = 100
 
 # A pass that takes more than this share of the interval gets a warning.
 _SLOW_PASS_FRACTION = 0.5
@@ -93,6 +103,11 @@ class CollectionDeps:
     # one pass to the next instead of starting a fresh burst every hour.
     rate_limit_state: RateLimitState = field(default_factory=RateLimitState)
     shift_hook: ShiftHook = _no_shift
+    # True once the owner has been told the hook is failing; cleared by the
+    # next pass where it succeeds. In memory, like the rate-limit state: a
+    # DB write on the failure path could fail too, and a restart re-alerting
+    # once about a hook that's still broken is a feature.
+    shift_hook_alerted: bool = False
     # Injected so the pacing tests can run a nine-minute pass in no time.
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.monotonic
@@ -223,13 +238,64 @@ def _record_health_sync(db_path: str, results: list[CollectorResult], now: datet
     return newly_flagged
 
 
+def _merge_loser_tags(
+    stored: list[StoredItem], winners: dict[str, RawItem], extra: dict[str, list[TopicItem]]
+) -> list[StoredItem]:
+    """Add the losing copies' game tags to the winners' items.
+
+    `extra` is the catalog filter's verdict on the copies dedupe threw away.
+    A tag the winner already has keeps the winner's flag, unless the loser
+    was confident and the winner wasn't. A URL whose winner matched no game
+    at all but whose loser did is stored too, with the winner's content.
+    These tags ride along on items being stored anyway, so they don't
+    compete for the per-game cap.
+    """
+    by_url = {item.url: item for item in stored}
+    for topic_items in extra.values():
+        for topic_item in topic_items:
+            url = topic_item.item.url
+            if url not in by_url:
+                won = winners[url]
+                by_url[url] = StoredItem(
+                    url=url,
+                    title=won.title,
+                    excerpt=won.excerpt,
+                    source_name=won.source_name,
+                    trust=won.trust,
+                    published_at=won.published_at,
+                    topics={},
+                )
+            topics = by_url[url].topics
+            topics[topic_item.topic_key] = topics.get(topic_item.topic_key, True) and (
+                topic_item.uncertain
+            )
+    return list(by_url.values())
+
+
 def _store_sync(db_path: str, collected: list[RawItem], cfg: AppConfig, now: datetime) -> int:
-    """Normalize, filter against the whole catalog, and store. Returns the new item count."""
+    """Normalize, filter against the whole catalog, and store. Returns the new item count.
+
+    When several sources carry one URL, dedupe keeps the most trusted copy's
+    content, but the stored item gets the game tags of every copy (a
+    Palworld-only community feed and an official feed that mentions
+    Borderlands 4 make one item tagged both). Across passes it stays
+    first-come: a stored URL is dropped before any of this happens.
+    """
     lookback = timedelta(hours=cfg.collection.lookback_hours)
     with closing(connect(db_path)) as conn:
-        normalized = normalize(collected, lambda urls: existing_urls(conn, urls), now, lookback)
+        losers: list[RawItem] = []
+        deduped = canonicalize_items(collected, losers=losers)
+        normalized = normalize(deduped, lambda urls: existing_urls(conn, urls), now, lookback)
         grouped = filter_items(normalized, cfg.catalog, cfg.collection.max_items_per_game)
-        return store_items(conn, _to_stored_items(grouped), lambda: now)
+        stored = _to_stored_items(grouped)
+
+        winners = {item.url: item for item in normalized}
+        new_losers = [item for item in losers if item.url in winners]
+        if new_losers:
+            # Uncapped: only the tags are used, and they never take a slot.
+            extra = filter_items(new_losers, cfg.catalog, len(new_losers))
+            stored = _merge_loser_tags(stored, winners, extra)
+        return store_items(conn, stored, lambda: now)
 
 
 def _log_results(results: list[CollectorResult]) -> None:
@@ -258,12 +324,18 @@ async def _health_and_store(
     deps: CollectionDeps, results: list[CollectorResult], now: datetime
 ) -> tuple[int, list[str]]:
     """Steps 4 and 2 and 3 of a pass: health, then dedupe, filter and store."""
-    flagged = await asyncio.to_thread(_record_health_sync, deps.db_path, results, now)
+    flagged: list[str] = []
+    try:
+        flagged = await asyncio.to_thread(_record_health_sync, deps.db_path, results, now)
+    except Exception:
+        # Bookkeeping isn't worth the items: a locked database here costs a
+        # health update, not the pass.
+        logger.exception("couldn't record source health")
     for name in flagged:
         await _alert_owner(
             deps,
-            f"newsbot: source {name!r} has failed {SOURCE_FAILURE_ALERT_THRESHOLD} "
-            "collections in a row",
+            f"newsbot: source {plain_line(name, _ALERT_NAME_CAP)!r} has failed "
+            f"{SOURCE_FAILURE_ALERT_THRESHOLD} collections in a row",
         )
     collected = [item for result in results for item in result.items]
     new_items = await asyncio.to_thread(_store_sync, deps.db_path, collected, deps.cfg, now)
@@ -307,12 +379,20 @@ async def run_collection(deps: CollectionDeps) -> CollectionOutcome:
 
         new_codes = 0
         try:
-            new_codes = await deps.shift_hook([i for r in results for i in r.items], results)
+            new_codes = await asyncio.wait_for(
+                deps.shift_hook([i for r in results for i in r.items], results),
+                timeout=_SHIFT_HOOK_TIMEOUT_S,
+            )
+            deps.shift_hook_alerted = False
         except Exception:
             # Codes are the loud feature, but a detector bug shouldn't cost
-            # every stored item this pass; the owner hears about it instead.
+            # every stored item this pass; the owner hears about it instead,
+            # once, until the hook works again. A hook that hangs past the
+            # timeout lands here too (TimeoutError is an Exception).
             logger.exception("SHiFT detection failed")
-            await _alert_owner(deps, "newsbot: SHiFT detection failed during collection")
+            if not deps.shift_hook_alerted:
+                deps.shift_hook_alerted = True
+                await _alert_owner(deps, "newsbot: SHiFT detection failed during collection")
 
         ran = [r for r in results if r.skipped is None]
         duration_s = deps.clock() - started

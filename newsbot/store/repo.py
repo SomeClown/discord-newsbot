@@ -192,15 +192,20 @@ def claim_digest(
 
 def _insert_items(
     conn: sqlite3.Connection, items: list[StoredItem], now_iso: str
-) -> dict[str, int]:
-    """Insert items and their game tags, returning url -> item id.
+) -> tuple[dict[str, int], int]:
+    """Insert items and their game tags, returning url -> item id and the rows inserted.
+
+    The count comes from each INSERT's own `rowcount` (1 if the row went in,
+    0 if the url was already there), so it can't include anything another
+    connection wrote in the meantime.
 
     No transaction of its own: `save_run` and `store_items` each wrap it in
     theirs, and a nested commit would quietly break `save_run`'s atomicity.
     """
     url_to_id: dict[str, int] = {}
+    inserted = 0
     for item in items:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO items "
             "(url, title, excerpt, source_name, trust, published_at, collected_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(url) DO NOTHING",
@@ -214,6 +219,7 @@ def _insert_items(
                 now_iso,
             ),
         )
+        inserted += cursor.rowcount
         item_id = conn.execute("SELECT id FROM items WHERE url = ?", (item.url,)).fetchone()[0]
         url_to_id[item.url] = item_id
         for topic_key, uncertain in item.topics.items():
@@ -222,7 +228,7 @@ def _insert_items(
                 "ON CONFLICT(item_id, topic_key) DO NOTHING",
                 (item_id, topic_key, int(uncertain)),
             )
-    return url_to_id
+    return url_to_id, inserted
 
 
 def store_items(
@@ -238,10 +244,8 @@ def store_items(
     """
     now_iso = _resolve_now(now)
     with conn:
-        before = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-        _insert_items(conn, items, now_iso)
-        after = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-    return after - before
+        _, inserted = _insert_items(conn, items, now_iso)
+    return inserted
 
 
 def save_run(
@@ -264,7 +268,7 @@ def save_run(
     """
     now_iso = _resolve_now(now)
     with conn:
-        url_to_id = _insert_items(conn, items, now_iso)
+        url_to_id, _ = _insert_items(conn, items, now_iso)
 
         for story in stories:
             item_ids = [url_to_id[u] for u in story.item_urls if u in url_to_id]
