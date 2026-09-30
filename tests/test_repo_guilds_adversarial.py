@@ -228,7 +228,18 @@ _READS = {
 
 # Functions the sweep covers by a different shape (they don't take `guild_id` directly,
 # or their result isn't a guild id to compare).
-_OTHER_COVERAGE = {"query_items", "search_items", "upsert_lounge"}
+#
+# The three import backfills are here too: they only ever run inside the one-time
+# import, on an empty `guilds` table, so "another guild's rows" can't exist yet
+# (tests/test_import_v2.py covers them, including refusing to run beside a guild row).
+_OTHER_COVERAGE = {
+    "query_items",
+    "search_items",
+    "upsert_lounge",
+    "adopt_orphan_digests_in_tx",
+    "backfill_guild_code_posts",
+    "backfill_lounge_quotes_guild",
+}
 
 
 @pytest.mark.parametrize("name", sorted(_MUTATIONS))

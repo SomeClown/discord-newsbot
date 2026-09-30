@@ -1430,6 +1430,53 @@ def adopt_orphan_digests(conn: sqlite3.Connection, guild_id: int) -> int:
     return cur.rowcount
 
 
+# The three backfills below belong to the one-time import (newsbot/guilds/
+# importer.py). Unlike everything else in this file they do NOT open their own
+# `with conn:` block: a `with conn:` commits, and the import's whole point is
+# that nothing commits until every section has been written. The caller owns
+# the transaction.
+
+
+def adopt_orphan_digests_in_tx(conn: sqlite3.Connection, guild_id: int) -> int:
+    """Hand every NULL-guild digest row to `guild_id`, inside the caller's transaction.
+
+    Same idea as `adopt_orphan_digests`, minus the commit and minus the
+    "is this the imported guild" subquery: the import runs this on an empty
+    `guilds` table, where every digest row is an orphan by definition.
+    Returns the number of rows adopted.
+    """
+    cur = conn.execute("UPDATE digests SET guild_id = ? WHERE guild_id IS NULL", (guild_id,))
+    return cur.rowcount
+
+
+def backfill_guild_code_posts(conn: sqlite3.Connection, guild_id: int) -> int:
+    """Copy every posted or failed `alerted_codes` row into `guild_code_posts` for `guild_id`.
+
+    This is what keeps a code v2.2 already announced from being announced
+    again: v3 asks `guild_code_posts`, not `alerted_codes`, whether this
+    guild has seen a code. `seeded`, `too_old`, `roundup` and `pending` rows
+    are left out on purpose: the first three were never posted anywhere, and
+    a `pending` one is the crash-recovery path's business. `claimed_at`
+    borrows `first_seen_at`, the closest thing v2.2 recorded. No commit.
+    """
+    cur = conn.execute(
+        "INSERT INTO guild_code_posts "
+        "(guild_id, code, status, message_id, pinged, from_roundup, claimed_at) "
+        "SELECT ?, code, status, message_id, pinged, from_roundup, first_seen_at "
+        "FROM alerted_codes WHERE status IN ('posted', 'failed')",
+        (guild_id,),
+    )
+    return cur.rowcount
+
+
+def backfill_lounge_quotes_guild(conn: sqlite3.Connection, guild_id: int) -> int:
+    """Stamp `guild_id` on every `lounge_quotes_used` row that has no guild yet. No commit."""
+    cur = conn.execute(
+        "UPDATE lounge_quotes_used SET guild_id = ? WHERE guild_id IS NULL", (guild_id,)
+    )
+    return cur.rowcount
+
+
 # --- Free servers' /news: item headlines (design.md §15, owner decision D2) ---
 #
 # Stories only exist for games a comped server follows, so a free server
