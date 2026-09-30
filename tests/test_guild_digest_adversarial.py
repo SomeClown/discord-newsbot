@@ -161,7 +161,7 @@ class World:
         async def sleep(seconds: float) -> None:
             self.sleeps.append(seconds)
 
-        async def summary_for(game_key: str, due_at: datetime):
+        async def summary_for(game_key: str, due_at: datetime, after: datetime | None = None):
             return self.summaries.get(game_key)
 
         def publisher_for(guild, scope, already, on_posted):
@@ -886,7 +886,7 @@ async def test_a_comped_fallback_or_lookup_failure_with_no_items_is_ok_and_posts
     world.add_guild(G1, tier="comped", games=(BL4, PAL))
     world.summaries[BL4] = GameSummary("fallback", [], [], None)
 
-    async def boom(game_key, due_at):
+    async def boom(game_key, due_at, after):
         if game_key == PAL:
             raise RuntimeError("lookup broke")
         return world.summaries[game_key]

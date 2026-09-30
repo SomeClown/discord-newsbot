@@ -130,7 +130,7 @@ class World:
         async def sleep(seconds: float) -> None:
             self.sleeps.append(seconds)
 
-        async def summary_for(game_key: str, due_at: datetime):
+        async def summary_for(game_key: str, due_at: datetime, after: datetime | None = None):
             return self.summaries.get(game_key)
 
         def publisher_for(guild, scope, already, on_posted):
@@ -347,7 +347,7 @@ async def test_a_summary_lookup_that_raises_costs_that_game_its_summary_only(wor
     world.add_guild(G1, tier="comped")
     world.add_item("borderlands4", "a headline", in_window())
 
-    async def boom(game_key, due_at):
+    async def boom(game_key, due_at, after):
         raise RuntimeError("lookup broke")
 
     outcome = await run_guild_digest(world.deps(summary_for=boom), G1, kind=RunKind.SCHEDULED)
@@ -385,12 +385,31 @@ async def test_the_default_lookup_reads_the_stored_summary_for_that_due_instant(
     assert world.channels[11].embeds[0].footer.text.endswith("one note")
 
 
+async def test_a_comped_lookup_is_told_when_the_servers_last_digest_ended(world):
+    world.add_guild(G1, tier="comped")
+    world.add_item("borderlands4", "a headline", in_window(3))
+    seen = []
+
+    async def spy(game_key, due_at, after):
+        seen.append((game_key, due_at, after))
+
+    deps = world.deps(summary_for=spy)
+    world.clock = DUE + timedelta(seconds=20)
+    await run_guild_digest(deps, G1, kind=RunKind.SCHEDULED)
+    # A first digest has nothing to repeat; the next day's is told where this one ended.
+    tomorrow = DUE + timedelta(days=1)
+    world.clock = tomorrow + timedelta(seconds=20)
+    await run_guild_digest(deps, G1, kind=RunKind.SCHEDULED)
+    assert {(due, after) for _, due, after in seen if due == DUE} == {(DUE, None)}
+    assert {(due, after) for _, due, after in seen if due == tomorrow} == {(tomorrow, DUE)}
+
+
 async def test_a_free_guild_never_asks_for_summaries(world):
     world.add_guild(G1)
     world.add_item("borderlands4", "a headline", in_window())
     calls = []
 
-    async def spy(game_key, due_at):
+    async def spy(game_key, due_at, after):
         calls.append(game_key)
 
     await run_guild_digest(world.deps(summary_for=spy), G1, kind=RunKind.SCHEDULED)
@@ -962,7 +981,7 @@ async def test_upgrade_day_the_imported_guild_is_not_due_and_is_due_tomorrow_at_
         now=lambda: clock["now"],
         publisher_for=publisher_for,
         notify_guild=notify,
-        summary_for=lambda key, at: _none(),
+        summary_for=lambda key, at, after: _none(),
         sleep=no_sleep,
     )
     assert await run_due_guilds(deps) == []

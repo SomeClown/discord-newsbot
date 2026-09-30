@@ -46,7 +46,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfoNotFoundError
 
 from newsbot.bot.format import (
@@ -122,9 +122,17 @@ class GameSummary:
     note: str | None = None
 
 
-# (game key, the digest's due instant) -> that game's summary for the day, or None
-# if there isn't one. Task 7 can wrap the stored lookup with an inline "make one now".
-SummaryLookup = Callable[[str, datetime], Awaitable[GameSummary | None]]
+class SummaryLookup(Protocol):
+    """(game key, the digest's due instant, the server's previous window end) -> a summary.
+
+    `None` if there isn't one. The previous window end is `None` for a server's
+    first digest. The reuse rule (see `repo.get_game_summary`) needs all three;
+    `summaries.summary_lookup` wraps the stored lookup with an inline "make one now".
+    """
+
+    def __call__(
+        self, game_key: str, due_at: datetime, after: datetime | None = None, /
+    ) -> Awaitable[GameSummary | None]: ...
 
 
 @dataclass
@@ -263,10 +271,12 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
     return GameSummary(row.status, stories, list(row.coverage_notes), row.note)
 
 
-async def _stored_summary(db_path: str, game_key: str, due_at: datetime) -> GameSummary | None:
+async def _stored_summary(
+    db_path: str, game_key: str, due_at: datetime, after: datetime | None
+) -> GameSummary | None:
     def _sync() -> GameSummary | None:
         with closing(connect(db_path)) as conn:
-            row = repo.get_game_summary(conn, game_key, due_at)
+            row = repo.get_game_summary(conn, game_key, due_at, after)
             return summary_from_row(conn, row) if row is not None else None
 
     return await asyncio.to_thread(_sync)
@@ -298,26 +308,32 @@ async def _build(
 
     def _items_sync():
         with closing(connect(deps.db_path)) as conn:
-            return repo.items_for_window(conn, guild.guild_id, window[0], window[1])
+            return (
+                repo.items_for_window(conn, guild.guild_id, window[0], window[1]),
+                # What a summary has to be newer than to not be a repeat for this server.
+                repo.last_window_end(conn, guild.guild_id, exclude_run_date=run_date),
+            )
 
-    items_by_game = await asyncio.to_thread(_items_sync)
+    items_by_game, previous_end = await asyncio.to_thread(_items_sync)
 
     stories_by_game: dict[str, list[StoryDraft]] = {}
     notes_by_game: dict[str, str | None] = {}
     coverage: list[str] = []
     degraded = bool(notes)
     if guild.tier == "comped":
-        lookup = deps.summary_for or (lambda key, at: _stored_summary(deps.db_path, key, at))
+        lookup = deps.summary_for or (
+            lambda key, at, after: _stored_summary(deps.db_path, key, at, after)
+        )
         for game in games:
             try:
-                summary = await lookup(game.key, due_at)
+                summary = await lookup(game.key, due_at, previous_end)
                 if (
                     retry_fallback
                     and deps.retry_summary is not None
                     and summary is not None
                     and summary.status == "fallback"
                 ):
-                    summary = await deps.retry_summary(game.key, due_at) or summary
+                    summary = await deps.retry_summary(game.key, due_at, previous_end) or summary
             except Exception:
                 # A broken lookup costs this game its summary, not the server its digest.
                 logger.exception("summary lookup failed for %s", game.key)

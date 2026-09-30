@@ -442,16 +442,18 @@ A game with no items posts nothing. Games post in catalog order.
 ### 3.6 Comped summaries (`newsbot/pipeline/summaries.py`)
 
 **`prepare_summaries(deps, now)`** runs on its own job every 5 minutes, so digests never wait on Claude:
-- It finds each game followed by a comped guild and the earliest `due_at` among those comped guilds for that game's local day.
-- When `now >= earliest_due - 30 minutes` and no reusable summary exists (below):
-  1. run `collect_web_search` for those games (skipped with a coverage note if there's no key or the quota is exhausted);
+- It finds each comped guild's next `due_at` for each game it follows.
+- When `now >= due - 30 minutes` for some guild and no summary that guild may reuse exists (below):
+  1. run `collect_web_search` for that game, inside the same claim as the summary so overlapping jobs search once (skipped with a coverage note if there's no key or the quota is exhausted);
   2. for each game, select the items in `(previous summary's window_end, now]` (first time: `now - 24h`, floor 48h);
   3. run `summarize_topic(llm, game, items, prior_headlines, all_topics=<games followed by any comped guild, catalog order>, subject=ai.subject)`.
 
   With only the friend comped, `all_topics` is Borderlands 4, Palworld and Diablo IV in the same order as today, so **the prompt is byte-identical** and no owner preview gate is triggered. A second comped guild would change that list; §4 notes it.
 - **Store,** in one transaction: the `game_summaries` row (`ok`, or `fallback` after summarize's own 3 attempts), plus `stories` with `summary_id` set and `digest_id NULL`, plus `story_items`. Saving at summary time rather than at post time is safe now, because items were already stored by collection. It also makes prior headlines exist even if the post fails.
 
-**Reuse rule.** A comped digest due at `due_at` uses the newest `game_summaries` row for the game with `window_end` in `(due_at - 24h, due_at + 30min]`. That's "computed once per game per day and reused by every comped guild following it".
+**Reuse rule (changed 2026-09-30, owner lead decision, after task 7's adversarial tests).** A comped guild's digest due at `due_at` may reuse a stored `game_summaries` row for the game only if both hold: (a) its `window_end` is strictly after that guild's previous posted digest's window end (for a first digest, any row); (b) its `window_end >= due_at - 6h` (`SUMMARY_MAX_AGE`). It takes the newest qualifying `ok` row (an `ok` beats a newer `fallback`; a lone `fallback` still counts and is not retried); if none qualifies, a new summary is made. The old rule, "`window_end` in `(due_at - 24h, due_at + 30min]`", repeated a day's summary on a 23-hour DST day or after a digest time moved earlier, and left one server reading 15-hour-old news for good after an outage. So calls per game per day are at most one per distinct comped cycle, not strictly one per game: servers whose digests fall within about 5h30 of the first share a call, and the worst case is four a day (servers six hours apart).
+
+**Storage.** `run_date` is a label, not a key: `game_summaries` has no uniqueness beyond its id, so an inline summary for a missed digest can't replace a good prepared one. Only a run-now retry rewrites a row, and it names that row. A save verifies the caller still holds the claim and is discarded if not; the claim is refreshed while the call runs. Each model call has a 5 minute deadline (a timeout is a `fallback` row with a note), and a game whose save fails rests 30 minutes, doubling to 8 hours, in memory.
 
 **If it fails:**
 - **Claude fails:** the row is `fallback`, the digest posts headlines with "Summary unavailable", status `partial`, and the owner gets one alert (`newsbot: summary for {game} fell back to headlines`). It isn't retried that day by the scheduler.
@@ -820,7 +822,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 **Change:** §3.6.
 
 **Tests** (`tests/test_summaries.py`, `StubLLM`, counting LLM calls):
-- **two comped guilds (one Pacific, one Berlin) following Palworld: one summarize call, reused by both;**
+- **two comped guilds with digests minutes apart following Palworld: one summarize call, reused by both (one Pacific and one Berlin are two cycles under the 2026-09-30 reuse rule);**
 - the first guild's lead window triggers it; nothing happens before the lead;
 - `all_topics` equals the comped-followed games in catalog order, and the friend-only prompt matches today's prompt byte for byte (built with v2's `build_prompt` against the same inputs);
 - web search once per game per day, only for comped games;

@@ -583,7 +583,9 @@ def test_notice_text_length_is_bounded(conn):
         )
 
 
-def test_game_summaries_are_unique_per_game_per_day(conn):
+def test_game_summaries_may_share_a_run_date_but_not_take_a_bad_status(conn):
+    # Was "unique per game per day". run_date is only a label now: a summary made inline for a
+    # missed digest can land on the same date as a prepared one and must not replace it.
     sql = (
         "INSERT INTO game_summaries "
         "(game_key, run_date, status, window_start, window_end, created_at) "
@@ -591,7 +593,8 @@ def test_game_summaries_are_unique_per_game_per_day(conn):
     )
     with conn:
         conn.execute(sql, ("ok",))
-    _raises_integrity(conn, sql, ("fallback",))
+        conn.execute(sql, ("fallback",))
+    assert conn.execute("SELECT COUNT(*) FROM game_summaries").fetchone()[0] == 2
     _raises_integrity(conn, sql.replace("'bl4'", "'bl5'"), ("weird",))
 
 

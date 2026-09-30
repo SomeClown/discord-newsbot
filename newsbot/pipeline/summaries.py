@@ -1,4 +1,4 @@
-"""One Claude summary per game per day, made once and shared by every comped server.
+"""One Claude summary per game per cycle, made once and shared by every comped server.
 
 In v2 the daily run collected, summarized and posted in one breath, for one
 server, and the summary was a private matter between me and Haiku. With more
@@ -9,6 +9,16 @@ ahead of time by a job (`prepare_summaries`), stored in `game_summaries` with
 its stories, and every comped digest just reads it. Think of it as the
 kitchen cooking one big pot before anyone sits down, instead of a pot per
 table.
+
+Whether a pot is still good is decided per server, not per clock: a stored
+summary is reusable for a server's digest if it's newer than that server's
+previous digest (so nobody reads the same paragraph twice) and no more than
+six hours older than the digest's due time (so nobody reads yesterday's news).
+My first rule was "anything from the last 24 hours", which a 23-hour spring
+forward day, a moved digest time, and one late outage each found a way to
+break. Servers whose digests are close together still share one call; servers
+a half day apart each get their own, so the honest bound is one call per
+distinct comped cycle per game, not one per game.
 
 The prompt is deliberately untouched. `summarize_topic` still builds the exact
 same two strings v2 did, from the same kind of inputs (the stored items in a
@@ -31,7 +41,11 @@ Two servers that want the same game's summary at the same moment must cost one
 Claude call, not two. The claim is a row in `app_state`, written under
 `BEGIN IMMEDIATE` in the same transaction as the "is there one already?"
 check; whoever loses waits (politely, on a timer, not in a loop) and then
-reads the winner's row.
+reads the winner's row. The winner runs the web search and the model call
+inside the claim, refreshes it while it works, gives the model call a
+deadline, and saves only if the claim is still its own. A game whose saves keep
+failing is left alone for a while (30 minutes, doubling, kept in memory) instead
+of being paid for every five minutes.
 
 The bot's scheduler doesn't run any of this yet (plan task 13).
 """
@@ -43,7 +57,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -61,9 +75,24 @@ from newsbot.store.models import CompedFollow, GameSummaryRow, StoryToSave, Usag
 
 logger = logging.getLogger(__name__)
 
-# The prepare job starts this long before the earliest comped digest, so the
-# digest never waits on Claude.
+# The prepare job starts this long before a comped digest, so the digest never
+# waits on Claude.
 LEAD = timedelta(minutes=30)
+# A digest whose due time passed this recently may still be about to need its summary.
+_DUE_GRACE = timedelta(minutes=30)
+# How long one model call for one game may take. A real one is three attempts at
+# 60 s plus 7 s of backoff (about three minutes), so this means "it's hung", not
+# "it's being thorough"; it's also well inside the claim's ten-minute lease.
+SUMMARIZE_TIMEOUT_S = 300.0
+_TIMEOUT_NOTE = "Summary unavailable (the model took too long); showing headlines."
+# After a failed save the game is left alone for this long, doubling per failure up
+# to the cap. In memory (on `SummaryDeps`), not in `app_state`: the likeliest reason
+# a save fails is that the database is unwell, and a backoff that needs the database
+# to be written down is not much of a backoff. A restart forgets it; that's fine.
+SAVE_BACKOFF = timedelta(minutes=30)
+SAVE_BACKOFF_MAX = timedelta(hours=8)
+# How often the claim's lease is pushed out while somebody is still working.
+_HEARTBEAT_S = repo.SUMMARY_CLAIM_LEASE.total_seconds() / 5
 # How long a caller that lost the claim waits between looks, and how many looks
 # it gets (together: the claim's lease, after which the claim is fair game).
 _POLL_S = 2.0
@@ -88,34 +117,37 @@ class SummaryDeps:
     brave_api_key: str | None = None
     # Used for the model's retry backoff and for waiting on somebody else's claim.
     sleep: Sleep = asyncio.sleep
+    summarize_timeout_s: float = SUMMARIZE_TIMEOUT_S
+    heartbeat_s: float = _HEARTBEAT_S
+    # game key -> (consecutive failed saves, not before). See `SAVE_BACKOFF`.
+    save_failures: dict[str, tuple[int, datetime]] = field(default_factory=dict)
 
 
 # --- Who needs a summary, and when ---
 
 
-def earliest_dues(
+def upcoming_dues(
     follows: Sequence[CompedFollow], now: datetime
-) -> dict[str, tuple[datetime, date]]:
-    """Per game, the earliest upcoming comped digest instant and its local date.
+) -> list[tuple[CompedFollow, datetime, date]]:
+    """Each comped server's next digest instant per game it follows, with its local date.
 
-    "Upcoming" includes a due time that passed less than a reuse tolerance ago
-    (30 minutes): that digest may still be about to need its summary. Once a
+    "Next" includes a due time that passed less than a grace period ago (30
+    minutes): that digest may still be about to need its summary. Once a
     server's time today is further back than that, its next one is tomorrow's.
     A server with an unusable zone or time is skipped; its own digest will say so.
     """
-    best: dict[str, tuple[datetime, date]] = {}
+    out: list[tuple[CompedFollow, datetime, date]] = []
     for follow in follows:
         try:
             day = local_run_date(now, follow.timezone)
             due = local_due_instant(day, follow.digest_time, follow.timezone)
-            if now > due + repo.SUMMARY_REUSE_AFTER:
+            if now > due + _DUE_GRACE:
                 day += timedelta(days=1)
                 due = local_due_instant(day, follow.digest_time, follow.timezone)
         except ZoneInfoNotFoundError, ValueError, OSError:
             continue
-        if follow.game_key not in best or due < best[follow.game_key][0]:
-            best[follow.game_key] = (due, day)
-    return best
+        out.append((follow, due, day))
+    return out
 
 
 def _all_topics(cfg: AppConfig, followed: set[str], game: GameCfg) -> list[GameCfg]:
@@ -127,11 +159,23 @@ def _all_topics(cfg: AppConfig, followed: set[str], game: GameCfg) -> list[GameC
 
 
 def _claim_sync(
-    db_path: str, game_key: str, due_at: datetime, token: str, now, retry_fallback: bool
+    db_path: str,
+    game_key: str,
+    due_at: datetime,
+    after: datetime | None,
+    token: str,
+    now,
+    retry_fallback: bool,
 ):
     with closing(connect(db_path)) as conn:
         state, row = repo.claim_game_summary(
-            conn, game_key, due_at, token=token, now=now, retry_fallback=retry_fallback
+            conn,
+            game_key,
+            due_at,
+            token=token,
+            now=now,
+            retry_fallback=retry_fallback,
+            after=after,
         )
         summary = summary_from_row(conn, row) if row is not None and state == "reusable" else None
         return state, row, summary
@@ -140,6 +184,11 @@ def _claim_sync(
 def _release_sync(db_path: str, game_key: str, token: str) -> None:
     with closing(connect(db_path)) as conn:
         repo.release_game_summary_claim(conn, game_key, token)
+
+
+def _refresh_sync(db_path: str, game_key: str, token: str, now) -> bool:
+    with closing(connect(db_path)) as conn:
+        return repo.refresh_game_summary_claim(conn, game_key, token, now)
 
 
 def _inputs_sync(
@@ -194,15 +243,21 @@ async def _summarize(deps: SummaryDeps, game: GameCfg, retrying: GameSummaryRow 
         # doesn't go looking for a summary that will never exist.
         return start, end, TopicSummary(game.key, [], False, None, Usage(0, 0))
     try:
-        summary = await summarize_topic(
-            deps.llm,
-            game,
-            items,
-            prior,
-            all_topics=_all_topics(deps.cfg, followed, game),
-            subject=deps.cfg.ai.subject,
-            sleep=deps.sleep,
-        )
+        async with asyncio.timeout(deps.summarize_timeout_s):
+            summary = await summarize_topic(
+                deps.llm,
+                game,
+                items,
+                prior,
+                all_topics=_all_topics(deps.cfg, followed, game),
+                subject=deps.cfg.ai.subject,
+                sleep=deps.sleep,
+            )
+    except TimeoutError:
+        # A hung call would otherwise hold this game's claim, and every game
+        # after it in the prepare run, until somebody restarted the bot.
+        logger.warning("summarizing %s timed out after %s s", game.key, deps.summarize_timeout_s)
+        summary = TopicSummary(game.key, [], True, _TIMEOUT_NOTE, Usage(0, 0))
     except Exception:
         # `summarize_topic` turns API trouble into a fallback itself; this is for
         # the bug I haven't met yet, which gets the same treatment.
@@ -221,7 +276,9 @@ def _save_sync(
     coverage: list[str],
     token: str,
     now,
-) -> GameSummary:
+    replace_id: int | None,
+) -> GameSummary | None:
+    """Save it, or `None` if the claim was lost while the model was thinking."""
     with closing(connect(db_path)) as conn:
         summary_id = repo.save_game_summary(
             conn,
@@ -246,11 +303,86 @@ def _save_sync(
             ],
             token=token,
             now=now,
+            replace_id=replace_id,
+            require_claim=True,
         )
+        if summary_id is None:
+            return None
         row = repo.game_summary_by_id(conn, summary_id)
         if row is None:
             raise RuntimeError(f"summary {summary_id} vanished right after it was saved")
         return summary_from_row(conn, row)
+
+
+def _backed_off(deps: SummaryDeps, game_key: str) -> bool:
+    failed = deps.save_failures.get(game_key)
+    return failed is not None and deps.now() < failed[1]
+
+
+def _note_save_failure(deps: SummaryDeps, game_key: str) -> None:
+    count = deps.save_failures.get(game_key, (0, deps.now()))[0] + 1
+    wait = min(SAVE_BACKOFF * 2 ** (count - 1), SAVE_BACKOFF_MAX)
+    deps.save_failures[game_key] = (count, deps.now() + wait)
+    logger.warning("%s: save failed %d time(s), resting it for %s", game_key, count, wait)
+
+
+async def _keep_claim(deps: SummaryDeps, game_key: str, token: str) -> None:
+    """Push the claim's lease out while the owner is still working, so nobody takes it over."""
+    while True:
+        await asyncio.sleep(deps.heartbeat_s)
+        try:
+            ours = await asyncio.to_thread(_refresh_sync, deps.db_path, game_key, token, deps.now)
+        except Exception:
+            logger.exception("couldn't refresh the summary claim for %s", game_key)
+            continue
+        if not ours:
+            return
+
+
+async def _make(
+    deps: SummaryDeps,
+    game: GameCfg,
+    run_date: date,
+    coverage: Sequence[str],
+    search: bool,
+    retrying: GameSummaryRow | None,
+    token: str,
+) -> GameSummary | None:
+    """Do the work behind a won claim: search, summarize, save. `None` if the claim was lost."""
+    beat = asyncio.create_task(_keep_claim(deps, game.key, token))
+    try:
+        if search:
+            # Inside the claim, so two overlapping jobs search once, not twice.
+            coverage = await _web_search(deps, [game.key])
+        start, end, summary = await _summarize(deps, game, retrying)
+        try:
+            saved = await asyncio.to_thread(
+                _save_sync,
+                deps.db_path,
+                game.key,
+                run_date,
+                start,
+                end,
+                summary,
+                list(coverage),
+                token,
+                deps.now,
+                retrying.id if retrying is not None else None,
+            )
+        except Exception:
+            _note_save_failure(deps, game.key)
+            raise
+        deps.save_failures.pop(game.key, None)
+        return saved
+    finally:
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
+        # Normally `save_game_summary` already dropped the claim; this covers a
+        # cancel or a save that blew up, so nobody waits out the whole lease.
+        try:
+            await asyncio.to_thread(_release_sync, deps.db_path, game.key, token)
+        except Exception:
+            logger.exception("couldn't release the summary claim for %s", game.key)
 
 
 async def ensure_summary(
@@ -259,70 +391,66 @@ async def ensure_summary(
     due_at: datetime,
     *,
     run_date: date,
+    after: datetime | None = None,
     coverage: Sequence[str] = (),
+    search: bool = False,
     retry_fallback: bool = False,
 ) -> GameSummary | None:
     """The summary a digest due at `due_at` should use for `game_key`, making it if nobody has.
 
-    Reuses a stored one inside the reuse window. Otherwise claims the game
-    (one caller wins, the rest wait and then reuse the result), summarizes,
-    saves, and releases. `None` means there was nothing to be had: an unknown
-    game, or a claim that never resolved inside its lease.
+    `after` is the asking server's previous digest window end (`None` for a
+    first digest); with `due_at` it decides what counts as reusable, see
+    `repo.get_game_summary`. If nothing is, this claims the game (one caller
+    wins, the rest wait and then reuse the result), optionally searches the web
+    (`search`, which replaces `coverage` with what the search reports),
+    summarizes, saves, and releases. `None` means there was nothing to be had:
+    an unknown game, a claim that never resolved inside its lease, or a game
+    whose saves have been failing and is resting.
 
     `retry_fallback` (a confirmed run-now) remakes a `fallback` summary once for
     this call. A caller that had to wait for somebody else's claim doesn't
     retry on top of it: they just got an answer.
+
+    If the claim is taken over while the model is thinking (only possible if the
+    heartbeat dies), the slow owner's result is thrown away, not saved beside
+    the new owner's; it goes back to looking for the answer that won.
     """
     game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
     if game is None:
         return None
     token = uuid.uuid4().hex
     retry = retry_fallback
-    retrying: GameSummaryRow | None = None
     polls = 0
     while True:
         state, row, stored = await asyncio.to_thread(
-            _claim_sync, deps.db_path, game_key, due_at, token, deps.now, retry
+            _claim_sync, deps.db_path, game_key, due_at, after, token, deps.now, retry
         )
         if state == "reusable":
             return stored
-        if state == "claimed":
-            retrying = row
-            break
-        retry = False
-        if polls >= _MAX_POLLS:
-            logger.warning("gave up waiting for %s's summary claim", game_key)
+        if state == "busy":
+            retry = False
+            if polls >= _MAX_POLLS:
+                logger.warning("gave up waiting for %s's summary claim", game_key)
+                return None
+            polls += 1
+            await deps.sleep(_POLL_S)
+            continue
+        if _backed_off(deps, game_key):
+            try:
+                await asyncio.to_thread(_release_sync, deps.db_path, game_key, token)
+            except Exception:
+                logger.exception("couldn't release the summary claim for %s", game_key)
             return None
-        polls += 1
-        await deps.sleep(_POLL_S)
-
-    try:
-        start, end, summary = await _summarize(deps, game, retrying)
-        saved = await asyncio.to_thread(
-            _save_sync,
-            deps.db_path,
-            game_key,
-            run_date,
-            start,
-            end,
-            summary,
-            list(coverage),
-            token,
-            deps.now,
-        )
-    finally:
-        # Normally `save_game_summary` already dropped the claim; this covers a
-        # cancel or a save that blew up, so nobody waits out the whole lease.
-        try:
-            await asyncio.to_thread(_release_sync, deps.db_path, game_key, token)
-        except Exception:
-            logger.exception("couldn't release the summary claim for %s", game_key)
-    if saved.status == "fallback":
-        try:
-            await deps.alert(f"newsbot: summary for {game.name} fell back to headlines")
-        except Exception:
-            logger.exception("couldn't send the summary fallback alert for %s", game_key)
-    return saved
+        saved = await _make(deps, game, run_date, coverage, search, row, token)
+        if saved is None:
+            retry = False
+            continue
+        if saved.status == "fallback":
+            try:
+                await deps.alert(f"newsbot: summary for {game.name} fell back to headlines")
+            except Exception:
+                logger.exception("couldn't send the summary fallback alert for %s", game_key)
+        return saved
 
 
 # --- The lookups a digest uses ---
@@ -336,12 +464,15 @@ def summary_lookup(deps: SummaryDeps) -> SummaryLookup:
     so. If that fails too the row is `fallback` like any other.
     """
 
-    async def lookup(game_key: str, due_at: datetime) -> GameSummary | None:
+    async def lookup(
+        game_key: str, due_at: datetime, after: datetime | None = None
+    ) -> GameSummary | None:
         return await ensure_summary(
             deps,
             game_key,
             due_at,
             run_date=due_at.astimezone(UTC).date(),
+            after=after,
             coverage=[_WEB_SEARCH_SKIPPED] if deps.cfg.web_search is not None else [],
         )
 
@@ -351,12 +482,15 @@ def summary_lookup(deps: SummaryDeps) -> SummaryLookup:
 def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     """The run-now lookup: like `summary_lookup`, but a `fallback` gets one more try."""
 
-    async def lookup(game_key: str, due_at: datetime) -> GameSummary | None:
+    async def lookup(
+        game_key: str, due_at: datetime, after: datetime | None = None
+    ) -> GameSummary | None:
         return await ensure_summary(
             deps,
             game_key,
             due_at,
             run_date=due_at.astimezone(UTC).date(),
+            after=after,
             coverage=[_WEB_SEARCH_SKIPPED] if deps.cfg.web_search is not None else [],
             retry_fallback=True,
         )
@@ -367,9 +501,13 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
 # --- The prepare job ---
 
 
-def _has_summary_sync(db_path: str, game_key: str, due_at: datetime) -> bool:
+def _needs_summary_sync(
+    db_path: str, guild_id: int, game_key: str, due_at: datetime, day: date
+) -> tuple[bool, datetime | None]:
+    """Whether this server's digest has no summary it may reuse, and its previous window end."""
     with closing(connect(db_path)) as conn:
-        return repo.get_game_summary(conn, game_key, due_at) is not None
+        after = repo.last_window_end(conn, guild_id, exclude_run_date=day)
+        return repo.get_game_summary(conn, game_key, due_at, after) is None, after
 
 
 def _follows_sync(db_path: str) -> list[CompedFollow]:
@@ -397,34 +535,38 @@ async def _web_search(deps: SummaryDeps, game_keys: list[str]) -> list[str]:
 async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> list[str]:
     """Make the summaries the next comped digests will need. Returns the games it worked on.
 
-    Meant to run every five minutes. For each game a comped server follows it
-    finds the earliest digest due; once that's within `LEAD`, and no summary
-    (of any status: a fallback isn't retried today) is reusable for it, the
-    game is searched and summarized. Web search runs first, once for all the
-    games that need it, so the summary can see what it found.
+    Meant to run every five minutes. A game needs one when some comped server
+    that follows it has a digest due within `LEAD` and no stored summary that
+    server may reuse (newer than its last digest, at most six hours older than
+    this one; a fallback counts, it isn't retried today). The game is then
+    searched and summarized, the search inside the same claim as the summary so
+    overlapping jobs search once. The new summary also serves every other server
+    whose digest is that close, which is what keeps this to about one call per
+    distinct comped cycle per game.
     """
     now = now or deps.now()
     follows = await asyncio.to_thread(_follows_sync, deps.db_path)
-    dues = earliest_dues(follows, now)
-    todo: list[tuple[GameCfg, datetime, date]] = []
+    dues = upcoming_dues(follows, now)
+    todo: list[tuple[GameCfg, datetime, date, datetime | None]] = []
     for game in deps.cfg.catalog:
-        if game.key not in dues:
-            continue
-        due, run_date = dues[game.key]
-        if now < due - LEAD:
-            continue
-        if await asyncio.to_thread(_has_summary_sync, deps.db_path, game.key, due):
-            continue
-        todo.append((game, due, run_date))
-    if not todo:
-        return []
-
-    notes = await _web_search(deps, [g.key for g, _, _ in todo])
+        mine = sorted((d for d in dues if d[0].game_key == game.key), key=lambda d: d[1])
+        for follow, due, run_date in mine:
+            if now < due - LEAD:
+                continue
+            needs, after = await asyncio.to_thread(
+                _needs_summary_sync, deps.db_path, follow.guild_id, game.key, due, run_date
+            )
+            if needs:
+                todo.append((game, due, run_date, after))
+                break
     done: list[str] = []
-    for game, due, run_date in todo:
+    for game, due, run_date, after in todo:
         try:
-            await ensure_summary(deps, game.key, due, run_date=run_date, coverage=notes)
-            done.append(game.key)
+            got = await ensure_summary(
+                deps, game.key, due, run_date=run_date, after=after, search=True
+            )
+            if got is not None:
+                done.append(game.key)
         except Exception:
             # One game's bad day doesn't cancel the others'.
             logger.exception("preparing the summary for %s failed", game.key)
@@ -433,10 +575,13 @@ async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> l
 
 __all__ = [
     "LEAD",
+    "SAVE_BACKOFF",
+    "SAVE_BACKOFF_MAX",
+    "SUMMARIZE_TIMEOUT_S",
     "SummaryDeps",
-    "earliest_dues",
     "ensure_summary",
     "prepare_summaries",
     "retry_lookup",
     "summary_lookup",
+    "upcoming_dues",
 ]

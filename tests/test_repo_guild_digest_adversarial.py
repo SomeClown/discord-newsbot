@@ -539,20 +539,30 @@ def _summary(conn, game, end, *, status="ok"):
     return cur.lastrowid
 
 
-def test_the_summary_reuse_window_is_exclusive_below_inclusive_above_and_per_game(conn):
+def test_the_summary_reuse_rule_is_inclusive_at_six_hours_exclusive_after_and_per_game(conn):
+    # Was a (due - 24h, due + 30min] window; see repo.get_game_summary for the rule now.
     _summary(conn, "palworld", T0)  # someone else's game never matches
     assert repo.get_game_summary(conn, "borderlands4", T0) is None
-    exactly_low = _summary(conn, "borderlands4", T0 - timedelta(hours=24))
-    assert repo.get_game_summary(conn, "borderlands4", T0) is None  # due - 24h is excluded
-    just_inside = _summary(
-        conn, "borderlands4", T0 - timedelta(hours=24) + timedelta(microseconds=1)
-    )
+    too_old = _summary(conn, "borderlands4", T0 - repo.SUMMARY_MAX_AGE - timedelta(microseconds=1))
+    assert repo.get_game_summary(conn, "borderlands4", T0) is None  # one tick past six hours
+    just_inside = _summary(conn, "borderlands4", T0 - repo.SUMMARY_MAX_AGE)
     assert repo.get_game_summary(conn, "borderlands4", T0).id == just_inside
-    top = _summary(conn, "borderlands4", T0 + timedelta(minutes=30))
-    assert repo.get_game_summary(conn, "borderlands4", T0).id == top  # due + 30m is included
-    _summary(conn, "borderlands4", T0 + timedelta(minutes=30, microseconds=1))
-    assert repo.get_game_summary(conn, "borderlands4", T0).id == top
-    assert exactly_low != just_inside
+    far_ahead = _summary(conn, "borderlands4", T0 + timedelta(days=2))  # no upper bound
+    assert repo.get_game_summary(conn, "borderlands4", T0).id == far_ahead
+    # `after` excludes a row ending exactly on it, and falls back to the older qualifying row.
+    assert repo.get_game_summary(conn, "borderlands4", T0, after=T0 + timedelta(days=2)) is None
+    assert repo.get_game_summary(conn, "borderlands4", T0, after=T0 - timedelta(hours=7)).id == (
+        far_ahead
+    )
+    assert too_old != just_inside
+
+
+def test_an_ok_row_beats_a_newer_fallback_and_a_fallback_alone_is_still_reused(conn):
+    ok = _summary(conn, "borderlands4", T0 - timedelta(hours=3))
+    _summary(conn, "borderlands4", T0 - timedelta(hours=1), status="fallback")
+    assert repo.get_game_summary(conn, "borderlands4", T0).id == ok
+    only = _summary(conn, "palworld", T0 - timedelta(hours=1), status="fallback")
+    assert repo.get_game_summary(conn, "palworld", T0).id == only
 
 
 def test_two_summaries_ending_at_the_same_instant_resolve_to_the_newest_row(conn):

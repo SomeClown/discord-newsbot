@@ -636,7 +636,7 @@ Owner decisions (2026-09-30):
 - `guild_lounge`: the friend's server's welcome and quote settings, imported from `lounge:`. Only that row exists for now.
 - `items` stays shared, tagged with the games it matched.
 - `digests` gains a guild column: one row per guild per local day, with the guard, catch-up, run-now confirmation and resumable publisher keyed per guild.
-- A new `game_summaries` table holds one Claude summary per game per local day, reused by every comped guild following that game.
+- A new `game_summaries` table holds the Claude summaries, one per game per comped "cycle": a stored summary is reused by a comped guild's digest if it is newer than that guild's last digest and at most 6 hours older than this one's due time (plan §3.6), so servers with digests close together share one call.
 - **SHiFT codes:** detection stays global (`alerted_codes` or its successor records each code once). Posting is tracked per guild (code, guild, status), and the daily ping cap counts per guild.
 - The lounge quote tables gain a guild column.
 

@@ -120,9 +120,13 @@ CREATE TABLE game_summaries (
     note TEXT,
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    UNIQUE (game_key, run_date)
+    created_at TEXT NOT NULL
 );
+
+-- run_date is a label, not a key: an inline summary for a missed digest can
+-- share one with a prepared row, and must never replace it. The reuse lookup
+-- reads by (game_key, window_end), so that's what's indexed.
+CREATE INDEX idx_game_summaries_game_end ON game_summaries (game_key, window_end);
 
 CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 

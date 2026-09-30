@@ -332,17 +332,21 @@ def _summary(conn, game, window_end, *, status="ok", notes=("n1",), note=None):
     return cur.lastrowid
 
 
-def test_get_game_summary_reuse_window_boundaries(conn):
+def test_get_game_summary_reuse_rule_boundaries(conn):
+    # Was a (due - 24h, due + 30min] window. Now: ended strictly after `after`, and at or
+    # after due - 6h, with no upper bound.
     due = T0
-    _summary(conn, "g", due - timedelta(hours=24))  # exactly 24h before: out (exclusive)
+    _summary(conn, "g", due - repo.SUMMARY_MAX_AGE - timedelta(seconds=1))  # too old
     assert repo.get_game_summary(conn, "g", due) is None
-    inside = _summary(conn, "g", due - timedelta(hours=24) + timedelta(seconds=1))
-    assert repo.get_game_summary(conn, "g", due).id == inside
-    newer = _summary(conn, "g", due + timedelta(minutes=30))  # exactly 30m after: in
+    edge = _summary(conn, "g", due - repo.SUMMARY_MAX_AGE)  # exactly six hours: in
+    assert repo.get_game_summary(conn, "g", due).id == edge
+    newer = _summary(conn, "g", due + timedelta(hours=3))  # after the due time is fine
     got = repo.get_game_summary(conn, "g", due)
     assert got.id == newer and got.coverage_notes == ["n1"] and got.status == "ok"
-    _summary(conn, "g", due + timedelta(minutes=31))  # too far ahead
-    assert repo.get_game_summary(conn, "g", due).id == newer
+    # `after` is exclusive: a summary ending exactly at the last digest's window end is a repeat.
+    assert repo.get_game_summary(conn, "g", due, after=due + timedelta(hours=3)) is None
+    earlier = due + timedelta(hours=3) - timedelta(seconds=1)
+    assert repo.get_game_summary(conn, "g", due, after=earlier).id == newer
     assert repo.get_game_summary(conn, "other", due) is None
 
 
