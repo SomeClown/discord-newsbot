@@ -86,6 +86,13 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 | D10 | Support contact for privacy and terms | The owner supplies it (email, or a support Discord invite). | T18 |
 | D11 | Approving the 12 new catalog entries | From task 17's report. | Rollout only |
 
+
+**Owner answers (2026-09-30):**
+- D1 to D8 accepted as recommended.
+- **D9:** the home guild is the **test server** (1552824311608512532), not the friend's server. The prod bot must be invited to the test server before cutover, and a dedicated prod-admin channel there is suggested so prod and dev alerts don't mix. The friend's server keeps its current admin channel as its own per-guild admin channel through the import.
+- **D10:** an email address; the owner will supply it before task 18.
+- D11 comes at rollout, from task 17's report.
+
 ---
 
 ## 3. Resolved design
