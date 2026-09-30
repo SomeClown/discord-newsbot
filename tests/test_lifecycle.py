@@ -68,6 +68,9 @@ class FakeClient:
     def is_ready(self):
         return self._ready
 
+    def get_guild(self, guild_id):
+        return next((g for g in self.guilds if g.id == guild_id), None)
+
     async def fetch_guild(self, guild_id):
         self.fetched.append(guild_id)
         if guild_id in self._errors:
@@ -75,6 +78,12 @@ class FakeClient:
         if guild_id in self._gone:
             raise discord.NotFound(SimpleNamespace(status=404, reason="nf"), "Unknown Guild")
         return object()
+
+
+@pytest.fixture(autouse=True)
+def _no_valve_pause(monkeypatch):
+    # The self-healing valve sleeps between Discord checks; tests don't need to wait.
+    monkeypatch.setattr(lifecycle, "VALVE_CHECK_PAUSE", 0)
 
 
 @pytest.fixture
@@ -486,13 +495,21 @@ async def test_reconcile_drops_the_imported_guild_when_discord_says_gone(v3_db, 
     assert _guild_ids(v3_db) == [G2]
 
 
-async def test_reconcile_with_empty_cache_never_even_asks_about_the_imported_guild(v3_db, life):
+async def test_reconcile_with_empty_cache_asks_about_the_imported_guild_and_keeps_it_unless_gone(
+    v3_db, life
+):
+    # Changed: with the self-healing valve an empty cache no longer skips the per-row check. The
+    # imported row still goes only on an explicit NotFound or Forbidden, same rule as before.
     with closing(connect(v3_db)) as conn:
         repo.create_guild(conn, G1, tier="comped", set_up=True, imported_at=_now())
-    client = FakeClient([], gone=[G1])
+    client = FakeClient(
+        [], errors={G1: discord.HTTPException(SimpleNamespace(status=500, reason="x"), "x")}
+    )
     await life.reconcile(client)
-    assert client.fetched == []
+    assert client.fetched == [G1]
     assert _guild_ids(v3_db) == [G1]
+    await life.reconcile(FakeClient([], gone=[G1]))
+    assert _guild_ids(v3_db) == []
 
 
 def _now():

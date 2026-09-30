@@ -34,6 +34,18 @@ FIRST_CONTACT_TEXT = (
     "`/newsbot setup` to pick games, a channel and a time. Until then I'll stay quiet."
 )
 
+# How long to wait on Discord for the hello and for `fetch_guild` before giving
+# up. Both run inside startup reconciliation, where a hang stalls every server
+# after it; fifteen seconds is generous for one HTTP call and stingy for a
+# stuck one.
+HELLO_TIMEOUT = 15.0
+FETCH_TIMEOUT = 15.0
+# When the valve trips, the bot asks Discord about this many stale rows per
+# start, one at a time with a short pause between, so a mass offline kick
+# clears itself over a few restarts without hammering the API.
+VALVE_CHECK_CAP = 50
+VALVE_CHECK_PAUSE = 0.25
+
 # Below this many stale rows the valve never trips on percentage alone.
 VALVE_MIN_DELETES = 3
 # Above this share of all rows, a cleanup is treated as a bad guild list.
@@ -46,10 +58,12 @@ def can_speak_in(channel: Any, me: Any) -> bool:
         return False
     try:
         perms = channel.permissions_for(me)
+        return bool(perms.view_channel and perms.send_messages)
     except Exception:
+        # Includes a result that isn't a Permissions at all. Discord never
+        # sends one; I'd still rather not find out the hard way.
         logger.debug("permissions_for failed while picking a first-contact channel")
         return False
-    return bool(perms.view_channel and perms.send_messages)
 
 
 def pick_first_contact_channel(guild: Any) -> Any | None:
@@ -84,7 +98,9 @@ class ReconcilePlan:
     imported server: see `reconcile_plan`); the I/O step asks Discord
     directly. `to_create` are guilds the bot is in and has no row for.
     `valve_tripped` means there were stale rows and the plan refused to
-    delete any of them; `valve_reason` says why, for the owner alert.
+    delete any of them; `valve_reason` says why, for the owner alert, and
+    `to_verify` lists the stale rows the I/O step should ask Discord about
+    one by one (deleting only the ones Discord confirms are gone).
     """
 
     to_delete: tuple[int, ...]
@@ -92,6 +108,7 @@ class ReconcilePlan:
     to_create: tuple[int, ...]
     valve_tripped: bool = False
     valve_reason: str = ""
+    to_verify: tuple[int, ...] = ()
 
 
 def reconcile_plan(
@@ -106,9 +123,13 @@ def reconcile_plan(
     allows it. The valve trips when:
     - the live list is empty but the database isn't (an outage, not a mass
       exodus; this catches the small databases the percentage rule can't);
+    - or the database has rows, the live list is non-empty, and the two share
+      nothing (a wrong guild list looks exactly like this, and a three-row
+      database would otherwise lose every row to it);
     - or stale rows would exceed max(3, 10% of all rows).
-    When it trips, nothing is deleted and `valve_reason` is set. Creating
-    missing rows is never blocked: that can only add a free row.
+    When it trips, nothing is deleted here, `valve_reason` is set and every
+    stale row goes in `to_verify`: the caller checks each with Discord.
+    Creating missing rows is never blocked: that can only add a free row.
 
     `protected_ids` (the imported server) are never put in `to_delete`;
     they go to `to_confirm` so the caller can check with Discord before
@@ -129,6 +150,17 @@ def reconcile_plan(
             to_create,
             True,
             "the bot sees no servers at all, which looks like an outage and not a mass removal",
+            tuple(stale),
+        )
+    if not db & live:
+        return ReconcilePlan(
+            (),
+            (),
+            to_create,
+            True,
+            "none of the saved servers are among the ones the bot sees, which looks like a "
+            "wrong server list and not a mass removal",
+            tuple(stale),
         )
     limit = max(VALVE_MIN_DELETES, VALVE_FRACTION * len(db))
     if len(stale) > limit:
@@ -138,6 +170,7 @@ def reconcile_plan(
             to_create,
             True,
             f"{len(stale)} of {len(db)} servers look gone, over the limit of {limit:g}",
+            tuple(stale),
         )
     return ReconcilePlan(
         tuple(g for g in stale if g not in protected),

@@ -95,11 +95,20 @@ class Client:
     def is_ready(self):
         return self._ready
 
+    def get_guild(self, guild_id):
+        return next((g for g in self.guilds if g.id == guild_id), None)
+
     async def fetch_guild(self, guild_id):
         self.fetched.append(guild_id)
         if self._fetch is not None:
             return await self._fetch(guild_id)
         return SimpleNamespace(id=guild_id)
+
+
+@pytest.fixture(autouse=True)
+def _no_valve_pause(monkeypatch):
+    # The self-healing valve sleeps between Discord checks; tests don't need to wait.
+    monkeypatch.setattr(lifecycle, "VALVE_CHECK_PAUSE", 0)
 
 
 @pytest.fixture
@@ -149,8 +158,11 @@ def _count(db, table, where="1=1", args=()):
 
 
 def _expected_trip(n_db: int, n_stale: int) -> bool:
-    """The valve rule, restated independently in integers: stale > max(3, 10% of all rows)."""
-    return n_stale > 3 and n_stale * 10 > n_db
+    """The valve rule, restated independently in integers: stale > max(3, 10% of all rows).
+
+    Also trips when nothing in the database survives (the live list is disjoint from it).
+    """
+    return (n_stale > 3 and n_stale * 10 > n_db) or n_stale == n_db
 
 
 @pytest.mark.parametrize("n_db", [1, 2, 3, 4, 10, 30, 31, 100, 1000])
@@ -182,17 +194,23 @@ def test_valve_an_empty_live_list_always_trips_for_any_nonempty_db(n_db):
 
 
 def test_valve_three_stale_of_three_with_one_live_elsewhere_trips():
-    # All three rows gone but the bot sees some other server: 3 is not > 3, so this deletes
-    # everything. Pinned: a total wipe of a 3-row database is allowed when the list is non-empty.
+    # This used to delete everything (3 is not > 3). Changed with the disjoint guard: a database
+    # none of whose rows appear in a non-empty live list trips, and the I/O step verifies each row.
     plan = reconcile_plan([1, 2, 3], [99])
-    assert not plan.valve_tripped and plan.to_delete == (1, 2, 3) and plan.to_create == (99,)
+    assert plan.valve_tripped and plan.to_delete == () and plan.to_create == (99,)
+    assert plan.to_verify == (1, 2, 3)
 
 
-def test_valve_small_database_loses_every_row_to_a_one_guild_partial_list():
-    # The documented gap in the percentage rule: with 3 or fewer rows, "the cache came back with
-    # one wrong guild in it" looks the same as "we were all kicked". Nothing to fix cheaply.
+def test_valve_small_database_no_longer_loses_every_row_to_a_one_guild_partial_list():
+    # The old documented gap, closed by the disjoint guard: "one wrong guild in the cache" and
+    # "we were all kicked" now both go through per-row confirmation instead of a blind delete.
     plan = reconcile_plan([1, 2, 3], [4])
-    assert plan.to_delete == (1, 2, 3)
+    assert plan.valve_tripped and plan.to_delete == () and plan.to_verify == (1, 2, 3)
+
+
+def test_valve_overlap_of_even_one_row_is_not_disjoint():
+    plan = reconcile_plan([1, 2, 3], [3, 4])
+    assert not plan.valve_tripped and plan.to_delete == (1, 2)
 
 
 def test_valve_imported_guild_counts_toward_the_limit_and_is_never_asked_about_when_tripped():
@@ -232,7 +250,8 @@ async def test_owner_alert_has_no_ids_no_names_and_is_capped(v3_db, cfg, alerts)
 
 
 async def test_a_tripped_valve_never_clears_on_its_own_and_alerts_every_start(v3_db, cfg, alerts):
-    """A raid kicked the bot from 5 of 10 servers while it slept. Nothing ever cleans that up."""
+    """A raid kicked the bot from 5 of 10 servers while it slept. Discord says the bot is still in
+    them (the default fake answer), so the rows are kept and the owner hears about it each start."""
     ids = list(range(BASE, BASE + 10))
     _seed(v3_db, *ids)
     life = GuildLifecycle(v3_db, cfg, _alert_into(alerts))
@@ -241,7 +260,107 @@ async def test_a_tripped_valve_never_clears_on_its_own_and_alerts_every_start(v3
         plan = await life.reconcile(Client(survivors))
         assert plan.valve_tripped
     assert _ids(v3_db) == ids
-    assert len(alerts) == 3  # nagging, at least; but the rows stay forever
+    assert len(alerts) == 3  # nagging, at least; the rows stay while Discord won't confirm
+
+
+async def test_a_tripped_valve_heals_itself_over_several_starts_with_a_cap(
+    v3_db, cfg, alerts, monkeypatch
+):
+    """A mass offline kick: 12 of 20 rows are stale, Discord says gone for all of them, and the
+    cap is 5 per start. Each start deletes up to 5 confirmed rows and reports counts only."""
+    monkeypatch.setattr(lifecycle, "VALVE_CHECK_CAP", 5)
+    ids = list(range(BASE, BASE + 20))
+    _seed(v3_db, *ids)
+    life = GuildLifecycle(v3_db, cfg, _alert_into(alerts))
+
+    async def gone(gid):
+        raise _http(404, discord.NotFound, "gone")
+
+    survivors = ids[12:]
+    first = Client(survivors, fetch=gone)
+    assert (await life.reconcile(first)).valve_tripped
+    assert len(first.fetched) == 5 and len(_ids(v3_db)) == 15
+    assert "5 confirmed gone and deleted, 0 still unconfirmed" in alerts[0]
+    assert "7 skipped over the limit of 5" in alerts[0]
+    assert not any(str(g) in alerts[0] for g in ids)
+    await life.reconcile(Client(survivors, fetch=gone))
+    await life.reconcile(Client(survivors, fetch=gone))
+    assert _ids(v3_db) == survivors
+
+
+async def test_a_tripped_valve_keeps_rows_discord_will_not_confirm(v3_db, cfg, alerts):
+    ids = list(range(BASE, BASE + 10))
+    _seed(v3_db, *ids)
+    life = GuildLifecycle(v3_db, cfg, _alert_into(alerts))
+
+    async def fetch(gid):
+        if gid == ids[0]:
+            raise _http(404, discord.NotFound, "gone")
+        if gid == ids[1]:
+            raise _http(403, discord.Forbidden, "Missing Access")
+        if gid == ids[2]:
+            raise _http(500)
+        return SimpleNamespace(id=gid)
+
+    await life.reconcile(Client(ids[5:], fetch=fetch))
+    assert _ids(v3_db) == ids[2:]
+    assert "2 confirmed gone and deleted, 3 still unconfirmed" in alerts[0]
+    assert "0 skipped" in alerts[0]
+
+
+async def test_a_tripped_valve_checks_sequentially_with_a_pause(v3_db, cfg, alerts, monkeypatch):
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(lifecycle, "VALVE_CHECK_PAUSE", 0.25)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    ids = list(range(BASE, BASE + 10))
+    _seed(v3_db, *ids)
+    life = GuildLifecycle(v3_db, cfg, _alert_into(alerts))
+    await life.reconcile(Client(ids[5:]))
+    assert sleeps == [0.25] * 4
+
+
+async def test_a_disjoint_small_database_is_verified_not_wiped(v3_db, life, alerts):
+    _seed(v3_db, 1, 2, 3)
+    client = Client([99])
+    plan = await life.reconcile(client)
+    assert plan.valve_tripped
+    assert client.fetched == [1, 2, 3]
+    assert _ids(v3_db) == [1, 2, 3, 99]
+    assert len(alerts) == 1
+
+
+async def test_a_guild_that_rejoins_while_the_valve_verifies_keeps_its_row(v3_db, life):
+    _seed(v3_db, G1, G2, G3)
+    client = Client([BASE + 70])
+
+    async def fetch(gid):
+        if gid == G1:
+            client.guilds.append(make_guild(G1))  # re-invited while Discord is being asked
+        raise _http(404, discord.NotFound, "gone")
+
+    client._fetch = fetch
+    await life.reconcile(client)
+    assert _ids(v3_db) == [G1, BASE + 70]
+
+
+async def test_a_tripped_valve_alert_survives_a_failing_delete(v3_db, life, alerts, monkeypatch):
+    _seed(v3_db, G1, G2)
+
+    def boom(conn, guild_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    async def gone(gid):
+        raise _http(404, discord.NotFound, "gone")
+
+    monkeypatch.setattr(repo, "delete_guild", boom)
+    await life.reconcile(Client([BASE + 70], fetch=gone))
+    assert "0 confirmed gone and deleted, 2 still unconfirmed" in alerts[0]
 
 
 async def test_a_tripped_valve_clears_once_enough_new_servers_join(v3_db, cfg, alerts):
@@ -303,7 +422,13 @@ async def test_remove_then_join_in_the_wrong_order_leaves_a_row_for_a_guild_we_l
     await life.on_guild_remove(make_guild(G1))
     await life.on_guild_join(make_guild(G1))
     assert _ids(v3_db) == [G1]
-    await life.reconcile(Client([G2]))  # G1 is stale, G2 is new; 1 stale <= 3, so it's deleted
+
+    async def gone(gid):
+        raise _http(404, discord.NotFound, "gone")
+
+    # G1 is stale and G2 is new with nothing in common: the disjoint guard trips the valve, and
+    # the row only goes because Discord confirms the bot isn't in G1.
+    await life.reconcile(Client([G2], fetch=gone))
     assert _ids(v3_db) == [G2]
 
 
@@ -359,12 +484,6 @@ async def test_two_reconciles_at_once_delete_a_stale_row_once(life, v3_db):
     assert _ids(v3_db) == [G2]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reconcile applies its start-of-run snapshot after awaits: a guild removed while "
-    "reconcile is saying hello to an earlier guild still gets a row created afterward, for a "
-    "server the bot has left. It stays until the next start (and always if the valve trips).",
-)
 async def test_remove_event_mid_reconcile_does_not_resurrect_the_row(life, v3_db):
     g2 = make_guild(G2, channels=[Chan(20)])
     client = Client()
@@ -373,18 +492,13 @@ async def test_remove_event_mid_reconcile_does_not_resurrect_the_row(life, v3_db
         client.guilds = [g for g in client.guilds if g.id != G2]
         await life.on_guild_remove(g2)
 
+    # The row-write is checked against the live cache at the moment it happens, not the snapshot.
     g1 = make_guild(G1, channels=[Chan(10, hook=g2_is_kicked_meanwhile)])
     client.guilds = [g1, g2]
     await life.reconcile(client)
     assert _ids(v3_db) == [G1]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reconcile deletes stale rows from its snapshot after awaiting Discord (the imported "
-    "guild's fetch): a guild the bot rejoins during that await has its fresh row deleted, and "
-    "the join event sent no hello because the row still existed. Bot is in, no row, until restart.",
-)
 async def test_rejoin_during_reconcile_keeps_the_row(life, v3_db):
     with closing(connect(v3_db)) as conn:
         repo.create_guild(conn, G1, imported_at=NOW)
@@ -687,18 +801,15 @@ async def test_fetch_guild_returning_anything_at_all_keeps_the_imported_row(life
     assert G1 in _ids(v3_db)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_confirmed_gone has no timeout: a fetch_guild that never answers hangs reconcile "
-    "forever, so the other stale deletes, the missing-row creates and comping never run.",
-)
-async def test_a_hanging_fetch_guild_does_not_hang_reconcile(life, v3_db):
+async def test_a_hanging_fetch_guild_does_not_hang_reconcile(life, v3_db, monkeypatch):
+    monkeypatch.setattr(lifecycle, "FETCH_TIMEOUT", 0.05)
     _imported_db(v3_db)
 
     async def fetch(gid):
         await asyncio.Event().wait()
 
     await asyncio.wait_for(life.reconcile(Client([G2], fetch=fetch)), timeout=1.0)
+    assert G1 in _ids(v3_db)  # no answer is not "gone"
 
 
 async def test_imported_guild_fetch_is_asked_once_per_guild_not_per_stale_row(life, v3_db):
@@ -814,12 +925,6 @@ async def test_http_failures_on_the_hello_never_escape_and_keep_the_row(life, v3
     [TimeoutError(), ConnectionResetError(), RuntimeError("x"), OSError("x")],
     ids=lambda e: type(e).__name__,
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="_say_hello only catches discord.HTTPException. A TimeoutError, connection reset or "
-    "any other exception from send escapes on_guild_join, and through it aborts reconcile's "
-    "create loop and skips comping for everything after it.",
-)
 async def test_non_http_failures_on_the_hello_do_not_abort_reconcile(life, v3_db, error):
     bad = Chan(1, error=error)
     good = Chan(2)
@@ -838,12 +943,9 @@ async def test_non_http_hello_failure_keeps_the_row_even_when_it_escapes(life, v
     assert _ids(v3_db) == [G1]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="no timeout around the hello's send: one hung send blocks reconcile forever (and "
-    "every later create and the comping pass with it).",
-)
-async def test_a_hung_hello_does_not_hang_reconcile(life, v3_db):
+async def test_a_hung_hello_does_not_hang_reconcile(life, v3_db, monkeypatch):
+    monkeypatch.setattr(lifecycle, "HELLO_TIMEOUT", 0.05)
+
     async def never():
         await asyncio.Event().wait()
 
@@ -925,18 +1027,14 @@ def test_guild_without_me_attribute_at_all_is_handled():
     assert lifecycle.pick_first_contact_channel(guild) is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="can_speak_in says it never raises, but only the permissions_for call is inside the "
-    "try; reading view_channel off a None result raises AttributeError. Discord never returns "
-    "None, so this is a docstring-versus-code nit.",
-)
 def test_permissions_for_returning_garbage_is_not_a_yes():
     class Weird(Chan):
         def permissions_for(self, member):
             return None
 
     assert lifecycle.pick_first_contact_channel(make_guild(channels=[Weird(1)])) is None
+    assert lifecycle.can_speak_in(Weird(1), "bot") is False
+    assert lifecycle.can_speak_in(Chan(1, perms="garbage"), "bot") is False
 
 
 def test_first_contact_text_fits_a_message_and_has_no_markup_that_pings():
@@ -984,13 +1082,21 @@ async def test_a_delisted_guild_that_is_removed_and_rejoined_comes_back_free(v3_
     assert _tier(v3_db, G1) == "free"
 
 
-async def test_duplicate_join_for_a_listed_free_row_does_not_upgrade_until_reconcile(v3_db, cfg):
+async def test_duplicate_join_for_a_listed_free_row_upgrades_it_immediately(v3_db, cfg):
     _seed(v3_db, G1)
     life = GuildLifecycle(v3_db, cfg.model_copy(update={"comped_guild_ids": [G1]}), _noop_alert())
+    # Changed: a duplicate join used to wait for the next reconcile to comp the row.
     assert await life.on_guild_join(make_guild(G1)) is False
-    assert _tier(v3_db, G1) == "free"
-    await life.reconcile(Client([G1]))
     assert _tier(v3_db, G1) == "comped"
+
+
+async def test_duplicate_join_never_downgrades_or_comps_an_unlisted_row(v3_db, cfg):
+    _seed(v3_db, G1, tier="comped")
+    _seed(v3_db, G2)
+    life = GuildLifecycle(v3_db, cfg.model_copy(update={"comped_guild_ids": []}), _noop_alert())
+    await life.on_guild_join(make_guild(G1))
+    await life.on_guild_join(make_guild(G2))
+    assert (_tier(v3_db, G1), _tier(v3_db, G2)) == ("comped", "free")
 
 
 async def test_comping_is_idempotent_and_leaves_other_settings_alone(v3_db, cfg):
@@ -1018,13 +1124,10 @@ def _noop_alert():
 # --- reconcile robustness ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reconcile's delete loop has no per-guild error handling: one failing delete raises "
-    "out of reconcile, skipping the remaining deletes, every create and the comping pass.",
-)
 async def test_one_failing_delete_does_not_abort_the_rest_of_reconcile(life, v3_db, monkeypatch):
-    _seed(v3_db, G1, G2, G3)
+    # A survivor (BASE + 60) keeps the live list from being disjoint from the database, which
+    # would trip the valve; this test is about one failing delete, not the valve.
+    _seed(v3_db, G1, G2, G3, BASE + 60)
     real = repo.delete_guild
 
     def flaky(conn, guild_id):
@@ -1034,7 +1137,7 @@ async def test_one_failing_delete_does_not_abort_the_rest_of_reconcile(life, v3_
 
     monkeypatch.setattr(repo, "delete_guild", flaky)
     new = BASE + 50
-    await life.reconcile(Client([new]))  # G1, G2, G3 stale: 3 <= 3, all may go
+    await life.reconcile(Client([new, BASE + 60]))  # G1, G2, G3 stale: 3 <= 3, all may go
     assert new in _ids(v3_db)
     assert G2 not in _ids(v3_db)
 

@@ -1227,23 +1227,31 @@ class GuildLifecycle:
             return False
         if not created:
             logger.info("guild join: row already exists", extra={"guild_id": guild.id})
+            # A duplicate join still upgrades a listed free row; it never downgrades.
+            self._comp_one(guild.id)
             return False
         logger.info("guild join: new server %d", guild.id, extra={"guild_id": guild.id})
         await self._say_hello(guild)
         return True
 
     async def _say_hello(self, guild: discord.Guild) -> None:
-        channel = lifecycle.pick_first_contact_channel(guild)
-        if channel is None:
-            logger.info("guild %d: nowhere the bot may speak; no first-contact message", guild.id)
-            return
+        """One attempt at the hello. Logs and swallows any failure (cancellation excepted)."""
         try:
-            await channel.send(
-                lifecycle.FIRST_CONTACT_TEXT, allowed_mentions=lifecycle.allowed_mentions()
-            )
-        except discord.HTTPException:
-            # Permissions can change between the check and the send. One
-            # attempt, then quiet: the hello is a nicety, not a promise.
+            channel = lifecycle.pick_first_contact_channel(guild)
+            if channel is None:
+                logger.info(
+                    "guild %d: nowhere the bot may speak; no first-contact message", guild.id
+                )
+                return
+            async with asyncio.timeout(lifecycle.HELLO_TIMEOUT):
+                await channel.send(
+                    lifecycle.FIRST_CONTACT_TEXT, allowed_mentions=lifecycle.allowed_mentions()
+                )
+        except Exception:
+            # Permissions change between the check and the send, sockets reset,
+            # and sends occasionally never come back (the timeout). One attempt,
+            # then quiet: the hello is a nicety, not a promise, and it must not
+            # take reconcile's remaining servers down with it.
             logger.warning("guild %d: first-contact message failed", guild.id, exc_info=True)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
@@ -1286,9 +1294,18 @@ class GuildLifecycle:
         Call it from the first `on_ready`, after the import. Does nothing
         (returns None) if the client isn't ready, since a half-filled guild
         cache is exactly how a cleanup wipes the wrong servers. See
-        `lifecycle.reconcile_plan` for the valve; when it trips the owner is
-        told and no rows are deleted. Guilds the bot is in but has no row for
-        get the join treatment, hello included, per plan section 3.8.
+        `lifecycle.reconcile_plan` for the valve; when it trips, the stale rows
+        are checked with Discord one at a time (capped per start) and only the
+        confirmed-gone ones are deleted, then the owner gets counts. Guilds the
+        bot is in but has no row for get the join treatment, hello included,
+        per plan section 3.8.
+
+        The plan is a snapshot and this method awaits Discord between steps, so
+        every create and delete re-asks `client.get_guild` right before it
+        acts. No await sits between that check and the write, which makes the
+        pair atomic on the event loop; a lock held across the hello or the
+        fetch would only make join events queue behind a slow send. Each step
+        runs on its own so one failure can't skip the rest.
         """
         if not client.is_ready():
             logger.warning("reconcile: client not ready; skipping")
@@ -1304,43 +1321,103 @@ class GuildLifecycle:
             protected_ids=[r.guild_id for r in rows if r.imported_at is not None],
         )
         if plan.valve_tripped:
-            logger.warning("reconcile: cleanup skipped, %s", plan.valve_reason)
+            logger.warning("reconcile: cleanup paused, %s", plan.valve_reason)
+            deleted, unconfirmed, skipped = await self._self_heal(client, plan.to_verify)
             await self._alert_owner(
-                f"Startup cleanup skipped: {plan.valve_reason}. No server rows were deleted."
+                f"Startup cleanup paused: {plan.valve_reason}. Asked Discord about the stale "
+                f"servers: {deleted} confirmed gone and deleted, {unconfirmed} still unconfirmed "
+                f"(kept), {skipped} skipped over the limit of {lifecycle.VALVE_CHECK_CAP} per "
+                "start (the next start checks more)."
             )
         deletes = list(plan.to_delete)
         for guild_id in plan.to_confirm:
             if await self._confirmed_gone(client, guild_id):
                 deletes.append(guild_id)
         for guild_id in deletes:
-            with closing(connect(self.db_path)) as conn:
-                repo.delete_guild(conn, guild_id)
-            logger.info("reconcile: removed stale server %d", guild_id)
+            self._delete_if_still_gone(client, guild_id)
         for guild_id in plan.to_create:
-            await self.on_guild_join(live[guild_id])
+            try:
+                guild = client.get_guild(guild_id)
+                if guild is None:
+                    logger.info("reconcile: server %d left mid-run; no row created", guild_id)
+                    continue
+                await self.on_guild_join(guild)
+            except Exception:
+                logger.exception("reconcile: create failed", extra={"guild_id": guild_id})
         self._apply_comping()
         return plan
+
+    async def _self_heal(
+        self, client: discord.Client, stale: tuple[int, ...]
+    ) -> tuple[int, int, int]:
+        """Valve tripped: ask Discord about stale rows, delete the confirmed ones.
+
+        Sequential, at most `VALVE_CHECK_CAP` per call, with a pause between
+        asks. Returns (deleted, still unconfirmed, skipped over the cap).
+        """
+        batch = stale[: lifecycle.VALVE_CHECK_CAP]
+        deleted = 0
+        for n, guild_id in enumerate(batch):
+            if n:
+                await asyncio.sleep(lifecycle.VALVE_CHECK_PAUSE)
+            if await self._confirmed_gone(client, guild_id) and self._delete_if_still_gone(
+                client, guild_id
+            ):
+                deleted += 1
+        return deleted, len(batch) - deleted, len(stale) - len(batch)
+
+    def _delete_if_still_gone(self, client: discord.Client, guild_id: int) -> bool:
+        """Delete the row unless the bot has (re)joined since the plan was made. True if deleted."""
+        if client.get_guild(guild_id) is not None:
+            logger.info("reconcile: server %d is back; row kept", guild_id)
+            return False
+        try:
+            with closing(connect(self.db_path)) as conn:
+                repo.delete_guild(conn, guild_id)
+        except Exception:
+            logger.exception("reconcile: delete failed", extra={"guild_id": guild_id})
+            return False
+        logger.info("reconcile: removed stale server %d", guild_id)
+        return True
 
     async def _confirmed_gone(self, client: discord.Client, guild_id: int) -> bool:
         """Ask Discord directly whether the bot is out of `guild_id`; any doubt says no."""
         try:
-            await client.fetch_guild(guild_id)
+            async with asyncio.timeout(lifecycle.FETCH_TIMEOUT):
+                await client.fetch_guild(guild_id)
         except discord.NotFound, discord.Forbidden:
             return True
         except Exception:
+            # Includes the timeout: no answer is not an answer, so the row stays.
             logger.warning("reconcile: couldn't confirm server %d is gone", guild_id, exc_info=True)
             return False
         return False
+
+    def _comp_one(self, guild_id: int) -> None:
+        """D6: a listed guild whose row is free becomes comped. Never downgrades, never raises."""
+        if guild_id not in self.cfg.comped_guild_ids:
+            return
+        try:
+            with closing(connect(self.db_path)) as conn:
+                row = repo.get_guild(conn, guild_id)
+                if row is not None and row.tier == "free":
+                    repo.update_guild_settings(conn, guild_id, tier="comped")
+                    logger.info("server %d comped (comped_guild_ids)", guild_id)
+        except Exception:
+            logger.exception("comping failed", extra={"guild_id": guild_id})
 
     def _apply_comping(self) -> None:
         """D6: listed guilds that have a row and are free become comped. Never downgrades."""
         if not self.cfg.comped_guild_ids:
             return
-        with closing(connect(self.db_path)) as conn:
-            tiers = {r.guild_id: r.tier for r in repo.list_guilds(conn)}
-            for guild_id in lifecycle.comp_candidates(self.cfg.comped_guild_ids, tiers):
-                repo.update_guild_settings(conn, guild_id, tier="comped")
-                logger.info("reconcile: server %d comped (comped_guild_ids)", guild_id)
+        try:
+            with closing(connect(self.db_path)) as conn:
+                tiers = {r.guild_id: r.tier for r in repo.list_guilds(conn)}
+        except Exception:
+            logger.exception("reconcile: comping could not read the guild rows")
+            return
+        for guild_id in lifecycle.comp_candidates(self.cfg.comped_guild_ids, tiers):
+            self._comp_one(guild_id)
 
 
 __all__ = [
