@@ -590,6 +590,9 @@ async def test_recover_pending_notifies_each_guild_and_returns_a_count(h):
             conn,
             [(CODE_A, "s", "https://x.test", False), (CODE_B, "s", "https://x.test", False)],
             now=lambda: NOW,
+            # Changed with the delivery queue: a claim now moves a `queued` row to
+            # `pending`, so the release has to queue for the guilds first.
+            queue_for_games=[],
         )
         repo.claim_guild_codes(
             conn, 1, [CODE_A, CODE_B], pinged=False, local_day="2026-10-01", now=lambda: NOW
@@ -605,7 +608,12 @@ async def test_recover_pending_notifies_each_guild_and_returns_a_count(h):
     assert set(by_guild) == {1, 2}
     assert CODE_A in by_guild[1] and CODE_B in by_guild[1]
     assert CODE_B not in by_guild[2]
-    assert set(rows(h.db_path, "SELECT DISTINCT status FROM guild_code_posts")) == {("failed",)}
+    # Changed with the queue: guild 2's CODE_B was queued at release and never claimed, so
+    # recovery leaves it `queued` for delivery instead of it not existing.
+    assert set(rows(h.db_path, "SELECT DISTINCT status FROM guild_code_posts")) == {
+        ("failed",),
+        ("queued",),
+    }
     assert await recover_pending_guild_codes(h.db_path, h.notify_guild) == 0
 
 
@@ -634,16 +642,20 @@ def test_claim_guild_codes_duplicate_aborts_the_whole_claim_ping_spend_included(
             conn,
             [(CODE_A, "s", "https://x.test", False), (CODE_B, "s", "https://x.test", False)],
             now=lambda: NOW,
+            queue_for_games=[],
         )
         repo.claim_guild_codes(
             conn, 1, [CODE_A], pinged=False, local_day="2026-10-01", now=lambda: NOW
         )
-        with pytest.raises(Exception, match="UNIQUE"):
+        # Changed with the delivery queue: the old failure was a UNIQUE violation on a
+        # second INSERT; now it's a code that's no longer `queued` (someone else
+        # claimed it), which is the guard that stops two passes double-sending.
+        with pytest.raises(repo.ClaimLostError):
             repo.claim_guild_codes(
                 conn, 1, [CODE_B, CODE_A], pinged=True, local_day="2026-10-01", now=lambda: NOW
             )
         assert repo.get_shift(conn, 1).ping_count == 0
-        assert set(repo.guild_posted_codes(conn, 1, [CODE_A, CODE_B])) == {CODE_A}
+        assert [q.code for q in repo.queued_guild_codes(conn, 1)] == [CODE_B]
 
 
 def test_record_released_codes_reports_only_what_it_inserted(db_path):

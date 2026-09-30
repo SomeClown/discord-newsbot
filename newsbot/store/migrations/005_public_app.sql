@@ -75,10 +75,15 @@ CREATE TABLE guild_shift (
 CREATE TABLE guild_code_posts (
     guild_id INTEGER NOT NULL REFERENCES guilds (guild_id) ON DELETE CASCADE,
     code TEXT NOT NULL REFERENCES alerted_codes (code),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'posted', 'failed')),
+    -- queued: released, waiting its guild's turn; pending: claimed, send in
+    -- flight; posted / failed: outcome; skipped: the guild stopped wanting it.
+    status TEXT NOT NULL CHECK (status IN ('queued', 'pending', 'posted', 'failed', 'skipped')),
     message_id INTEGER,
     pinged INTEGER NOT NULL DEFAULT 0 CHECK (pinged IN (0, 1)),
     from_roundup INTEGER NOT NULL DEFAULT 0 CHECK (from_roundup IN (0, 1)),
+    -- what detection knew at release time, for a delivery that happens later
+    golden INTEGER NOT NULL DEFAULT 0 CHECK (golden IN (0, 1)),
+    trusted INTEGER NOT NULL DEFAULT 1 CHECK (trusted IN (0, 1)),
     claimed_at TEXT NOT NULL,
     PRIMARY KEY (guild_id, code)
 );

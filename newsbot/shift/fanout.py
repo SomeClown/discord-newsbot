@@ -5,19 +5,33 @@ nobody had to think about the gap between them. v3 has as many servers as
 will have us, and the gap is the whole design. Detection is global and happens
 once per collection pass: the regex, trust, age limit, roundup handling and
 the silent first sweep all behave exactly as design.md §12 decided, against
-the one `alerted_codes` table. Then the codes released in *this pass* (and only
-this pass, which is why enabling alerts never produces a backlog) fan out to
-every eligible server, each with its own channel, its own ping choice and its
-own daily ping budget in its own local day. Think of it as one town crier who
-reads the news once and then visits each house, rather than each house hiring
-a crier.
+the one `alerted_codes` table. Then each code released in *this pass* (and only
+this pass, which is why enabling alerts never produces a backlog) is queued
+for every server eligible at that instant, in the same transaction as the
+release. Delivery is a separate step that works through the queue, server by
+server, each with its own channel, its own ping choice and its own daily ping
+budget in its own local day. Think of it as one town crier who reads the news
+once, writes down every house that wants it, and then walks the list.
 
-Two rules carry over from v2 without apology: a code's claim is written
-*before* anything is sent (a crash loses an alert, never doubles a ping), and
-a failure in one server's channel is that server's problem. It goes to that
-server's own admin channel and never stops the next server in line. The owner
-hears about the detector breaking (`pipeline/collect.py` does that), not about
-someone deleting their SHiFT channel.
+The queue exists because my first draft delivered inside the collection hook's
+120 second timeout and recorded nobody until their turn came. A few hundred
+servers at a pace of 0.2 s each is a long walk, the timeout is not patient,
+and a server the crier never reached had no record of ever being owed the
+code. Now the list is written before the walk starts, a walk cut short leaves
+the rest of the list queued, and the next pass (or startup) picks up where it
+stopped. At a server's turn its *current* settings decide what happens: alerts
+switched off or the channel gone means `skipped`; a new ping choice is the
+one used. Codes are not stale-checked beyond that; a queued code for a server
+that's still listening is news to it.
+
+Two rules carry over from v2 without apology: a code's claim (queued to
+`pending`) is written *before* anything is sent (a crash loses an alert, never
+doubles a ping; a `pending` row that's gone stale is marked `failed`, never
+re-sent), and a failure in one server's channel is that server's problem. It
+goes to that server's own admin channel and never stops the next server in
+line. The owner hears about the detector breaking (`pipeline/collect.py` does
+that) and about a roundup too big for the cap, not about someone deleting
+their SHiFT channel.
 
 Posting is injected (`FanoutDeps.poster_for`), so all of this is testable
 without a Discord in sight.
@@ -38,26 +52,31 @@ from newsbot.config import AppConfig
 from newsbot.pipeline.normalize import canonicalize_items
 from newsbot.pipeline.run import local_run_date
 from newsbot.shift.decide import (
+    MAX_ROUNDUP_CODES,
     CodeCandidate,
     aggregate,
     plan_alerts,
     seeding_healthy,
     sightings_from_items,
 )
-from newsbot.shift.sweep import CodeAlertPoster, post_alert_with_retry
+from newsbot.shift.sweep import _ROUNDUP_CAP_ALERT, CodeAlertPoster, post_alert_with_retry
 from newsbot.store.db import connect
-from newsbot.store.models import GuildSettings, ShiftSettings
+from newsbot.store.models import GuildSettings, QueuedCode, ShiftSettings
 from newsbot.store.repo import (
+    ClaimLostError,
     claim_guild_codes,
-    eligible_shift_guilds,
+    current_shift_delivery,
     fail_pending_guild_codes,
+    fail_queued_guild_codes,
     get_alert_state,
-    guild_posted_codes,
     known_codes,
     mark_guild_codes_failed,
     mark_guild_codes_posted,
+    queued_guild_codes,
+    queued_guild_ids,
     record_released_codes,
     record_silent_codes,
+    skip_queued_guild_codes,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +91,10 @@ NotifyGuild = Callable[[int, str], Awaitable[None]]
 # the same instant; Discord's rate limiter is patient, but not infinitely.
 _GUILD_PACE_S = 0.2
 
+# A `pending` row older than this is a send that died, not one in flight (the
+# hook's own timeout is 120 s). Startup doesn't need the wait: nothing is in flight.
+_PENDING_STALE_S = 600.0
+
 
 @dataclass
 class FanoutDeps:
@@ -82,6 +105,9 @@ class FanoutDeps:
     notify_guild: NotifyGuild
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     pace_s: float = _GUILD_PACE_S
+    # The bot-wide owner alert path (never a server's channel). None means
+    # nobody is listening, which is how tests that don't care run.
+    alert_owner: Notify | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +118,7 @@ class GuildOutcome:
     posted: int = 0
     roundup_posted: int = 0
     failed: int = 0
+    skipped: int = 0
     pinged: bool = False
     cap_reached: bool = False
     error: str | None = None
@@ -165,11 +192,6 @@ async def _safe_notify(notify: Notify, text: str) -> None:
         logger.exception("couldn't send a guild notice")
 
 
-def _unposted_sync(db_path: str, guild_id: int, codes: list[str]) -> set[str]:
-    with closing(connect(db_path)) as conn:
-        return set(codes) - guild_posted_codes(conn, guild_id, codes)
-
-
 async def _claim(
     deps: FanoutDeps,
     guild_id: int,
@@ -179,8 +201,10 @@ async def _claim(
     local_day: str,
     now: datetime,
     from_roundup: bool,
-) -> bool:
-    def _sync() -> bool:
+) -> bool | None:
+    """Claim queued -> pending; None if another pass beat us to these codes."""
+
+    def _sync() -> bool | None:
         with closing(connect(deps.db_path)) as conn:
             return claim_guild_codes(
                 conn,
@@ -193,35 +217,59 @@ async def _claim(
                 from_roundup=from_roundup,
             )
 
-    return await asyncio.to_thread(_sync)
+    try:
+        return await asyncio.to_thread(_sync)
+    except ClaimLostError:
+        return None
 
 
-async def _fan_out_one(
-    deps: FanoutDeps,
-    guild: GuildSettings,
-    shift: ShiftSettings,
-    to_post: list[CodeCandidate],
-    roundup_to_post: list[CodeCandidate],
-    now: datetime,
-) -> GuildOutcome:
-    """One server's turn. Raises freely; `_fan_out` catches it so nobody else waits."""
-    guild_id = guild.guild_id
+def _candidate(queued: QueuedCode) -> CodeCandidate:
+    return CodeCandidate(
+        queued.code,
+        golden=queued.golden,
+        source_name=queued.source_name,
+        item_url=queued.item_url,
+        fresh=True,
+        trusted=queued.trusted,
+        roundup=queued.from_roundup,
+    )
+
+
+async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildOutcome:
+    """One server's turn. Raises freely; `deliver_queued_codes` catches it so nobody else waits."""
+
+    def _load_sync() -> tuple[GuildSettings, ShiftSettings, list[QueuedCode]] | int:
+        # Current settings, read at this server's turn: they (not the ones from
+        # release time) decide whether to post, with which ping, under which cap.
+        with closing(connect(deps.db_path)) as conn:
+            queued = queued_guild_codes(conn, guild_id)
+            state = current_shift_delivery(conn, guild_id, deps.cfg.shift.games)
+            if state is None:
+                skip_queued_guild_codes(conn, guild_id, [q.code for q in queued])
+                return len(queued)
+            guild, shift = state
+            # Alerts switched off and back on since the release: the no-backlog
+            # rule says a re-enabled server starts from codes found after that.
+            stale = [
+                q for q in queued if shift.enabled_at is None or shift.enabled_at > q.queued_at
+            ]
+            if stale:
+                skip_queued_guild_codes(conn, guild_id, [q.code for q in stale])
+            return guild, shift, [q for q in queued if q not in stale]
+
+    loaded = await asyncio.to_thread(_load_sync)
+    if isinstance(loaded, int):
+        return GuildOutcome(guild_id, skipped=loaded)
+    guild, shift, queued = loaded
     channel_id = shift.channel_id
-    if channel_id is None:  # eligible_shift_guilds never returns one; belt and suspenders
-        return GuildOutcome(guild_id)
+    if channel_id is None or not queued:  # the first can't happen; the second is a stale-only turn
+        return GuildOutcome(guild_id, skipped=0)
 
     async def notify(text: str) -> None:
         await deps.notify_guild(guild_id, text)
 
-    # A server's own history decides what's news to it: a code it already has a
-    # row for (the import copies v2.2's posted codes in) never posts again.
-    fresh_codes = await asyncio.to_thread(
-        _unposted_sync, deps.db_path, guild_id, [c.code for c in to_post + roundup_to_post]
-    )
-    normal = [c for c in to_post if c.code in fresh_codes]
-    roundup = [c for c in roundup_to_post if c.code in fresh_codes]
-    if not normal and not roundup:
-        return GuildOutcome(guild_id)
+    normal = [_candidate(q) for q in queued if not q.from_roundup]
+    roundup = [_candidate(q) for q in queued if q.from_roundup]
 
     local_day = local_run_date(now, guild.timezone).isoformat()
     poster = deps.poster_for(guild_id, channel_id, shift.ping, notify)
@@ -238,9 +286,9 @@ async def _fan_out_one(
         # Render before claiming, worst case first: a claim can only turn a ping
         # off, and a message that fits under the longer pinged header fits
         # under the shorter one. (A row stranded `pending` by a render that
-        # blew up afterwards would sit there until the next startup.)
+        # blew up afterwards would sit there until it goes stale.)
         rendered = render_code_alerts(normal, ping=want_ping, ping_mention=mention)
-        final_ping = await _claim(
+        claimed = await _claim(
             deps,
             guild_id,
             [c.code for c in normal],
@@ -249,19 +297,22 @@ async def _fan_out_one(
             now=now,
             from_roundup=False,
         )
-        if want_ping and not final_ping:
-            cap_reached = True
-            rendered = render_code_alerts(normal, ping=False)
-        posted, failed = await _post_batch(deps, guild_id, poster, rendered, notify)
-        if cap_reached and deps.cfg.shift.max_pings_per_day > 0:
-            await _safe_notify(
-                notify, "newsbot: SHiFT code alert daily ping cap reached; posted without a ping"
-            )
+        if claimed is not None:  # None: a concurrent pass has these, and will send them
+            final_ping = claimed
+            if want_ping and not final_ping:
+                cap_reached = True
+                rendered = render_code_alerts(normal, ping=False)
+            posted, failed = await _post_batch(deps, guild_id, poster, rendered, notify)
+            if cap_reached and deps.cfg.shift.max_pings_per_day > 0:
+                await _safe_notify(
+                    notify,
+                    "newsbot: SHiFT code alert daily ping cap reached; posted without a ping",
+                )
 
     if roundup:
         # Never pinged, never counted against the cap; it claims with its own flag.
         rendered_roundup = render_roundup_alerts(roundup)
-        await _claim(
+        claimed = await _claim(
             deps,
             guild_id,
             [c.code for c in roundup],
@@ -270,10 +321,11 @@ async def _fan_out_one(
             now=now,
             from_roundup=True,
         )
-        roundup_posted, roundup_failed = await _post_batch(
-            deps, guild_id, poster, rendered_roundup, notify
-        )
-        failed += roundup_failed
+        if claimed is not None:
+            roundup_posted, roundup_failed = await _post_batch(
+                deps, guild_id, poster, rendered_roundup, notify
+            )
+            failed += roundup_failed
 
     return GuildOutcome(
         guild_id,
@@ -285,42 +337,70 @@ async def _fan_out_one(
     )
 
 
-async def _fan_out(
-    deps: FanoutDeps,
-    to_post: list[CodeCandidate],
-    roundup_to_post: list[CodeCandidate],
-    now: datetime,
-) -> list[GuildOutcome]:
-    def _eligible_sync() -> list[tuple[GuildSettings, ShiftSettings]]:
-        with closing(connect(deps.db_path)) as conn:
-            return eligible_shift_guilds(conn, deps.cfg.shift.games, now)
+async def deliver_queued_codes(deps: FanoutDeps, *, startup: bool = False) -> list[GuildOutcome]:
+    """Work through the delivery queue: every server with `queued` codes, in guild id order.
 
-    eligible = await asyncio.to_thread(_eligible_sync)
+    Runs at the end of every collection pass (so a walk the hook timeout cut
+    short is finished by the next one) and can be called at startup
+    (`startup=True`) to do the same after a crash. It starts with crash
+    recovery: a `pending` row is a claim whose send never got confirmed, so it
+    becomes `failed` and its server is told; at startup that is every
+    `pending` row, mid-run only the stale ones. Nothing `pending` is ever
+    sent again.
+
+    A timeout or cancellation leaves whatever hasn't had its turn `queued`.
+    Two passes running at once can't double-send: the queued -> pending claim
+    is atomic, and the loser sees it lost and moves on.
+    """
+    now = deps.now()
+    stale_before = None if startup else now - timedelta(seconds=_PENDING_STALE_S)
+    await recover_pending_guild_codes(deps.db_path, deps.notify_guild, claimed_before=stale_before)
+
+    def _queued_sync() -> list[int]:
+        with closing(connect(deps.db_path)) as conn:
+            return queued_guild_ids(conn)
+
     outcomes: list[GuildOutcome] = []
-    for i, (guild, shift) in enumerate(eligible):
+    for i, guild_id in enumerate(await asyncio.to_thread(_queued_sync)):
         if i:
             await deps.sleep(deps.pace_s)
         try:
-            outcomes.append(await _fan_out_one(deps, guild, shift, to_post, roundup_to_post, now))
+            outcomes.append(await _deliver_one(deps, guild_id, now))
         except Exception as exc:
             # One server's broken channel (or a bug that only its settings
             # tickle) is its own business; the rest of the list still gets its turn.
-            logger.exception("SHiFT fan-out failed for a guild", extra={"guild_id": guild.guild_id})
-            outcomes.append(GuildOutcome(guild.guild_id, error=str(exc)))
+            # What it hadn't claimed yet is failed, not left queued: a bug
+            # doesn't fix itself by the next pass, and an hourly notice isn't a fix.
+            logger.exception("SHiFT delivery failed for a guild", extra={"guild_id": guild_id})
+            outcomes.append(GuildOutcome(guild_id, error=str(exc)))
+            await asyncio.to_thread(_fail_queued_sync, deps.db_path, guild_id)
             await _safe_notify(
-                lambda text, g=guild.guild_id: deps.notify_guild(g, text),
+                lambda text, g=guild_id: deps.notify_guild(g, text),
                 "newsbot: a SHiFT code alert couldn't be posted to your server this time.",
             )
     return outcomes
 
 
-async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
-    """Detect codes in `items` once, then post the new ones to every eligible server.
+def _fail_queued_sync(db_path: str, guild_id: int) -> None:
+    with closing(connect(db_path)) as conn:
+        fail_queued_guild_codes(conn, guild_id)
 
-    Returns how many codes were released (posted or roundup-posted) this pass.
-    `items` is everything collected, before dedupe: a code edited into an
-    already-seen thread still counts, and the code tables do their own dedupe.
+
+async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
+    """Detect codes in `items` once, queue the new ones, then deliver the queue.
+
+    Returns how many codes were released (queued for servers or roundup-queued)
+    this pass. `items` is everything collected, before dedupe: a code edited
+    into an already-seen thread still counts, and the code tables do their own
+    dedupe. Delivery runs even when nothing new was found, because the queue
+    may still hold codes from a pass that ran out of time.
     """
+    released = await _release(deps, items, seeding_ok=seeding_ok)
+    await deliver_queued_codes(deps)
+    return released
+
+
+async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
     now = deps.now()
     shift_cfg = deps.cfg.shift
     sightings = sightings_from_items(
@@ -349,7 +429,7 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
         ping_trust=tuple(shift_cfg.ping_trust),
     )
 
-    def _plan_and_record_sync() -> tuple[list[CodeCandidate], list[CodeCandidate], int]:
+    def _plan_and_record_sync() -> tuple[int, int]:
         with closing(connect(deps.db_path)) as conn:
             known = known_codes(conn, [c.code for c in candidates])
             state = get_alert_state(conn)
@@ -375,24 +455,26 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
                 [(c.code, c.source_name, c.item_url, False) for c in plan.to_post]
                 + [(c.code, c.source_name, c.item_url, True) for c in plan.roundup_to_post],
                 now=lambda: now,
+                queue_for_games=shift_cfg.games,
+                flags={c.code: (c.golden, c.trusted) for c in plan.to_post + plan.roundup_to_post},
             )
-            won = set(released)
             overflow = sum(1 for _, status in plan.silent if status == "roundup")
-            return (
-                [c for c in plan.to_post if c.code in won],
-                [c for c in plan.roundup_to_post if c.code in won],
-                overflow,
-            )
+            return len(released), overflow
 
-    to_post, roundup_to_post, roundup_overflow = await asyncio.to_thread(_plan_and_record_sync)
+    released, roundup_overflow = await asyncio.to_thread(_plan_and_record_sync)
     if roundup_overflow:
         logger.warning(
             "roundup codes recorded silently past the per-check cap",
             extra={"overflow": roundup_overflow},
         )
-    if to_post or roundup_to_post:
-        await _fan_out(deps, to_post, roundup_to_post, now)
-    return len(to_post) + len(roundup_to_post)
+        if deps.alert_owner is not None:
+            # One line per check, not per trimmed code (design.md §13, D3), and
+            # to the owner: this is about the detector's cap, not any server.
+            await _safe_notify(
+                deps.alert_owner,
+                _ROUNDUP_CAP_ALERT.format(count=MAX_ROUNDUP_CODES, overflow=roundup_overflow),
+            )
+    return released
 
 
 def make_shift_hook(
@@ -411,16 +493,20 @@ def make_shift_hook(
     return hook
 
 
-async def recover_pending_guild_codes(db_path: str, notify_guild: NotifyGuild) -> int:
-    """Startup: flip every `pending` server code to `failed` and tell each affected server.
+async def recover_pending_guild_codes(
+    db_path: str, notify_guild: NotifyGuild, *, claimed_before: datetime | None = None
+) -> int:
+    """Flip `pending` server codes to `failed` and tell each affected server.
 
-    Returns the total code count; the owner is told that number and nothing
-    more (which servers lost which codes is those servers' business).
+    Everything `pending` by default (startup); with `claimed_before`, only
+    rows claimed earlier than that (a pass that must not step on a send still
+    in flight). Returns the total code count; the owner is told that number
+    and nothing more (which servers lost which codes is those servers' business).
     """
 
     def _sync() -> dict[int, list[str]]:
         with closing(connect(db_path)) as conn:
-            return fail_pending_guild_codes(conn)
+            return fail_pending_guild_codes(conn, claimed_before=claimed_before)
 
     by_guild = await asyncio.to_thread(_sync)
     for guild_id, codes in by_guild.items():
@@ -435,6 +521,7 @@ async def recover_pending_guild_codes(db_path: str, notify_guild: NotifyGuild) -
 __all__ = [
     "FanoutDeps",
     "GuildOutcome",
+    "deliver_queued_codes",
     "detect_and_fan_out",
     "make_shift_hook",
     "recover_pending_guild_codes",

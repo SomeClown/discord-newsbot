@@ -310,3 +310,16 @@ class ItemView:
     published_at: datetime | None
     collected_at: datetime
     topic_keys: list[str]
+
+
+@dataclass(frozen=True)
+class QueuedCode:
+    """A released code waiting in one server's delivery queue (`guild_code_posts`, `queued`)."""
+
+    code: str
+    source_name: str
+    item_url: str
+    from_roundup: bool
+    golden: bool
+    trusted: bool
+    queued_at: datetime

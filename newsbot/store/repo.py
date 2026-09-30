@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, date, datetime, timedelta
 
 from newsbot.store.db import StoreError
@@ -36,6 +36,7 @@ from newsbot.store.models import (
     LoungeState,
     Notice,
     PriorStory,
+    QueuedCode,
     QuoteDeckState,
     ShiftSettings,
     SourceHealthRow,
@@ -1517,6 +1518,17 @@ def backfill_lounge_quotes_guild(conn: sqlite3.Connection, guild_id: int) -> int
 # Detection is global (`alerted_codes` above: one row per code, ever); what a
 # server has been told lives in `guild_code_posts`. The two are joined by the
 # fan-out in `shift/fanout.py`, which is the only caller of everything here.
+#
+# A code's life in one server's queue (`guild_code_posts.status`):
+#
+#   release -> queued -> pending -> posted | failed
+#                 \-> skipped (the server stopped wanting it before its turn)
+#
+# `queued` is written at release time, for every server eligible at that
+# moment, in the release's own transaction. Delivery (a later step, possibly a
+# later pass) claims queued -> pending under BEGIN IMMEDIATE, sends, then marks
+# the outcome. `pending` rows are never re-sent: a crash between claim and send
+# is recovered to `failed`, because a double ping is worse than a missed one.
 
 
 def record_released_codes(
@@ -1524,6 +1536,8 @@ def record_released_codes(
     rows: list[tuple[str, str, str, bool]],
     *,
     now: Callable[[], datetime] | None = None,
+    queue_for_games: list[str] | None = None,
+    flags: Mapping[str, tuple[bool, bool]] | None = None,
 ) -> list[str]:
     """Record globally-new codes as released: `(code, source_name, item_url, from_roundup)`.
 
@@ -1532,8 +1546,15 @@ def record_released_codes(
     once-per-code check and `/shift codes` honest. Returns the codes this call
     really inserted: a code some other writer recorded first is left alone and
     left out, so it never fans out twice.
+
+    Passing `queue_for_games` (the `shift.games` list; empty means every game)
+    also queues each inserted code for every server eligible at `now`, in the
+    same transaction, so who hears about a code is decided at the moment it's
+    released and not by whoever happens to be reachable before a timeout.
+    `flags` maps a code to its `(golden, trusted)` for the later render.
     """
-    now_iso = _resolve_now(now)
+    moment = (now or (lambda: datetime.now(UTC)))()
+    now_iso = moment.isoformat()
     inserted: list[str] = []
     with conn:
         for code, source_name, item_url, from_roundup in rows:
@@ -1545,7 +1566,42 @@ def record_released_codes(
             )
             if cur.rowcount == 1:
                 inserted.append(code)
+        if queue_for_games is None or not inserted:
+            return inserted
+        by_code = {row[0]: row for row in rows}
+        guild_ids = [g.guild_id for g, _ in eligible_shift_guilds(conn, queue_for_games, moment)]
+        for guild_id in guild_ids:
+            for code in inserted:
+                golden, trusted = (flags or {}).get(code, (False, True))
+                conn.execute(
+                    "INSERT INTO guild_code_posts "
+                    "(guild_id, code, status, pinged, from_roundup, golden, trusted, claimed_at) "
+                    "VALUES (?, ?, 'queued', 0, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (guild_id, code, int(by_code[code][3]), int(golden), int(trusted), now_iso),
+                )
     return inserted
+
+
+def _shift_guild_state(
+    conn: sqlite3.Connection, guild_id: int, games: list[str]
+) -> tuple[GuildSettings, ShiftSettings] | None:
+    """This server's settings if it currently wants SHiFT alerts, else None.
+
+    Set up, alerts on with a channel, and (when `games` is non-empty)
+    following at least one of them. Says nothing about `enabled_at`; callers
+    differ on what that means.
+    """
+    guild = get_guild(conn, guild_id)
+    shift = get_shift(conn, guild_id)
+    if guild is None or shift is None or not guild.set_up:
+        return None
+    if not shift.enabled or shift.channel_id is None:
+        return None
+    if games:
+        followed = {g.game_key for g in list_guild_games(conn, guild_id)}
+        if not followed & set(games):
+            return None
+    return guild, shift
 
 
 def eligible_shift_guilds(
@@ -1564,18 +1620,70 @@ def eligible_shift_guilds(
     ).fetchall()
     eligible: list[tuple[GuildSettings, ShiftSettings]] = []
     for row in rows:
-        guild = get_guild(conn, row["guild_id"])
-        shift = get_shift(conn, row["guild_id"])
-        if guild is None or shift is None or shift.channel_id is None:
+        state = _shift_guild_state(conn, row["guild_id"], games)
+        if state is None:
             continue
+        _, shift = state
         if shift.enabled_at is None or shift.enabled_at > now:
             continue
-        if games:
-            followed = {g.game_key for g in list_guild_games(conn, guild.guild_id)}
-            if not followed & set(games):
-                continue
-        eligible.append((guild, shift))
+        eligible.append(state)
     return eligible
+
+
+def current_shift_delivery(
+    conn: sqlite3.Connection, guild_id: int, games: list[str]
+) -> tuple[GuildSettings, ShiftSettings] | None:
+    """A queued code's delivery-time check: what this server wants *right now*.
+
+    None means skip (alerts off, no channel, no followed SHiFT game, or the
+    server is gone). The caller uses the returned settings, not whatever they
+    were when the code was released.
+    """
+    return _shift_guild_state(conn, guild_id, games)
+
+
+def queued_guild_ids(conn: sqlite3.Connection) -> list[int]:
+    """Servers with at least one `queued` code, in guild id order."""
+    return [
+        row["guild_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT guild_id FROM guild_code_posts WHERE status = 'queued' "
+            "ORDER BY guild_id"
+        )
+    ]
+
+
+def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCode]:
+    """This server's `queued` codes in release order, with what the render needs."""
+    rows = conn.execute(
+        "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
+        "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
+        "WHERE p.guild_id = ? AND p.status = 'queued' ORDER BY p.rowid",
+        (guild_id,),
+    ).fetchall()
+    return [
+        QueuedCode(
+            code=row["code"],
+            source_name=row["source_name"],
+            item_url=row["item_url"],
+            from_roundup=bool(row["from_roundup"]),
+            golden=bool(row["golden"]),
+            trusted=bool(row["trusted"]),
+            queued_at=datetime.fromisoformat(row["claimed_at"]),
+        )
+        for row in rows
+    ]
+
+
+def skip_queued_guild_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
+    """Flip this server's still-`queued` `codes` to `skipped`: it stopped wanting them."""
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE guild_code_posts SET status = 'skipped' "
+                "WHERE guild_id = ? AND code = ? AND status = 'queued'",
+                (guild_id, code),
+            )
 
 
 def guild_posted_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> set[str]:
@@ -1593,6 +1701,10 @@ def guild_posted_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]
     return found
 
 
+class ClaimLostError(StoreError):
+    """Another pass already claimed (or skipped) one of the codes; nothing was changed."""
+
+
 def claim_guild_codes(
     conn: sqlite3.Connection,
     guild_id: int,
@@ -1604,13 +1716,15 @@ def claim_guild_codes(
     max_pings: int | None = None,
     from_roundup: bool = False,
 ) -> bool:
-    """`claim_codes`, for one server: claim `codes` as `pending` and spend its ping budget.
+    """`claim_codes`, for one server: move its `queued` `codes` to `pending`, spending its ping.
 
     Same record-then-post shape and the same `BEGIN IMMEDIATE` reasoning as
     `claim_codes`, but the budget is the server's own (`guild_shift.ping_day` and
-    `ping_count`), and `local_day` is that server's local date. A plain INSERT, so
-    a code the server already has aborts the whole claim. Returns whether the
-    ping was really spent (the cap is re-checked under the write lock).
+    `ping_count`), and `local_day` is that server's local date. Each code must
+    still be `queued` under the write lock; if any isn't (another pass got
+    there first, which is the whole point of checking), nothing changes, the
+    ping isn't spent, and `ClaimLostError` is raised. Returns whether the ping
+    was really spent (the cap is re-checked under the write lock).
     """
     if not codes:
         return False
@@ -1635,12 +1749,13 @@ def claim_guild_codes(
             (local_day, count, guild_id),
         )
         for code in codes:
-            conn.execute(
-                "INSERT INTO guild_code_posts "
-                "(guild_id, code, status, pinged, from_roundup, claimed_at) "
-                "VALUES (?, ?, 'pending', ?, ?, ?)",
-                (guild_id, code, int(actual_pinged), int(from_roundup), now_iso),
+            cur = conn.execute(
+                "UPDATE guild_code_posts SET status = 'pending', pinged = ?, from_roundup = ?, "
+                "claimed_at = ? WHERE guild_id = ? AND code = ? AND status = 'queued'",
+                (int(actual_pinged), int(from_roundup), now_iso, guild_id, code),
             )
+            if cur.rowcount != 1:
+                raise ClaimLostError(f"guild {guild_id} code {code} is no longer queued")
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -1673,23 +1788,57 @@ def mark_guild_codes_failed(conn: sqlite3.Connection, guild_id: int, codes: list
             )
 
 
-def fail_pending_guild_codes(conn: sqlite3.Connection) -> dict[int, list[str]]:
-    """Flip every `pending` guild code to `failed`; return the codes per guild.
+def fail_queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[str]:
+    """Flip this server's `queued` codes to `failed`; return them.
 
-    The startup crash-recovery step, per server: a `pending` row means a process
+    For a turn that blew up before anything was claimed: retrying a bug every
+    hour (and telling the server every hour) is worse than saying so once.
+    """
+    with conn:
+        codes = [
+            row["code"]
+            for row in conn.execute(
+                "SELECT code FROM guild_code_posts WHERE guild_id = ? AND status = 'queued' "
+                "ORDER BY rowid",
+                (guild_id,),
+            )
+        ]
+        conn.execute(
+            "UPDATE guild_code_posts SET status = 'failed' "
+            "WHERE guild_id = ? AND status = 'queued'",
+            (guild_id,),
+        )
+    return codes
+
+
+def fail_pending_guild_codes(
+    conn: sqlite3.Connection, *, claimed_before: datetime | None = None
+) -> dict[int, list[str]]:
+    """Flip `pending` guild codes to `failed`; return the codes per guild.
+
+    The crash-recovery step, per server: a `pending` row means a process
     claimed a code (and a ping) for that server and died before the send was
     confirmed. The caller tells each affected server, and the owner only a count.
+    At startup nothing can be in flight, so every `pending` row goes; a running
+    pass passes `claimed_before` so a send still in flight elsewhere is left alone.
     """
     with conn:
         rows = conn.execute(
-            "SELECT guild_id, code FROM guild_code_posts WHERE status = 'pending' "
+            "SELECT guild_id, code, claimed_at FROM guild_code_posts WHERE status = 'pending' "
             "ORDER BY guild_id, claimed_at, code"
         ).fetchall()
         by_guild: dict[int, list[str]] = {}
         for row in rows:
+            if claimed_before is not None and datetime.fromisoformat(row["claimed_at"]) >= (
+                claimed_before
+            ):
+                continue
             by_guild.setdefault(row["guild_id"], []).append(row["code"])
-        if rows:
-            conn.execute("UPDATE guild_code_posts SET status = 'failed' WHERE status = 'pending'")
+            conn.execute(
+                "UPDATE guild_code_posts SET status = 'failed' "
+                "WHERE guild_id = ? AND code = ? AND status = 'pending'",
+                (row["guild_id"], row["code"]),
+            )
     return by_guild
 
 

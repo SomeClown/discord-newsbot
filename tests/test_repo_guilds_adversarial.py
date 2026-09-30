@@ -145,6 +145,11 @@ def world(conn):
                 "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA1', 'posted', 'n')",
                 (gid,),
             )
+            conn.execute(  # claim_guild_codes moves queued rows, so each guild has one queued
+                "INSERT INTO guild_code_posts (guild_id, code, status, claimed_at) "
+                "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA2', 'queued', ?)",
+                (gid, "2026-09-30T00:00:00+00:00"),
+            )
             conn.execute(
                 "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at, guild_id) "
                 "VALUES (?, ?, 'n', ?)",
@@ -230,6 +235,10 @@ _MUTATIONS = {
     "mark_guild_codes_failed": lambda c, g: repo.mark_guild_codes_failed(
         c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
     ),
+    "skip_queued_guild_codes": lambda c, g: repo.skip_queued_guild_codes(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"]
+    ),
+    "fail_queued_guild_codes": lambda c, g: repo.fail_queued_guild_codes(c, g),
 }
 
 _READS = {
@@ -237,6 +246,7 @@ _READS = {
     "list_guild_games": lambda c, g: [x.guild_id for x in repo.list_guild_games(c, g)],
     "get_shift": lambda c, g: [repo.get_shift(c, g).guild_id],
     "get_lounge": lambda c, g: [repo.get_lounge(c, g).guild_id],
+    "current_shift_delivery": lambda c, g: [repo.current_shift_delivery(c, g, [])[0].guild_id],
     "recent_notices": lambda c, g: [x.guild_id for x in repo.recent_notices(c, g)],
 }
 
@@ -254,6 +264,7 @@ _OTHER_COVERAGE = {
     "backfill_guild_code_posts",
     "backfill_lounge_quotes_guild",
     "guild_posted_codes",  # see the test just below
+    "queued_guild_codes",  # likewise, and it returns codes rather than guild ids
 }
 
 
@@ -279,6 +290,15 @@ def test_a_guild_mutation_never_changes_the_other_guilds_rows(world, name, mine,
 @pytest.mark.parametrize("gid", [G1, G2])
 def test_a_guild_read_only_ever_returns_that_guilds_rows(world, name, gid):
     assert set(_READS[name](world, gid)) == {gid}
+
+
+def test_queued_guild_codes_only_reports_that_guilds_queue(world):
+    with world:
+        world.execute(
+            "DELETE FROM guild_code_posts WHERE guild_id = ? AND status = 'queued'", (G2,)
+        )
+    assert [q.code for q in repo.queued_guild_codes(world, G1)] == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"]
+    assert repo.queued_guild_codes(world, G2) == []
 
 
 def test_guild_posted_codes_only_reports_that_guilds_posts(world):

@@ -546,6 +546,26 @@ def test_guild_code_posts_needs_a_known_code_and_a_real_status(conn):
     )
 
 
+def test_guild_code_posts_accepts_every_queue_status(conn):
+    _add_guild(conn, 1)
+    statuses = ["queued", "pending", "posted", "failed", "skipped"]
+    with conn:
+        for i, status in enumerate(statuses):
+            code = f"{i}" * 29
+            conn.execute(
+                "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, status) "
+                "VALUES (?, 'n', 's', 'u', 'posted')",
+                (code,),
+            )
+            conn.execute(
+                "INSERT INTO guild_code_posts (guild_id, code, status, claimed_at) "
+                "VALUES (1, ?, ?, 'n')",
+                (code, status),
+            )
+    got = [r[0] for r in conn.execute("SELECT status FROM guild_code_posts ORDER BY rowid")]
+    assert got == statuses
+
+
 def test_notice_text_length_is_bounded(conn):
     _add_guild(conn, 1)
     _raises_integrity(

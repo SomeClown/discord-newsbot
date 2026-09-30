@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -39,7 +40,10 @@ from newsbot.pipeline.publisher import PublishError
 from newsbot.shift.decide import CodeCandidate
 from newsbot.shift.fanout import (
     _GUILD_PACE_S,
+    _PENDING_STALE_S,
     FanoutDeps,
+    _release,
+    deliver_queued_codes,
     detect_and_fan_out,
     recover_pending_guild_codes,
 )
@@ -165,6 +169,7 @@ class Harness:
         self.sleeps: list[float] = []
         self.sleep = _no_sleep
         self.notify_raises: set[int] = set()
+        self.owner_alerts: list[str] = []
 
     def factory(self, guild_id, channel_id, ping, notify):
         if self.channels is not None:
@@ -179,6 +184,9 @@ class Harness:
         if guild_id in self.notify_raises:
             raise RuntimeError("notice channel is gone too")
 
+    async def alert_owner(self, text):
+        self.owner_alerts.append(text)
+
     def deps(self, *, now=None):
         return FanoutDeps(
             cfg=self.cfg,
@@ -187,7 +195,13 @@ class Harness:
             poster_for=self.factory,
             notify_guild=self.notify_guild,
             sleep=self.sleep,
+            alert_owner=self.alert_owner,
         )
+
+    async def deliver(self, *, startup=False):
+        """Just the delivery step: what a later pass (or startup) does with the queue."""
+        self.posters.clear()
+        return await deliver_queued_codes(self.deps(), startup=startup)
 
     async def run(self, items, *, seeding_ok=True):
         self.posters.clear()
@@ -500,29 +514,39 @@ def test_bad_values_ping_nobody(value):
     assert mentions_for(value).to_dict() == discord.AllowedMentions.none().to_dict()
 
 
-def test_a_21_digit_value_is_a_role_never_everyone():
-    wire = mentions_for("1" * 21).to_dict()
-    assert wire["parse"] == [] and wire["roles"] == [int("1" * 21)]
+@pytest.mark.parametrize("digits", [17, 18, 19, 20])
+def test_snowflake_length_digit_strings_are_roles_never_everyone(digits):
+    wire = mentions_for("1" * digits).to_dict()
+    assert wire["parse"] == [] and wire["roles"] == [int("1" * digits)]
+
+
+@pytest.mark.parametrize("digits", [1, 16, 21, 25])
+def test_digit_strings_that_cannot_be_snowflakes_ping_nobody(digits):
+    # Changed with the fail-closed fix: a 21-digit string used to be a role (any run of
+    # digits was); only 17 to 20 ASCII digits are now, and the rest ping nobody.
+    assert mentions_for("1" * digits).to_dict() == discord.AllowedMentions.none().to_dict()
+
+
+def test_a_trailing_newline_is_not_a_role():
+    assert mentions_for(ROLE + "\n").to_dict() == discord.AllowedMentions.none().to_dict()
+
+
+def test_a_str_subclass_is_not_trusted_as_a_role_or_as_everyone():
+    class Sneaky(str):
+        pass
+
+    assert mentions_for(Sneaky("everyone")) is not _PING_EVERYONE
+    assert mentions_for(Sneaky(ROLE)).to_dict() == discord.AllowedMentions.none().to_dict()
 
 
 def test_fullwidth_digits_never_become_everyone():
     assert "everyone" not in mentions_for("９９").to_dict().get("parse", [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="mentions_for('²'): str.isdigit() is true for superscripts but int() raises "
-    "ValueError, so the documented fail-closed path throws instead",
-)
 def test_superscript_digit_fails_closed_instead_of_raising():
     assert mentions_for("²").to_dict() == discord.AllowedMentions.none().to_dict()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="mentions_for(123) and mentions_for(True): non-str values hit .isdigit() and raise "
-    "AttributeError rather than failing closed to none()",
-)
 @pytest.mark.parametrize("value", [123, True, 1.5])
 def test_non_string_values_fail_closed_instead_of_raising(value):
     assert mentions_for(value).to_dict() == discord.AllowedMentions.none().to_dict()
@@ -543,11 +567,14 @@ async def test_two_overlapping_passes_never_exceed_the_cap(db_path, cfg):
 
     await asyncio.gather(one.run([item(CODE_A)]), two.run([item(CODE_B)]))
 
+    # Changed with the delivery queue: each pass delivers *every* queued row, so one
+    # pass may carry both codes in a single message and the other finds nothing left.
+    # What must hold is unchanged: both codes go out exactly once, one ping total.
     alerts = one.sent(1) + two.sent(1)
-    assert len(alerts) == 2
+    assert sorted(c for a in alerts for c in a.codes) == [CODE_A, CODE_B]
     assert sum(a.ping for a in alerts) == 1
     assert shift_row(db_path, 1).ping_count == 1
-    assert rows(db_path, "SELECT SUM(pinged) FROM guild_code_posts") == [(1,)]
+    assert post_status(db_path, 1) == {CODE_A: "posted", CODE_B: "posted"}
 
 
 async def test_two_overlapping_passes_with_the_same_code_post_it_once_per_guild(db_path, cfg):
@@ -571,8 +598,12 @@ def test_many_threads_claiming_for_one_guild_spend_exactly_the_cap(db_path):
     results: list[bool] = []
     lock = threading.Lock()
     with closing(connect(db_path)) as conn:
+        # Queued at release: a claim moves `queued` rows, so the guild needs some.
         repo.record_released_codes(
-            conn, [(_code(i), "s", "https://e.com", False) for i in range(8)]
+            conn,
+            [(_code(i), "s", "https://e.com", False) for i in range(8)],
+            now=lambda: NOW,
+            queue_for_games=[],
         )
     barrier = threading.Barrier(8)
 
@@ -715,7 +746,9 @@ async def test_recovery_flips_only_pending_rows_and_tells_only_that_guild(h):
         add_guild(h.db_path, gid, ping="none")
     await h.run([item(CODE_A)])  # both guilds: posted
     with closing(connect(h.db_path)) as conn:
-        repo.record_released_codes(conn, [(CODE_B, "s", "https://e.com", False)])
+        repo.record_released_codes(
+            conn, [(CODE_B, "s", "https://e.com", False)], now=lambda: NOW, queue_for_games=[]
+        )
         repo.claim_guild_codes(conn, 1, [CODE_B], pinged=False, local_day="2026-10-01")
     h.notices.clear()
 
@@ -724,9 +757,14 @@ async def test_recovery_flips_only_pending_rows_and_tells_only_that_guild(h):
     assert total == 1
     assert [g for g, _ in h.notices] == [1] and CODE_B in h.notices[0][1]
     assert post_status(h.db_path, 1) == {CODE_A: "posted", CODE_B: "failed"}
-    assert post_status(h.db_path, 2) == {CODE_A: "posted"}
+    # Changed with the queue: guild 2 has CODE_B queued (recovery leaves queued rows alone).
+    assert post_status(h.db_path, 2) == {CODE_A: "posted", CODE_B: "queued"}
     await h.run([item(CODE_B)])  # recovery never turns into a re-post
-    assert h.sent(1) == [] and h.sent(2) == []
+    # Changed with the queue: guild 2 never claimed CODE_B, it was queued at release, so
+    # this pass delivers it there. Guild 1's recovered (failed) row is what stays unsent.
+    assert h.sent(1) == []
+    assert post_status(h.db_path, 1) == {CODE_A: "posted", CODE_B: "failed"}
+    assert post_status(h.db_path, 2) == {CODE_A: "posted", CODE_B: "posted"}
 
 
 async def test_recovery_with_nothing_pending_says_nothing_to_anyone(h):
@@ -751,15 +789,17 @@ async def test_a_guild_deleted_mid_fanout_does_not_stop_the_next_one(h):
 
     await h.run([item(CODE_A)])
 
+    # Changed with the queue: guild 2's queued row went with it (the cascade), so its
+    # turn finds nothing and there is no longer a failed attempt to tell anyone about.
     assert len(h.sent(1)) == 1 and len(h.sent(3)) == 1 and h.sent(2) == []
     assert post_status(h.db_path, 2) == {}
-    assert [g for g, _ in h.notices] == [2]  # tried to tell the vanished guild, nobody else
+    assert h.notices == []
+    assert rows(h.db_path, "SELECT COUNT(*) FROM guild_code_posts WHERE guild_id = 2") == [(0,)]
 
 
-async def test_a_guild_disabled_after_the_eligible_read_still_gets_this_passs_alert(h):
-    # Documented behavior: eligibility is read once up front, and a guild waits
-    # its turn behind the 0.2 s pace. Turning alerts off in that window doesn't stop
-    # the message already lined up for you.
+async def test_a_guild_disabled_between_release_and_delivery_is_skipped_and_not_posted(h):
+    # Changed with the queue (was: a stale up-front read still posted to it): delivery
+    # re-reads the guild's settings at its turn, so turning alerts off in the gap wins.
     add_guild(h.db_path, 1, ping="none")
     add_guild(h.db_path, 2, ping="none")
 
@@ -771,13 +811,49 @@ async def test_a_guild_disabled_after_the_eligible_read_still_gets_this_passs_al
 
     await h.run([item(CODE_A)])
 
-    assert len(h.sent(2)) == 1
+    assert len(h.sent(1)) == 1 and h.sent(2) == []
+    assert post_status(h.db_path, 2) == {CODE_A: "skipped"}
+    assert h.notices == []
 
 
-async def test_ping_choice_changed_to_none_before_the_guilds_turn_is_not_honored(h):
-    # Documented behavior, the stale read again: a guild that switches to "none"
-    # while waiting its turn still gets this one pinged, because the settings
-    # (and the poster's ping choice) come from the up-front read.
+@pytest.mark.parametrize("change", ["no_channel", "unfollowed"])
+async def test_a_guild_that_lost_its_channel_or_its_game_is_skipped(h, change):
+    add_guild(h.db_path, 1)
+    add_guild(h.db_path, 2)
+    await _release_only(h, [item(CODE_A)])
+    with closing(connect(h.db_path)) as conn:
+        if change == "unfollowed":
+            repo.unfollow_game(conn, 2, "borderlands4")
+        else:
+            with conn:
+                conn.execute(
+                    "UPDATE guild_shift SET channel_id = NULL, enabled = 0 WHERE guild_id = 2"
+                )
+
+    await h.deliver()
+
+    assert len(h.sent(1)) == 1 and h.sent(2) == []
+    assert post_status(h.db_path, 2) == {CODE_A: "skipped"}
+
+
+async def test_a_guild_that_turned_alerts_off_and_on_again_gets_no_backlog(h):
+    add_guild(h.db_path, 1)
+    await _release_only(h, [item(CODE_A)])
+    with closing(connect(h.db_path)) as conn:
+        repo.set_shift(conn, 1, enabled=False, channel_id=100, ping="none", now=lambda: NOW)
+        repo.set_shift(
+            conn, 1, enabled=True, channel_id=100, ping="none", now=lambda: NOW + timedelta(hours=1)
+        )
+
+    await h.deliver()
+
+    assert h.sent(1) == []
+    assert post_status(h.db_path, 1) == {CODE_A: "skipped"}
+
+
+async def test_ping_choice_changed_to_none_before_delivery_posts_unpinged(h):
+    # Changed with the queue (was: the stale read still pinged it): the guild's choice at
+    # its turn is the one used, and no ping budget is spent on a ping that didn't happen.
     add_guild(h.db_path, 1, ping="everyone")
     add_guild(h.db_path, 2, ping="everyone")
 
@@ -789,7 +865,167 @@ async def test_ping_choice_changed_to_none_before_the_guilds_turn_is_not_honored
 
     await h.run([item(CODE_A)])
 
-    assert h.sent(2)[0].ping is True
+    assert h.sent(1)[0].ping is True
+    assert h.sent(2)[0].ping is False and h.sent(2)[0].ping_prefix == ""
+    assert post_status(h.db_path, 2) == {CODE_A: "posted"}
+    assert shift_row(h.db_path, 2).ping_count == 0
+
+
+async def test_a_ping_choice_changed_to_a_role_before_delivery_uses_the_role(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    await _release_only(h, [item(CODE_A)])
+    with closing(connect(h.db_path)) as conn:
+        repo.set_shift(conn, 1, enabled=True, channel_id=100, ping=ROLE)
+
+    await h.deliver()
+
+    assert h.sent(1)[0].ping is True and f"<@&{ROLE}>" in h.sent(1)[0].content
+    assert "@everyone" not in h.sent(1)[0].content
+
+
+async def test_the_cap_at_delivery_time_is_the_one_in_force_then(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    await _release_only(h, [item(CODE_A)])
+    h.cfg = _cap_cfg(h.cfg, 0)  # owner lowered the cap between release and delivery
+
+    await h.deliver()
+
+    assert h.sent(1)[0].ping is False
+    assert shift_row(h.db_path, 1).ping_count == 0
+
+
+async def _release_only(h, items):
+    """Release and queue codes without delivering (what a timeout before the walk leaves)."""
+    h.posters.clear()
+    await _release(h.deps(), items, seeding_ok=True)
+
+
+# --- the delivery queue ---
+
+
+async def test_release_queues_a_row_for_every_eligible_guild_in_the_same_pass(h):
+    for gid in (1, 2, 3):
+        add_guild(h.db_path, gid)
+    add_guild(h.db_path, 4, enabled_at=NOW + timedelta(hours=1))  # not yet: no backlog rule
+
+    await _release_only(h, [item(CODE_A)])
+
+    assert rows(h.db_path, "SELECT guild_id, status FROM guild_code_posts ORDER BY guild_id") == [
+        (1, "queued"),
+        (2, "queued"),
+        (3, "queued"),
+    ]
+
+
+async def test_a_pass_with_nothing_new_still_delivers_what_was_left_queued(h):
+    add_guild(h.db_path, 1)
+    await _release_only(h, [item(CODE_A)])
+    assert post_status(h.db_path, 1) == {CODE_A: "queued"}
+
+    assert await h.run([]) == 0  # the next hourly pass found nothing new
+
+    assert post_status(h.db_path, 1) == {CODE_A: "posted"}
+    assert len(h.sent(1)) == 1
+
+
+async def test_delivery_is_in_guild_id_order_with_the_pace_between_guilds(h):
+    for gid in (3, 1, 2):
+        add_guild(h.db_path, gid)
+    order: list[int] = []
+    real = h.factory
+
+    def factory(gid, cid, ping, notify):
+        order.append(gid)
+        return real(gid, cid, ping, notify)
+
+    h.factory = factory
+    await h.run([item(CODE_A)])
+
+    assert order == [1, 2, 3]
+
+
+async def test_a_queued_code_reaches_a_later_pass_in_the_same_batch_as_new_ones(h):
+    add_guild(h.db_path, 1)
+    await _release_only(h, [item(CODE_A)])
+
+    await h.run([item(CODE_B)])
+
+    assert [c for a in h.sent(1) for c in a.codes] == [CODE_A, CODE_B]
+
+
+class _Crash(BaseException):
+    """What a dying process looks like from inside: nothing in `except Exception` sees it."""
+
+
+async def test_a_crash_between_claim_and_send_never_double_sends(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    h.fail_with[1] = [_Crash()]
+    with pytest.raises(_Crash):
+        await h.run([item(CODE_A)])
+    assert post_status(h.db_path, 1) == {CODE_A: "pending"}  # claimed, never confirmed
+
+    # A pass right after: the row is fresh, so it's a send that may still be in flight.
+    h.fail_with.clear()
+    await h.run([])
+    assert h.sent(1) == [] and post_status(h.db_path, 1) == {CODE_A: "pending"}
+
+    # Startup: nothing can be in flight, so it's failed, the guild is told, and it is
+    # never sent. No later pass changes that.
+    h.notices.clear()
+    await h.deliver(startup=True)
+    assert post_status(h.db_path, 1) == {CODE_A: "failed"}
+    assert [g for g, _ in h.notices] == [1] and CODE_A in h.notices[0][1]
+    await h.run([item(CODE_A)])
+    assert h.sent(1) == [] and post_status(h.db_path, 1) == {CODE_A: "failed"}
+
+
+async def test_a_stale_pending_row_is_failed_by_a_running_pass_not_resent(h):
+    add_guild(h.db_path, 1)
+    h.fail_with[1] = [_Crash()]
+    with pytest.raises(_Crash):
+        await h.run([item(CODE_A)])
+
+    h.fail_with.clear()
+    h.clock = NOW + timedelta(seconds=_PENDING_STALE_S + 1)
+    h.notices.clear()
+    await h.run([])
+
+    assert h.sent(1) == [] and post_status(h.db_path, 1) == {CODE_A: "failed"}
+    assert [g for g, _ in h.notices] == [1]
+
+
+async def test_a_crash_leaves_other_queued_guilds_for_the_next_pass(h):
+    for gid in (1, 2, 3):
+        add_guild(h.db_path, gid)
+    h.fail_with[2] = [_Crash()]
+    with pytest.raises(_Crash):
+        await h.run([item(CODE_A)])
+    assert post_status(h.db_path, 3) == {CODE_A: "queued"}
+
+    h.fail_with.clear()
+    await h.run([])
+
+    assert post_status(h.db_path, 3) == {CODE_A: "posted"}
+    assert post_status(h.db_path, 2) == {CODE_A: "pending"}  # left for recovery, not re-sent
+    assert h.sent(2) == []
+
+
+async def test_two_passes_delivering_the_same_queue_send_each_code_once_per_guild(db_path, cfg):
+    seed(db_path)
+    for gid in (1, 2, 3, 4):
+        add_guild(db_path, gid, ping="everyone")
+    one, two = Harness(db_path, cfg, NOW), Harness(db_path, cfg, NOW)
+    await _release(one.deps(), [item(CODE_A, CODE_B)], seeding_ok=True)
+    assert rows(db_path, "SELECT COUNT(*) FROM guild_code_posts WHERE status = 'queued'") == [(8,)]
+
+    await asyncio.gather(one.deliver(), two.deliver())
+
+    for gid in (1, 2, 3, 4):
+        sent = one.sent(gid) + two.sent(gid)
+        assert sorted(c for a in sent for c in a.codes) == [CODE_A, CODE_B]
+        assert post_status(db_path, gid) == {CODE_A: "posted", CODE_B: "posted"}
+        assert shift_row(db_path, gid).ping_count == 1
+    assert one.notices == [] and two.notices == []
 
 
 # --- isolation ---
@@ -900,15 +1136,22 @@ async def test_cap_note_goes_to_the_capped_guild_only(h):
 
 
 def test_pace_alone_caps_how_many_guilds_one_hook_can_serve():
+    # Changed with the queue: the arithmetic is the same, but it's no longer a ceiling on
+    # who hears about a code, only on how many guilds one *pass* can serve before the
+    # timeout cuts the walk and the rest stay queued for the next one.
     # 120 s budget, 0.2 s between guilds (none before the first): sleeping alone
     # uses the whole budget at 601 guilds, before a single message is sent.
-    # Real sends take far longer than zero, so the practical ceiling is lower; at
+    # Real sends take far longer than zero, so the practical per-pass figure is lower; at
     # an assumed half second per guild (one DB claim, one Discord send, one
     # mark) it is about 170. The numbers come from the constants, so this
-    # test fails loudly if either is changed without revisiting the limit.
+    # test fails loudly if either is changed without revisiting them.
     pace_only = int(_SHIFT_HOOK_TIMEOUT_S / _GUILD_PACE_S) + 1
     assert (_SHIFT_HOOK_TIMEOUT_S, _GUILD_PACE_S, pace_only) == (120.0, 0.2, 601)
-    assert int(_SHIFT_HOOK_TIMEOUT_S / (_GUILD_PACE_S + 0.5)) == 171
+    per_pass = int(_SHIFT_HOOK_TIMEOUT_S / (_GUILD_PACE_S + 0.5))
+    assert per_pass == 171
+    # The walk always starts at the lowest queued guild id, so each pass makes progress:
+    # 1000 guilds all owed one code is fully served in ceil(1000 / 171) hourly passes.
+    assert math.ceil(1000 / per_pass) == 6
 
 
 async def test_pace_is_slept_between_guilds_not_before_the_first(h):
@@ -944,10 +1187,14 @@ async def test_timeout_mid_fanout_leaves_consistent_rows_and_no_stuck_pending(h)
 
     await _timed_out_pass(h, guilds, slow_s=0.05, timeout_s=0.3)
 
-    done = {gid for gid in guilds if post_status(h.db_path, gid)}
+    # Changed with the queue: every eligible guild has a row from release, so the cut-off
+    # shows up as posted (reached) versus queued (waiting), never as "no row at all".
+    status = {gid: post_status(h.db_path, gid) for gid in guilds}
+    done = {gid for gid in guilds if status[gid] == {CODE_A: "posted"}}
+    waiting = {gid for gid in guilds if status[gid] == {CODE_A: "queued"}}
     assert 0 < len(done) < len(guilds)
-    for gid in done:
-        assert post_status(h.db_path, gid) == {CODE_A: "posted"}  # no half-way rows
+    assert done | waiting == set(guilds)  # no half-way rows, nobody lost
+    assert done == set(range(1, len(done) + 1))  # the walk is in guild id order
     assert rows(h.db_path, "SELECT COUNT(*) FROM guild_code_posts WHERE status = 'pending'") == [
         (0,)
     ]
@@ -955,12 +1202,6 @@ async def test_timeout_mid_fanout_leaves_consistent_rows_and_no_stuck_pending(h)
     assert h.notices == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a fan-out cut off by the 120 s hook timeout leaves the unreached guilds with no "
-    "row and no notice, and the code is already global, so no later pass or recovery ever "
-    "delivers it to them",
-)
 async def test_guilds_cut_off_by_the_timeout_still_get_the_code_later(h):
     guilds = list(range(1, 21))
     for gid in guilds:
@@ -1013,7 +1254,12 @@ async def test_a_roundup_past_the_fifty_code_cap_posts_fifty_and_only_logs_the_r
     assert len(post_status(h.db_path, 1)) == 50
     assert rows(h.db_path, "SELECT COUNT(*) FROM alerted_codes WHERE status = 'roundup'") == [(10,)]
     assert any("past the per-check cap" in r.message for r in caplog.records)
-    # Documented: the overflow is a log line only. No guild and no owner hears of it.
+    # Changed: the overflow now reaches the owner as one capped line (v2 did this), and
+    # still no guild hears of it.
+    assert h.owner_alerts == [
+        "newsbot: SHiFT roundup code cap reached (50 per check); "
+        "10 code(s) recorded silently, not posted this check."
+    ]
     assert h.notices == []
     assert all(not a.ping and a.ping_prefix == "" for a in h.sent(1))
 

@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import logging
 import random
+import re
 import socket
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -218,19 +219,27 @@ _PING_EVERYONE = discord.AllowedMentions(
     everyone=True, users=False, roles=False, replied_user=False
 )
 
+# re.ASCII keeps Unicode digits (fullwidth, Arabic-Indic) out of it.
+_ROLE_ID = re.compile(r"[0-9]{17,20}", re.ASCII)
 
-def mentions_for(ping: str | None) -> discord.AllowedMentions:
+
+def mentions_for(ping: object) -> discord.AllowedMentions:
     """The one place a server's ping choice becomes an `AllowedMentions`.
 
     `"everyone"` hands back `_PING_EVERYONE` itself (never a second
-    `everyone=True`; the tripwire test holds that line), a string of digits is
-    a role id and pings only that role, and anything else (`"none"`, `None`,
-    garbage) pings nobody. Failing closed on garbage is deliberate: a bad
-    value in the database should cost a notification, not wake a server up.
+    `everyone=True`; the tripwire test holds that line), an exact `str` of 17
+    to 20 ASCII digits is a role id (a snowflake, which is how long Discord
+    ids actually are) and pings only that role, and anything else pings
+    nobody: `"none"`, `None`, garbage, a superscript two, an `int` someone
+    swore was a string. It never raises. A bad value in the database should
+    cost a notification, not wake a server up (or take the whole fan-out down
+    with a `ValueError`, which an earlier draft of this function managed).
     """
+    if type(ping) is not str:
+        return discord.AllowedMentions.none()
     if ping == "everyone":
         return _PING_EVERYONE
-    if ping and ping.isdigit() and int(ping) > 0:
+    if _ROLE_ID.fullmatch(ping):
         return discord.AllowedMentions(
             everyone=False, users=False, roles=[discord.Object(id=int(ping))], replied_user=False
         )
@@ -539,7 +548,9 @@ class DiscordCodeAlertPoster:
             return True  # that permission covers every role, mentionable or not
         guild = getattr(channel, "guild", None)
         get_role = getattr(guild, "get_role", None)
-        if get_role is None or not self._ping_choice.isdigit():
+        # Same rule as `mentions_for`, so a value that pings nobody can't raise here.
+        is_role = type(self._ping_choice) is str and _ROLE_ID.fullmatch(self._ping_choice)
+        if get_role is None or not is_role:
             return False
         role = get_role(int(self._ping_choice))
         return bool(role is not None and getattr(role, "mentionable", False))

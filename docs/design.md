@@ -685,6 +685,8 @@ It logs exactly what it imported and lists the old keys that can now be deleted.
 - Each code is posted once per guild with alerts on, in its SHiFT channel. Posting status is per guild, and one guild's failure never blocks another.
 - Pings follow the guild's choice. The existing rules still apply: trusted sources only, the first message of a batch, a per-guild cap of 3 per day, and roundups unpinged.
 - Enabling alerts starts from codes found after that moment, with no backlog.
+- Delivery is a queue. Releasing a code queues a row (`queued`) for every server eligible at that moment, in the release's own transaction. Delivery walks the queue per server in `guild_id` order (at the start of every pass, and at startup), re-reads that server's current settings at its turn (alerts off, no channel or no followed SHiFT game means `skipped`; otherwise its current ping choice and cap apply), claims `queued` to `pending`, sends, then marks `posted` or `failed`. A walk cut short by the hook timeout leaves the rest `queued`. A stale `pending` row (a crash between claim and send) becomes `failed` with a notice to that server and is never re-sent.
+- A roundup past the 50-code cap sends one line to the owner's alert path (not any server), as v2 did.
 - The mentions tripwire still allows exactly one `everyone=True` code path, which now decides from the guild's setting.
 
 **Admin routing.** A server's run report and posting failures go to its admin channel if set, otherwise to its `status`. The owner's admin channel gets:
