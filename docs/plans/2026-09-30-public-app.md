@@ -966,6 +966,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
   - `/lounge quote-now` delegates to `bot.run_quote` and only for the v2 lounge guild (`cfg.guild_id`); task 12 re-keys it and should drop that guard.
   - `/newsbot test-alert` is not in the v3 group: there's no per-guild test-alert path in `shift/fanout.py` to call. If the owner still wants it, it's a small new function in `fanout.py` plus a gated command.
   - Prod still has v2's per-guild `/newsbot` set in the friend's guild (v2 synced per guild). After the cutover the global `/newsbot` and that guild copy both show; clear the guild copy once (`tree.clear_commands(guild=...)` plus `sync(guild=...)`, same owner step as the plan's coexistence note).
+- From task 11: build one `GuildLifecycle` and forward `on_guild_join`, `on_guild_remove` and `on_guild_channel_delete` to it from `NewsBot`. It's a separate class so v2 doesn't pick those events up by name. Call `lifecycle.reconcile(client)` in `on_ready`, after the import and the orphan-digest adoption. Guilds found with no row get a free row and the first-contact message (plan §3.8). At cutover, that includes the home/test server, which is harmless.
 - Known limit: delivery runs inside the hook's 120 s timeout, so at about 170 or more SHiFT-enabled guilds a big code drop drains over several hourly passes. Moving delivery into its own job would fix this if the bot ever gets that big (a load-test item, task 14).
 
 ### Task 14: Load test
