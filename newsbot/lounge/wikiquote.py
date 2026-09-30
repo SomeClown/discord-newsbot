@@ -690,7 +690,7 @@ def parse_page(title: str, html: str) -> ParsedPage:
     parser.close()
 
     kind = _page_kind(title, parser.headings_seen)
-    logger.info("Wikiquote page %r looks like a %s page", title, kind)
+    logger.info("Wikiquote page %r parsed as a page of kind %s", title, kind)
     link = page_url(title)
 
     quotes: list[Quote] = []
