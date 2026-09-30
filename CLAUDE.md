@@ -24,7 +24,7 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
-**Lounge rollout, one step left (v2.2.0 deployed 2026-09-29).** The bot's welcome was never tested with a live join (no alt account; the test guild covered everything else). Discord's built-in welcome stays on until the first real newcomer shows the bot's welcome arriving too; then the owner switches off "Send a random welcome message when someone joins" and points the System Messages Channel back at the admin channel (`docs/deploy.md` §18). Deploy window now: never 09:00–09:15 America/Los_Angeles, and avoid about 07:55–08:05 (quote time).
+**Lounge rollout done (2026-09-30).** v2.2.0's welcome was verified with a real join in the test guild (the join event arrived with Server Members intent on, and the welcome posted); prod runs the same code. Discord's built-in welcome is off on the prod server and its System Messages Channel points at the admin channel again. Deploy window: never 09:00–09:15 America/Los_Angeles, and avoid about 07:55–08:05 (quote time).
 
 **Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
 - **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.
