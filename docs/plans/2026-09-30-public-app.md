@@ -950,6 +950,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 - Build the SHiFT hook with `make_shift_hook`, passing `notify_guild` (the per-guild admin-channel routing from task 8) and `alert_owner` (the owner alert path, used for the roundup-overflow line).
 - At startup, call `deliver_queued_codes(deps, startup=True)`. That fails every stale `pending` row with a per-guild notice, then delivers anything still `queued`.
 - Schedule the collection job with `collection_job_options(cfg)` (`max_instances=1`, `coalesce`).
+- From task 6: build the real `publisher_for` as `DiscordPublisher(bot, nonce_scope=scope, on_posted=cb, already_posted=already, skip_permanent=True)`. `send_report` and `notify_guild` come from task 8's routing. The every-minute `run_due_guilds` job must only start after `on_ready`.
 - Known limit: delivery runs inside the hook's 120 s timeout, so at about 170 or more SHiFT-enabled guilds a big code drop drains over several hourly passes. Moving delivery into its own job would fix this if the bot ever gets that big (a load-test item, task 14).
 
 ### Task 14: Load test
