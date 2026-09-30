@@ -615,6 +615,10 @@ class DiscordCodeAlertPoster:
         return bool(permissions_for(me).mention_everyone)
 
 
+# How long `is_owner` waits on Discord before saying no.
+_OWNER_LOOKUP_TIMEOUT_S = 10.0
+
+
 class NewsBot(discord.Client):
     """The bot process: gateway client, command tree, scheduler and job callbacks in one place.
 
@@ -675,9 +679,13 @@ class NewsBot(discord.Client):
         failed lookup says no: `/owner` is locked unless we can prove it isn't.
         """
         if self._owner_id is None:
+            # Any failure says no, a hang included: `/owner` staying shut for
+            # a minute beats a slash command that never answers.
             try:
-                app = await self.application_info()
-            except discord.HTTPException:
+                app = await asyncio.wait_for(
+                    self.application_info(), timeout=_OWNER_LOOKUP_TIMEOUT_S
+                )
+            except discord.HTTPException, OSError, TimeoutError:
                 logger.warning("couldn't look up the application owner")
                 return False
             self._owner_id = app.team.owner_id if app.team else app.owner.id

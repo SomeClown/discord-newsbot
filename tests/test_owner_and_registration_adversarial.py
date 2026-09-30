@@ -230,34 +230,37 @@ async def test_a_failed_lookup_is_not_cached_as_a_denial_for_the_real_owner(v3_c
     assert await bot.is_owner(owner) is True
 
 
-@pytest.mark.parametrize("exc", [OSError("dns"), TimeoutError(), RuntimeError("boom")])
-async def test_a_lookup_that_fails_without_an_http_error_propagates_to_the_caller(
-    v3_cfg, v3_db, exc
-):
-    # Only `discord.HTTPException` is turned into "no". A dropped connection arrives as
-    # an `OSError`, which escapes `is_owner` and lands in the tree's error handler (the
-    # generic "something went wrong" reply). Still fail-closed (the command never runs),
-    # but it isn't the quiet denial the docstring describes. Owner's call.
+@pytest.mark.parametrize("exc", [OSError("dns"), TimeoutError()])
+async def test_a_network_failure_in_the_lookup_is_a_quiet_no(v3_cfg, v3_db, exc):
+    # Changed from "propagates": a dropped connection or a timeout now gets the same
+    # quiet denial as an HTTP error, and nothing is cached, so the next try asks again.
     bot = make_bot(v3_cfg, v3_db, exc)
-    with pytest.raises(type(exc)):
+    assert await bot.is_owner(SimpleNamespace(id=OWNER_ID)) is False
+    assert bot._owner_id is None
+
+
+async def test_an_unexpected_lookup_error_still_propagates(v3_cfg, v3_db):
+    # Programming errors aren't swallowed; the tree's error handler reports them.
+    bot = make_bot(v3_cfg, v3_db, RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
         await bot.is_owner(SimpleNamespace(id=OWNER_ID))
     assert bot._owner_id is None
 
 
-async def test_a_lookup_that_never_answers_is_never_cut_off(v3_cfg, v3_db):
-    # There is no timeout in `is_owner`: a hung `application_info` hangs the command
-    # until Discord gives up on the interaction. Nothing is cached, nothing is sent and
-    # nothing is granted, so it's an inconvenience for the owner and a non-event for
-    # everyone else. Pinned so adding a timeout is a decision (and this test's flip).
+async def test_a_lookup_that_never_answers_is_cut_off_and_says_no(v3_cfg, v3_db, monkeypatch):
+    # Changed from "never cut off": the lookup now has a timeout, so a hung
+    # `application_info` becomes a quiet no instead of a command that never answers.
+    import newsbot.bot.client as client_module
+
+    monkeypatch.setattr(client_module, "_OWNER_LOOKUP_TIMEOUT_S", 0.05)
     never = asyncio.Event()
 
     async def app():
         await never.wait()
 
     bot = make_bot(v3_cfg, v3_db, app)
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(bot.is_owner(SimpleNamespace(id=OWNER_ID)), timeout=0.05)
-    assert bot._owner_id is None  # the cancelled lookup didn't poison the cache
+    assert await bot.is_owner(SimpleNamespace(id=OWNER_ID)) is False
+    assert bot._owner_id is None  # the timed-out lookup didn't poison the cache
 
 
 async def test_the_owner_command_with_a_hung_lookup_sends_nothing_and_grants_nothing(v3_cfg, v3_db):
@@ -274,12 +277,13 @@ async def test_the_owner_command_with_a_hung_lookup_sends_nothing_and_grants_not
 
 
 async def test_a_lookup_that_raises_inside_the_owner_command_leaks_nothing(v3_cfg, v3_db):
+    # Changed with the owner-lookup hardening: a network failure is a quiet no, so the
+    # command answers with its ordinary denial and reveals nothing.
     make_guild(v3_db, GUILD_A, set_up=True)
     bot = make_bot(v3_cfg, v3_db, OSError("dns"))
     interaction = FakeInteraction(guild_id=HOME, user_id=OWNER_ID)
-    with pytest.raises(OSError):
-        await servers_callback(v3_cfg, bot)(interaction)
-    assert interaction.sent == []  # the error handler, not the command, talks to the user
+    await servers_callback(v3_cfg, bot)(interaction)
+    assert all("Servers:" not in str(m) for m in interaction.sent)
 
 
 # --- what /owner servers reveals ---
@@ -631,11 +635,10 @@ async def test_only_the_failing_scope_goes_without_a_hash(v3_cfg, v3_db):
     assert set(_digest_rows(v3_db)) == {"commands:global", f"commands:{L1}"}
 
 
-async def test_a_sync_error_that_is_not_an_http_error_stops_the_remaining_scopes(v3_cfg, v3_db):
-    # `sync_commands` catches `discord.HTTPException` only. A dropped connection during
-    # startup (an `OSError`) escapes, so the scopes after it don't run and `setup_hook`
-    # raises. The scopes *before* it keep their hashes. Whether "can't reach Discord"
-    # should stop the bot or just be logged is the owner's call; pinned as it stands.
+async def test_a_sync_error_that_is_not_an_http_error_skips_only_its_own_scope(v3_cfg, v3_db):
+    # Changed: `sync_commands` now catches any Exception per scope, as its docstring
+    # always promised, so a dropped connection costs that scope its sync (and its
+    # hash) but the others still run and the bot still starts.
     make_guild(v3_db, L1)
     lounge_row(v3_db, L1)
     bot = make_bot(v3_cfg, v3_db)
@@ -648,10 +651,9 @@ async def test_a_sync_error_that_is_not_an_http_error_stops_the_remaining_scopes
         return []
 
     bot.tree.sync = dropped
-    with pytest.raises(OSError):
-        await setup_commands(bot)
-    assert seen == [None, HOME]  # L1 never got its turn
-    assert set(_digest_rows(v3_db)) == {"commands:global"}
+    await setup_commands(bot)
+    assert seen == [None, HOME, L1]  # L1 still got its turn
+    assert set(_digest_rows(v3_db)) == {"commands:global", f"commands:{L1}"}
 
 
 async def test_the_hash_moves_when_anything_a_member_could_see_changes(v3_cfg, v3_db):

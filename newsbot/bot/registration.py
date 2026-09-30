@@ -155,7 +155,10 @@ async def sync_commands(bot: NewsBot, plan: ScopePlan) -> dict[str, str]:
             continue
         try:
             synced = await bot.tree.sync(guild=guild)
-        except discord.HTTPException:
+        # Not just HTTPException: a dropped connection mid-sync is an OSError,
+        # and the promise here is that one bad scope never stops the bot
+        # starting. CancelledError still propagates (it's a BaseException).
+        except Exception:
             logger.exception("command sync failed", extra={"scope": scope})
             results[scope] = "failed"
             continue
