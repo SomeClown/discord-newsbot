@@ -1051,6 +1051,10 @@ Estimated 1 to 2 agent days.
 - **Retention:** also purges `game_summaries` and `guild_notices` older than 90 days. `alerted_codes` and `guild_code_posts` are kept forever, like v2. Backups are unchanged.
 - **Config:** a breaking change in shape, but v3 still loads v2 configs (derive plus import).
 
+**Deploy notes from task 2's adversarial round (2026-09-30):**
+- Migration 005 refuses to run if the database already holds a foreign-key violation. It rolls back cleanly, stays at v4, and names the table. **Before the v3 deploy, run `PRAGMA foreign_key_check` on a copy of the prod database** (the dev database passed). Fix or delete any orphan rows first.
+- **After going public, never roll back to v2.2 with `run-now` force.** v2.2 can't tell the friend's digest from a stranger's, and forcing overwrites. The runbook (task 18) says so.
+
 ## 6. Risks and open questions (ranked)
 
 1. **The import mis-carries the friend's setup.** Mitigation: the prod-like fixture tests, one atomic transaction, logging, old keys kept, and the test-guild run against a copy of the real config (owner step). The key test is "upgrade after today's digest: no second post".
