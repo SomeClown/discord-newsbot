@@ -288,8 +288,13 @@ def test_attribution_newlines_are_flattened_so_it_cannot_fake_the_link_line():
 
 def test_text_can_forge_the_header_line_documented():
     # Nothing forbids a quote whose first line is the header text. Cosmetic only.
+    # Checked by content rather than position, since the header no longer
+    # starts with its bold markers: the copy's `**` is escaped, so it can
+    # never render bold like the real header does.
     msg = render_quote_message(Quote(QUOTE_HEADER))
-    assert msg.split("\n")[1].startswith("\\*\\*")
+    forged = msg.split("\n")[1]
+    assert forged != QUOTE_HEADER
+    assert "\\*\\*" in forged
 
 
 def test_empty_and_whitespace_attribution_and_link_semantics():

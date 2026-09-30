@@ -27,8 +27,9 @@ from dataclasses import dataclass
 from newsbot.bot.format import _ALERT_CONTENT_LIMIT, discord_len, esc
 from newsbot.store.models import QuoteDeckState
 
-# Placeholders until the owner picks the wording (plan checkpoint B).
-QUOTE_HEADER = "**Quote of the day**"
+# The owner's wording (plan checkpoint B, 2026-09-29). A speakeasy pours one
+# a day, and nobody at the bar gets to pick it.
+QUOTE_HEADER = "\U0001f943 **Today's pour**"
 ATTRIBUTION_PREFIX = "~ "
 WIKIQUOTE_LINK_LABEL = "From Wikiquote:"
 
