@@ -150,7 +150,8 @@ def test_a_v22_failed_row_with_only_flat_ids_and_no_window_is_reclaimed_fresh(co
 def test_attempts_count_every_successful_claim_across_branches(conn):
     make_guild(conn, 1)
     first = claim(conn)
-    claim(conn, resume=True)  # resume a pending row
+    # Resume a pending row: only once its lease has gone stale, so the clock moves on.
+    claim(conn, resume=True, now=clock(T0 + timedelta(minutes=11)))
     repo.mark_guild_digest_failed(conn, first.digest_id, "x", {}, now=clock())
     claim(conn)  # reclaim a clean failure
     claim(conn, force=True)  # forced replace
@@ -190,6 +191,76 @@ def test_the_unique_index_is_per_guild_and_day(conn):
     assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 3
 
 
+# --- the scheduler's claim re-checks its rules under the lock ---
+
+
+def test_a_scheduled_claim_resumes_a_pending_row_only_once_its_lease_is_stale(conn):
+    make_guild(conn, 1)
+    claim(conn, now=clock(T0))
+    before = raw_row(conn)
+    for minutes in (0, 5, 10):  # exactly ten minutes is still inside the lease
+        assert claim(conn, resume=True, now=clock(T0 + timedelta(minutes=minutes))) is None
+    assert raw_row(conn) == before
+    got = claim(conn, resume=True, now=clock(T0 + timedelta(minutes=10, seconds=1)))
+    assert got is not None and got.resumed is True and got.attempts == 2
+
+
+def test_a_write_through_keeps_the_lease_fresh(conn):
+    make_guild(conn, 1)
+    got = claim(conn, now=clock(T0))
+    repo.record_posted_game(
+        conn, got.digest_id, "borderlands4", 1, now=clock(T0 + timedelta(minutes=9))
+    )
+    assert claim(conn, resume=True, now=clock(T0 + timedelta(minutes=15))) is None
+    assert claim(conn, resume=True, now=clock(T0 + timedelta(minutes=19, seconds=1))) is not None
+
+
+def test_touch_refreshes_a_pending_row_and_leaves_a_finished_one_alone(conn):
+    make_guild(conn, 1)
+    got = claim(conn, now=clock(T0))
+    repo.touch_guild_digest(conn, got.digest_id, now=clock(T0 + timedelta(minutes=8)))
+    assert raw_row(conn)["updated_at"] == (T0 + timedelta(minutes=8)).isoformat()
+    repo.mark_guild_digest_failed(conn, got.digest_id, "x", {}, now=clock(T0 + timedelta(hours=1)))
+    repo.touch_guild_digest(conn, got.digest_id, now=clock(T0 + timedelta(hours=2)))
+    assert raw_row(conn)["updated_at"] == (T0 + timedelta(hours=1)).isoformat()
+
+
+def test_a_scheduled_claim_honors_the_retry_gap_and_the_attempt_cap(conn):
+    make_guild(conn, 1)
+    first = claim(conn, now=clock(T0))
+    repo.mark_guild_digest_failed(conn, first.digest_id, "x", {}, now=clock(T0))
+    assert claim(conn, resume=True, now=clock(T0 + timedelta(minutes=10))) is None
+    got = claim(conn, resume=True, now=clock(T0 + timedelta(minutes=10, seconds=1)))
+    assert got is not None and got.attempts == 2
+    repo.mark_guild_digest_failed(conn, got.digest_id, "x", {}, now=clock(T0))
+    got = claim(conn, resume=True, now=clock(T0 + timedelta(hours=3)))
+    assert got is not None and got.attempts == 3
+    repo.mark_guild_digest_failed(conn, got.digest_id, "x", {}, now=clock(T0))
+    assert claim(conn, resume=True, now=clock(T0 + timedelta(days=1))) is None  # out of tries
+    assert claim(conn, now=clock(T0 + timedelta(days=1))) is not None  # run-now still may
+
+
+def test_a_scheduled_claim_never_retries_a_failure_that_posted(conn):
+    make_guild(conn, 1)
+    first = claim(conn, now=clock(T0))
+    repo.record_posted_game(conn, first.digest_id, "borderlands4", 5, now=clock(T0))
+    repo.mark_guild_digest_failed(conn, first.digest_id, "x", {}, now=clock(T0))
+    assert claim(conn, resume=True, now=clock(T0 + timedelta(days=1))) is None
+    assert claim(conn, now=clock(T0 + timedelta(days=1))).resumed is True  # an admin's call
+
+
+def test_a_scheduled_retry_of_a_clean_failure_reuses_the_window_it_was_claimed_with(conn):
+    make_guild(conn, 1)
+    first = claim(conn, now=clock(T0))
+    repo.mark_guild_digest_failed(conn, first.digest_id, "x", {}, now=clock(T0))
+    later = (T0 + timedelta(hours=5), T0 + timedelta(hours=6))
+    got = claim(conn, resume=True, window=later, now=clock(T0 + timedelta(minutes=11)))
+    assert (got.window_start, got.window_end) == WINDOW and got.resumed is False
+    repo.mark_guild_digest_failed(conn, got.digest_id, "x", {}, now=clock(T0))
+    fresh = claim(conn, window=later, now=clock(T0 + timedelta(minutes=12)))  # run-now: new window
+    assert (fresh.window_start, fresh.window_end) == later
+
+
 # --- write-through and the final save ---
 
 
@@ -223,15 +294,6 @@ def test_a_write_through_moves_updated_at_so_a_watchdog_could_see_life(conn):
     assert raw_row(conn)["updated_at"] == (T0 + timedelta(minutes=2)).isoformat()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "record_posted_game reads the JSON map and then writes it back without an "
-        "exclusive transaction, so two writers on the same row lose each other's games. "
-        "Latent today (one publisher writes its own row in sequence); it becomes a real "
-        "lost update if two processes ever work the same digest."
-    ),
-)
 def test_two_writers_recording_different_games_do_not_lose_each_other(db_path):
     with closing(connect(db_path)) as c:
         make_guild(c, 1)

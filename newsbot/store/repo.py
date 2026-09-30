@@ -20,9 +20,11 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 
+from newsbot.guilds.schedule import lease_is_stale, retry_is_ready
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
     AlertState,
@@ -87,6 +89,31 @@ def existing_urls(conn: sqlite3.Connection, urls: Iterable[str]) -> set[str]:
         rows = conn.execute(query, chunk)
         found.update(row["url"] for row in rows)
     return found
+
+
+@contextmanager
+def _immediate(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run the body in one `BEGIN IMMEDIATE` transaction: take the write lock, then look.
+
+    Read-modify-write on a digest row needs this. A plain `with conn:` starts
+    its transaction at the first write, after the read, so two writers can both
+    read the old value and the second one quietly undoes the first. (The
+    claim has always done this; `record_posted_game` learned it from a test
+    that lost 500 of 600 games.) Not reentrant: the connection must not
+    already be in a transaction.
+    """
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -1452,6 +1479,11 @@ def app_state_set(conn: sqlite3.Connection, key: str, value: str) -> None:
         )
 
 
+def app_state_delete(conn: sqlite3.Connection, key: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+
+
 def adopt_orphan_digests(conn: sqlite3.Connection, guild_id: int) -> int:
     """Give v2.2-written digest rows (NULL `guild_id`) to the imported guild.
 
@@ -2096,16 +2128,25 @@ def claim_guild_digest(
     - `force`: replaces the row in place, keeping its id, with `window` and nothing
       posted. (A confirmed run-now; the admin was asked first.)
     Every successful claim increments `attempts`.
+
+    `resume=True` is the scheduler's claim (scheduled and catch-up runs), and it
+    carries the scheduler's rules, re-checked here under the lock because the due
+    check ran on a snapshot that two ticks, or two processes, may both be holding:
+    a `pending` row resumes only once its lease is stale (`schedule.lease_is_stale`:
+    `updated_at` is refreshed as games land, so a fresh one is someone's live
+    publish), and a `failed` row is reclaimed only by `schedule.retry_is_ready`
+    (clean, under the attempt cap, past the ten-minute gap). A clean failure
+    retried this way reuses the window it was claimed with, so the retry covers
+    the same items.
     """
-    now_iso = _resolve_now(now)
+    now_dt = (now or (lambda: datetime.now(UTC)))()
+    now_iso = now_dt.isoformat()
     new_start, new_end = (_utc_iso(moment) for moment in window)
-    old_isolation = conn.isolation_level
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    claim: GuildClaim | None
+    with _immediate(conn):
         row = conn.execute(
-            "SELECT id, status, posted_by_game, window_start, window_end FROM digests "
-            "WHERE guild_id = ? AND run_date = ?",
+            "SELECT id, status, posted_by_game, posted_message_ids, window_start, window_end, "
+            "attempts, updated_at FROM digests WHERE guild_id = ? AND run_date = ?",
             (guild_id, run_date.isoformat()),
         ).fetchone()
         if row is None:
@@ -2114,10 +2155,13 @@ def claim_guild_digest(
                 "attempts, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, 1, ?, ?)",
                 (guild_id, run_date.isoformat(), new_start, new_end, now_iso, now_iso),
             )
-            claim = GuildClaim(cur.lastrowid, window[0], window[1], {}, False)
+            claim = GuildClaim(cur.lastrowid, window[0], window[1], {}, False, 1)
         else:
             status = row["status"]
             posted: dict[str, int] = json.loads(row["posted_by_game"])
+            posted_any = bool(posted) or row["posted_message_ids"] != "[]"
+            updated_at = _parse_dt_or_none(row["updated_at"])
+            attempts = row["attempts"] + 1
             stored = (
                 (
                     datetime.fromisoformat(row["window_start"]),
@@ -2127,15 +2171,28 @@ def claim_guild_digest(
                 else None
             )
             if force:
-                claim = GuildClaim(row["id"], window[0], window[1], {}, False)
+                claim = GuildClaim(row["id"], window[0], window[1], {}, False, attempts)
             elif status in ("ok", "partial") or (status == "pending" and not resume):
                 claim = None
-            elif status == "pending" and stored is None:
-                claim = None  # v2.2 wrote it and nobody knows what it posted
+            elif status == "pending" and (stored is None or not lease_is_stale(updated_at, now_dt)):
+                claim = None  # a v2.2 row nobody can read, or somebody's live publish
+            elif (
+                status == "failed"
+                and resume
+                and not retry_is_ready(
+                    posted_any=posted_any,
+                    attempts=row["attempts"],
+                    updated_at=updated_at,
+                    now=now_dt,
+                )
+            ):
+                claim = None  # too soon, too many tries, or an admin's call
             elif (status == "pending" or posted) and stored is not None:
-                claim = GuildClaim(row["id"], stored[0], stored[1], posted, True)
+                claim = GuildClaim(row["id"], stored[0], stored[1], posted, True, attempts)
+            elif resume and stored is not None:
+                claim = GuildClaim(row["id"], stored[0], stored[1], {}, False, attempts)
             else:
-                claim = GuildClaim(row["id"], window[0], window[1], {}, False)
+                claim = GuildClaim(row["id"], window[0], window[1], {}, False, attempts)
             if claim is not None:
                 start_iso, end_iso = _utc_iso(claim.window_start), _utc_iso(claim.window_end)
                 conn.execute(
@@ -2145,13 +2202,6 @@ def claim_guild_digest(
                     "WHERE id = ?",
                     (start_iso, end_iso, now_iso, int(force), row["id"]),
                 )
-        conn.execute("COMMIT")
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.isolation_level = old_isolation
     return claim
 
 
@@ -2167,10 +2217,13 @@ def record_posted_game(
 
     Called as each game lands, so a crash later in the same digest leaves an
     honest record of what already went out. Keeps the flat `posted_message_ids`
-    list (v2.2's shape) in step.
+    list (v2.2's shape) in step, and refreshes `updated_at`: for a `pending` row
+    that's the lease that keeps another process from resuming it. The read and
+    the write happen in one `BEGIN IMMEDIATE`, so two writers can't lose each
+    other's games.
     """
     now_iso = _resolve_now(now)
-    with conn:
+    with _immediate(conn):
         row = conn.execute(
             "SELECT posted_by_game FROM digests WHERE id = ?", (digest_id,)
         ).fetchone()
@@ -2182,6 +2235,22 @@ def record_posted_game(
             "UPDATE digests SET posted_by_game = ?, posted_message_ids = ?, updated_at = ? "
             "WHERE id = ?",
             (json.dumps(posted), json.dumps(list(posted.values())), now_iso, digest_id),
+        )
+
+
+def touch_guild_digest(
+    conn: sqlite3.Connection, digest_id: int, *, now: Callable[[], datetime] | None = None
+) -> None:
+    """Refresh a `pending` row's `updated_at`: the publisher's "still alive" heartbeat.
+
+    Does nothing to a row that's no longer `pending`, so a late heartbeat can't
+    touch a digest that already finished (or failed, whose retry gap runs from
+    `updated_at`).
+    """
+    with conn:
+        conn.execute(
+            "UPDATE digests SET updated_at = ? WHERE id = ? AND status = 'pending'",
+            (_resolve_now(now), digest_id),
         )
 
 
@@ -2227,7 +2296,7 @@ def mark_guild_digest_failed(
     already have recorded most of it); nothing is ever removed, for the reason
     `mark_digest_failed` gives: forgetting a posted game is how it gets posted twice.
     """
-    with conn:
+    with _immediate(conn):
         row = conn.execute(
             "SELECT posted_by_game FROM digests WHERE id = ?", (digest_id,)
         ).fetchone()

@@ -349,7 +349,9 @@ def test_the_window_is_floored_at_forty_eight_hours():
     assert digest_window(end, end - timedelta(days=9)) == (end - timedelta(hours=48), end)
 
 
-def test_a_previous_end_that_is_not_before_this_one_falls_back_to_a_day():
+def test_a_previous_end_that_is_not_before_this_one_gives_an_empty_window_at_that_end():
+    # Changed from "falls back to a day": that re-showed the last digest's items after a
+    # zone change. The window now starts at the previous end and is empty.
     end = utc(2026, 9, 30, 16, 0)
-    assert digest_window(end, end) == (end - timedelta(hours=24), end)
-    assert digest_window(end, end + timedelta(hours=3)) == (end - timedelta(hours=24), end)
+    assert digest_window(end, end) == (end, end)
+    assert digest_window(end, end + timedelta(hours=3)) == (end + timedelta(hours=3), end)

@@ -380,3 +380,6 @@ class GuildClaim:
     window_end: datetime
     posted_by_game: dict[str, int]
     resumed: bool
+    # The row's attempt count after this claim, so the publisher knows whether a
+    # failure is the last one the schedule will retry.
+    attempts: int = 1

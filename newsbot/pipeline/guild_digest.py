@@ -21,22 +21,33 @@ with a "Summary unavailable" note if there isn't one. Publishing is injected
 something, so all of it runs in tests without a Discord in sight. Problems
 that belong to a server go to that server's own notifier, never the owner.
 
-Servers are processed one after another with a pause between them, and one
-server's failure is logged and left at that; it doesn't get to delay or break
-the next one. The bot's scheduler isn't wired to any of this yet (that's the
-cutover, plan task 13), so for now the only thing calling it is the test suite.
+Servers are processed one after another with a pause between servers that
+actually sent something, and one server's failure is logged and left at that; it
+doesn't get to delay or break the next one. That includes a hung one: each server
+gets `GUILD_TIMEOUT_S` and then the tick moves on, leaving its row `pending`.
+
+A `pending` row is also a lease (the rules are in `guilds/schedule.py`). The
+publisher refreshes it as each game lands and on a `HEARTBEAT_S` heartbeat, so a
+second process only resumes a digest once the first has been quiet for
+`LEASE_STALE_AFTER`. A graceful cancel (a deploy) deliberately leaves the row
+`pending` for the same reason: it's a pause, not a failure.
+
+The bot's scheduler isn't wired to any of this yet (that's the cutover, plan
+task 13), so for now the only thing calling it is the test suite.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfoNotFoundError
 
 from newsbot.bot.format import (
     RenderedDigest,
@@ -45,7 +56,15 @@ from newsbot.bot.format import (
     render_guild_run_report,
 )
 from newsbot.config import AppConfig, GameCfg
-from newsbot.guilds.schedule import DueGuild, digest_window, due_guilds, local_due_instant
+from newsbot.guilds.schedule import (
+    CATCH_UP_AFTER,
+    MAX_ATTEMPTS,
+    RETRY_AFTER,
+    DueGuild,
+    digest_window,
+    due_guilds,
+    local_due_instant,
+)
 from newsbot.pipeline.publisher import Publisher
 from newsbot.pipeline.run import RunKind, _publish_with_retry, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, StoryDraft
@@ -60,6 +79,17 @@ logger = logging.getLogger(__name__)
 # few hundred bursts in the same second. discord.py handles the per-route 429s;
 # this is just manners.
 _GUILD_PACE_S = 1.0
+# The most one server's digest may take inside the tick before the tick gives up
+# on it and moves on (the row stays `pending`; the lease brings it back). Well
+# over a real digest (a few seconds of sends, plus at most 14 s of retry backoff)
+# and well under `schedule.LEASE_STALE_AFTER`, so a timed-out guild is never
+# resumed while its old publisher could still be writing.
+GUILD_TIMEOUT_S = 300.0
+# How often a publishing digest refreshes its row's lease.
+HEARTBEAT_S = 60.0
+# Backoff for a server whose run crashes: it's not retried until this long after
+# the last crash, doubling each time up to the cap.
+_CRASH_BACKOFF_CAP = timedelta(hours=6)
 
 Sleep = Callable[[float], Awaitable[None]]
 NotifyGuild = Callable[[int, str], Awaitable[None]]
@@ -103,6 +133,8 @@ class GuildDigestDeps:
     send_report: ReportSender | None = None
     sleep: Sleep = asyncio.sleep
     pace_s: float = _GUILD_PACE_S
+    guild_timeout_s: float = GUILD_TIMEOUT_S
+    heartbeat_s: float = HEARTBEAT_S
     # Guilds this process is publishing for right now, so a slow digest isn't
     # mistaken for a crashed one by the due check.
     running: set[int] = field(default_factory=set)
@@ -124,6 +156,30 @@ class GuildDigestOutcome:
     skipped_games: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     rendered: RenderedDigest | None = None
+    # Messages this run actually sent (games a resume found already posted don't count).
+    # The tick paces on it: a server that sent nothing costs the next one no pause.
+    sent: int = 0
+
+
+class GuildTimeZoneError(Exception):
+    """A server's stored time zone (or digest time) can't be used.
+
+    Raised by the command-path helpers (`todays_guild_digest`, `preview_guild_digest`,
+    a `run_guild_digest` that isn't on the schedule) instead of the `zoneinfo`
+    error underneath, which is what you get when tzdata renames a zone out from
+    under a stored setting. The command layer turns it into "your time zone setting
+    is invalid; fix it with /newsbot settings". The scheduled path doesn't raise it:
+    the due check logs and skips such a server.
+    """
+
+
+def _local_date(now: datetime, guild: GuildSettings) -> date:
+    try:
+        return local_run_date(now, guild.timezone)
+    except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+        raise GuildTimeZoneError(
+            f"server {guild.guild_id}'s time zone {guild.timezone!r} is invalid"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -163,7 +219,7 @@ async def todays_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildDige
             guild = repo.get_guild(conn, guild_id)
             if guild is None:
                 return None
-            run_date = local_run_date(deps.now(), guild.timezone)
+            run_date = _local_date(deps.now(), guild)
             return repo.get_guild_digest(conn, guild_id, run_date)
 
     return await asyncio.to_thread(_sync)
@@ -273,10 +329,17 @@ async def _build(
 
 
 def _window_sync(
-    db_path: str, guild_id: int, run_date: date, end: datetime
+    db_path: str, guild_id: int, run_date: date, end: datetime, now: datetime, *, late: bool
 ) -> tuple[datetime, datetime]:
     with closing(connect(db_path)) as conn:
         previous = repo.last_window_end(conn, guild_id, exclude_run_date=run_date)
+    # A server's very first digest, when it's running late (the server was set up after
+    # its digest time, or the bot was down), ends now instead of at the due instant it
+    # missed: one set up at 14:00 gets news up to 14:00, not a digest already five hours
+    # stale. Catch-up for a server that already has digests keeps ending at the due
+    # instant, so what piled up during the downtime lands in its next window.
+    if previous is None and late:
+        end = now
     return digest_window(end, previous)
 
 
@@ -295,8 +358,11 @@ def _when(deps: GuildDigestDeps, guild: GuildSettings, kind: RunKind, due: DueGu
     if due is not None:
         run_date, due_at = due.run_date, due.due_at
     else:
-        run_date = local_run_date(now, guild.timezone)
-        due_at = local_due_instant(run_date, guild.digest_time, guild.timezone)
+        run_date = _local_date(now, guild)
+        try:
+            due_at = local_due_instant(run_date, guild.digest_time, guild.timezone)
+        except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+            raise GuildTimeZoneError(f"server {guild.guild_id}'s digest time is invalid") from exc
     # Scheduled and catch-up windows end at the due instant, so items collected
     # while the bot was down land in the next window instead of being lost or
     # double-counted; run-now ends at "now".
@@ -316,7 +382,9 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
             return None
         guild, followed = loaded
         run_date, due_at, window_end = _when(deps, guild, RunKind.RUN_NOW, None)
-        window = await asyncio.to_thread(_window_sync, deps.db_path, guild_id, run_date, window_end)
+        window = await asyncio.to_thread(
+            _window_sync, deps.db_path, guild_id, run_date, window_end, deps.now(), late=False
+        )
         built = await _build(deps, guild, followed, window, due_at, run_date)
         return GuildPreview(built.rendered, built.notes)
 
@@ -367,6 +435,11 @@ def _mark_failed_sync(
         repo.mark_guild_digest_failed(conn, digest_id, notes, posted, now=now)
 
 
+def _touch_sync(db_path: str, digest_id: int, now: Callable[[], datetime]) -> None:
+    with closing(connect(db_path)) as conn:
+        repo.touch_guild_digest(conn, digest_id, now=now)
+
+
 def _status_sync(db_path: str, guild_id: int, run_date: date) -> str | None:
     with closing(connect(db_path)) as conn:
         row = repo.get_guild_digest(conn, guild_id, run_date)
@@ -404,7 +477,12 @@ async def run_guild_digest(
     (scheduled and catch-up only) and a finished one is refused (`skipped`).
 
     Takes the server's lock for the whole run. Anything unexpected after the claim
-    leaves the row `failed` with whatever did post, then propagates.
+    leaves the row `failed` with whatever did post, then propagates. A cancellation
+    (a deploy, or the tick's timeout) is the exception: it leaves the row `pending`,
+    window and posted games intact, for a resume once the lease goes stale.
+
+    Raises `GuildTimeZoneError` before claiming anything if the server's stored
+    zone can't be used and `due` didn't already settle the date.
     """
     async with deps.lock_for(guild_id):
         deps.running.add(guild_id)
@@ -423,7 +501,10 @@ async def _run_locked(
     guild, followed = loaded
     started = deps.now()
     run_date, due_at, window_end = _when(deps, guild, kind, due)
-    window = await asyncio.to_thread(_window_sync, deps.db_path, guild_id, run_date, window_end)
+    late = started - due_at >= CATCH_UP_AFTER
+    window = await asyncio.to_thread(
+        _window_sync, deps.db_path, guild_id, run_date, window_end, started, late=late
+    )
     claim = await asyncio.to_thread(
         _claim_sync,
         deps.db_path,
@@ -439,16 +520,25 @@ async def _run_locked(
             guild_id, "skipped", run_date, notes=["this day's digest is already claimed"]
         )
 
+    heartbeat = asyncio.create_task(_heartbeat(deps, claim.digest_id))
     try:
         return await _publish_claimed(
             deps, guild, followed, claim, run_date, due_at, kind, force, started
         )
+    except asyncio.CancelledError:
+        # A deploy, or the tick giving up on a hung publisher. The row is already
+        # `pending` with its window, and every game that landed was written through,
+        # so the right move is to leave it alone: once its lease goes stale the next
+        # tick resumes it and posts only what's missing. (It used to be marked
+        # `failed`, which only an admin's run-now could ever finish.)
+        logger.warning("guild %s's digest was cancelled; leaving it pending to resume", guild_id)
+        raise
     except BaseException as exc:
         # Everything this function knows how to handle returns an outcome. What gets
-        # here is a bug, a publisher raising something odd, or a cancellation (a
-        # deploy mid-digest), and the one thing that can't happen is the row staying
-        # `pending` with nobody the wiser. Unless the digest already saved: a
-        # cancellation inside the report must not relabel a good digest as failed.
+        # here is a bug or a publisher raising something odd, and the one thing that
+        # can't happen is the row staying `pending` with nobody the wiser. Unless the
+        # digest already saved: an error inside the report must not relabel a good
+        # digest as failed.
         status = await asyncio.to_thread(_status_sync, deps.db_path, guild_id, run_date)
         if status in ("ok", "partial"):
             logger.warning("error after guild %s's digest saved as %s", guild_id, status)
@@ -463,6 +553,28 @@ async def _run_locked(
             deps.now,
         )
         raise
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+
+
+async def _heartbeat(deps: GuildDigestDeps, digest_id: int) -> None:
+    """Refresh the row's lease while the digest publishes, so nobody else resumes it.
+
+    Real `asyncio.sleep`, not `deps.sleep`: that one is the tick's pacing and the
+    retry backoff, and tests replace it with something instant.
+    """
+    while True:
+        await asyncio.sleep(deps.heartbeat_s)
+        try:
+            await asyncio.to_thread(_touch_sync, deps.db_path, digest_id, deps.now)
+        except Exception:
+            logger.exception("couldn't refresh a digest's lease")
+
+
+def _will_retry(claim: GuildClaim, posted: bool) -> bool:
+    """True if the schedule will try this row again by itself (clean failure, tries left)."""
+    return not posted and claim.attempts < MAX_ATTEMPTS
 
 
 async def _publish_claimed(
@@ -485,9 +597,14 @@ async def _publish_claimed(
         await asyncio.to_thread(
             _mark_failed_sync, deps.db_path, claim.digest_id, f"build failed: {exc}", {}, deps.now
         )
-        await _safe_notify(
-            deps, guild_id, "newsbot: I couldn't build today's digest. I'll try again shortly."
-        )
+        if _will_retry(claim, bool(claim.posted_by_game)):
+            tail = "I'll try again shortly."
+        else:
+            tail = (
+                "That was my last automatic try; once it's sorted out, "
+                "an admin can run /newsbot run-now."
+            )
+        await _safe_notify(deps, guild_id, f"newsbot: I couldn't build today's digest. {tail}")
         return GuildDigestOutcome(guild_id, "failed", run_date, notes=[str(exc)])
 
     already = dict(claim.posted_by_game)
@@ -508,6 +625,7 @@ async def _publish_claimed(
     publisher = deps.publisher_for(guild, scope, already, on_posted)
     posted_new, error = await _publish_with_retry(publisher, to_post, sleep=deps.sleep)
     posted = {**already, **posted_new}
+    sent = len(set(posted) - set(already))
     skipped_games = dict(getattr(publisher, "skipped", {}) or {})
     finished_at = deps.now()
 
@@ -521,14 +639,17 @@ async def _publish_claimed(
             deps.now,
         )
         missing = [m.topic_key for m in built.rendered.messages if m.topic_key not in posted]
+        if _will_retry(claim, bool(posted)):
+            tail = "I'll try again shortly; if that fails, an admin can run /newsbot run-now."
+        else:
+            tail = "I won't retry on my own; once that's fixed, an admin can run /newsbot run-now."
         await _safe_notify(
             deps,
             guild_id,
             "newsbot: today's digest didn't fully post "
             f"({esc(plain_line(str(error), 200))}). Posted: {_names(built, list(posted))}; "
             f"didn't post: {_names(built, missing)}. "
-            "Check that I can still send messages and embeds in those channels, "
-            "then an admin can run /newsbot run-now.",
+            f"Check that I can still send messages and embeds in those channels. {tail}",
         )
         return GuildDigestOutcome(
             guild_id,
@@ -538,6 +659,7 @@ async def _publish_claimed(
             skipped_games,
             [*built.notes, str(error)],
             built.rendered,
+            sent,
         )
 
     notes = list(built.notes)
@@ -578,7 +700,7 @@ async def _publish_claimed(
         finished_at - started,
     )
     return GuildDigestOutcome(
-        guild_id, status, run_date, posted, skipped_games, notes, built.rendered
+        guild_id, status, run_date, posted, skipped_games, notes, built.rendered, sent
     )
 
 
@@ -628,32 +750,124 @@ def _candidates_sync(db_path: str):
         return repo.due_candidates(conn)
 
 
+# A run that crashes (as opposed to failing cleanly, which leaves a row with its own
+# retry rules) can't be trusted to leave any evidence, least of all before its claim,
+# so the tick keeps its own record: `app_state`, one small JSON value per server.
+# Why there: it's bookkeeping about the scheduler, not a setting (no `guilds` column,
+# no migration), it survives the every-minute loop and a restart, and it needs no
+# retention policy (it's cleared the next time the server's run gets anywhere).
+# `guild_notices` is a capped log for admins to read, not something to query for dedupe.
+def _crash_key(guild_id: int) -> str:
+    return f"guild_digest_crash:{guild_id}"
+
+
+@dataclass(frozen=True)
+class _CrashRecord:
+    run_date: date
+    attempts: int
+    last_at: datetime
+
+
+def _crash_get_sync(db_path: str, guild_id: int) -> _CrashRecord | None:
+    with closing(connect(db_path)) as conn:
+        raw = repo.app_state_get(conn, _crash_key(guild_id))
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        return _CrashRecord(
+            date.fromisoformat(data["run_date"]),
+            int(data["attempts"]),
+            datetime.fromisoformat(data["last_at"]),
+        )
+    except ValueError, KeyError, TypeError:
+        return None  # garbage is as good as no record
+
+
+def _crash_set_sync(db_path: str, guild_id: int, record: _CrashRecord) -> None:
+    value = json.dumps(
+        {
+            "run_date": record.run_date.isoformat(),
+            "attempts": record.attempts,
+            "last_at": record.last_at.isoformat(),
+        }
+    )
+    with closing(connect(db_path)) as conn:
+        repo.app_state_set(conn, _crash_key(guild_id), value)
+
+
+def _crash_clear_sync(db_path: str, guild_id: int) -> None:
+    with closing(connect(db_path)) as conn:
+        repo.app_state_delete(conn, _crash_key(guild_id))
+
+
+def _crash_backoff(attempts: int) -> timedelta:
+    return min(RETRY_AFTER * 2 ** max(attempts - 1, 0), _CRASH_BACKOFF_CAP)
+
+
 async def run_due_guilds(deps: GuildDigestDeps) -> list[GuildDigestOutcome]:
     """One tick: run the digest of every server that's due, one after another.
 
-    Waits `deps.pace_s` between servers that actually sent something. One server's
-    exception is logged, reported to that server, and forgotten; the next server
-    goes ahead on schedule. (A cancellation isn't an `Exception`, and propagates.)
+    Waits `deps.pace_s` after a server that actually sent something, and not after one
+    that had nothing to say. One server's exception is logged, reported to that
+    server (once per digest day, with a growing backoff before it's tried again),
+    and forgotten; the next server goes ahead on schedule. A server that runs past
+    `deps.guild_timeout_s` is left `pending` for the lease to bring back, and the tick
+    moves on. (An outside cancellation isn't an `Exception`, and propagates.)
     """
     now = deps.now()
     candidates = await asyncio.to_thread(_candidates_sync, deps.db_path)
     outcomes: list[GuildDigestOutcome] = []
     paced = False
     for due in due_guilds(candidates, now, deps.running):
+        crash = await asyncio.to_thread(_crash_get_sync, deps.db_path, due.guild_id)
+        if crash is not None and crash.run_date == due.run_date:
+            if deps.now() - crash.last_at <= _crash_backoff(crash.attempts):
+                continue
         if paced:
             await deps.sleep(deps.pace_s)
         kind = RunKind.CATCH_UP if due.catch_up else RunKind.SCHEDULED
         try:
-            outcome = await run_guild_digest(deps, due.guild_id, kind=kind, due=due)
+            async with asyncio.timeout(deps.guild_timeout_s) as limit:
+                outcome = await run_guild_digest(deps, due.guild_id, kind=kind, due=due)
         except Exception:
-            logger.exception("guild digest crashed", extra={"guild_id": due.guild_id})
-            await _safe_notify(
-                deps,
-                due.guild_id,
-                "newsbot: something went wrong posting today's digest. I'll try again shortly; "
-                "if it keeps happening, /newsbot status has the details.",
-            )
-            outcome = GuildDigestOutcome(due.guild_id, "failed", due.run_date)
+            if limit.expired():
+                logger.warning(
+                    "guild %s's digest timed out after %ss; left pending to resume",
+                    due.guild_id,
+                    deps.guild_timeout_s,
+                    extra={"guild_id": due.guild_id},
+                )
+                outcome = GuildDigestOutcome(
+                    due.guild_id, "failed", due.run_date, notes=["timed out; left pending"]
+                )
+            else:
+                logger.exception("guild digest crashed", extra={"guild_id": due.guild_id})
+                outcome = await _record_crash(deps, due, crash)
+        else:
+            if crash is not None:
+                await asyncio.to_thread(_crash_clear_sync, deps.db_path, due.guild_id)
         outcomes.append(outcome)
-        paced = outcome.status != "skipped"
+        paced = outcome.sent > 0
     return outcomes
+
+
+async def _record_crash(
+    deps: GuildDigestDeps, due: DueGuild, previous: _CrashRecord | None
+) -> GuildDigestOutcome:
+    """Note a crashed run for the backoff, and tell the server about it the first time only."""
+    first = previous is None or previous.run_date != due.run_date
+    record = _CrashRecord(due.run_date, 1 if first else previous.attempts + 1, deps.now())
+    try:
+        await asyncio.to_thread(_crash_set_sync, deps.db_path, due.guild_id, record)
+    except Exception:
+        logger.exception("couldn't record a crashed guild digest", extra={"guild_id": due.guild_id})
+    if first:
+        await _safe_notify(
+            deps,
+            due.guild_id,
+            "newsbot: something went wrong posting today's digest. This is the only message "
+            "I'll send about it today. If the digest doesn't show up, an admin can run "
+            "/newsbot run-now; /newsbot status has the details.",
+        )
+    return GuildDigestOutcome(due.guild_id, "failed", due.run_date)

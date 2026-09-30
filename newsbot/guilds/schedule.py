@@ -33,6 +33,19 @@ reading the `zoneinfo` docs twice):
   "tomorrow"), which waits the difference out.
 - **Nothing is due when the newest row is dated after the local date** (a
   clock step, or the westward zone change above).
+- **An unfinished row keeps its own date.** A retryable `failed` row or a
+  resumable `pending` one is judged for the day it was written, even after the
+  server's local date has moved on (a 23:59 digest that fails at 23:59 would
+  otherwise be abandoned at midnight, and its unposted games with it). Only when
+  nothing is left to retry or resume does the next day's digest start. While an
+  unfinished row is merely *waiting* (inside the retry gap, or a `pending` row
+  whose lease hasn't gone stale), the newer day waits too, because its window
+  would chain onto a digest that hasn't finished.
+- **A `pending` row is a lease.** The process publishing it refreshes
+  `updated_at` as each game lands and on a heartbeat, so another process (or a
+  restart) may only resume it once that stamp is `LEASE_STALE_AFTER` old. The
+  `running` set only knows about this process; the lease is what stops a
+  second one from resuming a digest the first is still busy posting.
 
 The window rule lives here too (`digest_window`), so all the time arithmetic
 is in one file I can be wrong in.
@@ -55,6 +68,12 @@ logger = logging.getLogger(__name__)
 # three attempts in all, at least ten minutes apart.
 MAX_ATTEMPTS = 3
 RETRY_AFTER = timedelta(minutes=10)
+# A `pending` row is resumable once nobody has touched it for this long. The
+# publisher refreshes it on a heartbeat (`guild_digest.HEARTBEAT_S`, 60 s) and
+# scheduled runs are capped well under this (`guild_digest.GUILD_TIMEOUT_S`,
+# 5 min), so a live publisher is never this stale. The price is that a bot
+# restarted after a crash waits up to this long before resuming.
+LEASE_STALE_AFTER = timedelta(minutes=10)
 # A run that starts this long after its due instant is reported as catch-up
 # rather than scheduled. The minute job is never exactly on time, so a
 # little lag is normal; this is "the bot was down" territory.
@@ -95,32 +114,67 @@ def local_due_instant(day: date, hhmm: str, timezone: str) -> datetime:
     return wall.astimezone(UTC)
 
 
-def _reason(
-    candidate: DueCandidate, local_date: date, now: datetime, running: Collection[int]
-) -> DueReason | None:
-    if candidate.run_date is None or candidate.run_date < local_date:
-        return "first"
-    if candidate.run_date > local_date:
-        return None
+def lease_is_stale(updated_at: datetime | None, now: datetime) -> bool:
+    """True when a `pending` row has gone `LEASE_STALE_AFTER` without a sign of life.
+
+    A row with no readable timestamp counts as stale: a lease nobody can read
+    would otherwise hold its server hostage forever.
+    """
+    return updated_at is None or now - updated_at > LEASE_STALE_AFTER
+
+
+def retry_is_ready(
+    *, posted_any: bool, attempts: int, updated_at: datetime | None, now: datetime
+) -> bool:
+    """True when a `failed` row may be retried on its own.
+
+    Only a *clean* failure retries. One that got some games out is an admin's
+    call (run-now asks first), as it was in v2. The claim re-checks this under
+    its lock, so two ticks that read the same stale row can't both retry it.
+    """
+    return (
+        not posted_any
+        and attempts < MAX_ATTEMPTS
+        and updated_at is not None
+        and now - updated_at > RETRY_AFTER
+    )
+
+
+def _unfinished(
+    candidate: DueCandidate, now: datetime, running: Collection[int]
+) -> tuple[DueReason | None, bool]:
+    """`(reason, waiting)` for the guild's newest row when it isn't finished.
+
+    `reason` is `retry` or `resume` when it should run now. `waiting` is true
+    when it's unfinished and will be ready later (inside the retry gap, or a
+    lease that hasn't gone stale), so the next day's digest must not jump the
+    queue. Neither set means the row is finished, or nobody will ever touch it.
+    """
     if candidate.status == "failed":
-        # Only a *clean* failure retries on its own. One that got some games
-        # out is an admin's call (run-now asks first), as it was in v2.
-        if (
-            not candidate.posted_any
-            and candidate.attempts < MAX_ATTEMPTS
-            and candidate.updated_at is not None
-            and now - candidate.updated_at > RETRY_AFTER
+        if candidate.posted_any or candidate.attempts >= MAX_ATTEMPTS:
+            return None, False
+        if candidate.updated_at is None:
+            return None, False
+        if retry_is_ready(
+            posted_any=False,
+            attempts=candidate.attempts,
+            updated_at=candidate.updated_at,
+            now=now,
         ):
-            return "retry"
-        return None
+            return "retry", False
+        return None, True
     if candidate.status == "pending":
-        # A pending row this process isn't running was left by a process that
-        # died (D7: resume it). One with no window was written by v2.2, which
-        # recorded nothing per game, so nobody knows what it posted: that one
-        # waits for an admin's run-now, as it always did.
-        if candidate.guild_id not in running and candidate.window_end is not None:
-            return "resume"
-    return None
+        # One with no window was written by v2.2, which recorded nothing per
+        # game, so nobody knows what it posted: that one waits for an admin's
+        # run-now, as it always did.
+        if candidate.window_end is None:
+            return None, False
+        if candidate.guild_id in running:
+            return None, True
+        if lease_is_stale(candidate.updated_at, now):
+            return "resume", False
+        return None, True
+    return None, False
 
 
 def due_guilds(
@@ -138,18 +192,31 @@ def due_guilds(
         try:
             local_date = now.astimezone(ZoneInfo(candidate.timezone)).date()
             due_at = local_due_instant(local_date, candidate.digest_time, candidate.timezone)
+            row_due_at = due_at
+            if candidate.run_date is not None and candidate.run_date < local_date:
+                row_due_at = local_due_instant(
+                    candidate.run_date, candidate.digest_time, candidate.timezone
+                )
         except ValueError, ZoneInfoNotFoundError, OSError:
             logger.warning(
                 "skipping guild %s: bad digest time or zone", candidate.guild_id, exc_info=True
             )
             continue
+        if candidate.run_date is not None:
+            if candidate.run_date > local_date:
+                continue
+            reason, waiting = _unfinished(candidate, now, running)
+            if reason is not None:
+                due.append(
+                    DueGuild(candidate.guild_id, candidate.run_date, row_due_at, reason, True)
+                )
+                continue
+            if waiting or candidate.run_date == local_date:
+                continue
         if now < due_at:
             continue
-        reason = _reason(candidate, local_date, now, running)
-        if reason is None:
-            continue
-        catch_up = reason != "first" or now - due_at >= CATCH_UP_AFTER
-        due.append(DueGuild(candidate.guild_id, local_date, due_at, reason, catch_up))
+        catch_up = now - due_at >= CATCH_UP_AFTER
+        due.append(DueGuild(candidate.guild_id, local_date, due_at, "first", catch_up))
     due.sort(key=lambda d: (d.due_at, d.guild_id))
     return due
 
@@ -160,10 +227,12 @@ def digest_window(end: datetime, previous_end: datetime | None) -> tuple[datetim
     Items are selected by `collected_at` in `(start, end]`. Chaining each
     window onto the previous digest's end leaves no gap and no overlap, which
     is how a run-now at 08:00 followed by tomorrow's 09:00 digest stays honest.
-    The start is floored at 48 hours back; a first digest (or a previous end
-    that isn't before this one, which a clock step can cause) covers 24.
+    The start is floored at 48 hours back; a first digest (no previous end)
+    covers 24. A previous end at or after this one (a zone change that pulled
+    the next digest earlier, or a clock step) gives an empty window that starts
+    at the previous end: nothing new, and above all nothing shown twice.
     Instants, not calendar days, so a 23-hour or 25-hour DST day just works.
     """
-    if previous_end is None or previous_end >= end:
+    if previous_end is None:
         return end - DEFAULT_WINDOW, end
     return max(previous_end, end - WINDOW_FLOOR), end

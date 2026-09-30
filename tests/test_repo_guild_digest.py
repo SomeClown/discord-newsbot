@@ -90,7 +90,9 @@ def test_guilds_do_not_share_a_day(guilds):
 
 def test_a_pending_row_resumes_with_its_window_and_what_it_posted(guilds):
     first = claim(guilds)
-    repo.record_posted_game(guilds, first.digest_id, "borderlands4", 555)
+    # The write-through's clock is pinned: it refreshes the row's lease, and the resume
+    # below is only allowed once that lease has gone stale.
+    repo.record_posted_game(guilds, first.digest_id, "borderlands4", 555, now=clock())
     later_window = (T0, T0 + timedelta(hours=3))
     got = claim(guilds, resume=True, window=later_window, now=clock(T0 + timedelta(hours=1)))
     assert got.digest_id == first.digest_id and got.resumed is True

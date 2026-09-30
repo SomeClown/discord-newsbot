@@ -458,6 +458,26 @@ async def test_an_unset_up_or_game_less_guild_is_skipped_without_a_claim(world):
 
 async def test_the_window_is_saved_and_a_scheduled_window_ends_at_the_due_instant(world):
     world.add_guild(G1)
+    # A guild that already has a digest behind it (a server's very first digest ends
+    # at "now" instead; see the first-digest test in the adversarial file).
+    with world.conn() as conn:
+        earlier = repo.claim_guild_digest(
+            conn,
+            G1,
+            DAY - timedelta(days=1),
+            force=False,
+            window=(DUE - timedelta(hours=48), DUE - timedelta(hours=24)),
+            now=lambda: NOW - timedelta(days=1),
+        )
+        repo.save_guild_digest(
+            conn,
+            earlier.digest_id,
+            "ok",
+            {},
+            None,
+            (DUE - timedelta(hours=48), DUE - timedelta(hours=24)),
+            now=lambda: NOW - timedelta(days=1),
+        )
     world.clock = DUE + timedelta(hours=3)  # the bot was down; this is catch-up
     [due] = due_guilds(_candidates(world), world.clock)
     assert due.catch_up is True
@@ -526,9 +546,12 @@ async def test_resume_after_a_crash_mid_publish_posts_only_the_missing_games(wor
         claim = repo.claim_guild_digest(
             conn, G1, DAY, force=False, window=window, now=lambda: DUE + timedelta(seconds=5)
         )
-        repo.record_posted_game(conn, claim.digest_id, "borderlands4", 424242)
+        repo.record_posted_game(
+            conn, claim.digest_id, "borderlands4", 424242, now=lambda: DUE + timedelta(seconds=5)
+        )
 
-    world.clock = DUE + timedelta(minutes=10)  # the new process starts
+    # The new process starts once the dead one's lease (ten minutes of quiet) has gone stale.
+    world.clock = DUE + timedelta(minutes=16)
     outcomes = await run_due_guilds(world.deps())
 
     assert [o.status for o in outcomes] == ["ok"]
@@ -636,7 +659,10 @@ async def test_a_notifier_that_raises_does_not_break_the_digest(world):
     assert outcome.status == "partial"
 
 
-async def test_cancellation_mid_publish_marks_failed_with_what_posted_and_propagates(world):
+async def test_cancellation_mid_publish_leaves_it_pending_with_what_posted_and_propagates(world):
+    # Changed from "marks failed": a graceful cancel (a deploy) is a pause, not a failure.
+    # `pending` with the window and the posted games is what lets the lease-expiry resume
+    # finish it; `failed` with posts only ever waited for an admin's run-now.
     import asyncio
 
     world.add_guild(G1)
@@ -646,7 +672,14 @@ async def test_cancellation_mid_publish_marks_failed_with_what_posted_and_propag
     with pytest.raises(asyncio.CancelledError):
         await run_guild_digest(world.deps(), G1, kind=RunKind.SCHEDULED)
     row = world.digest(G1)
-    assert row.status == "failed" and list(row.posted_by_game) == ["borderlands4"]
+    assert row.status == "pending" and list(row.posted_by_game) == ["borderlands4"]
+    assert row.window_end == DUE
+
+    world.channels[12].fail = []
+    world.clock = NOW + timedelta(minutes=11)  # the lease has gone stale
+    [outcome] = await run_due_guilds(world.deps())
+    assert outcome.status == "ok" and world.digest(G1).attempts == 2
+    assert len(world.channels[11].embeds) == 1 and len(world.channels[12].embeds) == 1
 
 
 # --- the run report ---
@@ -722,7 +755,7 @@ async def test_one_guilds_crash_is_reported_to_it_and_the_next_guild_still_posts
     assert [(o.guild_id, o.status) for o in outcomes] == [(G1, "failed"), (G2, "ok")]
     assert [g for g, _ in world.notices] == [G1]  # only the guild that had the problem
     assert world.digest(G1).status == "failed" and world.digest(G2).status == "ok"
-    assert world.sleeps == [1.0]
+    assert world.sleeps == []  # G1 sent nothing before it crashed, so G2 gets no pause
 
 
 async def test_a_skipped_guild_costs_no_pause(world):

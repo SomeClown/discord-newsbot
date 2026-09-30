@@ -660,7 +660,11 @@ It logs exactly what it imported and lists the old keys that can now be deleted.
 - A guild's digest posts one message per followed game in that game's channel, built from the stored items of the last 24 hours:
   - **Free:** the headline list, today's fallback format (official, then reported, then rumor; "+N more, use /news").
   - **Comped:** the stored Claude summary for that game and day, computed once and reused.
-- Many guilds due at once are processed one after another, with a short pause between guilds to respect Discord's rate limits. Nothing is fetched at digest time.
+- Many guilds due at once are processed one after another, with a short pause after each guild that sent something (none after a quiet one) to respect Discord's rate limits. Nothing is fetched at digest time.
+- **A `pending` row is a lease** (task 6 hardening). The publisher refreshes `updated_at` as each game posts and every 60 seconds, and a row may be resumed only once it has been quiet for 10 minutes, so a second process or a fast restart can't resume a digest that's still posting. The claim re-checks that, the 10-minute retry gap and the 3-attempt cap under `BEGIN IMMEDIATE`. Each guild's run gets 5 minutes inside the tick; a timeout or a graceful cancel (a deploy) leaves the row `pending` for the lease to bring back, rather than marking it `failed`.
+- **An unfinished row keeps its own date.** A retryable `failed` or resumable `pending` row is finished for the day it was written even after the guild's local date moves on, and the next day's digest waits for it. Windows chain from the last digest that posted; a previous end at or after this digest's end gives an empty window (nothing new, saved `ok`), never a 24-hour look-back that repeats items. A server's very first digest, when it runs at least five minutes late, ends at the moment it runs.
+- A run that crashes before it claims anything keeps its backoff in `app_state` (10 minutes, doubling to 6 hours), and its server hears about it once per digest day.
+- Headline lines are one line each: titles are flattened (all whitespace collapsed) and cut to 300 UTF-16 units, and a line whose URL is over 1000 units is dropped, so no item can forge a line or crowd out the rest.
 - `/news recent` and `/news search` read the shared data, limited to the games the server follows.
 
 **Commands.**

@@ -15,8 +15,10 @@ of how much they'd hurt if I got them wrong:
 
 Everything runs the real `DiscordPublisher` against hand-written fake channels
 and a real temp database with the real migrations. No network, and both the
-retry backoff and the pace between servers are patched out. Strict xfails
-are real holes in the implementation; each says what it found.
+retry backoff and the pace between servers are patched out. The holes this
+found (double posts across processes, retries that skipped their spacing,
+digests abandoned at midnight, repeated items after a zone change, a hung
+publisher, a guild nagged every minute) are fixed, and their xfail markers are gone.
 """
 
 from __future__ import annotations
@@ -30,7 +32,6 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfoNotFoundError
 
 import discord
 import pytest
@@ -41,6 +42,7 @@ from newsbot.guilds.schedule import MAX_ATTEMPTS, RETRY_AFTER
 from newsbot.pipeline.guild_digest import (
     GameSummary,
     GuildDigestDeps,
+    GuildTimeZoneError,
     guild_needs_confirmation,
     is_guild_busy,
     preview_guild_digest,
@@ -295,14 +297,6 @@ async def test_a_slow_publisher_is_not_resumed_by_the_next_tick_of_the_same_proc
     assert world.sends(ch(G1, 1)) == 1 and world.sends(ch(G1, 2)) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "`running` is per process and the claim doesn't look at how fresh a `pending` "
-        "row is, so a second process's tick sees the first process's in-flight digest "
-        "as a dead one, resumes it, and both publish. Real double post."
-    ),
-)
 async def test_a_second_process_does_not_resume_a_digest_the_first_is_still_publishing(world):
     world.add_guild(G1)
     world.add_item(BL4, "item-1", in_window())
@@ -362,14 +356,6 @@ async def test_a_confirmed_run_now_during_a_scheduled_run_waits_and_then_reposts
     assert world.digest(G1).attempts == 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Two ticks that both read 'no row yet' queue on the guild lock; the second then "
-        "claims the clean `failed` row the first just wrote, with no 10-minute gap and no "
-        "look at the attempt count, so a broken server is hit again immediately."
-    ),
-)
 async def test_the_second_overlapping_tick_does_not_retry_a_failure_inside_the_ten_minute_gap(
     world,
 ):
@@ -432,8 +418,9 @@ async def test_a_crash_between_send_and_write_through_duplicates_at_most_that_on
         assert sends == {crash_on: 2, other: 1}
         assert world.digest(G1).status == "ok"
     else:
-        # A graceful cancel after the first game is out leaves `failed` with posts, which
-        # no tick retries (see the gap test below), so nothing is duplicated and nothing resumes.
+        # An unhandled error (this `Crash` is not a cancel; a cancel now leaves `pending`, see
+        # the test below) after the first game is out leaves `failed` with posts, which no
+        # tick retries, so nothing is duplicated and nothing resumes.
         assert sends == {BL4: 1, PAL: 1}
         assert world.digest(G1).status == "failed"
     if how == "killed":
@@ -509,10 +496,10 @@ async def test_a_failure_with_posts_is_never_auto_retried_but_a_forced_run_repos
     assert world.digest(G1).posted_by_game[BL4] != row.posted_by_game[BL4]
 
 
-async def test_a_cancelled_digest_with_one_game_out_is_not_finished_by_a_later_tick(world):
-    # Documents a gap, not a pass/fail claim about the plan: a hard kill leaves `pending`,
-    # which D7 resumes; a graceful cancel (a deploy) leaves `failed` with posts, which only
-    # an admin's run-now finishes. The second game of that digest is simply late until then.
+async def test_a_cancelled_digest_with_one_game_out_is_resumed_once_its_lease_is_stale(world):
+    # Changed from "is not finished by a later tick": a graceful cancel (a deploy) used to
+    # leave `failed` with posts, which only an admin's run-now finished. It now leaves the
+    # row `pending` with its window and posted games, and a tick resumes it after the lease.
     world.add_guild(G1)
     world.add_item(BL4, "item-1", in_window())
     world.add_item(PAL, "item-2", in_window())
@@ -528,11 +515,17 @@ async def test_a_cancelled_digest_with_one_game_out_is_not_finished_by_a_later_t
     with pytest.raises(asyncio.CancelledError):
         await task
     world.channels[ch(G1, 2)].hang = False
+    row = world.digest(G1)
+    assert row.status == "pending" and list(row.posted_by_game) == [BL4]
+    assert row.window_end == DUE
 
-    world.clock = NOW + timedelta(hours=2)
+    world.clock = NOW + timedelta(minutes=5)  # the lease is still fresh: leave it alone
     assert await run_due_guilds(deps) == []
-    assert world.sends(ch(G1, 2)) == 0
-    assert world.digest(G1).status == "failed"
+    world.clock = NOW + timedelta(hours=2)
+    [resumed] = await run_due_guilds(deps)
+    assert resumed.status == "ok"
+    assert world.sends(ch(G1, 1)) == 1 and world.sends(ch(G1, 2)) == 1
+    assert world.digest(G1).status == "ok"
 
 
 # --- the due rule, end to end ---
@@ -565,10 +558,10 @@ async def test_retries_stop_after_the_attempt_cap_and_the_digest_stays_failed(wo
     assert world.digest(G1).status == "failed"
 
 
-async def test_a_guild_set_up_after_its_time_gets_a_late_digest_ending_at_the_due_instant(world):
-    # "Late, not cancelled." The window still ends at 09:00, not at 14:00, so what
-    # was collected between is in tomorrow's digest instead of lost. The catch: a
-    # brand-new server's first digest is up to a few hours stale.
+async def test_a_guild_set_up_after_its_time_gets_a_late_first_digest_ending_now(world):
+    # "Late, not cancelled," and its very first digest ends when it runs (14:00), not at the
+    # 09:00 it missed: a new server gets news up to the moment it was set up. (Changed: the
+    # window used to end at 09:00, so the first digest was hours stale.)
     world.add_guild(G1, games=(BL4,))
     world.add_item(BL4, "item-1", DUE - timedelta(hours=1))
     world.add_item(BL4, "item-2", DUE + timedelta(hours=3))
@@ -577,11 +570,13 @@ async def test_a_guild_set_up_after_its_time_gets_a_late_digest_ending_at_the_du
     [outcome] = await run_due_guilds(world.deps())
 
     assert outcome.status == "ok"
-    assert world.titles(ch(G1, 1)) == ["item-1"]
+    assert world.titles(ch(G1, 1)) == ["item-2", "item-1"]
+    assert world.digest(G1).window_end == DUE + timedelta(hours=5)
     assert "catch-up" in world.reports[0][2]
+    world.add_item(BL4, "item-3", DUE + timedelta(hours=5, minutes=30))
     world.clock = DUE + timedelta(days=1, seconds=30)
     await run_due_guilds(world.deps())
-    assert world.titles(ch(G1, 1)) == ["item-1", "item-2"]
+    assert world.titles(ch(G1, 1)) == ["item-2", "item-1", "item-3"]  # nothing twice, none lost
 
 
 async def test_the_report_calls_a_run_catch_up_at_five_minutes_late_not_before(world):
@@ -612,24 +607,28 @@ async def test_a_bad_zone_guild_is_skipped_and_the_others_still_post(world):
     assert world.notices == []
 
 
-async def test_run_now_for_a_guild_whose_zone_vanished_raises_before_claiming_anything(world):
-    # Documents current behavior: the scheduled path skips a bad zone quietly, but the
-    # command paths (run-now, preview, the confirmation check) let the error out. The
-    # command layer has to catch it, and nothing is left `pending`.
+async def test_a_guild_whose_zone_vanished_gets_a_catchable_error_from_the_command_paths(world):
+    # Changed from letting `ZoneInfoNotFoundError` escape: the command layer catches
+    # `GuildTimeZoneError` and says "your time zone setting is invalid; fix it with
+    # /newsbot settings". The scheduled path still just skips the server. Nothing is
+    # left `pending`, and the lock is released.
     world.add_guild(G1, games=(BL4,))
     with world.conn() as conn:
         conn.execute("UPDATE guilds SET timezone = 'Mars/Olympus' WHERE guild_id = ?", (G1,))
         conn.commit()
     deps = world.deps()
-    with pytest.raises(ZoneInfoNotFoundError):
+    with pytest.raises(GuildTimeZoneError):
         await run_guild_digest(deps, G1, kind=RunKind.RUN_NOW, force=True)
-    with pytest.raises(ZoneInfoNotFoundError):
+    with pytest.raises(GuildTimeZoneError):
+        await run_guild_digest(deps, G1, kind=RunKind.SCHEDULED)
+    with pytest.raises(GuildTimeZoneError):
         await preview_guild_digest(deps, G1)
-    with pytest.raises(ZoneInfoNotFoundError):
+    with pytest.raises(GuildTimeZoneError):
         await todays_guild_digest(deps, G1)
     with world.conn() as conn:
         assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 0
     assert not is_guild_busy(deps, G1) and G1 not in deps.running
+    assert await run_due_guilds(deps) == []
 
 
 async def test_a_zone_whose_local_date_moves_forward_starts_a_new_day_with_chained_windows(world):
@@ -648,14 +647,6 @@ async def test_a_zone_whose_local_date_moves_forward_starts_a_new_day_with_chain
     assert world.titles(ch(G1, 1)) == ["item-1", "item-2"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "digest_window falls back to a fresh 24h window when the previous end is not "
-        "before this end. A zone change that makes the new local day's due instant land "
-        "at or before the last digest's end therefore re-shows the last digest's items."
-    ),
-)
 async def test_a_zone_change_that_pulls_the_next_digest_earlier_does_not_repeat_items(world):
     world.add_guild(G1, games=(BL4,))
     world.add_item(BL4, "item-1", in_window())
@@ -685,14 +676,6 @@ async def test_a_clock_step_back_across_a_local_midnight_does_not_double_a_day(w
     assert world.sends(ch(G1, 1)) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A crash that leaves a day's digest half-posted is only resumed on its own local "
-        "date. Restart the next day and that day is 'first', the old row is abandoned, and "
-        "its chained window end hides the unposted game's items from every later digest."
-    ),
-)
 async def test_a_game_a_crashed_digest_never_posted_is_not_lost_when_the_restart_is_a_day_late(
     world,
 ):
@@ -733,6 +716,11 @@ async def test_a_catch_up_window_ends_at_the_due_instant_and_the_next_digest_pic
     world.add_guild(G1, games=(BL4,))
     stream_items(world, DUE - timedelta(days=1), 72)  # hourly, DUE-23h through DUE+48h
     deps = world.deps()
+    # An earlier on-time digest (it finds nothing): this server has a history, so its
+    # catch-up window still ends at the due instant. A server's very first digest, when
+    # it's late, ends now instead; see the set-up-late test above.
+    world.clock = DUE - timedelta(days=1) + timedelta(seconds=30)
+    await run_due_guilds(deps)
     world.clock = DUE + timedelta(hours=4)  # the bot was down at 09:00
     [late] = await run_due_guilds(deps)
     assert late.status == "ok"
@@ -1004,23 +992,28 @@ async def test_a_notifier_and_a_report_channel_that_both_raise_cost_nobody_anyth
     assert world.sends(ch(G2, 1)) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "run_due_guilds runs guilds one at a time with no per-guild timeout, so one "
-        "publisher that never returns stalls every guild after it, forever."
-    ),
-)
 async def test_a_hung_publisher_does_not_stall_the_guilds_behind_it(world):
     for g in (G1, G2):
         world.add_guild(g, games=(BL4,))
     world.add_item(BL4, "item-0001", in_window())
     world.channels[ch(G1, 1)].hang = True
-    try:
-        await asyncio.wait_for(run_due_guilds(world.deps()), 1.0)
-    except TimeoutError:
-        pass
+    deps = world.deps(guild_timeout_s=0.3)  # the real limit is minutes; the test won't wait
+
+    outcomes = await asyncio.wait_for(run_due_guilds(deps), 5)
+
+    assert [(o.guild_id, o.status) for o in outcomes] == [(G1, "failed"), (G2, "ok")]
     assert world.sends(ch(G2, 1)) == 1
+    # The timed-out guild is left `pending` (the tick doesn't call that a failure, or
+    # bother the server) and its lock and `running` entry are released.
+    assert world.digest(G1).status == "pending" and world.notices == []
+    assert not is_guild_busy(deps, G1) and G1 not in deps.running
+
+    world.channels[ch(G1, 1)].hang = False
+    world.clock = NOW + timedelta(minutes=5)  # lease still fresh
+    assert await run_due_guilds(deps) == []
+    world.clock = NOW + timedelta(minutes=11)  # stale: it resumes and posts what's missing
+    [resumed] = await run_due_guilds(deps)
+    assert resumed.status == "ok" and world.sends(ch(G1, 1)) == 1
 
 
 async def test_a_guild_deleted_during_the_tick_is_skipped_and_the_rest_carry_on(world):
@@ -1089,14 +1082,6 @@ async def test_reports_never_go_anywhere_but_that_guilds_admin_channel(world):
 # --- pacing and scale ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The tick paces after every guild that isn't `skipped`, including ones whose "
-        "digest was a quiet day that sent nothing, so a few hundred quiet servers still "
-        "cost a second apiece."
-    ),
-)
 async def test_pacing_applies_only_after_a_guild_that_sent_something(world):
     for g in (G1, G2, G3):
         world.add_guild(g, games=(BL4,))
@@ -1186,11 +1171,11 @@ async def test_a_preview_waits_for_a_running_digest_and_claims_nothing(world):
     assert not is_guild_busy(deps, G1)
 
 
-async def test_the_third_failed_attempts_notice_still_promises_a_retry_that_is_not_coming(
+async def test_the_last_failed_attempts_notice_says_no_retry_is_coming_and_points_at_run_now(
     world, monkeypatch
 ):
-    # Documents current wording: a build failure says "I'll try again shortly", including
-    # after the last allowed attempt.
+    # Changed from promising "I'll try again shortly" after the last allowed attempt: the
+    # earlier notices still do, the last one says it's over and names /newsbot run-now.
     world.add_guild(G1, games=(BL4,))
     deps = world.deps()
 
@@ -1203,17 +1188,26 @@ async def test_the_third_failed_attempts_notice_still_promises_a_retry_that_is_n
         await run_due_guilds(deps)
     assert world.digest(G1).attempts == MAX_ATTEMPTS
     assert len(world.notices) == MAX_ATTEMPTS
-    assert "try again shortly" in world.notices[-1][1]
+    assert all("try again shortly" in text for _, text in world.notices[:-1])
+    last = world.notices[-1][1]
+    assert "try again shortly" not in last and "/newsbot run-now" in last
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A failure before the claim (here: the window lookup) leaves no row, so the attempt "
-        "cap and the ten-minute spacing never apply: the guild is retried, and told "
-        "'something went wrong', on every single tick, forever."
-    ),
-)
+async def test_a_publish_failure_notice_promises_a_retry_only_while_one_is_coming(world):
+    world.add_guild(G1, games=(BL4,))
+    world.add_item(BL4, "item-1", in_window())
+    world.channels[ch(G1, 1)].always_fail = discord.HTTPException(_Response(500), "boom")
+    deps = world.deps()
+    for attempt in range(MAX_ATTEMPTS):
+        world.clock = NOW + attempt * (RETRY_AFTER + timedelta(minutes=1))
+        await run_due_guilds(deps)
+    texts = [text for _, text in world.notices]
+    assert len(texts) == MAX_ATTEMPTS
+    assert all("try again shortly" in t for t in texts[:-1])
+    assert "try again shortly" not in texts[-1] and "won't retry" in texts[-1]
+    assert all("/newsbot run-now" in t for t in texts)
+
+
 async def test_a_guild_that_crashes_before_its_claim_is_not_retried_and_noticed_every_minute(
     world, monkeypatch
 ):
@@ -1229,3 +1223,94 @@ async def test_a_guild_that_crashes_before_its_claim_is_not_retried_and_noticed_
         world.clock = NOW + timedelta(minutes=minute)
         await run_due_guilds(deps)
     assert len(world.notices) <= 1
+
+
+async def test_the_crash_backoff_survives_a_restart_and_a_new_day_gets_a_fresh_notice(
+    world, monkeypatch
+):
+    world.add_guild(G1, games=(BL4,))
+    world.add_item(BL4, "item-1", in_window())
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("newsbot.pipeline.guild_digest.repo.last_window_end", boom)
+    await run_due_guilds(world.deps())
+    world.clock = NOW + RETRY_AFTER - timedelta(seconds=1)
+    await run_due_guilds(world.deps())  # a fresh deps, as after a restart: still backing off
+    assert calls["n"] == 1
+    world.clock = NOW + RETRY_AFTER + timedelta(seconds=1)
+    await run_due_guilds(world.deps())  # tried again, and the gap to the next one has doubled
+    assert calls["n"] == 2
+    world.clock = NOW + RETRY_AFTER + timedelta(minutes=19)
+    await run_due_guilds(world.deps())
+    assert calls["n"] == 2
+    assert len(world.notices) == 1  # one notice for the day, however many crashes
+
+    world.clock = DUE + timedelta(days=1, seconds=30)  # tomorrow's digest: a new day
+    await run_due_guilds(world.deps())
+    assert calls["n"] == 3 and len(world.notices) == 2
+
+
+async def test_a_crash_record_is_cleared_once_the_guild_gets_through(world, monkeypatch):
+    world.add_guild(G1, games=(BL4,))
+    world.add_item(BL4, "item-1", in_window())
+    real = repo.last_window_end
+    state = {"fail": True}
+
+    def flaky(*args, **kwargs):
+        if state["fail"]:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("newsbot.pipeline.guild_digest.repo.last_window_end", flaky)
+    await run_due_guilds(world.deps())
+    with world.conn() as conn:
+        assert repo.app_state_get(conn, f"guild_digest_crash:{G1}") is not None
+    state["fail"] = False
+    world.clock = NOW + RETRY_AFTER + timedelta(seconds=1)
+    [outcome] = await run_due_guilds(world.deps())
+    assert outcome.status == "ok"
+    with world.conn() as conn:
+        assert repo.app_state_get(conn, f"guild_digest_crash:{G1}") is None
+
+
+# --- the lease ---
+
+
+async def test_a_publishing_digest_refreshes_its_lease_on_a_heartbeat(world):
+    world.add_guild(G1, games=(BL4,))
+    world.add_item(BL4, "item-1", in_window())
+    release = asyncio.Event()
+    world.channels[ch(G1, 1)].gate = release
+    deps = world.deps(heartbeat_s=0.02)
+    task = asyncio.create_task(run_due_guilds(deps))
+    await world.channels[ch(G1, 1)].entered.wait()
+    world.clock = NOW + timedelta(minutes=7)
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        with world.conn() as conn:
+            stamp = conn.execute("SELECT updated_at FROM digests").fetchone()[0]
+        if stamp == world.clock.isoformat():
+            break
+    assert stamp == world.clock.isoformat()
+    release.set()
+    await task
+
+
+async def test_a_second_process_resumes_only_after_the_first_has_been_quiet_for_the_lease(world):
+    world.add_guild(G1)
+    world.add_item(BL4, "item-1", in_window())
+    world.add_item(PAL, "item-2", in_window())
+    with world.conn() as conn:
+        claim = repo.claim_guild_digest(
+            conn, G1, DAY, force=False, window=(DUE - timedelta(hours=24), DUE), now=lambda: NOW
+        )
+        repo.record_posted_game(conn, claim.digest_id, BL4, 424242, now=lambda: NOW)
+    world.clock = NOW + timedelta(minutes=9)
+    assert await run_due_guilds(world.deps()) == []
+    world.clock = NOW + timedelta(minutes=10, seconds=1)
+    [outcome] = await run_due_guilds(world.deps())
+    assert outcome.status == "ok" and world.sends(ch(G1, 1)) == 0 and world.sends(ch(G1, 2)) == 1

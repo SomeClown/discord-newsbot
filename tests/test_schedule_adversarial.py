@@ -11,9 +11,9 @@ zones on their actual 2026 transition days: tick every minute, act on whatever
 small rules (retry spacing, resume, catch-up labelling), hostile settings
 strings, a clock that steps backwards, and a few thousand servers at once.
 
-Pure functions, no database, no network, no real clock. Two tests are marked
-strict xfail: they pin real holes (a late-night digest time can't retry or
-resume across local midnight) for whoever fixes them.
+Pure functions, no database, no network, no real clock. The holes this found (a
+late-night digest time couldn't retry or resume across local midnight) are
+fixed, and their xfail markers are gone.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import pytest
 
 from newsbot.guilds.schedule import (
     CATCH_UP_AFTER,
+    LEASE_STALE_AFTER,
     MAX_ATTEMPTS,
     RETRY_AFTER,
     WINDOW_FLOOR,
@@ -343,9 +344,12 @@ def test_window_with_no_previous_digest_is_the_last_24_hours():
 
 
 @pytest.mark.parametrize("offset", [timedelta(0), timedelta(seconds=1), timedelta(days=3)])
-def test_a_previous_end_at_or_after_this_end_falls_back_to_24_hours(offset):
+def test_a_previous_end_at_or_after_this_end_gives_an_empty_window_at_that_end(offset):
+    # Changed from "falls back to 24 hours": that window overlapped the one already posted
+    # (a zone change that pulls the next digest earlier repeated its items). Now the window
+    # starts at the previous end, so it's empty, and nothing is shown twice.
     end = utc(2026, 9, 30, 16)
-    assert digest_window(end, end + offset) == (end - timedelta(hours=24), end)
+    assert digest_window(end, end + offset) == (end + offset, end)
 
 
 def test_window_chains_onto_the_previous_end_and_floors_at_48_hours():
@@ -372,17 +376,9 @@ def test_spring_forward_zone_conversion_round_trips_to_the_shifted_wall_clock():
     assert instant.astimezone(ZoneInfo(LA)).strftime("%H:%M") == "03:30"
 
 
-# --- the two holes ---
+# --- unfinished rows across local midnight ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "due_guilds only judges today's local date, and `now < due_at` runs before "
-        "the retry rule. A 23:59 digest that fails at 23:59 can never be retried: "
-        "after midnight the new day's due instant is still a day away."
-    ),
-)
 def test_a_late_night_digest_that_fails_at_midnight_is_retried_after_midnight():
     failed_at = utc(2026, 10, 1, 6, 59, 30)  # 23:59:30 PDT on Sep 30
     c = cand(
@@ -396,14 +392,6 @@ def test_a_late_night_digest_that_fails_at_midnight_is_retried_after_midnight():
     assert [(d.run_date, d.reason) for d in due] == [(date(2026, 9, 30), "retry")]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Same cause: a `pending` row from a 23:59 digest whose process died before "
-        "midnight is not resumed after midnight, and the next day's 'first' digest "
-        "abandons it."
-    ),
-)
 def test_a_late_night_pending_row_is_resumed_after_midnight():
     c = cand(
         digest_time="23:59",
@@ -413,5 +401,90 @@ def test_a_late_night_pending_row_is_resumed_after_midnight():
         window_end=utc(2026, 10, 1, 6, 59),
         updated_at=utc(2026, 10, 1, 6, 59, 30),
     )
-    due = due_guilds([c], utc(2026, 10, 1, 7, 5))  # 00:05 on Oct 1
+    # 00:10 on Oct 1: ten and a half minutes after the last sign of life, so the lease
+    # (LEASE_STALE_AFTER, ten minutes) has just gone stale.
+    due = due_guilds([c], utc(2026, 10, 1, 7, 10))
     assert [(d.run_date, d.reason) for d in due] == [(date(2026, 9, 30), "resume")]
+
+
+def _pending(age, **kw):
+    return cand(
+        run_date=date(2026, 9, 30),
+        status="pending",
+        attempts=1,
+        window_end=NOW - timedelta(hours=1),
+        updated_at=NOW - age,
+        **kw,
+    )
+
+
+def test_a_pending_row_is_a_lease_and_resumes_only_once_it_is_stale():
+    assert due_guilds([_pending(LEASE_STALE_AFTER)], NOW) == []  # exactly ten minutes: not yet
+    [due] = due_guilds([_pending(LEASE_STALE_AFTER + timedelta(seconds=1))], NOW)
+    assert (due.reason, due.catch_up) == ("resume", True)
+    assert due_guilds([_pending(timedelta(seconds=5))], NOW) == []
+    assert due_guilds([_pending(-timedelta(minutes=30))], NOW) == []  # a clock stepped back
+
+
+def test_a_pending_row_with_no_readable_timestamp_counts_as_stale():
+    c = cand(run_date=date(2026, 9, 30), status="pending", window_end=NOW, updated_at=None)
+    assert [d.reason for d in due_guilds([c], NOW)] == ["resume"]
+
+
+def test_the_next_day_waits_for_an_unfinished_row_that_is_not_ready_yet():
+    # 00:05 on Oct 1, and yesterday's 23:59 row is a retry still inside its gap, or a
+    # live lease. Starting today's digest now would chain its window onto a digest
+    # that hasn't finished.
+    now = utc(2026, 10, 1, 7, 5)
+    failed = cand(
+        digest_time="00:00",
+        run_date=date(2026, 9, 30),
+        status="failed",
+        attempts=1,
+        updated_at=now - timedelta(minutes=2),
+    )
+    live = cand(
+        digest_time="00:00",
+        run_date=date(2026, 9, 30),
+        status="pending",
+        attempts=1,
+        window_end=now,
+        updated_at=now - timedelta(minutes=2),
+    )
+    assert due_guilds([failed], now) == [] and due_guilds([live], now) == []
+    later = now + timedelta(minutes=9)
+    assert [(d.run_date, d.reason) for d in due_guilds([failed], later)] == [
+        (date(2026, 9, 30), "retry")
+    ]
+
+
+def test_the_next_day_starts_once_nothing_is_left_to_retry_or_resume():
+    now = utc(2026, 10, 1, 7, 5)
+    for status, extra in [
+        ("failed", {"attempts": MAX_ATTEMPTS}),  # out of tries
+        ("failed", {"attempts": 1, "posted_any": True}),  # an admin's call
+        ("pending", {"attempts": 1, "window_end": None}),  # a v2.2 row nobody can resume
+        ("ok", {"attempts": 1}),
+    ]:
+        c = cand(
+            digest_time="00:00",
+            run_date=date(2026, 9, 30),
+            status=status,
+            updated_at=now - timedelta(hours=1),
+            **extra,
+        )
+        assert [(d.run_date, d.reason) for d in due_guilds([c], now)] == [
+            (date(2026, 10, 1), "first")
+        ], (status, extra)
+
+
+def test_a_retry_or_resume_of_an_earlier_day_uses_that_days_due_instant():
+    c = cand(
+        run_date=date(2026, 9, 29),
+        status="failed",
+        attempts=1,
+        updated_at=NOW - timedelta(hours=5),
+    )
+    [due] = due_guilds([c], NOW)
+    assert (due.run_date, due.reason) == (date(2026, 9, 29), "retry")
+    assert due.due_at == local_due_instant(date(2026, 9, 29), "09:00", LA)
