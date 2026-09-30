@@ -90,7 +90,7 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 **Owner answers (2026-09-30):**
 - D1 to D8 accepted as recommended.
 - **D9:** the home guild is the **test server** (1552824311608512532), not the friend's server. The prod bot must be invited to the test server before cutover, and a dedicated prod-admin channel there is suggested so prod and dev alerts don't mix. The friend's server keeps its current admin channel as its own per-guild admin channel through the import.
-- **D10:** an email address; the owner will supply it before task 18.
+- **D10:** the support contact is justsomeclown@gmail.com (owner, 2026-09-30), for the terms and privacy pages in task 18.
 - D11 comes at rollout, from task 17's report.
 
 ---
@@ -618,7 +618,10 @@ A game with no items posts nothing. Games post in catalog order.
 
 **Mentions (`bot/client.py`):**
 ```python
-_PING_EVERYONE = discord.AllowedMentions(everyone=True, users=False, roles=False, replied_user=False)
+_PING_EVERYONE = discord.AllowedMentions(
+    everyone=True, users=False, roles=False, replied_user=False
+)
+
 
 def mentions_for(ping: str | None) -> discord.AllowedMentions:
     """The one place a ping choice becomes an AllowedMentions."""
