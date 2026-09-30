@@ -192,8 +192,11 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
    create a new application for prod. Do not reuse the dev application.
 2. Bot settings:
    - **Public Bot: OFF** (nobody outside this server should be able to add it).
-   - No privileged intents (Message Content, Server Members, Presence);
-     the bot doesn't need them.
+   - No privileged intents, unless you turn on lounge welcomes (§18); then
+     enable **Server Members Intent** in the portal *before* starting the
+     bot. Without it the bot prints a message and exits after a 10-minute
+     wait, which keeps a restart loop from hammering Discord's login limit.
+     Message Content and Presence stay off either way.
    - Copy the bot token into the Droplet's `.env` (see below), never into
      the repo, a chat log, or this document.
 3. Generate an invite URL (OAuth2 → URL Generator):
@@ -444,6 +447,13 @@ and rejects any `alerts` key it doesn't recognize (`alerts.channel_id`
 didn't exist yet). Keep the pre-upgrade config around as `config.v1.yaml`
 (see "Upgrading to v2.0" below), and swap it back in alongside the
 `TAG` rollback above.
+
+**Rolling back past v2.2.0 (lounge) needs no config or database change,
+but does need Discord's built-in welcome switched back on.** Migration 004
+(`lounge_quotes_used`, `lounge_state`) is additive, and v2.1.1 ignores
+both the new tables and an unrecognized top-level `lounge:` block in
+`config.yaml`, so `TAG=2.1.1` alone rolls the code back with no database
+restore. See §18 for the Discord-side steps.
 
 ## 9. Backups
 
@@ -1048,3 +1058,62 @@ is actually the one that's going to read it.
    above, has the general form of this). No database restore is
    necessary either direction; migration 003 stays applied and
    harmless, the same as every additive migration before it.
+
+## 18. Enabling the lounge (v2.2)
+
+v2.2.0 (`docs/design.md` §14) adds a bot-posted welcome for new members and
+a daily quote, both in `#the-speakeasy-lounge`. Migration 004 is additive,
+and nothing else about the running bot changes. The order below matters:
+the portal switch has to come first, and Discord's own welcome has to stay
+on until the bot's works.
+
+1. **Developer Portal, prod app: Bot, Privileged Gateway Intents, Server
+   Members Intent ON.** Do this before anything else. The bot asks for the
+   intent whenever `lounge.welcome.enabled` is true; if the switch is off,
+   it prints a message, waits 10 minutes (so a restart loop can't spend
+   Discord's login limit) and exits. The daily quote alone needs no
+   privileged intent.
+2. **Wait for the `v2.2.0` tag's build**, same as any other release (§7).
+3. **Settle the quote sources.** Omit `lounge.daily_quote.sources` to use
+   the built-in public-domain list, or write your own. For a file on the
+   Droplet, put it at `/opt/newsbot/data/quotes.txt`, readable by uid 10001,
+   and refer to it as `file: /data/quotes.txt` (a relative path lands in the
+   read-only image). Modern copyrighted works are the owner's call; see the
+   copyright note in `config.example.yaml`.
+4. **Give the bot role View Channel and Send Messages** in
+   `#the-speakeasy-lounge`, and copy the channel id.
+5. **Edit a copy of `config.yaml`, not the live file,** adding the
+   `lounge:` block from `config.example.yaml` (§14 of the design has the
+   rules). Validate the copy the way §17 step 4 does, with
+   `load_config` from a checkout (never `docker compose ... config`
+   against the real `.env`), then `mv` it into place.
+6. **Set `TAG=2.2.0` and run `./scripts/deploy.sh`.** It takes a backup,
+   and migration 004 runs at startup. **Never deploy between 09:00 and
+   09:15 America/Los_Angeles** (`deploy.sh` refuses; `--force` skips the
+   check, so don't), and **avoid about 07:55 to 08:05**, around the quote
+   time: a restart there can skip that day's quote, since a missed one is
+   never caught up.
+7. **If the container is restart-looping with the intent message, stop it
+   right away** (`docker compose -f docker-compose.yml -f
+   docker-compose.prod.yml stop`). The 10-minute wait softens the loop but
+   doesn't excuse it. Turn the portal switch on, then start it again.
+8. **Check:** no startup permission-check admin alert; `/newsbot status`
+   healthy; have an alt account join and confirm the bot's welcome
+   appears (Discord's own will appear too, this once).
+9. **Then** turn off Discord's built-in welcome: Server Settings, System
+   Messages, "Send a random welcome message when someone joins". If the
+   System Messages Channel was pointed at the lounge, point it back at the
+   admin channel. Doing this last means there's never a gap with no
+   welcome.
+10. **The next morning,** confirm the quote posted with its `From
+    Wikiquote:` link (for Wikiquote sources). `/newsbot quote-now` posts
+    one on demand if you'd rather not wait; the scheduled run then skips
+    that day.
+
+**Rollback.** Set `TAG=2.1.1` in `.env` and deploy again (§8). Switch
+Discord's built-in welcome back on (and the System Messages Channel back to
+the lounge, if you moved it). No database restore is needed: migration 004
+is additive and v2.1.1 never reads its tables. The `lounge:` block can stay
+in `config.yaml` (v2.1.1 ignores unrecognized top-level keys), and so can
+the portal intent and the cache directory `/data/newsbot-lounge-cache/`
+(assuming the default `newsbot.db` path).

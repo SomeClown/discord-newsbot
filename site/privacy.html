@@ -11,17 +11,19 @@
 <p class="nav"><a href="index.html">discord-newsbot</a> · <a href="terms.html">Terms of Service</a></p>
 
 <h1>Privacy Policy</h1>
-<p class="meta">Effective September 25, 2026</p>
+<p class="meta">Effective September 29, 2026</p>
 
 <p>This page exists because Discord asks bots to have one, and I'm nothing if not compliant with forms. The honest summary: this bot reads the gaming news so you don't have to, and it is remarkably uninterested in you.</p>
 
 <h2>What it collects about you</h2>
-<p>Almost nothing, and not for lack of opportunity. The bot doesn't have Discord's "Message Content" permission, so it can't read your messages. It doesn't look at the member list, your status, or what you're playing.</p>
+<p>Almost nothing, and not for lack of opportunity. The bot doesn't have Discord's "Message Content" permission, so it can't read your messages. It doesn't read your status or what you're playing.</p>
+<p>One thing does change if a server turns on the bot's welcome messages: the bot then notices when someone joins (and when they accept the server's rules) so it can welcome them. It keeps its own record of recent welcomes only in memory, for up to 24 hours, so it doesn't welcome the same person twice. With that permission on, Discord's library also holds the server's member list in the bot's memory while it runs, because it needs that to notice rule acceptance. None of it is written to disk or to the logs, and the bot still doesn't read messages, statuses or activity.</p>
 <p>The one exception: if you try an admin-only <code>/newsbot</code> command without the permissions for it, the bot writes your Discord user ID into its log, next to the command you tried. That's so I can tell a curious member from a bug. It's never posted anywhere, and the log rotates itself out after roughly 30 MB of other, equally riveting entries.</p>
 <p>When you run <code>/news recent</code> or <code>/news search</code>, the bot answers you and forgets you. It doesn't keep a record of who searched for what. (Your search for "Palworld lawsuit" is between you and your conscience.)</p>
 
 <h2>What it does collect</h2>
 <p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, a few subreddits, Bluesky, and a web search. It keeps those items and their AI-written summaries for 90 days, then deletes them. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice. The database gets backed up nightly; backups are kept for a week.</p>
+<p>If the daily quote is on, the database also keeps a small table for it: the name of each quote source and a hash of each quote's text, so a quote isn't repeated until the rest have had a turn. It holds nothing about people. Quotes from Wikiquote are fetched with the bot's user agent and nothing about any member.</p>
 
 <h2>Who else sees what</h2>
 <ul>

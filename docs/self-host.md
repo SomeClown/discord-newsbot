@@ -62,9 +62,12 @@ find out.
      leftover install-link value from a template or an earlier edit is
      the usual cause; if the portal won't save your settings, check that
      first.
-   - No privileged intents (Message Content, Server Members, Presence).
-     This bot doesn't read message content or track member lists, so it
-     doesn't need any of them.
+   - No privileged intents, unless you turn on lounge welcomes (§13). Then
+     enable **Server Members Intent** here *before* starting the bot. If
+     it's off, the bot prints a message naming the switch, waits 10
+     minutes, and exits; the wait keeps a restart loop from hammering
+     Discord's login limit. Message Content and Presence stay off either
+     way.
    - Copy the bot token somewhere safe. It goes into `.env` in a minute;
      never into `config.yaml`, a chat log, or a commit. **The portal shows
      it exactly once, at creation**; if you navigate away without copying
@@ -521,3 +524,132 @@ its own token, its own config file, and its own data directory; just don't
 let two containers (or a container and a bare `python -m newsbot` process)
 ever share a token, for the same reason two processes on the same token
 race each other within a single deployment.
+
+## 13. Lounge welcomes and a daily quote
+
+Two optional features that share one channel: a welcome the bot posts for
+each new member, and one quote a day, fortune-cookie style. Both are off
+until you add a `lounge:` block to `config.yaml`. The block, with every
+option explained, is at the end of `config.example.yaml`, and the design is
+in [`docs/design.md` §14](design.md#14-lounge-bot-welcomes-and-a-daily-quote-approved-2026-09-29-quote-sources-revised-the-same-day).
+This needs v2.2.0 or later.
+
+**1. The portal step, if you want welcomes.** In the Developer Portal, open
+your application's Bot page and switch on **Server Members Intent** (under
+Privileged Gateway Intents) *before* you start the bot. Without it the bot
+prints a message and exits after a 10-minute wait. The quote alone needs no
+privileged intent. Message Content and Presence stay off.
+
+**2. Channel permissions.** The bot's role needs **View Channel** and
+**Send Messages** in the lounge channel. Nothing else: both posts are plain
+text. The startup permission check adds the channel when either feature is
+on and tells the admin channel what's missing.
+
+**3. Config.** Uncomment the block from `config.example.yaml` and fill in
+`lounge.channel_id`. Welcome messages support `{member}` (a mention of the
+new member) and `{server}` (the server's name), and nothing else in braces;
+the message has to fit Discord's 2,000-character limit, and both problems
+stop the bot at startup with a message instead of showing up later as a
+strange post. Bots are never welcomed, and nobody is welcomed twice within
+24 hours (the bot remembers that in memory only, so a restart forgets it).
+A server that uses rules screening or Onboarding gets its welcome when the
+member gets through it; a standard server gets it on join.
+
+**4. Where quotes come from.** `daily_quote.sources` is a list, and each
+entry is exactly one of:
+
+- `wikiquote: "Oscar Wilde"`: a Wikiquote page (an author, a work, or a
+  theme).
+- `file: /data/quotes.txt`: your own text file, quotes separated by a line
+  holding only `%` (the `fortune` format). Re-read every time, so edits need
+  no restart. UTF-8, 1 MB at most. A relative path is relative to the
+  config file's directory. **In Docker, don't use a relative path:** the
+  image is read-only, so put the file in the data directory and refer to it
+  as `/data/...`, readable by uid 10001 (the same ownership as the rest of
+  `./data`, §5).
+- `url: https://...`: a raw text file at an https address, in the same `%`
+  format. Plain `http://` is refused, and so is an address that redirects to
+  one (redirects are followed by hand, at most 5). It must be served as
+  `text/plain`; the link to a gist's or GitHub's web page is HTML, and the
+  bot says so rather than posting a page of markup. It's fetched every time
+  it's picked, with a 1 MB cap and a 10-second limit.
+
+An empty list is a config error; to switch the quote off, set
+`daily_quote.enabled: false`. Each day the bot picks a source at random,
+falls back through the others if it fails, and then picks a quote that
+source hasn't used yet. Every source has its own no-repeat deck, and a
+reshuffle never repeats yesterday's quote. Changing a source's identity (its
+title, path or address) starts a new deck for it; reordering the list
+doesn't.
+
+**5. The default list.** Leave `sources` out and the bot uses its built-in
+list: Wikiquote pages for Oscar Wilde, Mark Twain, Benjamin Franklin,
+William Shakespeare, Jane Austen, Edgar Allan Poe and Marcus Aurelius. These
+are authors whose works are in the U.S. public domain (published 1930 or
+earlier, as of 2026). A live check on 2026-09-29 found about 1,040 usable
+quotes across them. "Public domain" is the author's, not always the page's:
+a page can quote something published after they died, or a modern
+translation of an old original, which is copyrighted even when the original
+isn't. I'd call the list low-risk, not risk-free.
+
+**6. A copyright caution for modern works.** Wikiquote hosts limited
+excerpts of copyrighted works (films, recent books) under its own fair-use
+policy. That policy covers Wikiquote. A bot that reposts them every morning
+is a different use, and it carries real copyright risk. The example config
+shows a few, such as `wikiquote: "Fight Club (film)"`, commented out on
+purpose. Turning them on is your decision to make, not a default. Theme
+pages like "Friendship" mix public-domain and modern quotes, so the same
+caution applies. I'm not a lawyer, and this is not legal advice.
+
+**7. How Wikiquote is used.**
+- Pages are fetched through Wikiquote's public MediaWiki API, at most once a
+  week per page, with the saved copy used in between. A page that fails is
+  retried weekly, and its saved copy covers the gap. Set `NEWSBOT_CONTACT`
+  (§4): it goes into the User-Agent, which Wikimedia's policy asks for.
+- Saved copies live in `/data/<database name>-lounge-cache/` (for the
+  default `newsbot.db`, `/data/newsbot-lounge-cache/`). They are not backed
+  up, and deleting the directory is safe; the next run fetches again.
+- Quotes over 400 characters are dropped. Sections such as "Disputed",
+  "Misattributed", "Quotes about" and "External links" are skipped, since
+  those quotes are known to be wrong or aren't by the subject.
+- Pages whose title ends in a parenthetical mentioning film, TV, series or
+  video game are treated as works and attributed "Character, Title". On
+  theme pages, a quote with no cited source is dropped.
+
+**8. How a quote looks.** A header (`🥃 **Today's pour**`), the quote, and an
+attribution line starting with `~ `. Wikiquote quotes add a `From
+Wikiquote:` link to the page. Wikiquote's CC BY-SA license asks for that
+link, so it stays. Attributions come only from the page or your file, never
+from a model's memory. Quote text is posted inert: it can't ping anyone.
+
+**9. Trying it.** `/newsbot quote-now` (admin only; it exists while the
+daily quote is enabled) posts a quote now, and the scheduled run then skips
+today. If today's quote already posted, it asks before posting another.
+Every posted quote counts as used. A scheduled quote missed because the bot
+was down is skipped; there is no catch-up.
+
+**The clock.** `daily_quote.time` is `HH:MM` in `digest.timezone`, default
+08:00. A known issue in the scheduling library (APScheduler 3.x): a job set
+between 00:00 and 00:59 is skipped on the day after the spring-forward
+clock change. The default 08:00 isn't affected.
+
+**10. Switching off Discord's built-in welcome.** Only after the bot's
+welcome works. In Server Settings, System Messages, turn off "Send a random
+welcome message when someone joins". Doing it in this order means there's never a moment with no welcome, and the
+worst case for a while is two.
+
+**When something goes wrong.** Members only ever see a welcome or a quote;
+problems go to the admin channel. If every source fails and none has a saved
+copy, that day is skipped with one admin message saying why. If a source
+fell back to its saved copy, the quote still posts and the admin channel
+gets one line. Admin messages never show URL credentials, query strings or
+fragments. A failed post isn't retried; the admin message carries only the
+error type and Discord's HTTP status and code, and the log has the rest.
+Welcome failures log only the error type and status, nothing about the
+member.
+
+**Rollback.** Set `TAG` back to a release before 2.2.0 (say 2.1.1) as in §11
+and switch Discord's built-in welcome back on. The database change is
+additive, so no restore is needed. The `lounge:` block can stay in
+`config.yaml` (older versions ignore it), and so can the Server Members
+Intent in the portal.
