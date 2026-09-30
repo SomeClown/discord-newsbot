@@ -683,16 +683,6 @@ def test_a_duplicate_game_key_rolls_everything_back(v22_db, cfg):
     assert _everything(v22_db) == before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "importer.py _do_import: the `import` app_state row is never cleaned up when the "
-        "guild is deleted (e.g. the bot is removed from the only server). If that leaves the "
-        "guilds table empty while guild_id is still in config.yaml, the next start re-runs the "
-        "import, which dies on UNIQUE app_state.key and exits 2 every start. Either a no-op "
-        "(import already ran) or a clean re-import would do; a crash loop would not."
-    ),
-)
 def test_deleting_the_only_guild_does_not_brick_the_next_start(v22_db, cfg):
     ensure_imported(v22_db, cfg, _clock)
     with closing(connect(v22_db)) as conn:
@@ -1016,16 +1006,6 @@ def test_resync_creates_a_missing_row_when_the_config_turns_the_lounge_on(v22_db
     assert _lounge_row(v22_db).welcome_enabled is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "importer.py resync_lounge_from_config: when it creates the row (import ran with the "
-        "lounge off) it passes last_quote_date=None, dropping v2.2's lounge_state date that "
-        "the import itself would have carried over. Turn the lounge on the same day v2.2 "
-        "already posted a quote and the guild's once-a-day guard is empty: a second quote. "
-        "Narrow (needs a same-day flip), but it's the one thing the resync says it never does."
-    ),
-)
 def test_a_resync_created_row_inherits_v22s_last_quote_date(v22_db, tmp_path):
     off = _load(tmp_path, _with_lounge("lounge:\n  channel_id: 1401806745898061826\n"))
     ensure_imported(v22_db, off, _clock)

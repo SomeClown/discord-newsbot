@@ -362,12 +362,15 @@ def test_logs_the_sections_and_deletable_keys_and_no_welcome_text(v22_db, cfg, c
     assert "lighting is questionable" not in text and "Pull up a stool" not in text
 
 
-def test_nothing_is_logged_when_there_is_nothing_to_import(v22_db, cfg, caplog):
+def test_a_second_start_logs_only_that_the_import_already_happened(v22_db, cfg, caplog):
     ensure_imported(v22_db, cfg, _clock)
     caplog.clear()
     caplog.set_level(logging.INFO, logger="newsbot.guilds.importer")
-    ensure_imported(v22_db, cfg, _clock)
-    assert caplog.records == []
+    assert ensure_imported(v22_db, cfg, _clock) is None
+    assert [r.getMessage() for r in caplog.records] == [
+        "import: already happened on 2026-09-30T17:00:00+00:00; these keys can be deleted "
+        "from config.yaml: " + importer._DELETABLE_KEYS
+    ]
 
 
 def test_owner_notice_names_what_was_imported(v22_db, cfg):

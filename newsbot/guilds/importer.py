@@ -261,7 +261,8 @@ def _do_import(conn: sqlite3.Connection, legacy: LegacySetup, now_iso: str) -> I
         imported_at=now_iso,
     )
     conn.execute(
-        "INSERT INTO app_state (key, value) VALUES (?, ?)",
+        "INSERT INTO app_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (IMPORT_STATE_KEY, json.dumps(asdict(report))),
     )
     return report
@@ -315,6 +316,18 @@ def _log_report(report: ImportReport) -> None:
     )
 
 
+def _log_already_imported(value: str) -> None:
+    try:
+        when = json.loads(value)["imported_at"]
+    except ValueError, KeyError, TypeError:
+        when = "an unknown date"
+    log.info(
+        "import: already happened on %s; these keys can be deleted from config.yaml: %s",
+        when,
+        _DELETABLE_KEYS,
+    )
+
+
 def ensure_imported(
     db_path: str | Path,
     cfg: AppConfig,
@@ -322,11 +335,12 @@ def ensure_imported(
 ) -> ImportReport | None:
     """Import the v2 setup if this is the first v3 start; otherwise do nothing.
 
-    Runs only when the config has a legacy setup (a `guild_id`) and the
-    `guilds` table is empty, which is checked again under the write lock so
-    two processes starting together produce exactly one import. Once any
-    guild row exists it never runs again, even after the owner deletes the
-    old keys. Returns the report, or None when there was nothing to do.
+    Runs only when the config has a legacy setup (a `guild_id`), the
+    `app_state` import marker is absent, and the `guilds` table is empty.
+    Both are checked again under the write lock so two processes starting
+    together produce exactly one import. The import happens once, ever: the
+    marker outlives the guild row. Returns the report, or None when there
+    was nothing to do.
 
     Raises `ImportFailedError` if anything goes wrong; the database is then
     exactly as it was.
@@ -341,6 +355,18 @@ def ensure_imported(
         conn.isolation_level = None
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # The import happens once, ever. If the bot gets removed from the
+            # friend's server the guild rows cascade away, but the marker
+            # stays, and I'd much rather do nothing than resurrect a server
+            # we may have been kicked out of (or crash-loop trying). The
+            # guilds check is a second belt for the belt.
+            done = conn.execute(
+                "SELECT value FROM app_state WHERE key = ?", (IMPORT_STATE_KEY,)
+            ).fetchone()
+            if done is not None:
+                conn.execute("ROLLBACK")
+                _log_already_imported(done["value"])
+                return None
             if conn.execute("SELECT COUNT(*) FROM guilds").fetchone()[0]:
                 conn.execute("ROLLBACK")
                 return None
@@ -377,9 +403,12 @@ def resync_lounge_from_config(db_path: str | Path, cfg: AppConfig) -> bool:
             return False
         guild_id = found["guild_id"]
         existing = repo.get_lounge(conn, guild_id)
-        wanted = _lounge_settings(
-            guild_id, legacy.lounge, existing.last_quote_date if existing else None
+        # A row we're about to create starts from v2.2's date, like the import
+        # would have; an existing row keeps its own.
+        last_quote_date = (
+            existing.last_quote_date if existing else repo.get_lounge_state(conn).last_quote_date
         )
+        wanted = _lounge_settings(guild_id, legacy.lounge, last_quote_date)
         if wanted is None:
             # Both features off: switch an existing row off, but there's
             # nothing to create and nothing to say if there's no row.
