@@ -354,4 +354,10 @@ def test_welcome_module_imports_nothing_from_discord_or_the_bot():
         assert not name.startswith("newsbot.bot"), name
         assert name.lstrip(".") != "bot" and not name.lstrip(".").startswith("bot."), name
     # The allowlist, so a new import is a conscious edit.
-    assert {n.split(".")[0] for n in imports} == {"__future__", "re", "datetime", "typing"}
+    assert {n.split(".")[0] for n in imports} == {
+        "__future__",
+        "re",
+        "datetime",
+        "typing",
+        "collections",
+    }

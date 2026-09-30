@@ -242,10 +242,10 @@ async def test_a_bare_administrator_bit_counts_as_admin(admin, v3_db, problems):
 async def test_the_lounge_command_denies_non_admins_before_reading_the_database(v3_cfg, v3_db):
     calls = []
 
-    async def run_quote(force):
+    async def run_quote(guild_id, force):
         calls.append(force)
 
-    group = make_lounge_group(v3_cfg, SimpleNamespace(db_path=v3_db, run_quote=run_quote))
+    group = make_lounge_group(v3_cfg, SimpleNamespace(db_path=v3_db, run_guild_quote=run_quote))
     before = every_table(v3_db)
     interaction = FakeInteraction(permissions=MEMBER, guild_id=GUILD_A)
     await command(group, "quote-now").callback(interaction)
@@ -1097,28 +1097,27 @@ def lounge(v3_cfg, v3_db):
     cfg = v3_cfg.model_copy(update={"guild_id": GUILD_A})
     calls = []
 
-    async def run_quote(force):
-        calls.append(force)
+    async def run_quote(guild_id, force):
+        calls.append((guild_id, force))
         return SimpleNamespace(status="posted", message_id=123)
 
-    bot = SimpleNamespace(db_path=v3_db, run_quote=run_quote)
+    bot = SimpleNamespace(db_path=v3_db, run_guild_quote=run_quote)
     group = make_lounge_group(cfg, bot)
     return SimpleNamespace(call=command(group, "quote-now").callback, calls=calls, cfg=cfg)
 
 
-async def test_quote_now_runs_only_in_the_v2_lounge_guild_and_only_with_a_quote_row(lounge, v3_db):
-    # B has a perfectly good lounge row and is not `cfg.guild_id`: the v2 quote posts
-    # into v2's channel, so B must never trigger it.
+async def test_quote_now_runs_in_any_guild_with_a_quote_row_and_only_with_one(lounge, v3_db):
+    # Since task 12 the run is keyed by the invoking guild, so B (not `cfg.guild_id`)
+    # with a lounge row is served; A has no lounge row and gets nothing.
     make_guild(v3_db, GUILD_A)
     make_guild(v3_db, GUILD_B)
     _lounge_row(v3_db, GUILD_B)
     interaction = FakeInteraction(guild_id=GUILD_B)
     await lounge.call(interaction)
-    assert lounge.calls == [] and "isn't available for this server yet" in interaction.text
-    # And A has the guild id but no lounge row: still nothing.
+    assert lounge.calls == [(GUILD_B, False)]
     interaction = FakeInteraction(guild_id=GUILD_A)
     await lounge.call(interaction)
-    assert lounge.calls == []
+    assert lounge.calls == [(GUILD_B, False)]
 
 
 async def test_quote_now_with_the_quote_turned_off_does_nothing(lounge, v3_db):
@@ -1146,7 +1145,7 @@ async def test_quote_now_replies_are_ephemeral_and_mention_proof(lounge, v3_db):
     _lounge_row(v3_db, GUILD_A)
     interaction = FakeInteraction(guild_id=GUILD_A)
     await lounge.call(interaction)
-    assert lounge.calls == [False]
+    assert lounge.calls == [(GUILD_A, False)]
     for message in interaction.sent:
         assert message["ephemeral"] is True
         assert message["allowed_mentions"].everyone is False

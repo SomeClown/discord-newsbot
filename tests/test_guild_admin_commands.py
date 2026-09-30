@@ -927,11 +927,11 @@ def lounge(v3_cfg, v3_db):
     cfg = v3_cfg.model_copy(update={"guild_id": GUILD_A})
     calls = []
 
-    async def run_quote(force):
-        calls.append(force)
+    async def run_guild_quote(guild_id, force):
+        calls.append((guild_id, force))
         return SimpleNamespace(status="already_posted", message_id=None)
 
-    bot = SimpleNamespace(db_path=v3_db, run_quote=run_quote)
+    bot = SimpleNamespace(db_path=v3_db, run_guild_quote=run_guild_quote)
     group = make_lounge_group(cfg, bot)
     return SimpleNamespace(call=command(group, "quote-now").callback, calls=calls, group=group)
 
@@ -970,22 +970,23 @@ async def test_lounge_quote_now_needs_a_lounge_row_with_the_quote_on(lounge, v3_
     assert lounge.calls == []
 
 
-async def test_lounge_quote_now_delegates_for_the_v2_lounge_guild(lounge, v3_db):
+async def test_lounge_quote_now_runs_the_invoking_guilds_own_quote(lounge, v3_db):
     make_guild(v3_db, GUILD_A)
     _lounge_row(v3_db, GUILD_A)
     interaction = FakeInteraction()
     await lounge.call(interaction)
-    assert lounge.calls == [False]
+    assert lounge.calls == [(GUILD_A, False)]
     assert interaction.text == "Today's quote already posted."
 
 
-async def test_lounge_quote_now_never_runs_v2s_quote_for_another_guild(lounge, v3_db):
+async def test_lounge_quote_now_works_in_any_guild_with_a_lounge_row(lounge, v3_db):
+    # Task 12 dropped task 9's "only the v2 lounge guild" guard: the run is keyed by guild.
     make_guild(v3_db, GUILD_B)
-    _lounge_row(v3_db, GUILD_B)  # a lounge, but not the one the v2 code posts to
+    _lounge_row(v3_db, GUILD_B)
     interaction = FakeInteraction(guild_id=GUILD_B)
     await lounge.call(interaction)
-    assert "isn't available for this server yet" in interaction.text
-    assert lounge.calls == []
+    assert lounge.calls == [(GUILD_B, False)]
+    assert interaction.text == "Today's quote already posted."
 
 
 async def test_lounge_quote_now_outside_a_server(lounge):

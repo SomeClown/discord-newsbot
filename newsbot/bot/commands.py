@@ -233,6 +233,23 @@ def _quote_now_reply(cfg: AppConfig, status: str, message_id: int | None) -> str
     return "No quote posted; the admin channel has the reason."
 
 
+def _lounge_quote_reply(guild_id: int, channel_id: int, status: str, message_id: int | None) -> str:
+    """Map one `QuoteOutcome` to `/lounge quote-now`'s ephemeral reply (server-keyed)."""
+    if status == "posted" and message_id is not None:
+        return f"Posted: {_report_jump_link(guild_id, channel_id, message_id)}"
+    if status == "no_lounge":
+        return "This server doesn't have a lounge quote set up."
+    return _quote_now_reply_plain(status)
+
+
+def _quote_now_reply_plain(status: str) -> str:
+    if status == "already_posted":
+        return "Today's quote already posted."
+    if status == "post_failed":
+        return "Posting failed; the admin channel has the details."
+    return "No quote posted; the admin channel has the reason."
+
+
 # --- Synchronous DB calls, run through asyncio.to_thread by the handlers below ---
 
 
@@ -260,10 +277,17 @@ def _get_digest_sync(db_path: str, run_date) -> DigestRow | None:
         return get_digest(conn, run_date)
 
 
-def _quote_posted_today_sync(db_path: str, day: str) -> bool:
-    """Same rule as `claim_quote`: a stored date at or after `day` counts as posted."""
+def _quote_posted_today_sync(db_path: str, day: str, guild_id: int | None = None) -> bool:
+    """Same rule as `claim_quote`: a stored date at or after `day` counts as posted.
+
+    With `guild_id`, that server's own date (a missing lounge row reads as not posted).
+    """
     with closing(connect(db_path)) as conn:
-        last = get_lounge_state(conn).last_quote_date
+        if guild_id is None:
+            last = get_lounge_state(conn).last_quote_date
+        else:
+            lounge = repo.get_lounge(conn, guild_id)
+            last = lounge.last_quote_date if lounge else None
     return last is not None and last >= day
 
 
@@ -1694,9 +1718,9 @@ def make_guild_admin_group(
 def make_lounge_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
     """Build `/lounge quote-now`, registered only in servers that have a lounge (D3).
 
-    Task 12 re-keys the lounge code by server. Until then the only lounge the bot can
-    run is v2's, so this delegates to `bot.run_quote` and refuses any other server
-    instead of posting v2's quote into a channel that isn't theirs.
+    Any server with a lounge row and its quote on can use it. It runs through
+    `bot.run_guild_quote`, so the sources, channel, date guard and deck are that
+    server's own and nobody else's.
     """
     db_path = bot.db_path
     group = app_commands.Group(
@@ -1724,17 +1748,14 @@ def make_lounge_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
                 "This server doesn't have a lounge quote set up.", ephemeral=True
             )
             return
-        if interaction.guild_id != cfg.guild_id:
-            await interaction.response.send_message(
-                "The lounge quote isn't available for this server yet.", ephemeral=True
-            )
-            return
         zone = resolve_timezone(guild.timezone)
         if zone is None:
             await interaction.response.send_message(_ZONE_INVALID, ephemeral=True)
             return
         today = local_run_date(datetime.now(UTC), zone).isoformat()
-        already = await asyncio.to_thread(_quote_posted_today_sync, db_path, today)
+        already = await asyncio.to_thread(
+            _quote_posted_today_sync, db_path, today, interaction.guild_id
+        )
 
         force = False
         if already:
@@ -1751,8 +1772,13 @@ def make_lounge_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         else:
             await interaction.response.defer(ephemeral=True)
 
-        outcome = await bot.run_quote(force)
-        await _say(interaction, _quote_now_reply(cfg, outcome.status, outcome.message_id))
+        outcome = await bot.run_guild_quote(interaction.guild_id, force)
+        await _say(
+            interaction,
+            _lounge_quote_reply(
+                interaction.guild_id, lounge.channel_id, outcome.status, outcome.message_id
+            ),
+        )
 
     return group
 

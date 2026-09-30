@@ -283,6 +283,9 @@ _OTHER_COVERAGE = {
     "latest_guild_digest",  # tests/test_repo_scoped_reads.py
     "last_window_end",
     "items_for_window",
+    # The lounge deck and date guard: tests/test_repo_lounge_guilds.py (task 12).
+    "claim_quote",
+    "quote_deck_state",
 }
 
 

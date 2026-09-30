@@ -20,18 +20,19 @@ until 9 a.m. the first morning it matters.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import logging
 import random
 import re
 import socket
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 import discord
@@ -50,7 +51,7 @@ from newsbot.bot.permissions import (
     requirements_from_db,
 )
 from newsbot.collectors.base import RateLimitState, build_collectors
-from newsbot.config import AppConfig, Secrets
+from newsbot.config import AppConfig, QuoteSourceCfg, Secrets
 from newsbot.guilds import lifecycle
 from newsbot.lounge.daily import QuoteDeps, QuoteOutcome, run_daily_quote
 from newsbot.lounge.sources import cache_dir_for
@@ -61,7 +62,7 @@ from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
 from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
 from newsbot.store import repo
 from newsbot.store.db import connect
-from newsbot.store.models import DigestRow
+from newsbot.store.models import DigestRow, LoungeSettings
 from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
 from newsbot.text import plain_line
 from newsbot.useragent import user_agent_headers, warn_if_contact_unset
@@ -203,6 +204,46 @@ def schedule_daily_quote(
         callback,
         CronTrigger(hour=quote_time.hour, minute=quote_time.minute, timezone=tz),
         id="daily-quote",
+        misfire_grace_time=300,
+        coalesce=True,
+        max_instances=1,
+    )
+
+
+def build_intents_for_lounges(lounges: Iterable[LoungeSettings]) -> discord.Intents:
+    """The public app's gateway intents: Server Members iff any lounge row has welcomes on.
+
+    Same reasoning as `build_intents`, read from the database instead of the
+    config: the intent is privileged, the portal switch has to match, and a
+    bot whose lounges only post quotes never asks. Task 13 builds the intents
+    from `repo.list_lounges` after the import and the D5 re-sync, so the rows
+    this sees are the ones the bot will actually run with.
+    """
+    intents = discord.Intents.default()
+    intents.members = any(lounge.welcome_enabled for lounge in lounges)
+    return intents
+
+
+def schedule_guild_quote(
+    scheduler: AsyncIOScheduler,
+    guild_id: int,
+    quote_time: str,
+    timezone: str,
+    callback: Callable[[], Awaitable[None]],
+) -> Job:
+    """Add one server's daily-quote cron job: `quote_time` in that server's `timezone`.
+
+    Same terms as v2.2's job: a five-minute grace, no catch-up, missed means
+    skipped. The id carries the guild so two servers' jobs can't replace each
+    other (`replace_existing` lets a re-sync move one server's time).
+    """
+    tz = ZoneInfo(timezone)
+    at = _parse_digest_time(quote_time)
+    return scheduler.add_job(
+        callback,
+        CronTrigger(hour=at.hour, minute=at.minute, timezone=tz),
+        id=f"daily-quote-{guild_id}",
+        replace_existing=True,
         misfire_grace_time=300,
         coalesce=True,
         max_instances=1,
@@ -635,10 +676,26 @@ class NewsBot(discord.Client):
     `DiscordPublisher`).
     """
 
-    def __init__(self, cfg: AppConfig, secrets: Secrets, db_path: str) -> None:
-        super().__init__(
-            intents=build_intents(cfg), allowed_mentions=discord.AllowedMentions.none()
-        )
+    def __init__(
+        self,
+        cfg: AppConfig,
+        secrets: Secrets,
+        db_path: str,
+        *,
+        lounges: list[LoungeSettings] | None = None,
+    ) -> None:
+        # `lounges` is the public app's lounge path (design.md §15); left out,
+        # this is v2.2's single lounge from the config. Given, the intents
+        # follow the rows, and members are chunked per lounge guild in
+        # `chunk_lounge_guilds` instead of for every guild at connect time.
+        if lounges is None:
+            options: dict[str, object] = {"intents": build_intents(cfg)}
+        else:
+            options = {
+                "intents": build_intents_for_lounges(lounges),
+                "chunk_guilds_at_startup": False,
+            }
+        super().__init__(allowed_mentions=discord.AllowedMentions.none(), **options)
         self.cfg = cfg
         self.secrets = secrets
         self.db_path = db_path
@@ -676,6 +733,17 @@ class NewsBot(discord.Client):
         self._quote_lock = asyncio.Lock()
         # Filled on the first `is_owner` call; never guessed from config.
         self._owner_id: int | None = None
+        # The per-guild lounge path (design.md §15, plan 3.11). Nothing here
+        # is wired into setup_hook yet; that's the cutover. The welcome map is
+        # keyed (guild_id, user_id), the quote locks by guild, and
+        # `guild_notifier` is where a lounge problem goes (the task 8 router's
+        # `notify_guild`); unset, problems are logged with ids only.
+        self._lounges: dict[int, LoungeSettings] = {
+            lounge.guild_id: lounge for lounge in lounges or []
+        }
+        self._guild_welcomes = RecentWelcomes()
+        self._guild_quote_locks: dict[int, asyncio.Lock] = {}
+        self.guild_notifier: Callable[[int, str], Awaitable[None]] | None = None
 
     async def is_owner(self, user: discord.abc.User) -> bool:
         """True iff `user` owns this application (the team's owner, for a team-owned one).
@@ -1153,6 +1221,254 @@ class NewsBot(discord.Client):
             logger.exception("daily quote job crashed at the job boundary")
             await self.alert(f"newsbot: daily quote job crashed: {_alert_reason(exc)}")
 
+    # --- The per-guild lounge (design.md §15, plan 3.11) ---
+    #
+    # Everything from here to `_retention_job` is the public app's lounge,
+    # sitting next to v2.2's until the cutover swaps them. Settings come from
+    # `guild_lounge` rows, never from `config.yaml`; a server with no row
+    # (or welcomes off) is simply not part of the conversation.
+
+    def _list_lounges_sync(self) -> list[LoungeSettings]:
+        with closing(connect(self.db_path)) as conn:
+            return repo.list_lounges(conn)
+
+    async def reload_lounges(self) -> list[LoungeSettings]:
+        """Re-read every lounge row into the welcome lookup. Call after the import or a re-sync."""
+        rows = await asyncio.to_thread(self._list_lounges_sync)
+        self._lounges = {row.guild_id: row for row in rows}
+        return rows
+
+    async def chunk_lounge_guilds(self) -> None:
+        """Fill the member cache for lounge guilds with welcomes on, and only those.
+
+        `on_member_update` only fires for cached members, and the client
+        doesn't chunk at startup in this mode (hundreds of servers' member
+        lists is a lot of memory for events nobody listens to). One failed
+        chunk is logged and skipped; the welcome for that server still works
+        on joins.
+        """
+        for lounge in list(self._lounges.values()):
+            if not lounge.welcome_enabled:
+                continue
+            guild = self.get_guild(lounge.guild_id)
+            if guild is None or guild.chunked:
+                continue
+            try:
+                await guild.chunk()
+            except Exception as exc:
+                logger.warning(
+                    "couldn't chunk members for lounge guild %s (%s)",
+                    lounge.guild_id,
+                    type(exc).__name__,
+                )
+
+    async def notify_lounge_guild(self, guild_id: int, text: str) -> None:
+        """Tell one server's admins about a lounge problem. Never raises.
+
+        No notifier wired (the v2 path) means the text is dropped and a line
+        with the guild id only is logged; it still never goes to the owner,
+        because a stranger's broken welcome isn't the owner's page.
+        """
+        if self.guild_notifier is None:
+            logger.warning("lounge notice for guild %s dropped: no notifier wired", guild_id)
+            return
+        try:
+            await self.guild_notifier(guild_id, text)
+        except Exception:
+            logger.exception("couldn't send a lounge notice", extra={"guild_id": guild_id})
+
+    async def handle_member_join(self, member: discord.Member) -> None:
+        lounge = self._lounges.get(member.guild.id)
+        if lounge is None or not lounge.welcome_enabled:
+            return
+        await self._welcome_member(member, lounge, "join")
+
+    async def handle_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        """Welcome a member who just got through rules screening, in a lounge guild only."""
+        lounge = self._lounges.get(after.guild.id)
+        if lounge is None or not lounge.welcome_enabled:
+            return
+        if before.pending and not after.pending:
+            await self._welcome_member(after, lounge, "accepted")
+
+    async def _welcome_member(
+        self, member: discord.Member, lounge: LoungeSettings, event: str
+    ) -> None:
+        """`_maybe_welcome` for a lounge row: same decision, same logging rules, per-guild state.
+
+        The 24-hour map is keyed `(guild_id, user_id)`, so a welcome in one
+        server doesn't use up the same person's welcome in another. The
+        failure notice goes to this server's admins and names nobody.
+        """
+        guild_id = member.guild.id
+        try:
+            action = welcome_action(in_guild=True, is_bot=member.bot, pending=member.pending)
+            decision: str = action
+            if action == "welcome" and not self._guild_welcomes.check_and_record(
+                (guild_id, member.id), datetime.now(UTC)
+            ):
+                decision = "recent"
+            logger.info(
+                "member event %s: guild=%s pending=%s flags=%s decision=%s",
+                event,
+                guild_id,
+                member.pending,
+                member.flags.value,
+                decision,
+                extra={
+                    "welcome_event": event,
+                    "guild_id": guild_id,
+                    "pending": member.pending,
+                    "flags": member.flags.value,
+                    "decision": decision,
+                },
+            )
+            if decision != "welcome":
+                return
+            text = render_welcome(
+                lounge.welcome_message,
+                member_mention=member.mention,
+                server_name=member.guild.name,
+            )
+            channel = await self._channel_by_id(lounge.channel_id)
+            await channel.send(
+                text,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=[member], roles=False, replied_user=False
+                ),
+            )
+        except Exception as exc:
+            # Same rule as v2: no traceback (it ends with the exception's
+            # message), so nothing about a member reaches the logs.
+            logger.error(
+                "welcome failed in guild %s: %s%s", guild_id, type(exc).__name__, _http_detail(exc)
+            )
+            await self.notify_lounge_guild(
+                guild_id,
+                f"newsbot: couldn't post a welcome in the lounge ({type(exc).__name__}). "
+                "Check that I can view and send in the lounge channel.",
+            )
+
+    async def _channel_by_id(self, channel_id: int) -> discord.abc.Messageable:
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            channel = await self.fetch_channel(channel_id)
+        return channel  # type: ignore[return-value]
+
+    def build_guild_quote_deps(self, lounge: LoungeSettings, timezone: str) -> QuoteDeps:
+        """Assemble a fresh `QuoteDeps` for one server's quote run (its job or `/lounge quote-now`).
+
+        Sources, channel and deck come from the row; `local_day` is today in
+        the server's own zone (a bad zone raises `ZoneInfoNotFoundError` or
+        `ValueError`, which `run_guild_quote` turns into a notice). `alert`
+        is that server's notice path, so source trouble reaches its admins.
+        """
+        if self.http_client is None:
+            raise RuntimeError("build_guild_quote_deps() called before setup_hook() finished")
+        channel_id = lounge.channel_id
+
+        async def post(text: str) -> int:
+            channel = await self._channel_by_id(channel_id)
+            sent = await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            return sent.id
+
+        return QuoteDeps(
+            sources=[QuoteSourceCfg(**src) for src in lounge.quote_sources],
+            db_path=self.db_path,
+            http=self.http_client,
+            local_day=local_run_date(datetime.now(UTC), timezone),
+            now=lambda: datetime.now(UTC),
+            post=post,
+            alert=functools.partial(self.notify_lounge_guild, lounge.guild_id),
+            rng=random.SystemRandom(),
+            cache_dir=cache_dir_for(self.db_path),
+            guild_id=lounge.guild_id,
+        )
+
+    def _quote_inputs_sync(self, guild_id: int) -> tuple[LoungeSettings | None, str | None]:
+        """The guild's lounge row and time zone, read fresh (a re-sync or removal shows up)."""
+        with closing(connect(self.db_path)) as conn:
+            guild = repo.get_guild(conn, guild_id)
+            lounge = repo.get_lounge(conn, guild_id)
+        return lounge, guild.timezone if guild else None
+
+    async def run_guild_quote(self, guild_id: int, force: bool) -> QuoteOutcome:
+        """Run one server's quote under that server's lock (job and `/lounge quote-now` take turns).
+
+        Different servers don't wait on each other. A server with no lounge
+        row, no server row, or quotes turned off gets `no_lounge` and no
+        noise.
+        """
+        lock = self._guild_quote_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            lounge, timezone = await asyncio.to_thread(self._quote_inputs_sync, guild_id)
+            if lounge is None or timezone is None or not lounge.quote_enabled:
+                logger.info("lounge quote for guild %s skipped: no lounge quote set up", guild_id)
+                return QuoteOutcome("no_lounge")
+            try:
+                deps = self.build_guild_quote_deps(lounge, timezone)
+            except ZoneInfoNotFoundError, ValueError, OSError:
+                logger.warning("lounge quote for guild %s skipped: unusable time zone", guild_id)
+                await self.notify_lounge_guild(
+                    guild_id,
+                    "newsbot: no lounge quote today, because this server's time zone "
+                    "setting isn't usable. Fix it with /newsbot settings.",
+                )
+                return QuoteOutcome("skipped")
+            return await run_daily_quote(deps, force=force)
+
+    async def _guild_quote_job(self, guild_id: int) -> None:
+        try:
+            outcome = await self.run_guild_quote(guild_id, False)
+            logger.info(
+                "guild quote job finished",
+                extra={"status": outcome.status, "guild_id": guild_id},
+            )
+            if outcome.status == "no_lounge" and self.scheduler is not None:
+                # The server left or turned the quote off; its cron has nothing left to do.
+                job_id = f"daily-quote-{guild_id}"
+                if self.scheduler.get_job(job_id) is not None:
+                    self.scheduler.remove_job(job_id)
+        except Exception as exc:  # the job boundary: nothing here may take the process down
+            logger.exception("guild quote job crashed at the job boundary")
+            await self.notify_lounge_guild(
+                guild_id, f"newsbot: daily quote job crashed: {_alert_reason(exc)}"
+            )
+
+    async def schedule_lounge_quotes(self) -> list[int]:
+        """Add a cron job for every server whose quote is on; return their guild ids.
+
+        Reads the rows and zones fresh. A server whose zone won't load is
+        told once and left out rather than taking the others down with it.
+        """
+        if self.scheduler is None:
+            raise RuntimeError("schedule_lounge_quotes() called before the scheduler exists")
+        scheduled: list[int] = []
+        for lounge in await self.reload_lounges():
+            if not lounge.quote_enabled:
+                continue
+            _, timezone = await asyncio.to_thread(self._quote_inputs_sync, lounge.guild_id)
+            if timezone is None:
+                continue
+            try:
+                schedule_guild_quote(
+                    self.scheduler,
+                    lounge.guild_id,
+                    lounge.quote_time,
+                    timezone,
+                    functools.partial(self._guild_quote_job, lounge.guild_id),
+                )
+            except ZoneInfoNotFoundError, ValueError, OSError:
+                logger.warning("no quote job for guild %s: unusable time zone", lounge.guild_id)
+                await self.notify_lounge_guild(
+                    lounge.guild_id,
+                    "newsbot: the daily quote isn't scheduled, because this server's time "
+                    "zone setting isn't usable. Fix it with /newsbot settings.",
+                )
+                continue
+            scheduled.append(lounge.guild_id)
+        return scheduled
+
     async def _retention_job(self) -> None:
         try:
             cutoff = datetime.now(UTC) - timedelta(days=_RETENTION_DAYS)
@@ -1428,6 +1744,8 @@ __all__ = [
     "NewsBot",
     "NullPublisher",
     "build_intents",
+    "build_intents_for_lounges",
     "schedule_daily_quote",
+    "schedule_guild_quote",
     "should_catch_up",
 ]

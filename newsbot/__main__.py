@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 # a test can set it to zero instead of sleeping for ten real minutes.
 INTENT_EXIT_DELAY_S = 600
 
+# One line, because a restart loop's log is easier to read that way. Since the
+# public app (design.md §15) the welcome switch lives in a `guild_lounge` row,
+# which the `lounge:` block in config.yaml still feeds until someone deletes it.
+PRIVILEGED_INTENTS_MESSAGE = (
+    "newsbot: a lounge welcome is enabled (guild_lounge / lounge.welcome.enabled) "
+    "and needs the Server Members intent. Turn it on in the Discord Developer "
+    "Portal (Bot page, Privileged Gateway Intents), or turn the welcome off "
+    "(lounge.welcome.enabled: false)."
+)
+
 
 def _wait_before_exit() -> None:
     """Sleep `INTENT_EXIT_DELAY_S`, but wake straight away on SIGTERM or SIGINT.
@@ -99,12 +109,7 @@ def main() -> int:
         # Welcomes ask for the Server Members intent; Discord closes the
         # connection if the portal switch is off. Say which switch, and which
         # config key to flip instead, rather than dumping a traceback.
-        print(
-            "newsbot: lounge.welcome.enabled needs the Server Members intent. "
-            "Turn it on in the Discord Developer Portal (Bot page, Privileged "
-            "Gateway Intents), or set lounge.welcome.enabled to false.",
-            file=sys.stderr,
-        )
+        print(PRIVILEGED_INTENTS_MESSAGE, file=sys.stderr)
         logger.warning(
             "Waiting %d seconds before exiting, so a restart loop can't spend the bot's logins",
             INTENT_EXIT_DELAY_S,

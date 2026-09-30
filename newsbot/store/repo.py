@@ -769,18 +769,31 @@ def get_lounge_state(conn: sqlite3.Connection) -> LoungeState:
     return LoungeState(last_quote_date=row["value"] if row else None)
 
 
-def quote_deck_state(conn: sqlite3.Connection, source_key: str) -> QuoteDeckState:
+def quote_deck_state(
+    conn: sqlite3.Connection, source_key: str, guild_id: int | None = None
+) -> QuoteDeckState:
     """Return the hashes `source_key` has used and the most recent one.
 
     "Most recent" is the greatest `used_at`, with `rowid` breaking a tie
     (two claims inside the same clock tick, which only a test with a frozen
     clock ever manages).
+
+    With `guild_id`, only that server's rows count, plus rows no server has
+    claimed yet (`guild_id IS NULL`: v2.2's history, until the import stamps
+    it). Without one, every row counts, which is v2's single-lounge reading.
     """
-    rows = conn.execute(
-        "SELECT quote_hash FROM lounge_quotes_used WHERE source_key = ? "
-        "ORDER BY used_at DESC, rowid DESC",
-        (source_key,),
-    ).fetchall()
+    if guild_id is None:
+        rows = conn.execute(
+            "SELECT quote_hash FROM lounge_quotes_used WHERE source_key = ? "
+            "ORDER BY used_at DESC, rowid DESC",
+            (source_key,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT quote_hash FROM lounge_quotes_used WHERE source_key = ? "
+            "AND (guild_id = ? OR guild_id IS NULL) ORDER BY used_at DESC, rowid DESC",
+            (source_key, guild_id),
+        ).fetchall()
     hashes = [row["quote_hash"] for row in rows]
     return QuoteDeckState(used=frozenset(hashes), last_hash=hashes[0] if hashes else None)
 
@@ -794,6 +807,7 @@ def claim_quote(
     reshuffle: bool,
     force: bool,
     now: Callable[[], datetime] | None = None,
+    guild_id: int | None = None,
 ) -> bool:
     """Record today's quote as used, or say no. True means the caller won and should post.
 
@@ -809,6 +823,16 @@ def claim_quote(
 
     `reshuffle` deletes only `source_key`'s rows first, so the deck starts
     over without touching any other source's.
+
+    With `guild_id` (design.md §15) the same rules run per server: the date
+    guard is that server's `guild_lounge.last_quote_date`, the reshuffle
+    deletes only that server's rows (and the unclaimed `guild_id IS NULL`
+    ones), and the new row is stamped with the server. `lounge_state` is
+    still written too, so a rollback to v2.2 finds a current date. A server
+    with no lounge row (it was removed while the quote was loading) gets
+    False and nothing is written. The table's primary key is still
+    `(source_key, quote_hash)`, so two servers sharing one source share
+    its rows; that's the known limit from plan 3.2.
 
     Runs inside `BEGIN IMMEDIATE` for the reason `claim_codes` does: the
     scheduled job and `quote-now` can land in the same second, and the
@@ -827,12 +851,27 @@ def claim_quote(
         # second half, a backwards step let an earlier day through and the
         # day after that let today through again, which is two quotes for one
         # sunrise.
-        last_day = get_lounge_state(conn).last_quote_date
+        if guild_id is None:
+            last_day = get_lounge_state(conn).last_quote_date
+        else:
+            row = conn.execute(
+                "SELECT last_quote_date FROM guild_lounge WHERE guild_id = ?", (guild_id,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return False
+            last_day = row["last_quote_date"]
         if not force and last_day is not None and local_day <= last_day:
             conn.execute("ROLLBACK")
             return False
-        if reshuffle:
+        if reshuffle and guild_id is None:
             conn.execute("DELETE FROM lounge_quotes_used WHERE source_key = ?", (source_key,))
+        elif reshuffle:
+            conn.execute(
+                "DELETE FROM lounge_quotes_used WHERE source_key = ? "
+                "AND (guild_id = ? OR guild_id IS NULL)",
+                (source_key, guild_id),
+            )
         # Delete-then-insert rather than an upsert: an upsert keeps the old
         # rowid, so a re-claimed hash inside one clock tick would still rank
         # as older than rows inserted after it. A fresh insert gets a fresh rowid.
@@ -841,9 +880,15 @@ def claim_quote(
             (source_key, quote_hash),
         )
         conn.execute(
-            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?)",
-            (source_key, quote_hash, now_iso),
+            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at, guild_id) "
+            "VALUES (?, ?, ?, ?)",
+            (source_key, quote_hash, now_iso, guild_id),
         )
+        if guild_id is not None:
+            conn.execute(
+                "UPDATE guild_lounge SET last_quote_date = ? WHERE guild_id = ?",
+                (local_day, guild_id),
+            )
         conn.execute(
             "INSERT INTO lounge_state (key, value) VALUES ('last_quote_date', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
