@@ -956,7 +956,13 @@ def fts_escape(user_query: str) -> str:
 
 
 def search_stories(
-    conn: sqlite3.Connection, query: str, since: datetime, limit: int, offset: int
+    conn: sqlite3.Connection,
+    query: str,
+    since: datetime,
+    limit: int,
+    offset: int,
+    *,
+    topic_keys: list[str] | None = None,
 ) -> tuple[list[StoryView], int]:
     """Full-text search over story headlines and summaries, for `/news search`.
 
@@ -964,27 +970,38 @@ def search_stories(
     then recency. An empty or all-whitespace query returns nothing rather
     than matching everything, since "search for nothing" isn't a query a
     member meant to run.
+
+    `topic_keys` limits the search to those games (a public server only sees
+    the games it follows). `None` means every game, as v2 had it; an empty list
+    means *no* game and returns nothing. That's the opposite of
+    `query_stories`, where an empty list means "All", and I did it on purpose:
+    for a server that follows nothing, the safe misreading is an empty result.
     """
     escaped = fts_escape(query)
-    if not escaped:
+    if not escaped or topic_keys == []:
         return [], 0
+
+    topic_sql, topic_params = "", []
+    if topic_keys is not None:
+        topic_sql = f" AND stories.topic_key IN ({','.join('?' for _ in topic_keys)})"
+        topic_params = list(topic_keys)
 
     try:
         total = conn.execute(
-            "SELECT COUNT(*) FROM stories_fts "
+            "SELECT COUNT(*) FROM stories_fts "  # noqa: S608
             "JOIN stories ON stories.id = stories_fts.rowid "
-            "WHERE stories_fts MATCH ? AND stories.created_at >= ?",
-            (escaped, _utc_iso(since)),
+            f"WHERE stories_fts MATCH ? AND stories.created_at >= ?{topic_sql}",
+            (escaped, _utc_iso(since), *topic_params),
         ).fetchone()[0]
         rows = conn.execute(
-            "SELECT stories.id, stories.topic_key, stories.headline, stories.summary, "
+            "SELECT stories.id, stories.topic_key, stories.headline, stories.summary, "  # noqa: S608
             "stories.label, stories.created_at, stories.is_update_of "
             "FROM stories_fts "
             "JOIN stories ON stories.id = stories_fts.rowid "
-            "WHERE stories_fts MATCH ? AND stories.created_at >= ? "
+            f"WHERE stories_fts MATCH ? AND stories.created_at >= ?{topic_sql} "
             "ORDER BY bm25(stories_fts), stories.created_at DESC "
             "LIMIT ? OFFSET ?",
-            (escaped, _utc_iso(since), limit, offset),
+            (escaped, _utc_iso(since), *topic_params, limit, offset),
         ).fetchall()
     except sqlite3.OperationalError, UnicodeEncodeError:
         # fts_escape should make every query syntactically valid, but this
@@ -1181,6 +1198,27 @@ def get_guild(conn: sqlite3.Connection, guild_id: int) -> GuildSettings | None:
         (guild_id,),
     ).fetchone()
     return _guild_from_row(row) if row else None
+
+
+def guild_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Counts across every server, for the owner's `/owner servers`. Numbers only, no names.
+
+    Keys: `servers`, `set_up`, `free`, `comped`, `shift_enabled` and `permission_problems`
+    (servers whose last permission check left a note).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS servers, "
+        "COALESCE(SUM(set_up = 1), 0) AS set_up, "
+        "COALESCE(SUM(tier = 'free'), 0) AS free, "
+        "COALESCE(SUM(tier = 'comped'), 0) AS comped, "
+        "COALESCE(SUM(permission_problems IS NOT NULL AND permission_problems != ''), 0) "
+        "AS permission_problems FROM guilds"
+    ).fetchone()
+    counts = {key: row[key] for key in row.keys()}  # noqa: SIM118 (sqlite3.Row isn't a mapping)
+    counts["shift_enabled"] = conn.execute(
+        "SELECT COUNT(*) FROM guild_shift WHERE enabled = 1"
+    ).fetchone()[0]
+    return counts
 
 
 def list_set_up_guilds(conn: sqlite3.Connection) -> list[GuildSettings]:
@@ -2069,6 +2107,16 @@ def get_guild_digest(
         f"SELECT {_GUILD_DIGEST_COLUMNS} FROM digests "  # noqa: S608
         "WHERE guild_id = ? AND run_date = ?",
         (guild_id, run_date.isoformat()),
+    ).fetchone()
+    return _guild_digest_from_row(row) if row else None
+
+
+def latest_guild_digest(conn: sqlite3.Connection, guild_id: int) -> GuildDigestRow | None:
+    """`guild_id`'s newest digest row by local date, for `/newsbot status`."""
+    row = conn.execute(
+        f"SELECT {_GUILD_DIGEST_COLUMNS} FROM digests "  # noqa: S608
+        "WHERE guild_id = ? ORDER BY run_date DESC LIMIT 1",
+        (guild_id,),
     ).fetchone()
     return _guild_digest_from_row(row) if row else None
 

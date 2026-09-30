@@ -217,3 +217,20 @@ def v22_db(v4_db) -> Path:
     with closing(connect(v4_db)) as conn:
         assert migrate(conn) == 5
     return v4_db
+
+
+@pytest.fixture
+def v3_db(tmp_path):
+    """An empty, fully migrated database at a fresh path (for the v3 command tests)."""
+    path = str(tmp_path / "newsbot.db")
+    with closing(connect(path)) as conn:
+        migrate(conn)
+    return path
+
+
+@pytest.fixture
+def v3_cfg(monkeypatch):
+    """The v3 fixture config: catalog of borderlands4, palworld and rust; home guild 2000...01."""
+    from v3_fakes import load_v3_config
+
+    return load_v3_config(monkeypatch)

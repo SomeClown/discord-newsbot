@@ -277,6 +277,7 @@ _OTHER_COVERAGE = {
     # only sees its own guild's rows (items_for_window through guild_games,
     # last_window_end and get_guild_digest through the digests guild_id).
     "get_guild_digest",
+    "latest_guild_digest",  # tests/test_repo_scoped_reads.py
     "last_window_end",
     "items_for_window",
 }

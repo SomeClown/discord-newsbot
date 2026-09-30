@@ -664,6 +664,24 @@ class NewsBot(discord.Client):
         self._recent_welcomes = RecentWelcomes()
         # The scheduled quote and `/newsbot quote-now` take turns.
         self._quote_lock = asyncio.Lock()
+        # Filled on the first `is_owner` call; never guessed from config.
+        self._owner_id: int | None = None
+
+    async def is_owner(self, user: discord.abc.User) -> bool:
+        """True iff `user` owns this application (the team's owner, for a team-owned one).
+
+        `discord.Client` doesn't have this (only `commands.Bot` does, and this isn't
+        one), so it asks Discord who owns the application and remembers the answer. A
+        failed lookup says no: `/owner` is locked unless we can prove it isn't.
+        """
+        if self._owner_id is None:
+            try:
+                app = await self.application_info()
+            except discord.HTTPException:
+                logger.warning("couldn't look up the application owner")
+                return False
+            self._owner_id = app.team.owner_id if app.team else app.owner.id
+        return user.id == self._owner_id
 
     async def _on_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError

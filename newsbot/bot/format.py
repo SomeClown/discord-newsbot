@@ -39,6 +39,7 @@ from newsbot.store.models import (
     AlertStatus,
     CodeView,
     HeadlineItem,
+    ItemView,
     Notice,
     SourceHealthRow,
     StatusSnapshot,
@@ -1443,6 +1444,67 @@ def render_guild_status(notices: Sequence[Notice], *, limit: int = 5) -> str:
     return _truncate_utf16("\n".join(lines), _MAX_FIELD_VALUE, suffix="…")
 
 
+def render_item_page(
+    items: Sequence[ItemView],
+    names_by_key: Mapping[str, str],
+    title: str,
+    page: int,
+    pages: int,
+) -> discord.Embed:
+    """One page of a free server's `/news recent` or `/news search`: stored item headlines.
+
+    Free servers get headlines, not stories (owner decision D2), so this is
+    `_headline_line`'s one-line format (official marker, flattened title, `<url>`) under
+    a bold game name. An item whose URL won't survive `_safe_link` is dropped, same as in
+    the digest. `ItemView.topic_keys` is already limited to games this server follows.
+    """
+    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
+    blocks = []
+    for item in items:
+        line = _headline_line(item)
+        if line is None:
+            continue
+        names = ", ".join(names_by_key.get(key, key) for key in item.topic_keys)
+        blocks.append(f"**{esc(names)}**\n{line}" if names else line)
+    if not blocks:
+        embed.description = "No headlines found."
+        return embed
+    embed.description = _truncate_description("\n\n".join(blocks))
+    embed.set_footer(text=f"Page {page} of {pages}")
+    return embed
+
+
+def render_guild_overview(
+    *,
+    tier: str,
+    schedule_line: str,
+    digest_lines: Sequence[str],
+    game_lines: Sequence[str],
+    shift_line: str,
+    notices: Sequence[Notice],
+) -> discord.Embed:
+    """`/newsbot status` for one server: its own settings, last digest, games and notices.
+
+    Callers pass lines that are already safe (their own `esc()`ed names, `<#id>` channel
+    mentions, jump links); every field is cut to Discord's field limit regardless. There's
+    no spend in here on purpose: money is the owner's business, not a server's.
+    """
+    embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
+
+    def field(name: str, lines: Sequence[str]) -> None:
+        text = "\n".join(lines) or "Nothing yet."
+        embed.add_field(
+            name=name, value=_truncate_utf16(text, _MAX_FIELD_VALUE, suffix="…"), inline=False
+        )
+
+    field("Server", [f"Tier: {tier}", schedule_line])
+    field("Last digest", digest_lines)
+    field("Games", game_lines)
+    field("SHiFT codes", [shift_line])
+    field("Recent notices", [render_guild_status(notices)])
+    return embed
+
+
 __all__ = [
     "DigestOutcome",
     "RenderedAlert",
@@ -1455,8 +1517,10 @@ __all__ = [
     "render_digest_summary_line",
     "render_guild_digest",
     "render_guild_run_report",
+    "render_guild_overview",
     "render_guild_status",
     "render_headlines_embed",
+    "render_item_page",
     "render_owner_report",
     "render_roundup_alerts",
     "render_run_report",
