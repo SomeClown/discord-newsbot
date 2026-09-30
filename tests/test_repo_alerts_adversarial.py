@@ -279,7 +279,7 @@ def test_migration_002_applies_on_real_v1_schema_with_related_data_and_fk_on(tmp
         conn.commit()
 
         version = migrate(conn)
-        assert version == 3
+        assert version == 4
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
         # Data survived the upgrade.

@@ -271,3 +271,52 @@ def test_shift_codes_public_option_defaults_false(tmp_path, monkeypatch):
     group = make_shift_group(cfg, ":memory:")
     public = _param(_command(group, "codes"), "public")
     assert public.default is False
+
+
+# --- /newsbot quote-now (design.md §14) ---
+
+
+def _lounge_cfg(cfg, *, welcome: bool, quote: bool):
+    from newsbot.config import DailyQuoteCfg, LoungeCfg, QuoteSourceCfg, WelcomeCfg
+
+    lounge = LoungeCfg(
+        channel_id=555000000000000001,
+        welcome=WelcomeCfg(enabled=welcome, message="Hi {member}"),
+        daily_quote=DailyQuoteCfg(
+            enabled=quote, sources=[QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")]
+        ),
+    )
+    return cfg.model_copy(update={"lounge": lounge})
+
+
+def _admin_names(cfg) -> set[str]:
+    class _FakeBot:
+        db_path = ":memory:"
+
+    return {c.name for c in make_admin_group(cfg, _FakeBot()).commands}
+
+
+def test_quote_now_registered_when_daily_quote_enabled(cfg):
+    assert "quote-now" in _admin_names(_lounge_cfg(cfg, welcome=True, quote=True))
+
+
+def test_quote_now_registered_with_welcome_off(cfg):
+    assert "quote-now" in _admin_names(_lounge_cfg(cfg, welcome=False, quote=True))
+
+
+def test_quote_now_absent_when_daily_quote_disabled(cfg):
+    assert "quote-now" not in _admin_names(_lounge_cfg(cfg, welcome=True, quote=False))
+
+
+def test_quote_now_absent_without_a_lounge_block(cfg):
+    assert "quote-now" not in _admin_names(cfg)
+
+
+def test_quote_now_description(cfg):
+    class _FakeBot:
+        db_path = ":memory:"
+
+    group = make_admin_group(_lounge_cfg(cfg, welcome=False, quote=True), _FakeBot())
+    assert _command(group, "quote-now").description == (
+        "Post today's lounge quote now (the scheduled one then skips today)."
+    )

@@ -79,6 +79,10 @@ shared message for it to live in.
   posted) within the window, newest first, each with a copyable code block,
   first-seen date, and source link. Only registered when `alerts.enabled:
   true`; see [SHiFT code alerts](#shift-code-alerts) below.
+- **`/newsbot quote-now`** (admin): posts today's lounge quote now, and the
+  scheduled one then skips today. Asks for confirmation if today's quote
+  already went out. Only registered when `lounge.daily_quote.enabled: true`;
+  see [Lounge](#lounge) below.
 
 Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
@@ -105,6 +109,30 @@ privacy policy promises we don't keep user ids around.
 
 Controlled by `digest.report_to_admin` (default `true`), and only takes
 effect when `admin_channel_id` is set.
+
+## Lounge
+
+Optional, and off unless `config.yaml` has a `lounge:` block (v2.2). Two
+things, both posted to one channel:
+
+- **A welcome** for each new member, written by you in `config.yaml`, with
+  `{member}` and `{server}` as the only placeholders. Bots are never
+  welcomed, and nobody is welcomed twice in 24 hours. This needs the
+  **Server Members Intent** switched on in the Developer Portal before the
+  bot starts; without it the bot says so and exits after a 10-minute wait.
+- **A daily quote**, fortune-cookie style, at a time you pick (default
+  08:00 in `digest.timezone`). Quotes come from Wikiquote pages, a text file
+  of your own, or a raw https link, mixed as you like. With no list
+  configured it draws from a built-in one: Oscar Wilde, Mark Twain,
+  Benjamin Franklin, William Shakespeare, Jane Austen, Edgar Allan Poe and
+  Marcus Aurelius, all public-domain authors. Nothing repeats until a
+  source's quotes have all been used. Modern copyrighted works are
+  possible but carry real copyright risk, so they're commented-out examples
+  in `config.example.yaml`, never a default.
+
+Setup, source types, Docker paths and rollback are in
+[`docs/self-host.md`](docs/self-host.md) §13; the design is
+[`docs/design.md`](docs/design.md) §14.
 
 ## SHiFT code alerts
 

@@ -18,16 +18,24 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, ValidationError, field_validator
 
+from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
+from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
+from newsbot.text import shown_url
+
 Trust = Literal["official", "press", "community"]
 
-_TOPIC_KEY_RE = re.compile(r"^[a-z0-9_]+$")
-_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+# `\Z`, not `$`: in Python, `$` also matches just before a trailing newline,
+# so "08:00\n" (one YAML block scalar away) used to pass as a time. The
+# test-engineer found that one; I'd written `$` out of pure habit.
+_TOPIC_KEY_RE = re.compile(r"^[a-z0-9_]+\Z")
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 # Discord allows 25 choices per slash-command option, and /news recent spends
 # one of them on "All". Hence 24, not the round number I first wrote.
 _MAX_TOPICS = 24
@@ -215,6 +223,103 @@ class AlertsCfg(BaseModel, extra="forbid"):
         return _reject_bool_channel_id(v)
 
 
+class WelcomeCfg(BaseModel, extra="forbid"):
+    """The lounge welcome (design.md §14). Off unless someone turns it on."""
+
+    enabled: bool = False
+    # Required once `enabled` is true, and checked (placeholders, length) in
+    # load_config even while disabled, so a typo can't sit quietly until the
+    # day someone flips the switch.
+    message: str = ""
+
+
+_SOURCE_KINDS = ("wikiquote", "file", "url")
+
+
+class QuoteSourceCfg(BaseModel, frozen=True):
+    """One entry in `lounge.daily_quote.sources`: a kind and a value.
+
+    `key` is the source's identity in the database and the cache: it depends
+    only on the source itself, never on its position in the list, so
+    reordering or editing the neighbors leaves everyone's no-repeat deck
+    alone. A `file` value is already an absolute path by the time
+    `load_config` hands this back.
+    """
+
+    kind: Literal["wikiquote", "file", "url"]
+    value: str
+
+    @property
+    def key(self) -> str:
+        if self.kind == "wikiquote":
+            # MediaWiki treats underscores as spaces and the first letter as
+            # case-insensitive, so "oscar_wilde" and "Oscar Wilde" are one page.
+            title = " ".join(self.value.replace("_", " ").split())
+            return "wikiquote:" + title[:1].upper() + title[1:]
+        return f"{self.kind}:{self.value.strip()}"
+
+
+class DailyQuoteCfg(BaseModel, extra="forbid"):
+    """The daily quote (design.md §14). Off unless someone turns it on."""
+
+    enabled: bool = False
+    time: str = "08:00"
+    # None means "use the built-in list"; load_config swaps in the real list,
+    # so nothing downstream ever sees None. An empty list is an error there.
+    sources: list[QuoteSourceCfg] | None = None
+
+    @field_validator("time")
+    @classmethod
+    def _validate_time(cls, v: str) -> str:
+        if not _TIME_RE.match(v):
+            raise ValueError(f"lounge.daily_quote.time {v!r} is not HH:MM (24-hour)")
+        return v
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _parse_sources(cls, v: object) -> object:
+        """Turn each one-key mapping (`wikiquote: Oscar Wilde`) into a `QuoteSourceCfg`."""
+        if not isinstance(v, list):
+            return v
+        problems: list[str] = []
+        parsed: list[object] = []
+        for i, entry in enumerate(v):
+            where = f"lounge.daily_quote.sources[{i}]"
+            if isinstance(entry, QuoteSourceCfg):
+                parsed.append(entry)
+                continue
+            if not isinstance(entry, dict) or len(entry) != 1:
+                message = f"{where} must have exactly one of wikiquote, file or url"
+                if isinstance(entry, dict) and entry:
+                    message += f" (found: {', '.join(str(k) for k in entry)})"
+                problems.append(message)
+                continue
+            ((kind, value),) = entry.items()
+            if kind not in _SOURCE_KINDS:
+                problems.append(f"{where} has an unknown key {kind!r} (use wikiquote, file or url)")
+            elif not isinstance(value, str) or not value.strip():
+                problems.append(f"{where}.{kind} must be a non-empty string")
+            else:
+                parsed.append(QuoteSourceCfg(kind=kind, value=value.strip()))
+        if problems:
+            raise ValueError("; ".join(problems))
+        return parsed
+
+
+class LoungeCfg(BaseModel, extra="forbid"):
+    """The optional `lounge:` block: welcomes and a daily quote, one channel."""
+
+    # Required once either feature is enabled (checked in load_config).
+    channel_id: int | None = Field(None, gt=0)
+    welcome: WelcomeCfg = WelcomeCfg()
+    daily_quote: DailyQuoteCfg = DailyQuoteCfg()
+
+    @field_validator("channel_id", mode="before")
+    @classmethod
+    def _validate_channel_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_channel_id(v)
+
+
 class AppConfig(BaseModel):
     guild_id: int
     admin_channel_id: int | None = None
@@ -223,6 +328,7 @@ class AppConfig(BaseModel):
     topics: list[Topic]
     sources: list[Source]
     alerts: AlertsCfg = AlertsCfg()
+    lounge: LoungeCfg = LoungeCfg()
 
 
 class Secrets(BaseModel):
@@ -248,6 +354,13 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
     game they forgot.
     """
     loc = error["loc"]
+    message = error["msg"]
+    # The lounge validators write their own complete messages, path included.
+    # Left alone they'd come out as "lounge.daily_quote.time: Value error,
+    # lounge.daily_quote.time '99:99' is not HH:MM", which says the path twice
+    # and the words "Value error" once too often.
+    if error["type"] == "value_error" and message.startswith("Value error, lounge."):
+        return message.removeprefix("Value error, ")
     if (
         len(loc) == 3
         and loc[0] == "topics"
@@ -265,7 +378,107 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
             f"topics[{idx}] ({key}): channel_id is required "
             "(each game posts to its own channel as of v2.0)"
         )
-    return f"{'.'.join(str(p) for p in loc)}: {error['msg']}"
+    return f"{'.'.join(str(p) for p in loc)}: {message}"
+
+
+def _source_problem(i: int, src: QuoteSourceCfg) -> str | None:
+    """What's wrong with one quote source's value, or None if it's fine."""
+    where = f"lounge.daily_quote.sources[{i}].{src.kind}"
+    if src.kind == "wikiquote":
+        v = src.value
+        if v.lower().startswith("http"):
+            return (
+                f'{where} {v!r} isn\'t a page title (use the title, like "Oscar Wilde", not a URL)'
+            )
+        if len(v) > 255:
+            # No echo: 256 characters of it wouldn't help anyone find the entry.
+            return f"{where} is {len(v)} characters long; a Wikiquote page title can be 255 at most"
+        if any(c in v for c in "#<>[]{}|"):
+            return (
+                f"{where} {v!r} has a character a Wikiquote page title can't have "
+                "(one of # < > [ ] { } |)"
+            )
+    elif src.kind == "url":
+        # Whatever we echo goes through shown_url: a raw link to a private gist
+        # carries its secret in the userinfo or query, and a config error is
+        # exactly what gets pasted into a chat when asking for help.
+        shown = shown_url(src.value)
+        try:
+            parts = urlsplit(src.value)
+            scheme, host = parts.scheme.lower(), parts.hostname
+        except ValueError:
+            return f"{where} {shown!r} isn't an https:// address"
+        if scheme == "http":
+            return f"{where} {shown!r} uses plain http; only https:// addresses are allowed"
+        if scheme != "https" or not host:
+            return f"{where} {shown!r} isn't an https:// address"
+    return None
+
+
+def _check_lounge(cfg: AppConfig, config_path: Path, errors: list[str]) -> AppConfig:
+    """Cross-check the `lounge:` block, appending to `errors`; return `cfg` with sources filled in.
+
+    Pydantic has already checked each field on its own. This is the part that
+    needs two fields at once (a channel for an enabled feature) or the config
+    file's location (relative `file:` paths). Shapes are checked even while a
+    feature is disabled, for the same reason the welcome text is: a typo
+    shouldn't get to wait for the day somebody flips the switch.
+    """
+    lounge = cfg.lounge
+    welcome, quote = lounge.welcome, lounge.daily_quote
+
+    if (welcome.enabled or quote.enabled) and lounge.channel_id is None:
+        errors.append(
+            "lounge.channel_id is required when lounge.welcome.enabled "
+            "or lounge.daily_quote.enabled is true"
+        )
+
+    if welcome.enabled and not welcome.message.strip():
+        errors.append("lounge.welcome.message is required when lounge.welcome.enabled is true")
+    elif welcome.message.strip():
+        for name in unknown_placeholders(welcome.message):
+            allowed = " or ".join("{" + p + "}" for p in sorted(ALLOWED_PLACEHOLDERS))
+            errors.append(
+                f"lounge.welcome.message has an unknown placeholder {{{name}}} (use {allowed})"
+            )
+        length = worst_case_length(welcome.message)
+        if length > 2000:
+            errors.append(
+                f"lounge.welcome.message is {length} characters with the longest possible "
+                "mention and server name filled in; Discord's limit is 2000"
+            )
+
+    sources = quote.sources
+    if sources is None:
+        sources = [QuoteSourceCfg(kind="wikiquote", value=t) for t in DEFAULT_WIKIQUOTE_PAGES]
+    elif not sources:
+        errors.append(
+            "lounge.daily_quote.sources is empty; remove it to use the built-in list, "
+            "or set lounge.daily_quote.enabled to false"
+        )
+    else:
+        resolved: list[QuoteSourceCfg] = []
+        seen: dict[str, int] = {}
+        for i, src in enumerate(sources):
+            problem = _source_problem(i, src)
+            if problem:
+                errors.append(problem)
+            if src.kind == "file":
+                # absolute(), not resolve(): "relative to the config file's
+                # directory" should mean that, symlinks and all.
+                path = Path(src.value)
+                if not path.is_absolute():
+                    path = config_path.absolute().parent / path
+                src = src.model_copy(update={"value": str(path)})
+            if src.key in seen:
+                errors.append(f"lounge.daily_quote.sources[{i}] repeats sources[{seen[src.key]}]")
+            else:
+                seen[src.key] = i
+            resolved.append(src)
+        sources = resolved
+
+    quote = quote.model_copy(update={"sources": sources})
+    return cfg.model_copy(update={"lounge": lounge.model_copy(update={"daily_quote": quote})})
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -381,6 +594,8 @@ def load_config(path: str | Path) -> AppConfig:
             continue
         filtered_sources.append(source)
     cfg = cfg.model_copy(update={"sources": filtered_sources})
+
+    cfg = _check_lounge(cfg, Path(path), errors)
 
     if errors:
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))

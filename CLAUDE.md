@@ -24,26 +24,7 @@ Ranked 2026-09-26. The effort figures are rough, pre-investigation ballparks; so
 
 Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot status` in the prod guild, confirming the admin-only commands are admin-only.)
 
-**Future feature: bot-posted welcome messages (discussion stage, 2026-09-29; nothing designed yet).** Discord's built-in welcome used to land in the admin channel because that was the server's System Messages Channel. The owner moved that setting to `#the-speakeasy-lounge` on 2026-09-29 (no code).
-
-Decided so far:
-- **Replace Discord's welcome** with the bot's own, and switch Discord's built-in welcome off in Server Settings → Overview.
-- **The owner writes one static welcome message** that everyone gets on joining.
-- **A separate daily "welcome to the day" message:** one random fortune-style quote, posted once a day, not tied to anyone joining.
-- **Both go to `#the-speakeasy-lounge`**, as a new member-facing channel in config.
-- **Everything else stays in the admin channel,** as today: system, admin, server status and bot status messages, including run reports, health alerts and permission alerts.
-
-Still open:
-- Where the daily quote comes from: a text file (the classic `fortune` format, entries separated by `%` lines), a URL fetched and cached, or both.
-- What time it posts, and whether it repeats quotes before the list runs out.
-
-Known costs:
-- Needs Discord's privileged **Server Members** intent. It's a portal toggle, and no review is needed under 100 servers.
-- The bot must handle member-join events (for the welcome only; the daily quote runs on the scheduler).
-- `site/privacy.html` says the bot "doesn't look at the member list", so that has to change.
-- Any quote text from outside is untrusted: escape it, no mentions except the new member, and a length cap.
-
-Path: a `docs/design.md` section, then an `architect` plan.
+**In progress: lounge welcomes and daily quote (v2.2.0).** The build is complete on branch `feat/lounge` (design: `docs/design.md` §14; plan: `docs/plans/2026-09-29-lounge.md`, 12 tasks; docs written 2026-09-29). Remaining: the test-guild checklist, the PR, the v2.2.0 release, and the prod rollout (`docs/deploy.md` §18). Checkpoints A to D were answered 2026-09-29: prod and the test guild use all sources, modern works included; the built-in default list stays public-domain only; the header is `🥃 **Today's pour**`; prod is a standard server (no Community mode, Onboarding or rules screening), so welcomes post on join; welcome and quotes go to `#the-speakeasy-lounge`, and the System Messages Channel returns to the admin channel after cutover. The Server Members intent must be enabled in the Developer Portal before deploying with welcomes on. **Deploy window:** never 09:00 to 09:15 America/Los_Angeles (`deploy.sh` refuses), and avoid about 07:55 to 08:05 too, since a restart around the 08:00 quote skips that day's quote (missed means skipped, no catch-up). Status above still says v2.1.1 until the release is actually deployed.
 
 **Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
 - **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.

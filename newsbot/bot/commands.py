@@ -31,7 +31,12 @@ from discord import app_commands
 from discord.app_commands import Choice
 
 from newsbot.bot.client import DiscordPublisher, NewsBot, NullPublisher
-from newsbot.bot.format import render_code_page, render_status, render_story_page
+from newsbot.bot.format import (
+    _report_jump_link,
+    render_code_page,
+    render_status,
+    render_story_page,
+)
 from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, Topic, configured_source_names
 from newsbot.pipeline.run import RunKind, RunMode, is_run_in_progress, local_run_date, run_daily
@@ -43,6 +48,7 @@ from newsbot.store.models import AlertStatus, CodeView, DigestRow, StatusSnapsho
 from newsbot.store.repo import (
     alert_status,
     get_digest,
+    get_lounge_state,
     query_codes,
     query_stories,
     search_stories,
@@ -178,6 +184,18 @@ def invalid_test_alert_code_message(code: str) -> str | None:
     return _NOT_A_CODE_MESSAGE
 
 
+def _quote_now_reply(cfg: AppConfig, status: str, message_id: int | None) -> str:
+    """Map one `QuoteOutcome` to `/newsbot quote-now`'s ephemeral reply."""
+    if status == "posted" and message_id is not None and cfg.lounge.channel_id is not None:
+        link = _report_jump_link(cfg.guild_id, cfg.lounge.channel_id, message_id)
+        return f"Posted: {link}"
+    if status == "already_posted":
+        return "Today's quote already posted."
+    if status == "post_failed":
+        return "Posting failed; the admin channel has the details."
+    return "No quote posted; the admin channel has the reason."
+
+
 # --- Synchronous DB calls, run through asyncio.to_thread by the handlers below ---
 
 
@@ -203,6 +221,13 @@ def _search_stories_sync(
 def _get_digest_sync(db_path: str, run_date) -> DigestRow | None:
     with closing(connect(db_path)) as conn:
         return get_digest(conn, run_date)
+
+
+def _quote_posted_today_sync(db_path: str, day: str) -> bool:
+    """Same rule as `claim_quote`: a stored date at or after `day` counts as posted."""
+    with closing(connect(db_path)) as conn:
+        last = get_lounge_state(conn).last_quote_date
+    return last is not None and last >= day
 
 
 def _status_snapshot_sync(
@@ -478,6 +503,40 @@ def make_admin_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
                 content=f"Would post in <#{message.channel_id}>:",
                 embed=message.embed,
                 ephemeral=True,
+            )
+
+    if cfg.lounge.daily_quote.enabled:
+        # Registered on the quote feature alone, welcomes or no welcomes:
+        # the two lounge features share a channel, not a switch.
+        @group.command(
+            name="quote-now",
+            description="Post today's lounge quote now (the scheduled one then skips today).",
+        )
+        async def quote_now(interaction: discord.Interaction) -> None:
+            if not await _check_admin(interaction, cfg.admin_permission):
+                return
+
+            today = local_run_date(datetime.now(UTC), cfg.digest.timezone).isoformat()
+            already = await asyncio.to_thread(_quote_posted_today_sync, bot.db_path, today)
+
+            force = False
+            if already:
+                view = ConfirmView(interaction.user.id)
+                await interaction.response.send_message(
+                    "Today's quote already posted. Post another one?", view=view, ephemeral=True
+                )
+                await view.wait()
+                if not view.value:
+                    await interaction.edit_original_response(content="Cancelled.", view=None)
+                    return
+                force = True
+                await interaction.edit_original_response(content="Posting...", view=None)
+            else:
+                await interaction.response.defer(ephemeral=True)
+
+            outcome = await bot.run_quote(force)
+            await interaction.followup.send(
+                _quote_now_reply(cfg, outcome.status, outcome.message_id), ephemeral=True
             )
 
     if cfg.alerts.allow_test_command:

@@ -1,6 +1,6 @@
 """Tests for newsbot.text: HTML/BBCode stripping, truncation, and the first-line fallback."""
 
-from newsbot.text import clean_text, first_line, plain_text
+from newsbot.text import clean_text, first_line, plain_line, plain_text, shown_url
 
 
 def test_clean_text_strips_nested_html():
@@ -88,3 +88,21 @@ def test_plain_text_custom_limit_truncates_with_ellipsis():
     result = plain_text(text, limit=20)
     assert result.endswith("…")
     assert len(result) <= 21
+
+
+def test_plain_line_leaves_markup_and_entities_alone():
+    assert plain_line("a=1&region=us <b>x</b>\n  y") == "a=1&region=us <b>x</b> y"
+
+
+def test_plain_line_cap_includes_the_ellipsis():
+    assert plain_line("x" * 300, 250) == "x" * 249 + "…"
+    assert plain_line("x" * 250, 250) == "x" * 250
+
+
+def test_shown_url_keeps_scheme_host_and_path_only():
+    assert shown_url("https://u:tok@h.example/x/y?secret=1#frag") == "https://h.example/x/y"
+    assert shown_url("  http://h.example:8080/x?a=1  ") == "http://h.example:8080/x"
+
+
+def test_shown_url_says_so_when_the_address_cannot_be_read():
+    assert shown_url("https://[bad?token=abc") == "(unreadable address)"

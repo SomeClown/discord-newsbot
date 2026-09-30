@@ -5,7 +5,7 @@ Angle (test-engineer brief, 2026-09-26): a v2 database that already has
 every status `alerted_codes` can hold (not just `roundup` and `posted`),
 and the specific rollback shape that matters in practice -- a v1.3.0
 process, which only knows about migrations 001/002, opening a database
-that's already at `user_version = 3`. `db.migrate()` picks up migration
+that's already at `user_version = 4`. `db.migrate()` picks up migration
 files from a fixed directory, so "v1.3.0's migrate()" is simulated here by
 monkeypatching that directory to hold only 001/002, the same way
 test_migration_003_roundup_flag.py's own rollback-proof test simulates a
@@ -54,7 +54,7 @@ def test_v2_db_with_every_known_status_migrates_cleanly(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 3
+        assert version == 4
 
         rows = {
             row["code"]: (row["status"], row["from_roundup"])
@@ -83,7 +83,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         conn.commit()
         first = migrate(conn)
         second = migrate(conn)
-    assert first == second == 3
+    assert first == second == 4
     with closing(connect(db_path)) as conn:
         row = conn.execute(
             "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
@@ -91,7 +91,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         assert row["from_roundup"] == 1
 
 
-def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_three(db_path, monkeypatch):
+def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_four(db_path, monkeypatch):
     # Build a real v2.0 database first (migrations 001-003 applied), then
     # simulate a v1.3.0 process's migrate() (which only ever globs
     # 001/002 out of its own migrations/ directory) running against it.
@@ -122,8 +122,8 @@ def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_three(db_
 
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-        assert version == 3
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert version == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         row = conn.execute(
             "SELECT status, from_roundup FROM alerted_codes "
             "WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"

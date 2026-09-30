@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from urllib.parse import urlsplit, urlunsplit
 
 # Tags whose start or end implies a line break in the rendered text. This
 # list doesn't need to be exhaustive: worst case a missed tag just joins
@@ -133,3 +134,42 @@ def first_line(html_or_text: str, limit: int = 120) -> str:
         if candidate:
             return _truncate(candidate, limit)
     return ""
+
+
+def shown_url(url: str) -> str:
+    """`url` as scheme, host and path only, for admin lines, logs and error messages.
+
+    Raw links to private gists carry their secret in the userinfo or the
+    query string, and neither the admin channel nor a config error that gets
+    pasted into a bug report is where a secret should end up. Lives here and
+    not in the lounge code because `config.py` needs it too, and config can't
+    import anything that imports config.
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return "(unreadable address)"
+    # An address typed without its `//` ("https:user:pw@host/x") has no
+    # netloc for urlsplit to find, so the credentials land in the path and
+    # would be echoed right along with it. With no netloc, a path holding an
+    # `@` is treated as holding a secret and isn't shown at all.
+    if not parts.netloc and "@" in parts.path:
+        return f"{parts.scheme}:(address hidden)" if parts.scheme else "(address hidden)"
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", "")) or "(no address)"
+
+
+def plain_line(text: str, limit: int = 250) -> str:
+    """Collapse whitespace in `text` to single spaces and cap it at `limit`, ellipsis included.
+
+    The admin-facing sibling of `first_line`. That one strips HTML and
+    unescapes entities, which is right for a news headline and wrong for an
+    address: `?a=1&region=us` comes out as `?a=1\u00aeion=us`, and the admin is
+    shown a URL that isn't the one that failed. This never interprets
+    markup, so what goes in is what comes out, minus the whitespace. A cut
+    result is at most `limit` characters long (the ellipsis counts).
+    """
+    flat = re.sub(r"\s+", " ", text).strip()
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(limit - 1, 0)].rstrip() + "\u2026"

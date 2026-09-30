@@ -281,3 +281,92 @@ sources:
 #   # guild only; leave this false (or the whole alerts: block out) in
 #   # a production config. config.py logs a startup warning if it's true.
 #   allow_test_command: false
+
+# Lounge welcomes and a daily quote (design.md §14, v2.2). Two optional
+# features that share one channel, both off unless you uncomment this block.
+# Full walkthrough: docs/self-host.md ("Lounge welcomes and a daily quote").
+#
+# FIRST, if you turn on the welcome: in the Discord Developer Portal, open
+# your application's Bot page and switch on Server Members Intent (under
+# Privileged Gateway Intents) BEFORE you start the bot. Without it the bot
+# prints a message naming that switch, waits 10 minutes (so a restart loop
+# can't burn through Discord's login limit), and exits. The daily quote needs
+# no privileged intent. The bot's role needs View Channel and Send Messages
+# in the lounge channel; the startup permission check will say if not.
+#
+# lounge:
+#   channel_id: 111111111111111115  # placeholder: required if either feature is on
+#   welcome:
+#     enabled: true
+#     # Posted once for each new member, as written, so formatting, emoji and
+#     # <#channel-id> links work. Two placeholders exist: {member} (a mention
+#     # of the new member) and {server} (the server's name). Any other {...}
+#     # is a startup error, so a typo fails loudly instead of posting
+#     # literally, and the message has to fit Discord's 2,000-character limit
+#     # even with a worst-case mention swapped in (also checked at startup).
+#     # Bots are never welcomed. This is the owner's own welcome, kept as an
+#     # example; the <#..._ID> bits stand in for real channel ids.
+#     message: |
+#       **You met me at a very strange time in my life.**
+#
+#       Welcome to {server}, {member}. Pull up a stool. The bartender is a bot, the lighting is questionable, and nobody here will ask where you were before you walked in.
+#
+#       A few things worth knowing, in rough order of importance:
+#       - **SHiFT codes** land in <#SHIFT_CHANNEL_ID>. If it pings everyone, it's a Golden Key, and yes, you're allowed to run.
+#       - **The news** for our games shows up every morning around 9 in <#BL4_CHANNEL_ID>, <#PALWORLD_CHANNEL_ID> and <#DIABLO_CHANNEL_ID>. A robot reads the internet so you don't have to, which is the single most useful thing a robot has ever done for me.
+#       - **Once a day**, a quote of questionable wisdom turns up right here. Most of them are older than the building. A few are older than me, which is saying something.
+#
+#       That's it. No test, no dress code, and the only real rule is "don't be the reason we need more rules." Grab a drink, say hello, and try not to judge the rest of us too harshly. We were like this when you found us.
+#   daily_quote:
+#     enabled: true
+#     # HH:MM, 24-hour, in digest.timezone. Default 08:00. A quote missed
+#     # because the bot was down is skipped, never caught up. Known quirk: the
+#     # scheduling library (APScheduler 3.x) skips a job set between 00:00
+#     # and 00:59 on the day after the spring-forward clock change, so don't
+#     # pick a midnight-hour time. The default 08:00 isn't affected.
+#     time: "08:00"
+#     # Where quotes come from. Leave `sources` out and the bot uses its
+#     # built-in list: Wikiquote pages for Oscar Wilde, Mark Twain, Benjamin
+#     # Franklin, William Shakespeare, Jane Austen, Edgar Allan Poe and Marcus
+#     # Aurelius (authors whose works are in the U.S. public domain). Set it
+#     # and your list replaces the built-in one. An empty list is an error;
+#     # to turn the quote off, set `enabled: false`. Each day picks one
+#     # source at random, then a quote from it that hasn't been used yet;
+#     # every source has its own no-repeat deck. Each entry is exactly one of:
+#     sources:
+#       # A Wikiquote page title. Fetched through Wikiquote's API at most once
+#       # a week per page (the bot sends your NEWSBOT_CONTACT in its
+#       # User-Agent, so set it), with the saved copy used in between and if
+#       # the fetch fails. Quotes over 400 characters are dropped. Posts link
+#       # back to the page, which Wikiquote's CC BY-SA license asks for.
+#       - wikiquote: "Oscar Wilde"
+#       # A text file of your own, in the `fortune` format: quotes separated
+#       # by a line holding only `%`. Read fresh every time, so edits need no
+#       # restart. UTF-8, 1 MB at most. A relative path is relative to this
+#       # config file. In Docker the image is read-only, so keep the file in
+#       # the data directory (as below) and make sure uid 10001 can read it.
+#       - file: /data/quotes.txt
+#       # A raw text file at an https:// address, in the same `%` format.
+#       # Plain http:// is rejected. It has to be served as text/plain; the
+#       # link to a gist's or GitHub's web page is HTML and will be refused,
+#       # so use the "raw" link. Fetched every time it's picked (1 MB and 10
+#       # seconds at most).
+#       - url: https://gist.githubusercontent.com/you/abc123/raw/quotes.txt
+#       # Modern copyrighted works, deliberately NOT on by default. Wikiquote
+#       # hosts limited excerpts of films, recent books and the like under
+#       # its own fair-use policy. That covers Wikiquote; a bot reposting
+#       # them every morning is a different use, and it carries real
+#       # copyright risk. Turning these on is your call, made with eyes open.
+#       # Titles ending in "(film)", "(TV series)" or "(video game)" are read
+#       # as works and attributed "Character, Title". Theme pages like
+#       # "Friendship" mix public-domain and modern quotes the same way, so
+#       # they get the same caution (and only quotes that cite a source are
+#       # used). These show the shape; check the titles exist first.
+#       # - wikiquote: "Fight Club (film)"
+#       # - wikiquote: "Hunter S. Thompson"
+#       # - wikiquote: "Friendship"
+#
+# To try it without waiting for the clock, an admin can run
+# `/newsbot quote-now`. It posts today's quote and the scheduled run then
+# skips today; if today's already posted it asks before posting another.
+# It exists only while daily_quote is enabled.

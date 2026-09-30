@@ -55,6 +55,13 @@ newsbot/
     client.py      discord client, scheduler wiring, healthcheck, DiscordPublisher, DiscordCodeAlertPoster
     commands.py    /news recent, /news search, /newsbot status|run-now|preview|test-alert
     format.py      digest + result embeds + code alerts, paging, UTF-16-aware limit checks
+  lounge/          welcomes and the daily quote (§14, v2.2); no Discord objects except in bot/client.py
+    default_sources.py  the built-in Wikiquote list (public-domain authors)
+    quotes.py      `%` splitting, hashing, the per-source deck, message rendering
+    wikiquote.py   fetch (MediaWiki Action API) and parse one Wikiquote page
+    sources.py     load a file, URL or Wikiquote source; the weekly limit and saved copies
+    daily.py       one quote run: pick, load, draw, record, post, and the admin messages
+    welcome.py     placeholder checks, rendering, the 24-hour rule
   alerts.py        admin-channel notifications
   healthcheck.py   Docker HEALTHCHECK entry point
 ```
@@ -168,6 +175,8 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `stories_fts` | external-content FTS5 table over `stories(headline, summary)`, kept in sync by AFTER INSERT/DELETE/UPDATE triggers |
 | `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`), from_roundup (bool, default 0): added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25); `from_roundup` added by migration 003 (v2.0, §13), backfilled from `status = 'roundup'`; see §13's rollback note for why it exists |
 | `alert_state` | key (PK), value: a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
+| `lounge_quotes_used` | source_key, quote_hash (sha256 of the normalized quote text), used_at, PK(source_key, quote_hash): each source's no-repeat deck; added by migration 004 (v2.2, §14) |
+| `lounge_state` | key (PK), value: a small key/value scratchpad, currently `last_quote_date` for the once-a-day guard; added by migration 004 |
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
 
@@ -179,7 +188,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 
 ## 6. Discord interface
 
-**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands. **Superseded by §13** as of v2.0: there's no combined digest channel left to create a thread on, so the invite no longer needs Create Public Threads; see §13's per-game-channel permissions instead.
+**Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands. **Superseded by §13** as of v2.0: there's no combined digest channel left to create a thread on, so the invite no longer needs Create Public Threads; see §13's per-game-channel permissions instead. **Also superseded by §14** as of v2.2: with lounge welcomes on, the bot requests the privileged Server Members intent, which must be enabled in the Developer Portal first; with welcomes off, still default only.
 
 ### Digest
 - A header message with the date, a story count for each game, and a coverage note if any source type was skipped. A public thread is created on the header for discussion. **Superseded by §13** as of v2.0: there's no combined channel left to post a header to, so there's no header message and no thread. Each game's embed posts alone to that game's own channel, and a coverage note rides in that embed's own footer instead.
@@ -431,3 +440,157 @@ The combined digest channel goes away. Each game's daily digest posts to its own
 **Unchanged.** `/news recent`, `/news search`, `/newsbot status|run-now|preview` (preview shows what each channel would get), the 09:00 run's SHiFT code check, retention, backups.
 
 **Rollback.** Implementation needed one additive schema change after all: migration 003 adds `alerted_codes.from_roundup` (backfilled from `status='roundup'`), because §13's original plan to reuse `status='posted'` for a roundup-posted code turned out to collide with `/shift codes`'s "from a roundup" marker; nothing else on the row would have distinguished the two. Migration 003 is purely additive, the same shape as 002: v1.3.0 runs unmodified against a v2 database, it just never reads or writes the new column. Rolling back means restoring a v1 `config.yaml` (v1.3.0 requires `digest.channel_id` and rejects unknown `alerts` keys, so the v2-shaped config won't load as-is) along with `TAG=1.3.0`; no database restore is needed either direction.
+
+## 14. Lounge: bot welcomes and a daily quote (approved 2026-09-29, quote sources revised the same day)
+
+Two member-facing messages in a new "lounge" channel (`#the-speakeasy-lounge` on the prod server): a welcome for each new member, replacing Discord's built-in random welcome, and one quote a day. Everything else stays in the admin channel: system, admin, server status and bot status messages, run reports, health and permission alerts. Owner decisions:
+- Replace Discord's welcome with one static welcome the owner writes, kept in `config.yaml`.
+- The quote posts at its own configurable time, default 08:00. A missed day is skipped, not caught up.
+- No quote repeats until its source's quotes have all been used.
+- Handle servers with and without rules screening. Never welcome bots. Welcome a given member at most once per 24 hours.
+- **Quotes come from a list of sources, mixed:**
+  - Wikiquote pages for authors, works (films, books, shows) or themes;
+  - the owner's own text file;
+  - a URL of such a file.
+- **With nothing configured,** a built-in default list of Wikiquote pages for public-domain authors is used, so the feature works without anyone writing quotes. An admin can replace the list or turn the feature off.
+- **Built into the existing bot,** not a separate service.
+
+The server's System Messages Channel already points at the lounge (owner, 2026-09-29), so Discord's own welcome lands there until this ships.
+
+**Config.** A new optional top-level block; absent means both features are off.
+```yaml
+lounge:
+  channel_id: 123456789012345678
+  welcome:
+    enabled: true
+    message: |
+      Welcome to the speakeasy, {member}! ...
+  daily_quote:
+    enabled: true
+    time: "08:00"                  # HH:MM in digest.timezone
+    sources:                       # optional; omitted means the built-in default list
+      - wikiquote: "Oscar Wilde"
+      - wikiquote: "Friendship"    # a theme page
+      - file: /data/quotes.txt     # the owner's own list
+      - url: https://gist.githubusercontent.com/.../raw/quotes.txt
+```
+- `channel_id` is required when either feature is enabled (validation error otherwise).
+- **Welcome placeholders.** `welcome.message` supports `{member}` (a mention of the new member) and `{server}` (the server's name). Any other `{...}` text is a validation error, so a typo fails at startup instead of posting literally. After substitution with a worst-case mention, it must fit Discord's 2,000-character limit, checked at startup.
+- **`daily_quote.time`** must be a valid `HH:MM`.
+- **Each entry in `sources`** is exactly one of:
+  - `wikiquote:` a page title;
+  - `file:` a path, relative to the config file's directory;
+  - `url:` an `https://` address. Plain `http://` is rejected.
+- **`sources` omitted** means the built-in default list. **An empty list** is a validation error, since it's almost certainly a mistake; turn the feature off with `enabled: false` instead.
+- **A config error of any kind** stops the bot at startup with a clear message, the same as every other section.
+
+**The built-in default list.** It lives in code (`newsbot/lounge/default_sources.py`) and contains only Wikiquote pages for authors whose works are in the U.S. public domain (published 1930 or earlier as of 2026): for example Oscar Wilde, Mark Twain, Benjamin Franklin, William Shakespeare, Jane Austen, Edgar Allan Poe, Marcus Aurelius. The same file carries a few **commented-out** examples of modern copyrighted works (for example `"Fight Club (film)"`). Next to them is a plain-language note: Wikiquote hosts limited excerpts of such works under its own fair-use policy, and a bot reposting them carries a real copyright risk, so turning them on is a deliberate owner decision, not a default. `config.example.yaml` shows the same examples commented out, with the same note.
+
+**Components.**
+- `newsbot/lounge/quotes.py`: the source-independent part. It splits text in the `fortune` format, hashes quotes, runs the per-source deck, and renders the message. No Discord code.
+- `newsbot/lounge/sources.py`: loads each source type (file, URL, Wikiquote) into a list of quotes, each with its attribution, and keeps a last good copy per source.
+- `newsbot/lounge/wikiquote.py`: fetches and parses one Wikiquote page.
+- `newsbot/lounge/default_sources.py`: the built-in list described above.
+- `newsbot/lounge/welcome.py`: renders the welcome and decides whether a member should be welcomed now. No Discord I/O beyond what its caller passes in.
+- `newsbot/bot/client.py`:
+  - requests the privileged Server Members intent, **only when welcomes are enabled**;
+  - handles `on_member_join` and `on_member_update`;
+  - schedules the quote job.
+- **Migration 004:** a `lounge_quotes_used` table (source key, quote hash, used-at timestamp) plus the last-posted date and quote for the once-a-day guard. Purely additive.
+
+**Welcome flow.**
+1. On join: if the member is a bot, stop.
+2. If the member is pending rules screening (`member.pending`), do nothing now; `on_member_update` welcomes them when `pending` goes from true to false. A server without screening never sets `pending`, so its members are welcomed on join.
+   - Behavior with Discord's newer Onboarding flow is verified in the test guild before release.
+   - If it differs, the fix changes only this step's readiness check, not the rest.
+3. If the member was welcomed in the last 24 hours, stop.
+   - This is an in-memory map of user ID to time, pruned as it goes and never written to disk.
+   - A restart forgets it, which at worst means a second welcome for someone who left and rejoined across the restart.
+4. Post the rendered message to the lounge with `AllowedMentions(users=[member], everyone=False, roles=False)`.
+   - The owner's text is trusted and posted as written, so formatting, emoji and channel links work.
+   - The member appears only as a mention, never as their display name, so a hostile name can't format or ping anything.
+
+**Daily quote flow.**
+1. **Schedule.** An APScheduler cron job at `daily_quote.time` in `digest.timezone`, with a small `misfire_grace_time` (a few minutes) and coalescing. A run missed by longer than that is skipped. There's no catch-up after downtime.
+2. **Already done?** If the database says today's quote already posted, stop. This guards against a restart near the posting time.
+3. **Pick a source** at random from the configured list (or the default list), so a huge page can't crowd out a small one. Load it:
+   - **File:** read from disk on every run, so edits take effect with no restart. Capped at 1 MB and must be UTF-8.
+   - **URL:** fetched through the shared HTTP client with the usual `NEWSBOT_CONTACT` User-Agent. A 10-second overall timeout, a 1 MB cap, status 200, and a final `https` address after any redirects. The response must be served as `text/plain`, which catches the "pasted the GitHub page, not the raw link" mistake with a message that says so.
+   - **Wikiquote:** the page's HTML fetched from Wikiquote's public MediaWiki API with the same User-Agent. The contact information satisfies Wikimedia's User-Agent policy.
+     - At most one fetch per page per week; the saved copy is used in between.
+     - Parsing keeps the quotes from the page's main quote sections, each with its attribution (the speaker and the work, as the page gives them).
+     - It skips sections headed "Disputed", "Misattributed", "Quotes about …", "External links" and similar, since their quotes are known to be wrong or aren't quotes from the subject.
+     - Film and TV dialogue with several speakers is kept as one quote, one speaker per line.
+     - Quotes longer than about 400 characters are dropped, as not lounge-sized.
+   - **Last good copy:** each source's latest successful load is saved next to the database. If a load fails, that copy is used. With no copy either, another source is tried (up to the number of sources), and if none works the day is skipped.
+4. **Split `file` and `url` text into quotes** on the `%` lines (the `fortune` format). Drop empty entries and any too long to post. `fortune`-style attribution lines are kept as written.
+5. **Pick from that source's deck.** Quotes are identified by a hash of their normalized text, and each source has its own deck.
+   - Take the quotes from that source not used yet.
+   - If none are left, reset that source's deck, excluding the most recently posted quote so a reshuffle can't repeat yesterday's.
+   - Choose one at random, record it, then post.
+   - Because decks are keyed by text, edits to a list need no bookkeeping: new quotes join the deck, and removed ones never come up.
+6. **Post.** The message is a short header, the quote, and its attribution, plus a link to the Wikiquote page for Wikiquote quotes. The link is also the license's attribution requirement.
+   - Quote text is untrusted: it goes through `esc()` like news text, and the message is sent with `AllowedMentions.none()`.
+   - Attributions come only from the source (the Wikiquote page, or the owner's file), never from an agent's or model's memory.
+
+**The test trigger.** `/newsbot quote-now` (admin only; registered when the daily quote is enabled) runs the same path as the scheduled job.
+- If today's quote hasn't posted, it posts it and the scheduled run skips today.
+- If today's quote has posted, it asks for confirmation before posting another.
+- Every posted quote is recorded as used either way.
+
+**Errors.** Lounge members only ever see a welcome or a quote; problems go to the admin channel.
+- **No usable quote:** every source failed with no saved copy, a missing file, or no valid entries. That day is skipped, with one admin message saying why.
+- **A source fell back to its saved copy:** one admin line saying so, and the quote still posts.
+- **Discord refuses a post:** logged and reported to the admin channel. A failed welcome or quote is not retried.
+- **Welcomes on but the Server Members intent not enabled in the portal:** the bot exits at startup with a message naming the portal switch and the config key.
+
+**Permissions and rollout.**
+- The startup permission check adds the lounge channel when either feature is on: View Channel and Send Messages.
+- **The Server Members intent must be enabled in the Discord Developer Portal before deploying with welcomes on,** for the dev bot and the prod bot. With welcomes off, it isn't needed. `docs/deploy.md` and `docs/self-host.md` say so as the first step.
+- **Rollout order:** enable the intent, deploy, then switch off Discord's built-in welcome in Server Settings, so there's never a gap with no welcome.
+
+**Privacy.** `site/privacy.html` currently says the bot doesn't look at the member list. It changes to say:
+- the bot notices when someone joins (and when they accept the rules) so it can welcome them;
+- it remembers that only in memory, for up to 24 hours;
+- it stores nothing about them.
+
+The quote table holds source names and hashes of quote text only. Wikiquote is contacted with the bot's User-Agent and nothing about members.
+
+**Testing.**
+- **Automated:**
+  - `%` splitting, with blank and oversized entries;
+  - Wikiquote parsing against saved page fixtures: an author page, a film page with dialogue, and a theme page. Disputed, misattributed and "about" sections are excluded, and attributions come out correct;
+  - the weekly fetch limit and the last-good-copy fallback per source type;
+  - source mixing, and failing over to another source;
+  - the per-source deck: no repeats, edits to the list, and no repeat across a reshuffle;
+  - the welcome decision: bots, pending members, and the 24-hour rule;
+  - message safety: `@everyone` in the owner's text and a hostile quote both inert;
+  - the once-a-day guard, and missed-means-skipped.
+- **Test guild:**
+  - joins with screening off and on, and with Onboarding on;
+  - quotes triggered early from each source type;
+  - a broken source falling back to its saved copy;
+  - the admin message when every source fails.
+
+**Resolved since planning (2026-09-29).**
+- **The prod server's sources:** settled at rollout, by checking which pages exist on Wikiquote. The owner's favorites are Dante's *Divine Comedy*, *Fight Club*, Hunter S. Thompson, H. L. Mencken and F. Scott Fitzgerald. For prod and the test guild all sources stay on, modern works included (a small private server of friends; the owner's call). The built-in list in code stays public-domain only. Taste is expressed through the source list; there's no humor filtering in code.
+- **Wording:** the quote header is `🥃 **Today's pour**`, attributions start with `~ `, and the Wikiquote link label is `From Wikiquote:`. The owner's welcome is in `config.example.yaml` as the example message.
+- **Community mode, Onboarding, rules screening:** the prod server is a standard server with none of them, so welcomes post on join. The pending and screening path still ships, with automated tests, for servers that use it. It has not been exercised against a live Onboarding guild; the test-guild steps for it are optional. Revisit if the server's setup changes.
+- **System Messages Channel:** the welcome and every quote go to `#the-speakeasy-lounge`; every system, status and error message goes to the admin channel. After cutover the System Messages Channel returns to the admin channel.
+
+**As built.** Where the code settled on something the sections above leave open or say differently:
+- **The built-in list** is Oscar Wilde, Mark Twain, Benjamin Franklin, William Shakespeare, Jane Austen, Edgar Allan Poe and Marcus Aurelius. A live check on 2026-09-29 found about 1,040 usable quotes across them.
+- **Wikiquote fetching** uses the MediaWiki Action API (`action=parse`, with `redirects=1`), at most once a week per page. A failing page is retried weekly, with its saved copy used in between. The raw HTML is what's cached (not the parsed quotes), so a parser fix applies to cached pages at once.
+- **The source key** is `kind:value` and depends only on the source: Wikiquote titles are normalized (underscores to spaces, first letter capitalized), and a `file:` path is made absolute against the config file's directory by `load_config`. Reordering the list keeps every deck; editing a source's title, path or address starts a new deck.
+- **The cache** is plain files at `<db-stem>-lounge-cache/<sha256(key)[:16]>.json` next to the database, not backed up, safe to delete.
+- **Page kinds.** A page whose title ends in a parenthetical containing film, TV, series or video game is a work, and quotes are attributed "Character, Title". Book and poem pages (for example *Divine Comedy*) parse as author-style pages. A page with a level-2 "Cast" or "Dialogue" heading is also a work. A page with three or more single-capital-letter headings (A, B, C...) is a theme page; anything else is author-style.
+- **Skipped sections.** Prefix match: Disputed, Misattributed, Attributed, Quotes about, Quotations about, About, Said about, Unsourced, Doubtful, Apocryphal, Spurious. Exact match: Notes, References, Sources, Bibliography, Further reading, External links, See also, Cast, Taglines. Skip headings are honored even inside boxes the parser otherwise ignores. So a work section named "Notes on Democracy" is kept, while "About a Boy" is skipped.
+- **Citations.** On theme pages, the citation is the first indented line that starts with a link to a Wikiquote page, otherwise the first indented line, and quotes with no source are dropped. Quotes over 400 characters are dropped everywhere. Translations: when a quote's own text is all italic (a foreign original) and it has two or more nested lines, the first line that isn't a locator is the English translation and gets posted as the quote, and the citation comes from the other lines. A locator is a short line such as "Lines 1–3" or "Canto IV" (a locator word plus a number, 40 characters at most); if every line is one, nothing is swapped.
+- **URL sources** follow redirects by hand: https only, at most 5, and no request is ever made to an http address. They're refetched each time they're picked, with a 1 MB cap and a 10-second limit.
+- **Admin messages** (`lounge/daily.py`, source notes for fallbacks and sources that failed on the way go out as one message per run) never show URL credentials, query strings or fragments; an address without `//` that contains `@` shows as `scheme:(address hidden)`. Every admin alert is capped at Discord's limit. A failed post reports only the error type and Discord's HTTP status and code; the details are in the log. Welcome failures log only the error type and HTTP status, nothing about the member.
+- **Daily picking.** Each day shuffles the sources and tries them in that order until one yields quotes, so the first pick is uniform across sources. Each source has its own deck, and a reshuffle never repeats yesterday's quote. The job is recorded before the post: a failed post leaves the quote used and the day done, with one admin message and no retry.
+- **`quote-now`:** if today's quote already posted (or the stored date is later than today) it asks before posting another. Every posted quote counts as used. A scheduled quote missed during downtime is skipped, with no catch-up.
+- **Known scheduling-library issue.** APScheduler 3.x skips a cron job set between 00:00 and 00:59 on the day after the spring-forward DST change. The default 08:00 quote and the 09:00 digest aren't affected.
+- **Deploy window.** Never deploy 09:00 to 09:15 America/Los_Angeles (`deploy.sh` refuses), and avoid about 07:55 to 08:05: a restart there skips the day's quote, since a missed one is never caught up.
+
+**Rollback.** Migration 004 is additive, so v2.1.1 runs against a v2.2 database untouched. v2.1.1's config loader ignores unrecognized top-level keys, so the `lounge:` block can stay in `config.yaml`. Rolling back is `TAG=2.1.1` plus switching Discord's built-in welcome back on; the Server Members intent can stay enabled.

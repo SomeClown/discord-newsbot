@@ -82,3 +82,9 @@ sources:
 # minimal single-topic start. See config.example.yaml's own alerts: block
 # and README.md's "SHiFT code alerts" section if your game actually has
 # redeem codes and you want the hourly sweep.
+
+# Lounge welcomes and a daily quote (design.md §14) are optional and off
+# unless a `lounge:` block is present. A welcome needs the Server Members
+# Intent switched on in the Developer Portal first. The whole thing, every
+# option explained, is the commented-out `lounge:` block at the end of
+# config.example.yaml, and docs/self-host.md walks through it.
