@@ -265,13 +265,7 @@ async def test_the_friends_job_is_8am_local_on_both_sides_of_both_dst_changes(im
     assert len(offsets) == 2  # PST and PDT both showed up; the wall-clock time never moved
 
 
-async def test_a_quote_time_changed_in_the_row_does_not_move_the_running_job(db_path):
-    """Pins today's behavior: the job's trigger is fixed at schedule time.
-
-    A D5 re-sync that changes `quote_time` after `schedule_lounge_quotes` ran shows up in the
-    row at once (the run reads it fresh) but not in the cron, until a restart or another
-    `schedule_lounge_quotes()`. The owner may want the re-sync to reschedule.
-    """
+async def test_reload_lounges_moves_a_job_whose_quote_time_changed(db_path):
     _seed(db_path, _row(G1, CH1, t="08:00"))
     bot = _bot(db_path, [])
     bot.scheduler = AsyncIOScheduler()
@@ -284,10 +278,54 @@ async def test_a_quote_time_changed_in_the_row_does_not_move_the_running_job(db_
         trigger = bot.scheduler.get_job(f"daily-quote-{G1}").trigger
         return {f.name: str(f) for f in trigger.fields}
 
-    assert (fields()["hour"], fields()["minute"]) == ("8", "0")  # still the old time
-    await bot.schedule_lounge_quotes()
-    assert (fields()["hour"], fields()["minute"]) == ("21", "15")  # a second pass moves it
+    assert (fields()["hour"], fields()["minute"]) == ("8", "0")  # nothing has re-read the row yet
+    await bot.reload_lounges()
+    assert (fields()["hour"], fields()["minute"]) == ("21", "15")
+    assert len(bot.scheduler.get_jobs()) == 1
     bot.scheduler.shutdown(wait=False)
+
+
+async def test_reload_lounges_moves_a_job_whose_zone_changed(db_path):
+    _seed(db_path, _row(G1, CH1), zones={G1: "UTC"})
+    bot = _bot(db_path, [])
+    bot.scheduler = AsyncIOScheduler()
+    bot.scheduler.start(paused=True)
+    try:
+        await bot.schedule_lounge_quotes()
+        with closing(connect(db_path)) as conn:
+            conn.execute("UPDATE guilds SET timezone = 'Asia/Tokyo' WHERE guild_id = ?", (G1,))
+            conn.commit()
+        await bot.reload_lounges()
+        assert bot.scheduler.get_job(f"daily-quote-{G1}").trigger.timezone == ZoneInfo("Asia/Tokyo")
+    finally:
+        bot.scheduler.shutdown(wait=False)
+
+
+async def test_reload_lounges_drops_jobs_for_removed_and_disabled_guilds_only(db_path):
+    _seed(db_path, _row(G1, CH1), _row(G2, CH2), _row(G3, CH1))
+    bot = _bot(db_path, [])
+    bot.scheduler = AsyncIOScheduler()
+    bot.scheduler.start(paused=True)
+    try:
+        await bot.schedule_lounge_quotes()
+        bot.scheduler.add_job(lambda: None, "interval", hours=1, id="daily-quote")  # v2.2's own
+        with closing(connect(db_path)) as conn:
+            repo.upsert_lounge(conn, _row(G1, CH1, quote=False))
+            repo.delete_guild(conn, G2)
+        await bot.reload_lounges()
+        await bot.reload_lounges()
+        assert sorted(j.id for j in bot.scheduler.get_jobs()) == sorted(
+            ["daily-quote", f"daily-quote-{G3}"]
+        )
+    finally:
+        bot.scheduler.shutdown(wait=False)
+
+
+async def test_reload_lounges_with_no_scheduler_just_loads_the_rows(db_path):
+    _seed(db_path, _row(G1, CH1))
+    bot = _bot(db_path, [])
+    bot.scheduler = None
+    assert [row.guild_id for row in await bot.reload_lounges()] == [G1]
 
 
 @pytest.mark.parametrize("started_first", [True, False])
@@ -322,7 +360,7 @@ def test_the_table_refuses_a_quote_time_that_is_not_a_time(db_path):
         assert repo.get_lounge(conn, G1) is None
 
 
-async def test_a_job_whose_quote_was_turned_off_removes_itself_and_stays_gone_until_rescheduled(
+async def test_a_job_whose_quote_was_turned_off_removes_itself_and_stays_gone_until_reloaded(
     db_path,
 ):
     _seed(db_path, _row(G1, CH1))
@@ -338,10 +376,9 @@ async def test_a_job_whose_quote_was_turned_off_removes_itself_and_stays_gone_un
         assert bot.scheduler.get_job(f"daily-quote-{G1}") is None
         with closing(connect(db_path)) as conn:
             repo.upsert_lounge(conn, _row(G1, CH1, quote=True))
-        # Pinned: turning the quote back on does not bring the job back by itself. Whatever
-        # toggles the quote (task 13's wiring or /lounge) has to call schedule_lounge_quotes.
+        # Turning the quote back on doesn't bring the job back by itself; the reload does.
         assert bot.scheduler.get_job(f"daily-quote-{G1}") is None
-        await bot.schedule_lounge_quotes()
+        await bot.reload_lounges()
         assert bot.scheduler.get_job(f"daily-quote-{G1}") is not None
     finally:
         bot.scheduler.shutdown(wait=False)
@@ -558,15 +595,8 @@ def test_the_no_rewelcome_map_stays_bounded_with_guild_user_keys():
     assert len(recent._seen) == 1  # a day on, the whole crowd has been forgotten
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "chunk_lounge_guilds awaits guild.chunk() with no timeout. One guild whose member "
-        "request never completes stalls the loop, so every later lounge guild is never "
-        "chunked, and whoever awaits it (on_ready, task 13) hangs with it"
-    ),
-)
-async def test_a_chunk_that_never_returns_does_not_stall_the_rest(db_path):
+async def test_a_chunk_that_never_returns_does_not_stall_the_rest(db_path, monkeypatch):
+    monkeypatch.setattr(client_module, "_LOUNGE_CHUNK_TIMEOUT_S", 0.05)
     bot = _bot(db_path, [_row(G1, CH1), _row(G2, CH2)])
     guilds = {G1: FakeGuild(G1), G2: FakeGuild(G2)}
 

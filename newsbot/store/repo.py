@@ -798,6 +798,12 @@ def quote_deck_state(
     return QuoteDeckState(used=frozenset(hashes), last_hash=hashes[0] if hashes else None)
 
 
+def _is_imported_guild(conn: sqlite3.Connection, guild_id: int) -> bool:
+    """True if `guild_id` is the guild the v2 import recorded (`imported_at` set)."""
+    row = conn.execute("SELECT guild_id FROM guilds WHERE imported_at IS NOT NULL").fetchone()
+    return row is not None and row["guild_id"] == guild_id
+
+
 def claim_quote(
     conn: sqlite3.Connection,
     *,
@@ -827,12 +833,15 @@ def claim_quote(
     With `guild_id` (design.md §15) the same rules run per server: the date
     guard is that server's `guild_lounge.last_quote_date`, the reshuffle
     deletes only that server's rows (and the unclaimed `guild_id IS NULL`
-    ones), and the new row is stamped with the server. `lounge_state` is
-    still written too, so a rollback to v2.2 finds a current date. A server
+    ones), and the new row is stamped with the server. Usage is per server
+    (migration 005): two servers on one source each keep their own rows, so
+    one claiming a hash never touches the other's. `lounge_state` is written
+    too, so a rollback to v2.2 finds a current date, but only when `guild_id`
+    is the imported guild: v2.2 has exactly one lounge (the friend's), and
+    its date is the one a rolled-back process must read. Every other server
+    leaving that cell alone keeps it from jumping around. A server
     with no lounge row (it was removed while the quote was loading) gets
-    False and nothing is written. The table's primary key is still
-    `(source_key, quote_hash)`, so two servers sharing one source share
-    its rows; that's the known limit from plan 3.2.
+    False and nothing is written.
 
     Runs inside `BEGIN IMMEDIATE` for the reason `claim_codes` does: the
     scheduled job and `quote-now` can land in the same second, and the
@@ -875,10 +884,19 @@ def claim_quote(
         # Delete-then-insert rather than an upsert: an upsert keeps the old
         # rowid, so a re-claimed hash inside one clock tick would still rank
         # as older than rows inserted after it. A fresh insert gets a fresh rowid.
-        conn.execute(
-            "DELETE FROM lounge_quotes_used WHERE source_key = ? AND quote_hash = ?",
-            (source_key, quote_hash),
-        )
+        # With a guild, the delete is that guild's copy (and an unstamped one,
+        # which the insert supersedes); another guild's row is none of our business.
+        if guild_id is None:
+            conn.execute(
+                "DELETE FROM lounge_quotes_used WHERE source_key = ? AND quote_hash = ?",
+                (source_key, quote_hash),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM lounge_quotes_used WHERE source_key = ? AND quote_hash = ? "
+                "AND (guild_id = ? OR guild_id IS NULL)",
+                (source_key, quote_hash, guild_id),
+            )
         conn.execute(
             "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at, guild_id) "
             "VALUES (?, ?, ?, ?)",
@@ -889,11 +907,12 @@ def claim_quote(
                 "UPDATE guild_lounge SET last_quote_date = ? WHERE guild_id = ?",
                 (local_day, guild_id),
             )
-        conn.execute(
-            "INSERT INTO lounge_state (key, value) VALUES ('last_quote_date', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (local_day,),
-        )
+        if guild_id is None or _is_imported_guild(conn, guild_id):
+            conn.execute(
+                "INSERT INTO lounge_state (key, value) VALUES ('last_quote_date', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (local_day,),
+            )
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

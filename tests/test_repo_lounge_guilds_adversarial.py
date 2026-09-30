@@ -2,20 +2,18 @@
 
 `test_repo_lounge_guilds.py` checks the happy path: two guilds, two sources,
 everybody minding their own business. This file asks what happens when they
-don't have separate sources, because `lounge_quotes_used` kept its
-`(source_key, quote_hash)` primary key and only grew a `guild_id` column. Two
-servers that follow the same Wikiquote page are two tenants in one row. Only
-the friend has a lounge today, so none of this can bite yet; the xfails are
-here so the day a second lounge exists, somebody reads the reason first.
+don't have separate sources: two servers that follow the same Wikiquote page
+must each keep their own history (migration 005 rebuilt the table without the
+shared `(source_key, quote_hash)` key, which used to make them tenants in one
+row and let one server's claim or departure rewrite the other's).
 
 Also pinned: what a second guild sees of the `guild_id IS NULL` rows (v2.2's
-history, and whatever a rolled-back v2.2 writes afterwards), and what the
-`lounge_state` rollback mirror holds when two guilds write to it. Where the
-code does something the owner might want to change, the test says what it does
-today and the comment says so. Strict xfails are real bugs; the fix belongs to
-the implement agent, not to me.
+history, and whatever a rolled-back v2.2 writes afterwards), v2.2's literal
+quote SQL running against the v3 table, and what the `lounge_state` rollback
+mirror holds when two guilds write to it (the imported guild's date only).
 """
 
+import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -92,28 +90,12 @@ def _used(conn, gid, key=WILDE):
 # --- the shared primary key (plan 3.2) ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "lounge_quotes_used keeps PRIMARY KEY (source_key, quote_hash), and claim_quote deletes "
-        "by that pair before inserting. Guild B claiming a quote guild A already used re-stamps "
-        "A's row with B's guild_id, so A's deck forgets it and A can post that quote again "
-        "before its deck is exhausted"
-    ),
-)
 def test_two_guilds_sharing_a_source_do_not_make_each_other_repeat(conn):
     assert _claim(conn, G1, h=H1, day=DAY1) is True
     assert _claim(conn, G2, h=H1, day=DAY1) is True  # B happens to draw the same quote
     assert H1 in _used(conn, G1)  # A posted it; it must still count as used for A
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "same shared primary key: after B re-stamps A's row, A's last_hash (the quote the "
-        "no-back-to-back rule protects) is gone too, so A can draw the same quote two days running"
-    ),
-)
 def test_a_second_guild_claiming_the_same_quote_does_not_erase_the_first_guilds_last_hash(conn):
     _claim(conn, G1, h=H2, day=DAY1, m=0)
     _claim(conn, G1, h=H1, day=DAY2, m=10)  # A's most recent quote is H1
@@ -121,14 +103,6 @@ def test_a_second_guild_claiming_the_same_quote_does_not_erase_the_first_guilds_
     assert repo.quote_deck_state(conn, WILDE, G1).last_hash == H1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "same shared primary key: a quote both guilds posted is stored once, under whoever "
-        "claimed it last, so when that guild leaves (ON DELETE CASCADE) the other guild's "
-        "history of it is deleted with it"
-    ),
-)
 def test_the_other_guild_leaving_does_not_delete_a_quote_this_guild_used(conn):
     _claim(conn, G1, h=H1)
     _claim(conn, G2, h=H1)
@@ -243,18 +217,32 @@ def test_a_rolled_back_v22_writing_null_rows_after_the_import_leaks_into_every_g
 # --- the lounge_state rollback mirror ---
 
 
-def test_the_rollback_mirror_holds_whichever_guild_claimed_last_not_the_latest_date(conn):
-    # Two lounge guilds in different zones: G1 is a day ahead of G2. The mirror is a single
-    # cell and the upsert takes the last writer, so it can move backwards. A rollback to
-    # v2.2 in that window would read G2's older date and, for the friend, allow a second
-    # quote that day. Low risk (the mirror exists for a rollback before going public), but
-    # the owner may want MAX() or "imported guild only".
+def test_the_rollback_mirror_is_written_only_for_the_imported_guild(conn):
+    # G1 is the friend's guild (the one the import recorded); G2 is a stranger's lounge in
+    # another zone. v2.2 has one lounge, the friend's, so the mirror is G1's date and nobody
+    # else's: G2 claiming later, on an earlier date, must not drag it backwards.
+    conn.execute("UPDATE guilds SET imported_at = ? WHERE guild_id = ?", (T0.isoformat(), G1))
+    conn.commit()
     _claim(conn, G1, key=WILDE, h=H1, day=DAY2, m=0)
     _claim(conn, G2, key=TWAIN, h=H2, day=DAY1, m=1)
-    assert repo.get_lounge_state(conn).last_quote_date == DAY1
+    assert repo.get_lounge_state(conn).last_quote_date == DAY2
+
+
+def test_a_claim_by_a_non_imported_guild_leaves_the_mirror_alone(conn):
+    conn.execute("UPDATE guilds SET imported_at = ? WHERE guild_id = ?", (T0.isoformat(), G1))
+    conn.commit()
+    _claim(conn, G2, h=H1, day=DAY1)
+    assert repo.get_lounge_state(conn).last_quote_date is None
+
+
+def test_with_no_imported_guild_nothing_writes_the_mirror(conn):
+    _claim(conn, G1, h=H1, day=DAY1)
+    assert repo.get_lounge_state(conn).last_quote_date is None
 
 
 def test_a_refused_guild_claim_leaves_the_mirror_alone(conn):
+    conn.execute("UPDATE guilds SET imported_at = ? WHERE guild_id = ?", (T0.isoformat(), G1))
+    conn.commit()
     _claim(conn, G1, h=H1, day=DAY2)
     assert _claim(conn, G1, h=H2, day=DAY2) is False
     assert _claim(conn, G1, h=H2, day=DAY1) is False  # the clock stepped backwards
@@ -280,7 +268,71 @@ def test_v2_claim_without_a_guild_id_leaves_every_guild_date_untouched(conn):
 
 
 def test_a_guild_claim_does_not_trip_v2s_guard_for_another_source_on_its_own_date(conn):
+    conn.execute("UPDATE guilds SET imported_at = ? WHERE guild_id = ?", (T0.isoformat(), G1))
+    conn.commit()
     assert _claim(conn, G1, h=H1, day=DAY1) is True
     # v2's reading of the mirror says today is taken, exactly as it would have after v2's own claim.
     assert _v2_claim(conn, key=TWAIN, h=H2, day=DAY1) is False
     assert _used(conn, G2, TWAIN) == frozenset()
+
+
+# --- v2.2's own statements against the v3 table (the rollback promise) ---
+
+# Copied from `git show v2.2.0:newsbot/store/repo.py`, claim_quote and quote_deck_state.
+V22_RESHUFFLE = "DELETE FROM lounge_quotes_used WHERE source_key = ?"
+V22_DELETE = "DELETE FROM lounge_quotes_used WHERE source_key = ? AND quote_hash = ?"
+V22_INSERT = "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at) VALUES (?, ?, ?)"
+V22_DECK = (
+    "SELECT quote_hash FROM lounge_quotes_used WHERE source_key = ? "
+    "ORDER BY used_at DESC, rowid DESC"
+)
+
+
+def _v22_claim(conn, h, used_at="2026-10-01T15:00:00+00:00", *, reshuffle=False):
+    if reshuffle:
+        conn.execute(V22_RESHUFFLE, (WILDE,))
+    conn.execute(V22_DELETE, (WILDE, h))
+    conn.execute(V22_INSERT, (WILDE, h, used_at))
+    conn.commit()
+
+
+def test_v22_sql_runs_against_the_v3_table_and_repeat_claims_do_not_collide(conn):
+    _claim(conn, G1, h=H1)
+    _v22_claim(conn, H2)
+    _v22_claim(conn, H2)  # the same quote again: delete-then-insert, never a collision
+    deck = [r["quote_hash"] for r in conn.execute(V22_DECK, (WILDE,))]
+    assert deck[0] == H2 and set(deck) == {H1, H2} and len(deck) == 2
+
+
+def test_v22_delete_then_insert_takes_over_a_guild_stamped_row_of_the_same_quote(conn):
+    _claim(conn, G1, h=H1)
+    _claim(conn, G2, h=H1)
+    _v22_claim(conn, H1)  # a single-lounge v2.2 sees one deck: its delete clears both copies
+    rows = conn.execute("SELECT guild_id FROM lounge_quotes_used").fetchall()
+    assert [r["guild_id"] for r in rows] == [None]
+
+
+def test_v22_reshuffle_clears_the_source_and_leaves_other_sources_alone(conn):
+    _claim(conn, G1, key=TWAIN, h=H3)
+    _claim(conn, G1, h=H1)
+    _v22_claim(conn, H2, reshuffle=True)
+    assert [r["quote_hash"] for r in conn.execute(V22_DECK, (WILDE,))] == [H2]
+    assert _used(conn, G1, TWAIN) == {H3}
+
+
+def test_what_v22_wrote_reads_back_in_v3_for_every_guild(conn):
+    _v22_claim(conn, H1)
+    assert H1 in _used(conn, G1) and H1 in _used(conn, G2)
+    assert _claim(conn, G1, h=H2) is True  # the stamped claim sits beside the unclaimed row
+    assert _used(conn, G1) == {H1, H2}
+    assert _used(conn, G2) == {H1}
+
+
+def test_the_stamped_key_still_refuses_a_literal_duplicate_for_one_guild(conn):
+    _claim(conn, G1, h=H1)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at, guild_id) "
+            "VALUES (?, ?, ?, ?)",
+            (WILDE, H1, "2026-10-01T15:00:00+00:00", G1),
+        )

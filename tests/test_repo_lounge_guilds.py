@@ -64,6 +64,8 @@ def _guild_date(conn, gid):
 
 
 def test_a_claim_writes_the_guilds_date_stamps_the_row_and_mirrors_lounge_state(conn):
+    conn.execute("UPDATE guilds SET imported_at = ? WHERE guild_id = ?", (T0.isoformat(), G1))
+    conn.commit()
     assert _claim(conn, G1) is True
     assert _guild_date(conn, G1) == DAY1
     assert _guild_date(conn, G2) is None

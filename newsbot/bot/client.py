@@ -665,6 +665,10 @@ class DiscordCodeAlertPoster:
 # How long `is_owner` waits on Discord before saying no.
 _OWNER_LOOKUP_TIMEOUT_S = 10.0
 
+# How long one server's member chunk gets before we give up on it and move on.
+# A request that never completes would otherwise stall every server after it.
+_LOUNGE_CHUNK_TIMEOUT_S = 60.0
+
 
 class NewsBot(discord.Client):
     """The bot process: gateway client, command tree, scheduler and job callbacks in one place.
@@ -1232,10 +1236,24 @@ class NewsBot(discord.Client):
         with closing(connect(self.db_path)) as conn:
             return repo.list_lounges(conn)
 
-    async def reload_lounges(self) -> list[LoungeSettings]:
-        """Re-read every lounge row into the welcome lookup. Call after the import or a re-sync."""
+    async def _load_lounges(self) -> list[LoungeSettings]:
         rows = await asyncio.to_thread(self._list_lounges_sync)
         self._lounges = {row.guild_id: row for row in rows}
+        return rows
+
+    async def reload_lounges(self) -> list[LoungeSettings]:
+        """Re-read every lounge row into the welcome lookup, then re-schedule the quote jobs.
+
+        Call after the import, a re-sync or a settings change. The jobs
+        follow the rows: a moved `quote_time` or zone moves its job, a
+        re-enabled quote gets one back, and a removed or disabled server
+        loses its own. Safe to call twice (job ids carry the guild). Before
+        the scheduler exists there's nothing to re-schedule, and the rows
+        are just loaded.
+        """
+        rows = await self._load_lounges()
+        if self.scheduler is not None:
+            await self._sync_quote_jobs(rows)
         return rows
 
     async def chunk_lounge_guilds(self) -> None:
@@ -1244,8 +1262,8 @@ class NewsBot(discord.Client):
         `on_member_update` only fires for cached members, and the client
         doesn't chunk at startup in this mode (hundreds of servers' member
         lists is a lot of memory for events nobody listens to). One failed
-        chunk is logged and skipped; the welcome for that server still works
-        on joins.
+        chunk (an error or a timeout) is logged and skipped; the welcome for
+        that server still works on joins.
         """
         for lounge in list(self._lounges.values()):
             if not lounge.welcome_enabled:
@@ -1254,8 +1272,8 @@ class NewsBot(discord.Client):
             if guild is None or guild.chunked:
                 continue
             try:
-                await guild.chunk()
-            except Exception as exc:
+                await asyncio.wait_for(guild.chunk(), timeout=_LOUNGE_CHUNK_TIMEOUT_S)
+            except Exception as exc:  # includes the timeout; the log line has the guild id only
                 logger.warning(
                     "couldn't chunk members for lounge guild %s (%s)",
                     lounge.guild_id,
@@ -1436,15 +1454,24 @@ class NewsBot(discord.Client):
             )
 
     async def schedule_lounge_quotes(self) -> list[int]:
-        """Add a cron job for every server whose quote is on; return their guild ids.
-
-        Reads the rows and zones fresh. A server whose zone won't load is
-        told once and left out rather than taking the others down with it.
-        """
+        """Reload the rows and make the quote jobs match them; return the scheduled guild ids."""
         if self.scheduler is None:
             raise RuntimeError("schedule_lounge_quotes() called before the scheduler exists")
+        return await self._sync_quote_jobs(await self._load_lounges())
+
+    async def _sync_quote_jobs(self, rows: list[LoungeSettings]) -> list[int]:
+        """Add or move a cron job for every server whose quote is on, and drop the rest.
+
+        Reads the zones fresh. A server whose zone won't load is told once
+        and left out (its old job goes too) rather than taking the others
+        down with it. Any `daily-quote-<guild id>` job not in the result is
+        removed; the v2.2 `daily-quote` job has no guild suffix and isn't ours.
+        """
+        scheduler = self.scheduler
+        if scheduler is None:
+            return []
         scheduled: list[int] = []
-        for lounge in await self.reload_lounges():
+        for lounge in rows:
             if not lounge.quote_enabled:
                 continue
             _, timezone = await asyncio.to_thread(self._quote_inputs_sync, lounge.guild_id)
@@ -1452,7 +1479,7 @@ class NewsBot(discord.Client):
                 continue
             try:
                 schedule_guild_quote(
-                    self.scheduler,
+                    scheduler,
                     lounge.guild_id,
                     lounge.quote_time,
                     timezone,
@@ -1467,6 +1494,11 @@ class NewsBot(discord.Client):
                 )
                 continue
             scheduled.append(lounge.guild_id)
+        wanted = {f"daily-quote-{gid}" for gid in scheduled}
+        for job in scheduler.get_jobs():
+            suffix = job.id.removeprefix("daily-quote-")
+            if suffix.isdigit() and job.id not in wanted:
+                scheduler.remove_job(job.id)
         return scheduled
 
     async def _retention_job(self) -> None:

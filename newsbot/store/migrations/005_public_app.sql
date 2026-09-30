@@ -132,10 +132,41 @@ CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE INDEX idx_item_topics_topic ON item_topics (topic_key, item_id);
 
--- lounge_quotes_used keeps its (source_key, quote_hash) primary key, which
--- is fine while only one server has a lounge. NULL until the import fills it.
-ALTER TABLE lounge_quotes_used ADD COLUMN guild_id INTEGER
-    REFERENCES guilds (guild_id) ON DELETE CASCADE;
+-- lounge_quotes_used is rebuilt so quote history is per server. It used to
+-- be keyed by (source_key, quote_hash) alone, which made two servers on one
+-- Wikiquote page tenants in a single row: the second one's claim re-stamped
+-- the first one's row (so the first repeated itself), and the second leaving
+-- cascaded the first one's history away. SQLite can't change a primary key in
+-- place, so: the same rebuild recipe as below.
+--
+-- The new table has no composite primary key at all, and that's deliberate.
+-- guild_id is NULL for v2.2's rows (and for whatever a rolled-back v2.2 writes
+-- later), and SQLite treats NULLs in a key as distinct, so a plain
+-- UNIQUE (guild_id, source_key, quote_hash) would let v2.2 insert the same
+-- quote twice. Two partial unique indexes split the cases instead: one for
+-- stamped rows, one for NULL rows. v2.2's own statements (delete by source,
+-- delete by source and hash, then a three-column insert) run unchanged: the
+-- deletes match rows of every guild, which is what a single-lounge v2.2
+-- expects, and its insert never collides because it deleted first.
+-- Rows are copied in rowid order so the "most recent, rowid breaks ties"
+-- reading survives. guild_id stays NULL until the Python import stamps it.
+CREATE TABLE lounge_quotes_used_new (
+    source_key TEXT NOT NULL CHECK (length(source_key) BETWEEN 1 AND 4096),
+    quote_hash TEXT NOT NULL CHECK (length(quote_hash) = 64),
+    used_at TEXT NOT NULL,
+    guild_id INTEGER REFERENCES guilds (guild_id) ON DELETE CASCADE
+);
+
+INSERT INTO lounge_quotes_used_new (source_key, quote_hash, used_at)
+SELECT source_key, quote_hash, used_at FROM lounge_quotes_used ORDER BY rowid;
+
+DROP TABLE lounge_quotes_used;
+ALTER TABLE lounge_quotes_used_new RENAME TO lounge_quotes_used;
+
+CREATE UNIQUE INDEX idx_lounge_quotes_guild
+    ON lounge_quotes_used (guild_id, source_key, quote_hash) WHERE guild_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_lounge_quotes_orphan
+    ON lounge_quotes_used (source_key, quote_hash) WHERE guild_id IS NULL;
 
 -- Free servers' /news reads item headlines, so items get the same kind of
 -- external-content FTS index stories have (see 001): the index stores no
