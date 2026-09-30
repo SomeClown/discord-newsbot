@@ -190,6 +190,60 @@ def claim_digest(
         return digest_id
 
 
+def _insert_items(
+    conn: sqlite3.Connection, items: list[StoredItem], now_iso: str
+) -> dict[str, int]:
+    """Insert items and their game tags, returning url -> item id.
+
+    No transaction of its own: `save_run` and `store_items` each wrap it in
+    theirs, and a nested commit would quietly break `save_run`'s atomicity.
+    """
+    url_to_id: dict[str, int] = {}
+    for item in items:
+        conn.execute(
+            "INSERT INTO items "
+            "(url, title, excerpt, source_name, trust, published_at, collected_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(url) DO NOTHING",
+            (
+                item.url,
+                item.title,
+                item.excerpt,
+                item.source_name,
+                item.trust,
+                item.published_at.isoformat() if item.published_at else None,
+                now_iso,
+            ),
+        )
+        item_id = conn.execute("SELECT id FROM items WHERE url = ?", (item.url,)).fetchone()[0]
+        url_to_id[item.url] = item_id
+        for topic_key, uncertain in item.topics.items():
+            conn.execute(
+                "INSERT INTO item_topics (item_id, topic_key, uncertain) VALUES (?, ?, ?) "
+                "ON CONFLICT(item_id, topic_key) DO NOTHING",
+                (item_id, topic_key, int(uncertain)),
+            )
+    return url_to_id
+
+
+def store_items(
+    conn: sqlite3.Connection,
+    items: list[StoredItem],
+    now: Callable[[], datetime] | None = None,
+) -> int:
+    """Store collected items and their game tags, atomically. Returns how many were new.
+
+    This is the hourly shared collection's write (design.md §15): items
+    belong to everyone, and `item_topics` is the game tag. An item whose url
+    is already stored keeps its row but can still gain a tag it didn't have.
+    """
+    now_iso = _resolve_now(now)
+    with conn:
+        before = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        _insert_items(conn, items, now_iso)
+        after = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    return after - before
+
+
 def save_run(
     conn: sqlite3.Connection,
     digest_id: int,
@@ -210,30 +264,7 @@ def save_run(
     """
     now_iso = _resolve_now(now)
     with conn:
-        url_to_id: dict[str, int] = {}
-        for item in items:
-            conn.execute(
-                "INSERT INTO items "
-                "(url, title, excerpt, source_name, trust, published_at, collected_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(url) DO NOTHING",
-                (
-                    item.url,
-                    item.title,
-                    item.excerpt,
-                    item.source_name,
-                    item.trust,
-                    item.published_at.isoformat() if item.published_at else None,
-                    now_iso,
-                ),
-            )
-            item_id = conn.execute("SELECT id FROM items WHERE url = ?", (item.url,)).fetchone()[0]
-            url_to_id[item.url] = item_id
-            for topic_key, uncertain in item.topics.items():
-                conn.execute(
-                    "INSERT INTO item_topics (item_id, topic_key, uncertain) VALUES (?, ?, ?) "
-                    "ON CONFLICT(item_id, topic_key) DO NOTHING",
-                    (item_id, topic_key, int(uncertain)),
-                )
+        url_to_id = _insert_items(conn, items, now_iso)
 
         for story in stories:
             item_ids = [url_to_id[u] for u in story.item_urls if u in url_to_id]
