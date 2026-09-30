@@ -31,7 +31,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 import yaml
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    SecretStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
@@ -76,6 +85,23 @@ def _reject_bool_channel_id(v: object) -> object:
     """
     if isinstance(v, bool):
         raise ValueError("channel_id must be an int, not a bool")
+    return v
+
+
+def _reject_bool_guild_id(v: object) -> object:
+    """The guild-id twin of `_reject_bool_channel_id`, with a message that says "guild".
+
+    (I reused the channel one at first, so a bad `home_guild_id` complained
+    about `channel_id`. Nobody deserves that at startup.)
+    """
+    if isinstance(v, bool):
+        raise ValueError("must be a number, not true or false")
+    return v
+
+
+def _reject_blank_name(v: str) -> str:
+    if not v.strip():
+        raise ValueError("can't be blank")
     return v
 
 
@@ -131,6 +157,32 @@ class Topic(BaseModel):
     @classmethod
     def _validate_channel_id_not_bool(cls, v: object) -> object:
         return _reject_bool_channel_id(v)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_not_blank(cls, v: str) -> str:
+        return _reject_blank_name(v)
+
+    @field_validator("aliases", "entities")
+    @classmethod
+    def _drop_blank_terms(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """Drop blank aliases and entities, with a warning, instead of refusing to load.
+
+        v2.2 never checked these, so a config with `aliases: [""]` loaded and
+        ran; refusing it now would turn an upgrade into an outage over a
+        stray dash in a YAML list. A blank term compiles to a regex that
+        matches between any two punctuation marks, so it can't stay, and
+        dropping it is the closest thing to what the owner meant.
+        """
+        kept = [t for t in v if t.strip()]
+        if len(kept) != len(v):
+            logging.getLogger(__name__).warning(
+                "topic %r: dropping %d blank %s entries (a blank term matches nearly everything)",
+                info.data.get("key", "?"),
+                len(v) - len(kept),
+                info.field_name,
+            )
+        return kept
 
     @field_validator("search_queries")
     @classmethod
@@ -218,17 +270,17 @@ Source = Annotated[
 ]
 
 
-class SharedRssSource(RssSource):
+class SharedRssSource(RssSource, extra="forbid"):
     """An RSS source that belongs to no one game (design.md §15, decision D1)."""
 
     games: list[str] | None = None
 
 
-class SharedSteamSource(SteamSource):
+class SharedSteamSource(SteamSource, extra="forbid"):
     games: list[str] | None = None
 
 
-class SharedBlueskySource(BlueskySource):
+class SharedBlueskySource(BlueskySource, extra="forbid"):
     games: list[str] | None = None
 
 
@@ -246,7 +298,7 @@ _SHARED_BY_TYPE: dict[str, type[RssSource | SteamSource | BlueskySource]] = {
 }
 
 
-class GameCfg(BaseModel):
+class GameCfg(BaseModel, extra="forbid"):
     """One catalog game (v3): a `Topic` without a channel, plus its own sources.
 
     Channels are per server now, so they live in the database and this has
@@ -264,13 +316,37 @@ class GameCfg(BaseModel):
     # (load_config rejects one that does).
     sources: list[Source] = []
 
+    @model_validator(mode="before")
+    @classmethod
+    def _let_the_channel_id_precheck_speak(cls, data: object) -> object:
+        # `channel_id` is a mistake with its own, better message (load_config's
+        # raw pre-check: "use /newsbot follow"). Left to extra="forbid" it would
+        # be reported twice, and would stop every cross-check from running.
+        if isinstance(data, dict) and "channel_id" in data:
+            return {k: v for k, v in data.items() if k != "channel_id"}
+        return data
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_not_blank(cls, v: str) -> str:
+        return _reject_blank_name(v)
+
+    @field_validator("aliases", "entities")
+    @classmethod
+    def _validate_terms_not_blank(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        # Unlike a v2 topic, nothing old depends on a blank term here, so it's
+        # an error rather than a shrug. It would match nearly every headline.
+        if any(not t.strip() for t in v):
+            raise ValueError(f"{info.field_name} can't have blank entries")
+        return v
+
     @field_validator("search_queries")
     @classmethod
     def _validate_search_queries(cls, v: list[str]) -> list[str]:
         return _check_search_queries(v)
 
 
-class WebSearchCfg(BaseModel):
+class WebSearchCfg(BaseModel, extra="forbid"):
     """Brave News search, once a day, for comped servers' games (design.md §15).
 
     Brave has always been one global source, so it gets one global block
@@ -283,7 +359,7 @@ class WebSearchCfg(BaseModel):
     trust: Trust = "press"
 
 
-class ShiftCfg(BaseModel):
+class ShiftCfg(BaseModel, extra="forbid"):
     """Global SHiFT detection. Per-server channel and ping live in the database."""
 
     # Empty means every game, same as v2's alerts.topics.
@@ -296,19 +372,19 @@ class ShiftCfg(BaseModel):
     allow_test_command: bool = False
 
 
-class CollectionCfg(BaseModel):
+class CollectionCfg(BaseModel, extra="forbid"):
     interval_minutes: int = Field(60, ge=15, le=1440)
     lookback_hours: int = Field(24, ge=1)
     max_items_per_game: int = Field(60, ge=1)
 
 
-class AiCfg(BaseModel):
+class AiCfg(BaseModel, extra="forbid"):
     # What SYSTEM_PROMPT calls the games ("the video games ..."); it was
     # digest.subject in v2 and the prompt stays byte-identical by default.
     subject: str = "video games"
 
 
-class OwnerReportCfg(BaseModel):
+class OwnerReportCfg(BaseModel, extra="forbid"):
     """When the owner's daily all-servers summary goes out."""
 
     time: str = "21:00"
@@ -513,24 +589,27 @@ class AppConfig(BaseModel):
     # The v2 fields. Optional now, because a v3 config has none of them; they
     # stay populated for old-shape configs so the running v2 path keeps
     # working until the cutover deletes them.
-    guild_id: int | None = None
+    guild_id: int | None = Field(None, gt=0)
     digest: DigestCfg | None = None
     topics: list[Topic] = []
     sources: list[Source] = []
     alerts: AlertsCfg = AlertsCfg()
     lounge: LoungeCfg = LoungeCfg()
 
-    @field_validator("home_guild_id", mode="before")
+    # `guild_id` is v2's key and gets the same checks as `home_guild_id`, since
+    # it's copied into it. v2.2 would have failed at runtime on a non-positive
+    # one anyway; this just says so at startup.
+    @field_validator("home_guild_id", "guild_id", mode="before")
     @classmethod
-    def _validate_home_guild_id_not_bool(cls, v: object) -> object:
-        return _reject_bool_channel_id(v)
+    def _validate_guild_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_guild_id(v)
 
     @field_validator("command_guild_ids", "comped_guild_ids", mode="before")
     @classmethod
     def _validate_guild_id_list(cls, v: object) -> object:
         if isinstance(v, list):
             for item in v:
-                _reject_bool_channel_id(item)
+                _reject_bool_guild_id(item)
         return v
 
     @field_validator("command_guild_ids", "comped_guild_ids")
@@ -573,6 +652,11 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
         ("Value error, lounge.", "Value error, owner_report.")
     ):
         return message.removeprefix("Value error, ")
+    if error["type"] == "value_error":
+        message = message.removeprefix("Value error, ")
+    elif error["type"] == "extra_forbidden":
+        where = ".".join(str(p) for p in loc[:-1]) or "the top level"
+        message += f" (unknown key {str(loc[-1])!r} in {where}; check the spelling)"
     if (
         len(loc) == 3
         and loc[0] == "topics"
@@ -736,6 +820,27 @@ def _catalog_raw_problems(raw: dict) -> list[str]:
     return problems
 
 
+def _at_least_one(value: int, where: str) -> int:
+    """Clamp a v2 number up to 1 (with a warning) for a v3 field that needs >= 1.
+
+    v2.2 took 0 or a negative number for these without complaint, and what it
+    did with them was quietly post nothing: `lookback_hours: 0` means
+    "nothing is recent", `max_items_per_topic: 0` caps every topic to an
+    empty list, and `queries_per_topic: 0` slices the query list to nothing.
+    v3 can't express "collect nothing" (and shouldn't want to), so 1 is the
+    nearest value that means something, and the owner gets told.
+    """
+    if value >= 1:
+        return value
+    logging.getLogger(__name__).warning(
+        "%s is %d, which v2 accepted but which only ever made the bot collect nothing; "
+        "using 1 instead",
+        where,
+        value,
+    )
+    return 1
+
+
 def _derive_catalog(
     topics: Sequence[Topic], sources: Sequence[Source]
 ) -> tuple[list[GameCfg], list[SharedSourceCfg], WebSearchCfg | None]:
@@ -753,7 +858,7 @@ def _derive_catalog(
             if web_search is None:
                 web_search = WebSearchCfg(
                     name=source.name,
-                    queries_per_game=source.queries_per_topic,
+                    queries_per_game=_at_least_one(source.queries_per_topic, "queries_per_topic"),
                     query_templates=source.query_templates,
                     trust=source.trust,
                 )
@@ -857,6 +962,14 @@ def _build_legacy(cfg: AppConfig, guild_id: int, digest: DigestCfg, raw: dict) -
     )
 
 
+def _yaml_kind(value: object) -> str:
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, str):
+        return "plain text"
+    return f"a bare {type(value).__name__} value"
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Load, validate, and cross-check `config.yaml`.
 
@@ -865,6 +978,11 @@ def load_config(path: str | Path) -> AppConfig:
     whack-a-mole against a stack trace.
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            "Invalid config:\n  - the top level of the file must be a set of "
+            f"`key: value` settings, not {_yaml_kind(raw)}"
+        )
     log = logging.getLogger(__name__)
 
     # A pre-check against the raw YAML, not a pydantic field: DigestCfg no
@@ -889,6 +1007,16 @@ def load_config(path: str | Path) -> AppConfig:
     except ValidationError as exc:
         errors = pre_errors + [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
+
+    # Unknown top-level keys stay legal (v2.2 and hybrid files carry keys this
+    # loader doesn't read), so they can't be errors; but `comped_guild_id`
+    # quietly dropping a server's premium tier is exactly the kind of thing a
+    # log line is for. `legacy` is ours, not something a file gets to set.
+    unknown_top = sorted(str(k) for k in raw if k not in AppConfig.model_fields or k == "legacy")
+    if unknown_top:
+        log.warning(
+            "ignoring unknown top-level keys in config (typos?): %s", ", ".join(unknown_top)
+        )
 
     errors: list[str] = list(pre_errors)
     is_v3 = "catalog" in raw
@@ -975,8 +1103,12 @@ def load_config(path: str | Path) -> AppConfig:
             derived = {
                 "collection": CollectionCfg(
                     interval_minutes=cfg.alerts.interval_minutes,
-                    lookback_hours=cfg.digest.lookback_hours,
-                    max_items_per_game=cfg.digest.max_items_per_topic,
+                    lookback_hours=_at_least_one(
+                        cfg.digest.lookback_hours, "digest.lookback_hours"
+                    ),
+                    max_items_per_game=_at_least_one(
+                        cfg.digest.max_items_per_topic, "digest.max_items_per_topic"
+                    ),
                 ),
                 "ai": AiCfg(subject=cfg.digest.subject),
                 "run_report": cfg.digest.report_to_admin,
@@ -992,6 +1124,14 @@ def load_config(path: str | Path) -> AppConfig:
             }
             update.update({k: v for k, v in derived.items() if k not in explicit})
         cfg = cfg.model_copy(update=update)
+        # v3's own cross-check only runs for a catalog:, but an explicit shift:
+        # block in a v2-shaped file can name a ghost game just as easily, and
+        # the sweep would then watch nothing without a word. The derived shift
+        # is skipped: its games are alerts.topics, already checked above.
+        if "shift" in explicit:
+            for g in cfg.shift.games:
+                if g not in known_keys:
+                    errors.append(f"shift.games names unknown game {g!r}")
 
     warned_brave = False
     seen_names: set[str] = set()
@@ -1091,6 +1231,8 @@ def count_configured_web_search_sources(path: str | Path) -> int:
     already past the point where the answer got thrown away.
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(raw, dict):
+        return 0
     sources = raw.get("sources") or []
     return sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
 

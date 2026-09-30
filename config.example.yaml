@@ -11,7 +11,7 @@
 # bot will happily start up pointed at a channel that doesn't exist and then
 # fail confusingly later, which is a worse failure mode than a config error.
 
-guild_id: 000000000000000000          # placeholder: your server's ID
+guild_id: 123456789012345678          # placeholder: your server's ID
 admin_channel_id: 000000000000000000  # placeholder: optional, alerts go here
 admin_permission: manage_guild
 

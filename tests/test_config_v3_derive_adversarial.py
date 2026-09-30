@@ -342,37 +342,35 @@ _V2_ZERO_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(_V2_ZERO_CASES))
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: DigestCfg.lookback_hours, max_items_per_topic and "
-        "WebSearchSource.queries_per_topic have no lower bound in v2 (0 is "
-        "'search nothing' for the last), but the derived CollectionCfg and "
-        "WebSearchCfg require >= 1. Derive mode builds them unguarded, so a "
-        "config that loaded under v2.2 crashes with a raw pydantic "
-        "ValidationError, not even a ConfigError."
-    ),
-)
-def test_v2_zero_values_still_load_or_fail_as_a_config_error(tmp_path, case):
+def test_v2_zero_values_still_load_clamped_to_one_with_a_warning(tmp_path, case, caplog):
+    # v2.2 accepted these and, at runtime, quietly collected nothing (nothing
+    # is "recent", the cap slices to [], the query list slices to []). v3 can't
+    # say "nothing", so the loader clamps to 1 and warns naming the key.
     p = tmp_path / "c.yaml"
     p.write_text(_V2_ZERO_CASES[case])
-    try:
-        load_config(p)
-    except ConfigError:
-        pass
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        cfg = load_config(p)
+    key, derived = {
+        "lookback_hours_0": ("digest.lookback_hours", cfg.collection.lookback_hours),
+        "max_items_per_topic_0": ("digest.max_items_per_topic", cfg.collection.max_items_per_game),
+        "queries_per_topic_0": (
+            "queries_per_topic",
+            cfg.web_search and cfg.web_search.queries_per_game,
+        ),
+    }[case]
+    assert derived == 1
+    assert f"{key} is 0" in caplog.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: as above, negative lookback_hours also escapes as a raw ValidationError.",
-)
-def test_a_negative_v2_lookback_is_at_worst_a_config_error(tmp_path):
+def test_a_negative_v2_lookback_is_clamped_too(tmp_path, caplog):
     p = tmp_path / "c.yaml"
     p.write_text(_HEAD % ", lookback_hours: -5" + "sources: []\n")
-    try:
-        load_config(p)
-    except ConfigError:
-        pass
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        cfg = load_config(p)
+    assert cfg.collection.lookback_hours == 1
+    # The v2 view keeps what the file said; only the derived block is clamped.
+    assert cfg.digest.lookback_hours == -5
+    assert "digest.lookback_hours is -5" in caplog.text
 
 
 # --- scalar mapping: digest, alerts, lounge ---
@@ -464,16 +462,8 @@ def test_an_explicit_shift_block_replaces_alerts_derivation(tmp_path):
     assert load_config(p).shift.games == ["b"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: v3 cross-checks (shift.games against known games) run only when "
-        "`catalog:` is present. In derive mode an explicit `shift: {games: "
-        "[ghost]}` loads without a word, and the SHiFT sweep then quietly "
-        "watches nothing. The same key in a v3 file is an error."
-    ),
-)
 def test_an_explicit_shift_block_naming_an_unknown_game_is_an_error_in_derive_mode(tmp_path):
+    # The cross-check now runs in derive mode for an explicit shift: block.
     with pytest.raises(ConfigError):
         load_config(_v2(tmp_path, "  []\n", tail="shift: {games: [ghost]}\n"))
 

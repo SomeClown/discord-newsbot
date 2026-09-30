@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from newsbot.collectors.base import RawItem, build_catalog_collectors
 from newsbot.config import (
@@ -270,35 +271,56 @@ def test_shift_games_may_repeat_and_still_validates_each(tmp_path):
         pytest.param('entities: [""]', id="empty-entity"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: blank aliases and entities load fine, and a blank term compiles to "
-        "(?<!\\w)(?:)(?!\\w), which matches anywhere between two non-word "
-        "characters, so almost any headline with punctuation becomes a "
-        "confident (or, for entities, uncertain) hit for the game."
-    ),
-)
 def test_blank_aliases_and_entities_are_rejected(tmp_path, field):
     text = f'catalog:\n  - {{key: rust, name: "Rust", {field}}}\n'
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, text))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a blank game name loads, and a blank name is a match-everything term.",
-)
 def test_a_blank_game_name_is_rejected(tmp_path):
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, 'catalog:\n  - {key: rust, name: ""}\n'))
 
 
-def test_a_blank_alias_really_does_match_ordinary_headlines():
-    # The evidence behind the xfails above, kept as a plain fact so the
-    # reason string can't quietly drift from what the regex does.
-    game = GameCfg(key="rust", name="Rust", aliases=[""], match_name=False)
-    assert build_matchers([game])["rust"].match("Hello, world") == "confident"
+@pytest.mark.parametrize("field", ["aliases", "entities", "name"])
+def test_a_blank_term_cannot_even_be_built_into_a_game(field):
+    # The loader's rejection sits in the model, so nothing that builds a
+    # GameCfg by hand can smuggle a match-everything regex to filter.py either.
+    kwargs = {"key": "rust", "name": "Rust", "aliases": ["R"], "match_name": True}
+    kwargs[field] = "  " if field == "name" else ["ok", "  "]
+    with pytest.raises(ValidationError):
+        GameCfg(**kwargs)
+
+
+def test_blank_term_messages_are_plain_and_name_the_field(tmp_path):
+    msg = _errors(tmp_path, 'catalog:\n  - {key: rust, name: "Rust", aliases: [""]}\n')
+    assert "catalog.0.aliases: aliases can't have blank entries" in msg
+    assert "Value error" not in msg
+    msg = _errors(tmp_path, 'catalog:\n  - {key: rust, name: " "}\n')
+    assert "catalog.0.name: can't be blank" in msg
+
+
+def test_a_v2_topic_drops_blank_aliases_and_entities_with_a_warning(tmp_path, caplog):
+    # v2.2 loaded these, so an upgrade must too: drop, warn, carry on.
+    text = (
+        "guild_id: 1\ndigest: {time: '09:00', timezone: UTC}\n"
+        'topics: [{key: rust, name: "Rust", channel_id: 2, aliases: ["", "Rusty"], '
+        'entities: [" "]}]\nsources: []\n'
+    )
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        cfg = load_config(_write(tmp_path, text))
+    assert cfg.topics[0].aliases == ["Rusty"] and cfg.topics[0].entities == []
+    assert cfg.catalog[0].aliases == ["Rusty"] and cfg.catalog[0].entities == []
+    assert build_matchers(cfg.topics)["rust"].match("Hello, world") is None
+    assert "dropping 1 blank aliases" in caplog.text
+
+
+def test_a_v2_topic_with_a_blank_name_is_an_error(tmp_path):
+    text = (
+        "guild_id: 1\ndigest: {time: '09:00', timezone: UTC}\n"
+        'topics: [{key: rust, name: "", channel_id: 2}]\nsources: []\n'
+    )
+    assert "topics.0.name: can't be blank" in _errors(tmp_path, text)
 
 
 def test_duplicate_aliases_are_accepted(tmp_path):
@@ -350,44 +372,69 @@ def test_blank_search_query_is_rejected_for_catalog_games(tmp_path):
 
 
 # --- unknown keys ---
-# Pinned wholesale: the v3 models are plain BaseModels, so a misspelled key
-# is dropped without a word. `comped_guild_id` for `comped_guild_ids` quietly
-# costs a server its premium tier, and `match_names: false` quietly leaves a
-# common-word game matching every rusty gate. extra="forbid" on the new
-# blocks would fix it, and would be a decision for the owner: it's
-# deliberately not applied to alerts/lounge (hybrid rollback), and nothing
-# in the plan says whether the new blocks should follow.
+# These used to be pinned as "silently ignored". The owner decided that's how
+# typos turn into silent misbehavior (`comped_guild_id` costs a server its
+# premium tier; `match_names: false` leaves a common-word game matching every
+# rusty gate), so the new v3 blocks are extra="forbid" now. The top level
+# stays open (v2.2 and hybrid files carry keys we don't read) but warns.
+# alerts/lounge are untouched: they were already forbid in v2.2.
 
 
 @pytest.mark.parametrize(
-    "extra, where",
+    "extra, key, where",
     [
-        ("comped_guild_id: [5]\n", "top level"),
-        ("owner_reports: {time: '01:00'}\n", "top level block name"),
-        ("shift: {gaems: [palworld]}\n", "shift"),
-        ("collection: {interval_minute: 15}\n", "collection"),
-        ("ai: {subjct: cards}\n", "ai"),
-        ("owner_report: {tz: UTC}\n", "owner_report"),
-        ("web_search: {queries_per_topic: 9}\n", "web_search (the v2 spelling)"),
+        ("shift: {gaems: [palworld]}\n", "gaems", "shift"),
+        ("collection: {interval_minute: 15}\n", "interval_minute", "collection"),
+        ("ai: {subjct: cards}\n", "subjct", "ai"),
+        ("owner_report: {tz: UTC}\n", "tz", "owner_report"),
+        ("web_search: {queries_per_topic: 9}\n", "queries_per_topic", "web_search"),
     ],
 )
-def test_unknown_keys_are_silently_ignored(tmp_path, extra, where):
-    cfg = load_config(_write(tmp_path, _MIN + extra))
-    assert cfg.catalog[0].key == "palworld", where
+def test_unknown_keys_in_the_v3_blocks_are_errors_naming_key_and_place(tmp_path, extra, key, where):
+    msg = _errors(tmp_path, _MIN + extra)
+    assert f"unknown key {key!r} in {where}" in msg
+    assert "Value error" not in msg
 
 
-def test_unknown_keys_inside_a_game_are_silently_ignored(tmp_path):
+def test_unknown_keys_inside_a_game_are_errors(tmp_path):
     text = 'catalog:\n  - {key: rust, name: "Rust", alises: [X], match_names: false}\n'
-    game = load_config(_write(tmp_path, text)).catalog[0]
-    assert game.aliases == [] and game.match_name is True
+    msg = _errors(tmp_path, text)
+    assert "unknown key 'alises' in catalog.0" in msg
+    assert "unknown key 'match_names' in catalog.0" in msg
 
 
-def test_a_games_key_on_a_catalog_source_is_silently_ignored(tmp_path):
-    # `games:` belongs on shared_sources; on a game's own source it does nothing.
+def test_unknown_keys_inside_a_shared_source_are_errors(tmp_path):
+    text = (
+        _MIN + "shared_sources: [{type: rss, name: W, url: 'https://example.com/a', trust: press,"
+        " game: [palworld]}]\n"
+    )
+    assert "unknown key 'game' in shared_sources.0.rss" in _errors(tmp_path, text)
+
+
+def test_a_games_key_on_a_catalog_source_is_still_ignored(tmp_path):
+    # Pinned: catalog sources reuse the v2 source models (which stay open for
+    # v2.2 compatibility), so `games:` here is dropped. Follow-up candidate.
     text = (
         _MIN + "    sources: [{type: steam_news, name: X, app_id: 1, games: [zzz], trust: press}]\n"
     )
     assert load_config(_write(tmp_path, text)).catalog[0].sources[0].name == "X"
+
+
+def test_unknown_top_level_keys_load_but_are_warned_about_once(tmp_path, caplog):
+    text = _MIN + "comped_guild_id: [5]\nowner_reports: {time: '01:00'}\n"
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        cfg = load_config(_write(tmp_path, text))
+    assert cfg.comped_guild_ids == []
+    warnings = [r for r in caplog.records if "unknown top-level keys" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "comped_guild_id, owner_reports" in warnings[0].getMessage()
+
+
+def test_known_v3_and_legacy_top_level_keys_do_not_warn(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="newsbot.config"):
+        load_config(V3)
+        load_config(PRODLIKE)
+    assert "unknown top-level keys" not in caplog.text
 
 
 # --- guild ids ---
@@ -415,15 +462,6 @@ def test_one_bad_comped_id_fails_the_whole_list_once(tmp_path):
 
 
 @pytest.mark.parametrize("key", ["home_guild_id", "comped_guild_ids", "command_guild_ids"])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (wording): the guild id fields reuse the channel-id guard, so the "
-        "message says 'Value error, channel_id must be an int, not a bool' "
-        "for a guild id. The 'Value error' prefix is the raw pydantic noise "
-        "the lounge and owner_report messages already strip."
-    ),
-)
 def test_bool_guild_id_message_is_plain_and_names_the_right_field(tmp_path, key):
     value = "[true]" if key.endswith("ids") else "true"
     msg = _errors(tmp_path, _MIN + f"{key}: {value}\n")
@@ -431,11 +469,8 @@ def test_bool_guild_id_message_is_plain_and_names_the_right_field(tmp_path, key)
     assert "channel_id" not in msg
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG (wording): 'comped_guild_ids: Value error, guild ids must be positive integers'.",
-)
 def test_non_positive_guild_id_message_has_no_value_error_prefix(tmp_path):
+    # The guild ids have their own validator now (they borrowed the channel one).
     assert "Value error" not in _errors(tmp_path, _MIN + "comped_guild_ids: [0]\n")
 
 
@@ -449,17 +484,9 @@ def test_home_guild_id_null_falls_back_to_the_legacy_guild_id(tmp_path):
 
 
 @pytest.mark.parametrize("bad", ["0", "true", "-3"])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: a bad legacy guild_id (0, negative, or a bool that pydantic reads "
-        "as 1) is copied into home_guild_id via model_copy, which skips "
-        "validation, sidestepping the positive-int and no-bool checks that "
-        "home_guild_id itself has. v2 never validated guild_id either, so the "
-        "value loads; the new field inherits it."
-    ),
-)
 def test_a_bad_legacy_guild_id_does_not_become_the_home_guild(tmp_path, bad):
+    # The legacy guild_id is validated like home_guild_id itself; model_copy
+    # used to carry a bad one across unchecked.
     text = _MIN + f"guild_id: {bad}\ndigest: {{time: '09:00', timezone: UTC}}\n"
     try:
         cfg = load_config(_write(tmp_path, text))
@@ -514,18 +541,20 @@ def test_the_boundaries_themselves_load(tmp_path, block):
 # --- top-level junk ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (pre-existing, not from d474a5b): a YAML file whose top level is a "
-        "list or a bare string reaches raw.get() and dies with AttributeError "
-        "instead of a ConfigError."
-    ),
-)
 @pytest.mark.parametrize("text", ["- a\n- b\n", "hello\n", "42\n"])
 def test_a_non_mapping_config_is_a_config_error(tmp_path, text):
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    "text, kind",
+    [("- a\n- b\n", "a list"), ("hello\n", "plain text"), ("42\n", "a bare int value")],
+)
+def test_a_non_mapping_config_says_what_it_was(tmp_path, text, kind):
+    msg = _errors(tmp_path, text)
+    assert f"must be a set of `key: value` settings, not {kind}" in msg
+    assert "AttributeError" not in msg
 
 
 @pytest.mark.parametrize("text", ["", "# only a comment\n", "{}\n", "~\n"])
