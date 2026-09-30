@@ -946,6 +946,12 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
 
 **Verify:** gate. `python -m newsbot.pipeline.run --config tests/fixtures/config_v2_prodlike.yaml --db <tmp>/t.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json --now 2026-09-23T17:00:00Z --dry-run` prints the friend's per-channel digest.
 
+**Wiring notes for task 13, collected from tasks 4 and 5 (2026-09-30):**
+- Build the SHiFT hook with `make_shift_hook`, passing `notify_guild` (the per-guild admin-channel routing from task 8) and `alert_owner` (the owner alert path, used for the roundup-overflow line).
+- At startup, call `deliver_queued_codes(deps, startup=True)`. That fails every stale `pending` row with a per-guild notice, then delivers anything still `queued`.
+- Schedule the collection job with `collection_job_options(cfg)` (`max_instances=1`, `coalesce`).
+- Known limit: delivery runs inside the hook's 120 s timeout, so at about 170 or more SHiFT-enabled guilds a big code drop drains over several hourly passes. Moving delivery into its own job would fix this if the bot ever gets that big (a load-test item, task 14).
+
 ### Task 14: Load test
 
 **Files:** new `tests/test_load_many_guilds.py` (fast, virtual clock) and `scripts/loadtest_digests.py` (optional, real time, scratch database, fake publisher; never run against `data/`).
