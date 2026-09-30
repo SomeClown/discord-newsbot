@@ -284,6 +284,16 @@ class GameSummaryRow:
 
 
 @dataclass(frozen=True)
+class CompedFollow:
+    """One comped, set-up server following one game, with when its digest is due."""
+
+    game_key: str
+    guild_id: int
+    digest_time: str
+    timezone: str
+
+
+@dataclass(frozen=True)
 class Notice:
     """A problem note kept for a server's `/newsbot status`."""
 

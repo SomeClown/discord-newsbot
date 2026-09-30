@@ -23,6 +23,7 @@ import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 from newsbot.guilds.schedule import lease_is_stale, retry_is_ready
 from newsbot.store.db import StoreError
@@ -30,6 +31,7 @@ from newsbot.store.models import (
     AlertState,
     AlertStatus,
     CodeView,
+    CompedFollow,
     DigestRow,
     DueCandidate,
     GameSummaryRow,
@@ -2352,8 +2354,8 @@ def items_for_window(
 # one it reuses (plan §3.6): computed up to a day before, or a little after
 # (the prepare job runs ahead of the earliest digest, and a later guild is
 # still inside the same local day's summary).
-_SUMMARY_REUSE_BEFORE = timedelta(hours=24)
-_SUMMARY_REUSE_AFTER = timedelta(minutes=30)
+SUMMARY_REUSE_BEFORE = timedelta(hours=24)
+SUMMARY_REUSE_AFTER = timedelta(minutes=30)
 
 
 def get_game_summary(
@@ -2371,8 +2373,8 @@ def get_game_summary(
         "ORDER BY window_end DESC, id DESC LIMIT 1",
         (
             game_key,
-            _utc_iso(due_at - _SUMMARY_REUSE_BEFORE),
-            _utc_iso(due_at + _SUMMARY_REUSE_AFTER),
+            _utc_iso(due_at - SUMMARY_REUSE_BEFORE),
+            _utc_iso(due_at + SUMMARY_REUSE_AFTER),
         ),
     ).fetchone()
     if row is None:
@@ -2399,3 +2401,256 @@ def summary_stories(conn: sqlite3.Connection, summary_id: int) -> list[StoryView
         (summary_id,),
     ).fetchall()
     return _rows_to_story_views(conn, rows)
+
+
+# --- Comped summaries (plan task 7) ---
+
+# How long a summary claim holds the game before somebody else may take it over.
+# A real summary is three attempts at 60 s plus 7 s of backoff, so ten minutes
+# is "the process that claimed this is dead", not "it's being thorough".
+SUMMARY_CLAIM_LEASE = timedelta(minutes=10)
+
+
+def _summary_claim_key(game_key: str) -> str:
+    return f"summary_claim:{game_key}"
+
+
+def comped_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
+    """Every (set-up comped server, game it follows) pair, for working out who needs a summary.
+
+    Fetch only: `pipeline/summaries.py` does the time zone arithmetic, since
+    SQLite can't do IANA zones.
+    """
+    rows = conn.execute(
+        "SELECT gg.game_key, g.guild_id, g.digest_time, g.timezone "
+        "FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
+        "WHERE g.tier = 'comped' AND g.set_up = 1 ORDER BY g.guild_id, gg.game_key"
+    ).fetchall()
+    return [
+        CompedFollow(r["game_key"], r["guild_id"], r["digest_time"], r["timezone"]) for r in rows
+    ]
+
+
+def latest_game_summary(conn: sqlite3.Connection, game_key: str) -> GameSummaryRow | None:
+    """The newest summary row for `game_key`, any status: the next window chains onto it."""
+    row = conn.execute(
+        "SELECT id FROM game_summaries WHERE game_key = ? "
+        "ORDER BY window_end DESC, id DESC LIMIT 1",
+        (game_key,),
+    ).fetchone()
+    return game_summary_by_id(conn, row["id"]) if row else None
+
+
+def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummaryRow | None:
+    row = conn.execute(
+        "SELECT id, game_key, run_date, status, window_start, window_end, coverage_notes, "
+        "note, input_tokens, output_tokens FROM game_summaries WHERE id = ?",
+        (summary_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return GameSummaryRow(
+        id=row["id"],
+        game_key=row["game_key"],
+        run_date=date.fromisoformat(row["run_date"]),
+        status=row["status"],
+        window_start=datetime.fromisoformat(row["window_start"]),
+        window_end=datetime.fromisoformat(row["window_end"]),
+        coverage_notes=json.loads(row["coverage_notes"]),
+        note=row["note"],
+        input_tokens=row["input_tokens"],
+        output_tokens=row["output_tokens"],
+    )
+
+
+def summary_items(
+    conn: sqlite3.Connection, game_key: str, start: datetime, end: datetime
+) -> list[StoredItem]:
+    """Stored items tagged `game_key` and collected in `(start, end]`, oldest first.
+
+    What a summary is built from: the same items v2's collect step handed the
+    model, read back out of the store instead of straight off the wire.
+    """
+    rows = conn.execute(
+        "SELECT items.url, items.title, items.excerpt, items.source_name, items.trust, "
+        "items.published_at, item_topics.uncertain "
+        "FROM item_topics JOIN items ON items.id = item_topics.item_id "
+        "WHERE item_topics.topic_key = ? AND items.collected_at > ? AND items.collected_at <= ? "
+        "ORDER BY items.collected_at, items.id",
+        (game_key, _utc_iso(start), _utc_iso(end)),
+    ).fetchall()
+    return [
+        StoredItem(
+            url=r["url"],
+            title=r["title"],
+            excerpt=r["excerpt"],
+            source_name=r["source_name"],
+            trust=r["trust"],
+            published_at=_parse_dt(r["published_at"]),
+            topics={game_key: bool(r["uncertain"])},
+        )
+        for r in rows
+    ]
+
+
+def claim_game_summary(
+    conn: sqlite3.Connection,
+    game_key: str,
+    due_at: datetime,
+    *,
+    token: str,
+    now: Callable[[], datetime] | None = None,
+    retry_fallback: bool = False,
+) -> tuple[Literal["claimed", "reusable", "busy"], GameSummaryRow | None]:
+    """Decide, under `BEGIN IMMEDIATE`, who summarizes `game_key` for a digest due at `due_at`.
+
+    - `reusable`: a summary inside the reuse window already exists (the row
+      comes back). A `fallback` row counts unless `retry_fallback` is set.
+    - `busy`: somebody else holds a fresh claim; wait and look again.
+    - `claimed`: the claim is now yours (`token` is written to `app_state`).
+      The row is the fallback being retried, if that's what you're doing.
+
+    The read and the write share one write lock, so two callers can't both
+    see "nothing there" and both go ask Claude. (`game_summaries` itself
+    can't hold a "pending" status: its CHECK only allows `ok` and
+    `fallback`, and I'd rather not rebuild a table for a lock.)
+    """
+    moment = (now or (lambda: datetime.now(UTC)))()
+    key = _summary_claim_key(game_key)
+    with _immediate(conn):
+        existing = get_game_summary(conn, game_key, due_at)
+        if existing is not None and not (retry_fallback and existing.status == "fallback"):
+            return "reusable", existing
+        held = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        if held is not None:
+            try:
+                claimed_at = datetime.fromisoformat(json.loads(held["value"])["at"])
+            except ValueError, KeyError, TypeError:
+                claimed_at = None  # an unreadable claim is a dead one
+            if claimed_at is not None and moment - claimed_at < SUMMARY_CLAIM_LEASE:
+                return "busy", None
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps({"token": token, "at": moment.isoformat()})),
+        )
+        return "claimed", existing
+
+
+def release_game_summary_claim(conn: sqlite3.Connection, game_key: str, token: str) -> None:
+    """Drop the claim if it's still ours (a stale one somebody took over is theirs now)."""
+    with _immediate(conn):
+        _release_claim(conn, game_key, token)
+
+
+def _release_claim(conn: sqlite3.Connection, game_key: str, token: str) -> None:
+    key = _summary_claim_key(game_key)
+    held = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    if held is None:
+        return
+    try:
+        mine = json.loads(held["value"]).get("token") == token
+    except ValueError, AttributeError:
+        mine = True
+    if mine:
+        conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+
+
+def save_game_summary(
+    conn: sqlite3.Connection,
+    *,
+    game_key: str,
+    run_date: date,
+    status: Literal["ok", "fallback"],
+    window_start: datetime,
+    window_end: datetime,
+    coverage_notes: list[str],
+    note: str | None,
+    usage: Usage,
+    stories: list[StoryToSave],
+    token: str,
+    now: Callable[[], datetime] | None = None,
+) -> int:
+    """Save a summary and its stories in one transaction, release the claim, return the row id.
+
+    Stories get `summary_id` set and no digest (items were stored by collection
+    already, so there's nothing to wait for, and prior headlines exist the next
+    day even if the post fails). A row for the same `(game_key, run_date)` is
+    replaced in place, which is how a run-now retry turns a `fallback` into an
+    `ok`: its tokens add to the old row's (the failed attempt still cost money)
+    and any stories it had are detached rather than deleted.
+    """
+    now_iso = _resolve_now(now)
+    with _immediate(conn):
+        old = conn.execute(
+            "SELECT id FROM game_summaries WHERE game_key = ? AND run_date = ?",
+            (game_key, run_date.isoformat()),
+        ).fetchone()
+        if old is not None:
+            conn.execute("UPDATE stories SET summary_id = NULL WHERE summary_id = ?", (old["id"],))
+        conn.execute(
+            "INSERT INTO game_summaries (game_key, run_date, status, window_start, window_end, "
+            "coverage_notes, note, input_tokens, output_tokens, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(game_key, run_date) DO UPDATE SET status = excluded.status, "
+            "window_start = excluded.window_start, window_end = excluded.window_end, "
+            "coverage_notes = excluded.coverage_notes, note = excluded.note, "
+            "input_tokens = game_summaries.input_tokens + excluded.input_tokens, "
+            "output_tokens = game_summaries.output_tokens + excluded.output_tokens, "
+            "created_at = excluded.created_at",
+            (
+                game_key,
+                run_date.isoformat(),
+                status,
+                _utc_iso(window_start),
+                _utc_iso(window_end),
+                json.dumps(coverage_notes),
+                note,
+                usage.input_tokens,
+                usage.output_tokens,
+                now_iso,
+            ),
+        )
+        summary_id = conn.execute(
+            "SELECT id FROM game_summaries WHERE game_key = ? AND run_date = ?",
+            (game_key, run_date.isoformat()),
+        ).fetchone()["id"]
+        for story in stories:
+            item_ids = [
+                row["id"]
+                for url in story.item_urls
+                for row in conn.execute("SELECT id FROM items WHERE url = ?", (url,))
+            ]
+            if not item_ids:
+                continue  # postprocess() already drops these; belt and braces
+            cur = conn.execute(
+                "INSERT INTO stories "
+                "(topic_key, headline, summary, label, is_update_of, digest_id, summary_id, "
+                "created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+                (
+                    story.topic_key,
+                    story.headline,
+                    story.summary,
+                    story.label,
+                    story.update_of_story_id,
+                    summary_id,
+                    now_iso,
+                ),
+            )
+            for item_id in item_ids:
+                conn.execute(
+                    "INSERT INTO story_items (story_id, item_id) VALUES (?, ?)",
+                    (cur.lastrowid, item_id),
+                )
+        _release_claim(conn, game_key, token)
+    return summary_id
+
+
+def game_summary_tokens(conn: sqlite3.Connection, since: datetime) -> Usage:
+    """Tokens the summaries wrote down since `since`, for the owner's spend estimate."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o "
+        "FROM game_summaries WHERE created_at >= ?",
+        (_utc_iso(since),),
+    ).fetchone()
+    return Usage(input_tokens=row["i"], output_tokens=row["o"])

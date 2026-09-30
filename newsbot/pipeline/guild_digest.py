@@ -70,7 +70,13 @@ from newsbot.pipeline.run import RunKind, _publish_with_retry, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, StoryDraft
 from newsbot.store import repo
 from newsbot.store.db import connect
-from newsbot.store.models import GuildClaim, GuildDigestRow, GuildGame, GuildSettings
+from newsbot.store.models import (
+    GameSummaryRow,
+    GuildClaim,
+    GuildDigestRow,
+    GuildGame,
+    GuildSettings,
+)
 from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
@@ -128,8 +134,12 @@ class GuildDigestDeps:
     now: Callable[[], datetime]
     publisher_for: PublisherFactory
     notify_guild: NotifyGuild
-    # None reads whatever `game_summaries` already holds.
+    # None reads whatever `game_summaries` already holds. `summaries.summary_lookup`
+    # builds the real one, which makes a missing summary inline.
     summary_for: SummaryLookup | None = None
+    # Retries a game's `fallback` summary once, for a confirmed run-now (plan §3.6).
+    # None means run-now just shows what's stored.
+    retry_summary: SummaryLookup | None = None
     send_report: ReportSender | None = None
     sleep: Sleep = asyncio.sleep
     pace_s: float = _GUILD_PACE_S
@@ -238,24 +248,26 @@ class _Built:
     degraded: bool
 
 
+def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
+    """A stored summary row plus its stories, as the digest's `GameSummary`."""
+    stories = [
+        StoryDraft(
+            headline=v.headline,
+            summary=v.summary,
+            label=v.label,
+            item_urls=list(v.urls),
+            update_of_story_id=v.is_update_of,
+        )
+        for v in repo.summary_stories(conn, row.id)
+    ]
+    return GameSummary(row.status, stories, list(row.coverage_notes), row.note)
+
+
 async def _stored_summary(db_path: str, game_key: str, due_at: datetime) -> GameSummary | None:
     def _sync() -> GameSummary | None:
         with closing(connect(db_path)) as conn:
             row = repo.get_game_summary(conn, game_key, due_at)
-            if row is None:
-                return None
-            views = repo.summary_stories(conn, row.id)
-        stories = [
-            StoryDraft(
-                headline=v.headline,
-                summary=v.summary,
-                label=v.label,
-                item_urls=list(v.urls),
-                update_of_story_id=v.is_update_of,
-            )
-            for v in views
-        ]
-        return GameSummary(row.status, stories, list(row.coverage_notes), row.note)
+            return summary_from_row(conn, row) if row is not None else None
 
     return await asyncio.to_thread(_sync)
 
@@ -267,8 +279,15 @@ async def _build(
     window: tuple[datetime, datetime],
     due_at: datetime,
     run_date: date,
+    *,
+    retry_fallback: bool = False,
 ) -> _Built:
-    """Render one server's digest from stored data. Reads only; writes nothing."""
+    """Render one server's digest from stored data.
+
+    Writes nothing itself; a comped server's lookup may make a missing summary
+    (see `summaries.py`), and `retry_fallback` (a confirmed run-now) asks for one
+    more go at a summary that already fell back.
+    """
     channels = {g.game_key: g.channel_id for g in followed}
     games = [g for g in deps.cfg.catalog if g.key in channels]
     notes = [
@@ -292,6 +311,13 @@ async def _build(
         for game in games:
             try:
                 summary = await lookup(game.key, due_at)
+                if (
+                    retry_fallback
+                    and deps.retry_summary is not None
+                    and summary is not None
+                    and summary.status == "fallback"
+                ):
+                    summary = await deps.retry_summary(game.key, due_at) or summary
             except Exception:
                 # A broken lookup costs this game its summary, not the server its digest.
                 logger.exception("summary lookup failed for %s", game.key)
@@ -591,7 +617,15 @@ async def _publish_claimed(
     guild_id = guild.guild_id
     window = (claim.window_start, claim.window_end)
     try:
-        built = await _build(deps, guild, followed, window, due_at, run_date)
+        built = await _build(
+            deps,
+            guild,
+            followed,
+            window,
+            due_at,
+            run_date,
+            retry_fallback=force and kind is RunKind.RUN_NOW,
+        )
     except Exception as exc:
         logger.exception("building guild %s's digest failed", guild_id)
         await asyncio.to_thread(
