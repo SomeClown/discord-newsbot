@@ -114,6 +114,19 @@ def _admin(cfg) -> discord.Permissions:
     return discord.Permissions(**{cfg.admin_permission: True})
 
 
+async def _until(ready) -> None:
+    """Wait for `ready()` on a real deadline, not a count of event-loop spins.
+
+    The handler reads the database in a thread first, and CI's runners are
+    slower than my laptop: 100 spins was enough here and not enough there,
+    which is how six tests passed locally and failed in CI on the same code.
+    """
+    # Polling on purpose: the fakes being watched have no event to await.
+    async with asyncio.timeout(5):
+        while not ready():  # noqa: ASYNC110
+            await asyncio.sleep(0.005)
+
+
 def _handler(cfg, bot):
     group = make_admin_group(cfg, bot)
     return next(c for c in group.commands if c.name == "quote-now")
@@ -270,10 +283,7 @@ async def test_a_stranger_cannot_press_the_owners_confirm_button(db_path, monkey
     bot = SpyBot(db_path)
     invoker = FakeInteraction(_admin(cfg), user_id=111)
     task = asyncio.create_task(_handler(cfg, bot).callback(invoker))
-    for _ in range(100):
-        if views and invoker.response.messages:
-            break
-        await asyncio.sleep(0)
+    await _until(lambda: views and invoker.response.messages)
     (view,) = views
     confirm = next(c for c in view.children if c.label == "Post again")
 
@@ -393,10 +403,7 @@ async def _click_through_the_prompt(cfg, bot, monkeypatch, label: str) -> FakeIn
     monkeypatch.setattr(commands_module, "ConfirmView", Capturing)
     interaction = FakeInteraction(_admin(cfg), user_id=111)
     task = asyncio.create_task(_handler(cfg, bot).callback(interaction))
-    for _ in range(100):
-        if views and interaction.response.messages:
-            break
-        await asyncio.sleep(0)
+    await _until(lambda: views and interaction.response.messages)
     (view,) = views
     button = next(c for c in view.children if c.label == label)
     await view._scheduled_task(button, FakeInteraction(_admin(cfg), user_id=111))
