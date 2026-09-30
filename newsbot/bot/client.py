@@ -44,9 +44,14 @@ from discord import app_commands
 
 from newsbot.alerts import send_alert
 from newsbot.bot.format import RenderedAlert, RenderedDigest, esc
-from newsbot.bot.permissions import check_channels, render_permission_alert
+from newsbot.bot.permissions import (
+    check_channels,
+    render_permission_alert,
+    requirements_from_db,
+)
 from newsbot.collectors.base import RateLimitState, build_collectors
 from newsbot.config import AppConfig, Secrets
+from newsbot.guilds import lifecycle
 from newsbot.lounge.daily import QuoteDeps, QuoteOutcome, run_daily_quote
 from newsbot.lounge.sources import cache_dir_for
 from newsbot.lounge.welcome import RecentWelcomes, render_welcome, welcome_action
@@ -54,6 +59,7 @@ from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import Deps, RunKind, RunMode, local_run_date, run_daily
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
 from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
+from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import DigestRow
 from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
@@ -1180,10 +1186,168 @@ class NewsBot(discord.Client):
         await super().close()
 
 
+class GuildLifecycle:
+    """Join, removal, channel-delete and startup reconciliation handlers (plan task 11).
+
+    These are deliberately not methods on `NewsBot`: discord.py dispatches
+    `on_guild_join` and friends by name, so defining them there would switch
+    them on for the v2 bot, which has no `guilds` rows to write. Task 13
+    builds one of these and forwards the events to it.
+
+    `alert_owner` is the owner alert path (`Router.alert_owner`). Logs carry
+    guild ids only; a server's name is its own business.
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        cfg: AppConfig,
+        alert_owner: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.db_path = db_path
+        self.cfg = cfg
+        self._alert_owner = alert_owner
+
+    def _create_row(self, guild_id: int) -> bool:
+        """Insert the guild's row (comped if `comped_guild_ids` lists it). True if it's new."""
+        tier = "comped" if guild_id in self.cfg.comped_guild_ids else "free"
+        with closing(connect(self.db_path)) as conn:
+            return repo.create_guild(conn, guild_id, tier=tier)
+
+    async def on_guild_join(self, guild: discord.Guild) -> bool:
+        """Create the row and, only if it was new, say hello once. True if the row was new.
+
+        A duplicate join event finds the row and sends nothing. A removal
+        deletes the row, so a real re-join is new again and gets one hello.
+        """
+        try:
+            created = self._create_row(guild.id)
+        except Exception:
+            logger.exception("guild join: could not write the row", extra={"guild_id": guild.id})
+            return False
+        if not created:
+            logger.info("guild join: row already exists", extra={"guild_id": guild.id})
+            return False
+        logger.info("guild join: new server %d", guild.id, extra={"guild_id": guild.id})
+        await self._say_hello(guild)
+        return True
+
+    async def _say_hello(self, guild: discord.Guild) -> None:
+        channel = lifecycle.pick_first_contact_channel(guild)
+        if channel is None:
+            logger.info("guild %d: nowhere the bot may speak; no first-contact message", guild.id)
+            return
+        try:
+            await channel.send(
+                lifecycle.FIRST_CONTACT_TEXT, allowed_mentions=lifecycle.allowed_mentions()
+            )
+        except discord.HTTPException:
+            # Permissions can change between the check and the send. One
+            # attempt, then quiet: the hello is a nicety, not a promise.
+            logger.warning("guild %d: first-contact message failed", guild.id, exc_info=True)
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        """Delete the guild's rows now. Shared items, stories and summaries stay."""
+        try:
+            with closing(connect(self.db_path)) as conn:
+                deleted = repo.delete_guild(conn, guild.id)
+        except Exception:
+            logger.exception("guild remove: delete failed", extra={"guild_id": guild.id})
+            return
+        logger.info("guild remove: %d (rows deleted: %s)", guild.id, deleted)
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        """If a saved setting used this channel, add one notice naming the use.
+
+        Settings stay as they are; nothing picks a replacement. The notice is
+        there so an admin finds out before the next digest skips the game.
+        """
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return
+        names = {g.key: g.name for g in self.cfg.catalog}
+        try:
+            with closing(connect(self.db_path)) as conn:
+                for req in requirements_from_db(conn, guild.id, game_names=names):
+                    if req.channel_id == channel.id:
+                        repo.add_notice(
+                            conn,
+                            guild.id,
+                            f"A channel used for {req.purpose} was deleted, so that is skipped "
+                            "until you pick a new one with /newsbot setup.",
+                        )
+                        return
+        except Exception:
+            logger.exception("channel delete: notice failed", extra={"guild_id": guild.id})
+
+    async def reconcile(self, client: discord.Client) -> lifecycle.ReconcilePlan | None:
+        """Startup: drop rows for servers the bot left, add rows for ones it missed, apply comping.
+
+        Call it from the first `on_ready`, after the import. Does nothing
+        (returns None) if the client isn't ready, since a half-filled guild
+        cache is exactly how a cleanup wipes the wrong servers. See
+        `lifecycle.reconcile_plan` for the valve; when it trips the owner is
+        told and no rows are deleted. Guilds the bot is in but has no row for
+        get the join treatment, hello included, per plan section 3.8.
+        """
+        if not client.is_ready():
+            logger.warning("reconcile: client not ready; skipping")
+            return None
+        # `client.guilds` includes guilds Discord has marked unavailable,
+        # which is what "unavailable counts as present" needs.
+        live = {g.id: g for g in client.guilds}
+        with closing(connect(self.db_path)) as conn:
+            rows = repo.list_guilds(conn)
+        plan = lifecycle.reconcile_plan(
+            [r.guild_id for r in rows],
+            live.keys(),
+            protected_ids=[r.guild_id for r in rows if r.imported_at is not None],
+        )
+        if plan.valve_tripped:
+            logger.warning("reconcile: cleanup skipped, %s", plan.valve_reason)
+            await self._alert_owner(
+                f"Startup cleanup skipped: {plan.valve_reason}. No server rows were deleted."
+            )
+        deletes = list(plan.to_delete)
+        for guild_id in plan.to_confirm:
+            if await self._confirmed_gone(client, guild_id):
+                deletes.append(guild_id)
+        for guild_id in deletes:
+            with closing(connect(self.db_path)) as conn:
+                repo.delete_guild(conn, guild_id)
+            logger.info("reconcile: removed stale server %d", guild_id)
+        for guild_id in plan.to_create:
+            await self.on_guild_join(live[guild_id])
+        self._apply_comping()
+        return plan
+
+    async def _confirmed_gone(self, client: discord.Client, guild_id: int) -> bool:
+        """Ask Discord directly whether the bot is out of `guild_id`; any doubt says no."""
+        try:
+            await client.fetch_guild(guild_id)
+        except discord.NotFound, discord.Forbidden:
+            return True
+        except Exception:
+            logger.warning("reconcile: couldn't confirm server %d is gone", guild_id, exc_info=True)
+            return False
+        return False
+
+    def _apply_comping(self) -> None:
+        """D6: listed guilds that have a row and are free become comped. Never downgrades."""
+        if not self.cfg.comped_guild_ids:
+            return
+        with closing(connect(self.db_path)) as conn:
+            tiers = {r.guild_id: r.tier for r in repo.list_guilds(conn)}
+            for guild_id in lifecycle.comp_candidates(self.cfg.comped_guild_ids, tiers):
+                repo.update_guild_settings(conn, guild_id, tier="comped")
+                logger.info("reconcile: server %d comped (comped_guild_ids)", guild_id)
+
+
 __all__ = [
     "HEARTBEAT",
     "DiscordCodeAlertPoster",
     "DiscordPublisher",
+    "GuildLifecycle",
     "NewsBot",
     "NullPublisher",
     "build_intents",

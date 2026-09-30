@@ -1226,6 +1226,14 @@ def guild_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def list_guilds(conn: sqlite3.Connection) -> list[GuildSettings]:
+    """Every guild row, in guild id order (startup reconciliation reads this)."""
+    rows = conn.execute(
+        f"SELECT {_GUILD_COLUMNS} FROM guilds ORDER BY guild_id"  # noqa: S608
+    ).fetchall()
+    return [_guild_from_row(row) for row in rows]
+
+
 def list_set_up_guilds(conn: sqlite3.Connection) -> list[GuildSettings]:
     """Every guild that finished `/newsbot setup`, in guild id order."""
     rows = conn.execute(
