@@ -26,16 +26,14 @@ Nothing open. (Last cleared 2026-09-28: a regular member was refused `/newsbot s
 
 **Lounge rollout done (2026-09-30).** v2.2.0's welcome was verified with a real join in the test guild (the join event arrived with Server Members intent on, and the welcome posted); prod runs the same code. Discord's built-in welcome is off on the prod server and its System Messages Channel points at the admin channel again. Deploy window: never 09:00–09:15 America/Los_Angeles, and avoid about 07:55–08:05 (quote time).
 
-**Next big feature (paused 2026-09-28, discussion stage; nothing designed yet):** a public, installable app, meaning one bot the owner runs, added to many servers from Discord. Owner chose the **hybrid** cost model:
-- **Free tier, no AI:** RSS, Reddit and Bluesky headlines, at no cost to the owner.
-- **AI summaries, web search and SHiFT alerts:** unlocked by the server admin's own API keys (bring your own key), or later by a paid Discord server subscription where the owner covers API costs (about $1 per server per month).
+**In progress: public app, part 1 (v3.0.0).** Designed in `docs/design.md` §15 (approved 2026-09-30) on branch `feat/public-app`. One public bot that any server can install:
+- a curated 15-game catalog;
+- setup through slash commands;
+- a free tier of headline digests plus SHiFT alerts;
+- the friend's server imported as the first, comped-premium server;
+- per-server settings in the database.
 
-Proposed order:
-1. Multi-server redesign with the free tier (about a week or more).
-2. Bring your own key (2–3 days).
-3. Discord Premium Apps subscription (2–4 days). It can only be switched on after Discord verifies the app, which opens at about 75 servers and includes a Stripe ID check; Discord takes 15% of the first $1M.
-
-Resume with brainstorming, then a `docs/design.md` section, then an `architect` plan. Self-hosting (v2.1) stays as the alternative.
+It uses hourly shared collection with per-server digests. Parts 2 (bring your own key) and 3 (a paid Discord subscription, possible only after verification at about 75 servers) come later. Next: an `architect` plan in `docs/plans/`. Self-hosting keeps working the same way.
 
 ## Documentation voice (read this before writing a docstring)
 

@@ -594,3 +594,141 @@ The quote table holds source names and hashes of quote text only. Wikiquote is c
 - **Deploy window.** Never deploy 09:00 to 09:15 America/Los_Angeles (`deploy.sh` refuses), and avoid about 07:55 to 08:05: a restart there skips the day's quote, since a missed one is never caught up.
 
 **Rollback.** Migration 004 is additive, so v2.1.1 runs against a v2.2 database untouched. v2.1.1's config loader ignores unrecognized top-level keys, so the `lounge:` block can stay in `config.yaml`. Rolling back is `TAG=2.1.1` plus switching Discord's built-in welcome back on; the Server Members intent can stay enabled.
+
+## 15. Public app, part 1: many servers, free tier (v3.0, approved 2026-09-30)
+
+The bot becomes a public Discord app: one bot, run by the owner, that any server can install. This is sub-project 1 of three agreed on 2026-09-28 (the "hybrid" cost model). Part 2 (server admins bring their own API keys) and part 3 (a paid Discord server subscription) get their own designs later. This section leaves room for them and builds neither.
+
+Owner decisions (2026-09-30):
+- **A curated game catalog first,** custom sources later (C).
+- **Setup through slash commands,** with a web dashboard possible later (C).
+- **The free tier is the headlines digest plus SHiFT code alerts** (B). AI summaries and web search are premium.
+- **The current bot becomes the public app** (A). The friend's server becomes the first server, marked comped premium, so it keeps AI summaries and web search on the owner's keys.
+- **One model for everyone** (A). `config.yaml` holds global settings and the catalog; per-server settings live in the database and are set with commands. A one-time import carries the current setup over. Self-hosting keeps working the same way.
+- **The lounge stays on the friend's server only** for now (A). Revisit at verification, when the Server Members intent has to be justified.
+- **The launch catalog has 15 games:** Borderlands 4, Palworld, Diablo IV, Fortnite, Call of Duty (one entry covering the current game and Warzone), Marvel Rivals, VALORANT, Counter-Strike 2, Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo and WARDOGS. Aniimo and WARDOGS are added only if their sources hold up.
+- **SHiFT pings are the admin's choice** (A). The default is no ping; a role or `@everyone` can be chosen.
+- **Each server can set an optional admin channel for its own problems** (A). Without one, problems show in that server's `/newsbot status`. The owner's admin channel gets bot-wide health only.
+- **Defaults accepted:**
+  - Manage Server to configure.
+  - At most 10 followed games per server.
+  - Each server has its own digest time and time zone, defaulting to 09:00, with catch-up after downtime.
+  - A single first-contact message on join.
+  - A server's settings are deleted right away when the bot is removed.
+  - Premium for anyone but the comped server is out of scope.
+  - The terms and privacy policy are updated before going public.
+  - "Public Bot" is switched on last.
+- **Approach 1:** collect on a schedule, digest on demand.
+
+**Configuration (breaking, hence v3.0.0).**
+- `config.yaml` becomes global only:
+  - API keys and `NEWSBOT_CONTACT`;
+  - `home_guild_id` and `admin_channel_id` (the owner's server and channel, for bot-wide alerts and owner-only commands);
+  - the collection interval and AI settings;
+  - `catalog:`, one entry per game: `key`, display `name`, `aliases`, `entities`, and its sources. That's today's `topics` plus `sources`, regrouped per game.
+- Per-server keys move to the database: `guild_id`, per-topic `channel_id`, `digest.time`/`timezone`, `alerts.channel_id`/`enabled`, and `lounge`. The loader accepts the old shape only for the one-time import.
+- Each catalog entry still passes today's source validation. Adding a game later is a config change, not a code change.
+
+**Data (migration 005, additive).**
+- `guilds`: guild id, digest time, time zone, optional admin channel, `tier` (`free` or `comped`; paid comes later), `set_up` flag, joined-at.
+- `guild_games`: guild, game key, channel. Primary key (guild, game). At most 10 per guild.
+- `guild_shift`: guild, enabled, channel, ping (`none`, a role id, or `everyone`).
+- `guild_lounge`: the friend's server's welcome and quote settings, imported from `lounge:`. Only that row exists for now.
+- `items` stays shared, tagged with the games it matched.
+- `digests` gains a guild column: one row per guild per local day, with the guard, catch-up, run-now confirmation and resumable publisher keyed per guild.
+- A new `game_summaries` table holds one Claude summary per game per local day, reused by every comped guild following that game.
+- **SHiFT codes:** detection stays global (`alerted_codes` or its successor records each code once). Posting is tracked per guild (code, guild, status), and the daily ping cap counts per guild.
+- The lounge quote tables gain a guild column.
+
+**One-time import.** On the first start with an old-shape config and no `guilds` rows, the bot writes the friend's server as the first guild (`comped`), with:
+- its games and channels;
+- digest time and time zone;
+- SHiFT settings (channel, `everyone` ping);
+- admin channel;
+- lounge settings.
+
+It logs exactly what it imported and lists the old keys that can now be deleted. With any `guilds` rows present it never runs again.
+
+**Collection (hourly, shared).**
+- The widened SHiFT sweep fetches every catalog game's sources once per interval, whichever servers follow them. It canonicalizes, dedupes, filters by topic and stores the items.
+- Source health is global. Failures are reported to the owner, never per server.
+- SHiFT detection runs on new Borderlands items and fans out per guild.
+- Web search runs only for games followed by a comped guild, once a day before the earliest comped digest.
+
+**Digests (per server, on demand).**
+- A job runs every minute. It finds the guilds whose local digest time has passed with no digest recorded for that local day, then runs each one. Catch-up after downtime falls out of the same check.
+- A guild's digest posts one message per followed game in that game's channel, built from the stored items of the last 24 hours:
+  - **Free:** the headline list, today's fallback format (official, then reported, then rumor; "+N more, use /news").
+  - **Comped:** the stored Claude summary for that game and day, computed once and reused.
+- Many guilds due at once are processed one after another, with a short pause between guilds to respect Discord's rate limits. Nothing is fetched at digest time.
+- `/news recent` and `/news search` read the shared data, limited to the games the server follows.
+
+**Commands.**
+- Commands are registered globally; Discord can take up to an hour to show changes.
+- Admin commands carry the Manage Server default permission and are checked again at run time. All replies are ephemeral:
+  - `/newsbot setup`: a guided first run. Pick a time zone, a digest time, games (a multi-select from the catalog) and a channel for them. Running it again edits the existing settings.
+  - `follow game: channel:` and `unfollow game:`, with catalog autocomplete and the 10-game limit.
+  - `games`, and `settings time: timezone: admin_channel:`. Time zones are validated against the IANA database, with autocomplete.
+  - `shift channel: ping: enabled:`, which explains itself if Borderlands 4 isn't followed.
+  - `status`, `preview` and `run-now`, all scoped to the server.
+- Member commands (`/news recent`, `/news search`, `/shift codes`) work as today, limited to the followed games.
+- `/newsbot servers` is registered only in the owner's home server. It shows server counts, how many are set up, today's digest results and tier counts.
+
+**First contact, joining and leaving.**
+- **On join:** create the guild row (free, not set up) and post one message, with no mentions, in the system channel, or else the first channel the bot may speak in, pointing at `/newsbot setup`. It's the only unprompted message the bot sends.
+- **On removal:** delete that guild's rows at once; shared items stay. At startup, rows for guilds the bot is no longer in are deleted as well.
+- **A deleted or unusable channel:** that part is skipped and reported to the server's admin channel or `status`. The bot never picks another channel on its own.
+
+**Permission checks.** These run per server after `setup`, `follow` and `settings` (with an immediate reply naming the channel and the missing permission), and for every server at startup. Problems go to the server's admin channel or its `status`. The owner sees only counts.
+
+**SHiFT alerts per server.**
+- Each code is posted once per guild with alerts on, in its SHiFT channel. Posting status is per guild, and one guild's failure never blocks another.
+- Pings follow the guild's choice. The existing rules still apply: trusted sources only, the first message of a batch, a per-guild cap of 3 per day, and roundups unpinged.
+- Enabling alerts starts from codes found after that moment, with no backlog.
+- The mentions tripwire still allows exactly one `everyone=True` code path, which now decides from the guild's setting.
+
+**Admin routing.** A server's run report and posting failures go to its admin channel if set, otherwise to its `status`. The owner's admin channel gets:
+- source health;
+- crashes;
+- the collection report;
+- a daily one-line summary, such as "digests posted to 37 of 38 servers; 1 failed (missing permissions)".
+
+**Privacy and terms.** Both are updated before the switch to public:
+- what's stored per server (settings and channel ids), deleted on removal;
+- that nothing is stored about members;
+- that the lounge runs only on the friend's server;
+- a support contact the owner will answer.
+
+**Going public, in order:**
+1. Test everything on the test server with the dev bot, including the import against a copy of the friend's real config and a second owner-created test server, which shows two servers don't bleed into each other.
+2. Upgrade the friend's server (the import runs, and nothing visible changes).
+3. Update the terms and privacy policy.
+4. Only then switch on "Public Bot" in the Developer Portal and share the install link.
+
+**Testing.**
+- **Automated:**
+  - import, once and only once;
+  - migration 005 against a v2.2 database;
+  - the per-guild scheduler across time zones, DST and catch-up;
+  - digests from shared items;
+  - a comped summary computed once and reused;
+  - SHiFT fan-out with per-guild caps and ping choices;
+  - join, leave and startup cleanup;
+  - the 10-game limit;
+  - command permissions;
+  - admin routing (server problems never reach the owner channel, and the reverse);
+  - pacing under many due digests.
+- **Load:** a simulated run of a few hundred fake guilds due at 09:00.
+- **Manual:** the test-server checks above.
+
+**Risks.**
+1. The import mis-carrying the friend's setup. Mitigation: tested against a real copy, logged, and the old keys are kept until the owner deletes them.
+2. Discord rate limits with many guilds due at once. Mitigation: pacing and the load test.
+3. Source quality for 12 new games. Mitigation: `--check-sources` and a per-game review.
+4. Up to an hour's delay on global command changes.
+5. The Server Members intent at verification (revisit at about 75 servers).
+6. The owner's time once strangers can report issues.
+
+**Effort.** Roughly 1.5 to 2 weeks of agent time, plus a day or two of source research in parallel.
+
+**Rollback.** Migration 005 is additive, and the friend's settings stay in the old `config.yaml` until the owner deletes those keys. Before going public, a rollback is a `TAG` change. After going public, it would drop other servers' settings, so the release notes say to keep a database backup from just before the switch.
