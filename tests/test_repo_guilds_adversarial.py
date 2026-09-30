@@ -12,7 +12,8 @@ cap under racing connections, FTS syntax thrown at `search_items`, and ids at
 the ends of the integer line.
 
 Things that are odd but consistent are pinned and labelled "documented".
-The three strict xfails are real (small) bugs, each one with its reason.
+The three strict xfails that used to live here were real (small) bugs; they're fixed
+and are plain tests now.
 """
 
 from __future__ import annotations
@@ -206,7 +207,9 @@ _MUTATIONS = {
         repo.follow_game(c, g, "new", 99),
     ),
     "unfollow_game": lambda c, g: repo.unfollow_game(c, g, "bl4"),
-    "set_shift": lambda c, g: repo.set_shift(c, g, enabled=False, channel_id=None, ping="3"),
+    "set_shift": lambda c, g: repo.set_shift(
+        c, g, enabled=False, channel_id=None, ping="123456789012345678"
+    ),
     "upsert_lounge": lambda c, g: repo.upsert_lounge(
         c, _lounge(g, welcome_message="changed", last_quote_date="1999-01-01")
     ),
@@ -524,8 +527,12 @@ def test_create_guild_racing_itself_has_one_winner_and_the_winners_settings_stic
 # --- CHECK constraints, poked with awkward values ---
 
 
-@pytest.mark.parametrize("ping", ["none", "everyone", "1", "9", "123456789012345678"])
-def test_shift_ping_accepts_none_everyone_and_positive_integers_without_leading_zeros(conn, ping):
+# Changed from "any positive integer": ping is now none, everyone, or a 17 to 20 digit
+# snowflake, so the short ids that used to pass ("1", "9") moved to the rejects below.
+@pytest.mark.parametrize(
+    "ping", ["none", "everyone", "12345678901234567", "123456789012345678", "9" * 20]
+)
+def test_shift_ping_accepts_none_everyone_and_snowflake_shaped_ids(conn, ping):
     repo.create_guild(conn, G1)
     repo.set_shift(conn, G1, enabled=False, channel_id=None, ping=ping)
     assert repo.get_shift(conn, G1).ping == ping
@@ -536,7 +543,13 @@ def test_shift_ping_accepts_none_everyone_and_positive_integers_without_leading_
     [
         "",
         "0",
+        "1",
+        "9",
         "05",
+        "1234567890123456",
+        "9" * 21,
+        "9" * 50,
+        "0" + "1" * 17,
         "-1",
         "+5",
         "1.5",
@@ -564,19 +577,12 @@ def test_shift_ping_of_none_python_none_is_refused(conn):
         repo.set_shift(conn, G1, enabled=False, channel_id=None, ping=None)
 
 
-def test_shift_ping_absurdly_long_digit_string_is_accepted_documented(conn):
-    # Documented: the CHECK is about shape, not size. 50 digits is "a role id" to it.
-    # Whether it's a real role is the command layer's problem.
-    repo.create_guild(conn, G1)
-    repo.set_shift(conn, G1, enabled=False, channel_id=None, ping="9" * 50)
-    assert repo.get_shift(conn, G1).ping == "9" * 50
-
-
 def test_shift_ping_passed_as_an_int_is_stored_as_text_documented(conn):
-    # Documented: TEXT affinity turns 5 into '5', so a caller passing a role id as an int works.
+    # Documented: TEXT affinity turns the int into text, so a caller passing a role id as an
+    # int works. (Was 5 until ping had to look like a snowflake; 5 is refused now.)
     repo.create_guild(conn, G1)
-    repo.set_shift(conn, G1, enabled=False, channel_id=None, ping=5)
-    assert repo.get_shift(conn, G1).ping == "5"
+    repo.set_shift(conn, G1, enabled=False, channel_id=None, ping=123456789012345678)
+    assert repo.get_shift(conn, G1).ping == "123456789012345678"
 
 
 def test_shift_enabled_without_a_channel_is_refused_and_leaves_the_old_row_alone(conn):
@@ -588,12 +594,6 @@ def test_shift_enabled_without_a_channel_is_refused_and_leaves_the_old_row_alone
     assert shift.enabled and shift.channel_id == 44
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="guild_shift.channel_id has no CHECK (> 0), unlike guild_games, guild_lounge and "
-    "guilds.admin_channel_id: an enabled row with channel 0 or -1 is accepted, and the "
-    "fan-out would then try to post to a channel that can't exist.",
-)
 @pytest.mark.parametrize("channel", [0, -1])
 def test_shift_channel_id_must_be_positive_like_every_other_channel_column(conn, channel):
     repo.create_guild(conn, G1)
@@ -626,12 +626,17 @@ def test_shift_changing_channel_or_ping_while_enabled_does_not_restamp(conn):
     assert (shift.channel_id, shift.ping, shift.enabled_at) == (5, "everyone", T0)
 
 
-@pytest.mark.parametrize("value", ["29:59", "24:00", "23:59", "00:00", "19:59"])
-def test_digest_time_shapes_the_glob_accepts_include_impossible_clock_times_documented(conn, value):
-    # Documented: the GLOB checks shape only ("two digits, colon, minutes 00-59"), so
-    # 29:59 and 24:00 are stored. Real validation belongs to the command layer.
+@pytest.mark.parametrize("value", ["23:59", "00:00", "19:59", "20:00", "09:30"])
+def test_digest_time_accepts_every_real_clock_time(conn, value):
     repo.create_guild(conn, G1, digest_time=value)
     assert repo.get_guild(conn, G1).digest_time == value
+
+
+# Changed from "documented: 24:00 and 29:59 are stored". The CHECK now wants hours 00-23.
+@pytest.mark.parametrize("value", ["29:59", "24:00", "24:30", "25:00"])
+def test_digest_time_refuses_impossible_clock_times(conn, value):
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.create_guild(conn, G1, digest_time=value)
 
 
 @pytest.mark.parametrize(
@@ -658,12 +663,26 @@ def test_digest_time_refuses_anything_not_shaped_like_hh_mm(conn, value):
     assert repo.get_guild(conn, G1) is None
 
 
-def test_timezone_and_lounge_quote_time_have_no_check_documented(conn):
-    # Documented: nothing in the database validates these two; the command layer must.
+def test_timezone_has_no_check_documented(conn):
+    # Documented: nothing in the database validates timezone (IANA names are the command
+    # layer's job). quote_time used to be in here too; it has a real-time CHECK now.
     repo.create_guild(conn, G1, timezone="Not/AZone")
     assert repo.get_guild(conn, G1).timezone == "Not/AZone"
-    repo.upsert_lounge(conn, _lounge(G1, quote_time="99:99"))
-    assert repo.get_lounge(conn, G1).quote_time == "99:99"
+
+
+@pytest.mark.parametrize("value", ["99:99", "24:00", "08:60", "8:00", "0800", "", "08:00\n"])
+def test_lounge_quote_time_must_be_a_real_clock_time(conn, value):
+    repo.create_guild(conn, G1)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.upsert_lounge(conn, _lounge(G1, quote_time=value))
+    assert repo.get_lounge(conn, G1) is None
+
+
+@pytest.mark.parametrize("value", ["00:00", "08:00", "23:59"])
+def test_lounge_quote_time_accepts_real_clock_times(conn, value):
+    repo.create_guild(conn, G1)
+    repo.upsert_lounge(conn, _lounge(G1, quote_time=value))
+    assert repo.get_lounge(conn, G1).quote_time == value
 
 
 # --- guild_id at the ends of the integer line ---
@@ -738,28 +757,27 @@ def test_add_notice_counts_characters_not_bytes(conn):
     assert repo.recent_notices(conn, G1)[0].text == "\U0001f37a" * 2000
 
 
-def test_add_notice_whitespace_only_text_is_accepted_documented(conn):
-    # Documented: only the truly empty string is refused.
+# Changed from "documented: whitespace-only text is accepted". A notice nobody can see
+# is an empty notice, so it gets the same ValueError an empty string does.
+@pytest.mark.parametrize("text", ["   ", "\n\t ", "\x00", " \x00 \x00"])
+def test_add_notice_whitespace_or_nul_only_text_is_refused_like_empty(conn, text):
     repo.create_guild(conn, G1)
-    repo.add_notice(conn, G1, "   ")
-    assert repo.recent_notices(conn, G1)[0].text == "   "
+    with pytest.raises(ValueError):
+        repo.add_notice(conn, G1, text)
+    assert repo.recent_notices(conn, G1) == []
 
 
-def test_add_notice_with_an_embedded_nul_in_the_middle_is_stored_whole(conn):
+# Changed from "stored whole": NULs are stripped now, wherever they sit.
+def test_add_notice_with_an_embedded_nul_in_the_middle_has_it_stripped(conn):
     repo.create_guild(conn, G1)
     repo.add_notice(conn, G1, "a\x00b")
-    assert repo.recent_notices(conn, G1)[0].text == "a\x00b"
+    assert repo.recent_notices(conn, G1)[0].text == "ab"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SQLite's length() stops at the first NUL, so the CHECK sees a leading-NUL notice as "
-    "length 0 and add_notice raises IntegrityError instead of storing it (or refusing it "
-    "with the same ValueError an empty string gets).",
-)
 def test_add_notice_with_a_leading_nul_does_not_blow_up_the_caller(conn):
     repo.create_guild(conn, G1)
     repo.add_notice(conn, G1, "\x00permission error")
+    assert repo.recent_notices(conn, G1)[0].text == "permission error"
 
 
 def test_a_notice_stamped_older_than_the_twenty_newest_is_pruned_immediately_documented(conn):
@@ -1029,12 +1047,6 @@ def test_search_items_unicode_and_case_folding_find_what_a_person_would_expect(c
     assert repo.search_items(conn, G1, "欢迎", SINCE, 5, 0)[1] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="search_items binds the user's text as a parameter outside its try block; a lone "
-    "surrogate (valid in a Python str, which JSON escapes like \\ud800 can produce) raises "
-    "UnicodeEncodeError to the caller. search_stories has the same shape.",
-)
 def test_search_items_with_a_lone_surrogate_does_not_raise(world):
     assert repo.search_items(world, G1, "\ud800", SINCE, 20, 0) == ([], 0)
 
@@ -1074,14 +1086,18 @@ def test_query_items_crosses_the_variable_chunk_boundary(conn):
     assert all(i.topic_keys == (["bl4", "palworld"] if i.id % 2 else ["bl4"]) for i in items)
 
 
-def test_query_items_a_negative_limit_means_unlimited_documented(conn):
-    # Documented: SQLite treats LIMIT -1 as "no limit", so the command layer must clamp
-    # the page size; the repo won't.
+# Changed from "documented: a negative limit means unlimited". SQLite reads LIMIT -1 as
+# "no limit"; query_items now clamps limit to at least 1 and offset to at least 0.
+def test_query_items_clamps_a_negative_limit_and_offset(conn):
     repo.create_guild(conn, G1)
     repo.follow_game(conn, G1, "bl4", 5)
     for i in range(12):
         _store(conn, f"https://e/{i}", f"Thing {i}", {"bl4": False}, T0 - timedelta(minutes=i))
-    assert len(repo.query_items(conn, G1, [], SINCE, -1, 0)[0]) == 12
+    page, total = repo.query_items(conn, G1, [], SINCE, -1, 0)
+    assert len(page) == 1 and total == 12
+    assert repo.query_items(conn, G1, [], SINCE, 0, 0)[0] == page
+    newest_two = repo.query_items(conn, G1, [], SINCE, 2, 0)[0]
+    assert repo.query_items(conn, G1, [], SINCE, 2, -5)[0] == newest_two
 
 
 # --- items_fts staying honest through the ways items actually change ---

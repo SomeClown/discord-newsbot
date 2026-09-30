@@ -841,7 +841,12 @@ def query_stories(
     limit: int,
     offset: int,
 ) -> tuple[list[StoryView], int]:
-    """Stories for `/news recent`, newest first. An empty `topic_keys` means "All"."""
+    """Stories for `/news recent`, newest first. An empty `topic_keys` means "All".
+
+    `limit` is clamped to at least 1 and `offset` to at least 0 (SQLite reads
+    `LIMIT -1` as "no limit", which is not what anyone meant by -1).
+    """
+    limit, offset = max(limit, 1), max(offset, 0)
     where = ["created_at >= ?"]
     params: list[object] = [_utc_iso(since)]
     if topic_keys:
@@ -911,9 +916,12 @@ def search_stories(
             "LIMIT ? OFFSET ?",
             (escaped, _utc_iso(since), limit, offset),
         ).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError, UnicodeEncodeError:
         # fts_escape should make every query syntactically valid, but this
         # is cheap insurance against the one FTS5 quirk we didn't think of.
+        # (The second one: a lone surrogate, which Python will happily hold
+        # in a str and SQLite's UTF-8 binding will not. JSON escapes can
+        # produce one, so a member can too.)
         return [], 0
 
     return _rows_to_story_views(conn, rows), total
@@ -1355,9 +1363,12 @@ def add_notice(
 
     Text over 2000 characters is cut to fit the column's limit (a permission
     error listing every channel shouldn't be the thing that fails). Empty
-    text raises `ValueError`.
+    text raises `ValueError`, and so does text that's only whitespace and NULs.
+    NULs are stripped first: SQLite's `length()` stops counting at the first
+    one, so the column's CHECK would otherwise call "\x00oops" empty.
     """
-    if not text:
+    text = text.replace("\x00", "")
+    if not text.strip():
         raise ValueError("A notice needs some text.")
     text = text[:_MAX_NOTICE_LENGTH]
     with conn:
@@ -1490,7 +1501,10 @@ def query_items(
     """Items for a free server's `/news recent`, newest collected first.
 
     Limited to games `guild_id` follows; an empty `topic_keys` means all of them.
+    `limit` is clamped to at least 1 and `offset` to at least 0, for the same
+    reason as in `query_stories`.
     """
+    limit, offset = max(limit, 1), max(offset, 0)
     topic_sql, topic_params = _item_topic_filter(guild_id, topic_keys)
     params = [*topic_params, _utc_iso(since)]
     where = f"{topic_sql} AND items.collected_at >= ?"
@@ -1534,6 +1548,8 @@ def search_items(
             "ORDER BY bm25(items_fts), items.collected_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError, UnicodeEncodeError:
+        # Same two escape hatches as search_stories: an FTS5 quirk, or a
+        # lone surrogate that can't be bound as UTF-8.
         return [], 0
     return _rows_to_item_views(conn, guild_id, rows), total

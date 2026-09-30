@@ -136,6 +136,17 @@ def test_query_stories_includes_urls(conn):
     assert page[0].urls == ["https://e/p"]
 
 
+def test_query_stories_clamps_a_negative_limit_and_offset(conn):
+    # SQLite reads LIMIT -1 as "no limit", so -1 must not mean everything.
+    for day in (1, 2, 3):
+        _save_story(conn, date(2026, 9, day), headline=f"S{day}", url=f"https://e/{day}")
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+
+    page, total = repo.query_stories(conn, [], since, None, limit=-1, offset=-3)
+    assert total == 3
+    assert [s.headline for s in page] == ["S3"]
+
+
 # --- search_stories / fts_escape ---
 
 
@@ -156,7 +167,10 @@ def test_search_stories_ranks_by_bm25_then_recency(conn):
     assert page[0].headline == "Patch patch patch notes"
 
 
-@pytest.mark.parametrize("bad_query", ['foo" OR bar*', "NEAR(", "", "   ", '"""'])
+# "\ud800" is a lone surrogate: a valid Python str that can't be bound as UTF-8.
+@pytest.mark.parametrize(
+    "bad_query", ['foo" OR bar*', "NEAR(", "", "   ", '"""', "\ud800", "patch \udfff"]
+)
 def test_search_stories_never_raises_on_malformed_input(conn, bad_query):
     page, total = repo.search_stories(conn, bad_query, datetime(2026, 1, 1, tzinfo=UTC), 10, 0)
     assert page == []

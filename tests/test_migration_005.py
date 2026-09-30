@@ -437,7 +437,9 @@ def test_guild_id_must_be_positive(conn, guild_id):
     )
 
 
-@pytest.mark.parametrize("bad_time", ["9:00", "09:60", "0900", "", "aa:bb", "3a:00"])
+@pytest.mark.parametrize(
+    "bad_time", ["9:00", "09:60", "0900", "", "aa:bb", "3a:00", "24:00", "29:59"]
+)
 def test_digest_time_shape_is_checked(conn, bad_time):
     _raises_integrity(
         conn,
@@ -471,7 +473,7 @@ def test_game_channel_must_be_positive(conn):
     _raises_integrity(conn, "INSERT INTO guild_games VALUES (1, 'g', 0)")
 
 
-@pytest.mark.parametrize("ping", ["none", "everyone", "1", "123456789012345678"])
+@pytest.mark.parametrize("ping", ["none", "everyone", "12345678901234567", "123456789012345678"])
 def test_shift_accepts_good_ping_values(conn, ping):
     _add_guild(conn, 1)
     with conn:
@@ -481,13 +483,25 @@ def test_shift_accepts_good_ping_values(conn, ping):
         )
 
 
-@pytest.mark.parametrize("ping", ["", "Everyone", "here", "0", "0123", "12a", "-5", "1 2", "12\n"])
+@pytest.mark.parametrize(
+    "ping", ["", "Everyone", "here", "0", "1", "0123", "12a", "-5", "1 2", "12\n", "9" * 21]
+)
 def test_shift_rejects_malformed_ping_values(conn, ping):
     _add_guild(conn, 1)
     _raises_integrity(
         conn,
         "INSERT INTO guild_shift (guild_id, enabled, channel_id, ping) VALUES (1, 1, 9, ?)",
         (ping,),
+    )
+
+
+@pytest.mark.parametrize("channel", [0, -1])
+def test_shift_channel_must_be_positive_when_set(conn, channel):
+    _add_guild(conn, 1)
+    _raises_integrity(
+        conn,
+        "INSERT INTO guild_shift (guild_id, enabled, channel_id) VALUES (1, 1, ?)",
+        (channel,),
     )
 
 

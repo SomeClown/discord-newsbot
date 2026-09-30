@@ -33,7 +33,7 @@
 CREATE TABLE guilds (
     guild_id INTEGER PRIMARY KEY CHECK (guild_id > 0),
     digest_time TEXT NOT NULL DEFAULT '09:00'
-        CHECK (digest_time GLOB '[0-2][0-9]:[0-5][0-9]'),
+        CHECK (digest_time GLOB '[01][0-9]:[0-5][0-9]' OR digest_time GLOB '2[0-3]:[0-5][0-9]'),
     timezone TEXT NOT NULL DEFAULT 'UTC',
     admin_channel_id INTEGER CHECK (admin_channel_id IS NULL OR admin_channel_id > 0),
     tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'comped')),
@@ -60,9 +60,12 @@ END;
 CREATE TABLE guild_shift (
     guild_id INTEGER PRIMARY KEY REFERENCES guilds (guild_id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
-    channel_id INTEGER,
+    channel_id INTEGER CHECK (channel_id IS NULL OR channel_id > 0),
+    -- A role id is a Discord snowflake: 17 to 20 digits, no leading zero.
     ping TEXT NOT NULL DEFAULT 'none'
-        CHECK (ping IN ('none', 'everyone') OR (ping GLOB '[1-9]*' AND ping NOT GLOB '*[^0-9]*')),
+        CHECK (ping IN ('none', 'everyone')
+            OR (length(ping) BETWEEN 17 AND 20
+                AND ping GLOB '[1-9]*' AND ping NOT GLOB '*[^0-9]*')),
     enabled_at TEXT,
     ping_day TEXT,
     ping_count INTEGER NOT NULL DEFAULT 0,
@@ -86,7 +89,8 @@ CREATE TABLE guild_lounge (
     welcome_enabled INTEGER NOT NULL DEFAULT 0,
     welcome_message TEXT NOT NULL DEFAULT '',
     quote_enabled INTEGER NOT NULL DEFAULT 0,
-    quote_time TEXT NOT NULL DEFAULT '08:00',
+    quote_time TEXT NOT NULL DEFAULT '08:00'
+        CHECK (quote_time GLOB '[01][0-9]:[0-5][0-9]' OR quote_time GLOB '2[0-3]:[0-5][0-9]'),
     quote_sources TEXT NOT NULL DEFAULT '[]',
     last_quote_date TEXT
 );

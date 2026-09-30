@@ -281,9 +281,11 @@ def test_set_shift_resaving_does_not_move_enabled_at_and_keeps_the_ping_budget(t
             "UPDATE guild_shift SET ping_day = '2026-09-30', ping_count = 2 WHERE guild_id = 1"
         )
     later = _clock(T0 + timedelta(days=2))
-    repo.set_shift(two_guilds, 1, enabled=True, channel_id=10, ping="1234", now=later)
+    repo.set_shift(
+        two_guilds, 1, enabled=True, channel_id=10, ping="1234567890123456789", now=later
+    )
     shift = repo.get_shift(two_guilds, 1)
-    assert (shift.channel_id, shift.ping, shift.enabled_at) == (10, "1234", T0)
+    assert (shift.channel_id, shift.ping, shift.enabled_at) == (10, "1234567890123456789", T0)
     assert (shift.ping_day, shift.ping_count) == ("2026-09-30", 2)
 
 
