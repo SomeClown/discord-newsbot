@@ -184,7 +184,7 @@ catalog:
 **CLI in a multi-guild world** (`python -m newsbot.pipeline.run`):
 - `--check-sources [--game KEY ...]`: runs catalog plus shared sources, and web search if keyed. Prints a per-source table grouped by game, then per-game match counts. `--game` restricts it to those games' own sources, plus shared sources matched only against them. It needs no database, no Anthropic key and no Discord token. This is what task 17 uses.
 - `--collect`: one collection pass into `--db`. It prints the collection summary, and SHiFT fan-out goes through `PrintCodeAlertPoster`. `--sweep` stays as an alias for one release, with a stderr note.
-- `--dry-run [--guild ID]` (the default mode): previews one guild's next digest from stored items. It writes nothing except the import, and only if the import hasn't run. `--guild` can be omitted when exactly one guild is set up (the self-hoster's case); otherwise it's an error listing the ids.
+- `--dry-run [--guild ID]` (the default mode): previews one guild's next digest from stored items. It writes nothing at all: it works on a throwaway copy of the database, so even the one-time import stays out of the real file (`--collect`, `--fixtures` and `--post-to-stdout` are the write modes). `--guild` can be omitted when exactly one guild is set up (the self-hoster's case); otherwise it's an error listing the ids.
 - `--post-to-stdout [--guild ID] [--force]`: POST mode for that guild. It claims, prints and saves, which exercises the per-guild guard.
 - `--fixtures DIR`: replaces collectors and implies one `--collect` pass first, so `--fixtures --stub-llm --dry-run` stays a fully offline run.
 - `--now`: the clock for every step, including the due and window math.
@@ -1191,8 +1191,14 @@ Estimated 1 to 2 agent days.
    - then switch **Public Bot** on;
    - share the install link.
 
+**Deploy notes** (from the task 13 adversarial round):
+- **Prod `config.yaml` must set `home_guild_id` and `admin_channel_id` to the owner's own server.** Without them, `home_guild_id` defaults to the friend's `guild_id`, so the owner channel (the daily owner report, bot-wide alerts, the import notice) and `/owner` land in the friend's server, in front of the friend.
+- **Never run `--collect`, `--fixtures` or `--post-to-stdout` against the live prod database.** They write: a collection pass stores items and marks SHiFT codes posted for every server (the CLI prints them instead of posting, so the real bot never announces them), and `--post-to-stdout` claims the day's digest. Only `--dry-run` (the default) and `--check-sources` are read-only; a dry run works on a throwaway copy of the file, so even the one-time import stays out of it. Rehearse on a copy of the database.
+- **At cutover the first digest window starts after v2.2's last digest.** The import (and the startup adoption of later v2.2 rows) stamps each posted v2.2 digest with a window ending at its `updated_at`, so the first v3 summary and headlines don't hand the server yesterday's items again.
+- **A v2.2 digest left pending or half-posted** when the bot was replaced is not posted over. Startup tells the server's admin channel once (the owner, if it has none); `/newsbot run-now` posts it.
+
 **Rollback:**
-- **Before step 8:** `TAG=2.2.0` plus deploy. The prod config still has the v2 keys (plus `catalog:`, which v2.2 ignores). No database restore is needed. Expect one thin digest the next morning, because v3 already stored recent items. Rolling forward later is safe (the adopt step, no re-import).
+- **Before step 8:** `TAG=2.2.0` plus deploy. The prod config still has the v2 keys (plus `catalog:`, which v2.2 ignores). No database restore is needed. Expect one thin digest the next morning, because v3 already stored recent items. Rolling forward later is safe (the adopt step, no re-import). **Before rolling forward after a rollback, run `DELETE FROM app_state WHERE key LIKE 'commands:%'`.** v2.2 re-syncs its own per-guild commands into the friend's server while it runs, but it knows nothing about `app_state`, so the command hashes from the first v3 start are still stored and still match. Without the delete, v3 sends nothing, and the old duplicate `/newsbot`, `/news` and `/shift` stay in the friend's menu.
 - **After step 8:** a TAG rollback would leave other servers with a bot that ignores their settings. Restore `newsbot.pre-public-*.db` only if you accept dropping every server's settings since then, which §15 already warns about. Prefer fixing forward. The release notes say to keep that backup.
 
 ## 10. Effort (agent time: build, test, review)

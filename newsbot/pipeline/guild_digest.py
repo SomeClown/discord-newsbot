@@ -145,6 +145,10 @@ class GuildDigestDeps:
     # None reads whatever `game_summaries` already holds. `summaries.summary_lookup`
     # builds the real one, which makes a missing summary inline.
     summary_for: SummaryLookup | None = None
+    # What a preview uses instead of `summary_for`, when set: `summaries.dry_run_lookup`, which
+    # reuses a stored summary or makes one in memory and never saves it. A preview that saved
+    # its summary would hand it to the real digest (plan §3.7: preview writes nothing).
+    preview_summary_for: SummaryLookup | None = None
     # Retries a game's `fallback` summary once, for a confirmed run-now (plan §3.6).
     # None means run-now just shows what's stored.
     retry_summary: SummaryLookup | None = None
@@ -291,6 +295,7 @@ async def _build(
     run_date: date,
     *,
     retry_fallback: bool = False,
+    summary_for: SummaryLookup | None = None,
 ) -> _Built:
     """Render one server's digest from stored data.
 
@@ -321,8 +326,10 @@ async def _build(
     coverage: list[str] = []
     degraded = bool(notes)
     if guild.tier == "comped":
-        lookup = deps.summary_for or (
-            lambda key, at, after: _stored_summary(deps.db_path, key, at, after)
+        lookup = (
+            summary_for
+            or deps.summary_for
+            or (lambda key, at, after: _stored_summary(deps.db_path, key, at, after))
         )
         for game in games:
             try:
@@ -416,7 +423,9 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
     """Build what this server's digest would be right now, without claiming or posting anything.
 
     `None` if the server isn't set up or follows nothing. Takes the server's lock, so a
-    preview can't interleave with its real digest.
+    preview can't interleave with its real digest. Saves nothing, a comped server's summary
+    included: with `preview_summary_for` set, a missing summary is made in memory and dropped
+    when the preview ends, which is why a preview costs a model call of its own.
     """
     async with deps.lock_for(guild_id):
         loaded = await asyncio.to_thread(_load_sync, deps.db_path, guild_id)
@@ -427,7 +436,15 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
         window = await asyncio.to_thread(
             _window_sync, deps.db_path, guild_id, run_date, window_end, deps.now(), late=False
         )
-        built = await _build(deps, guild, followed, window, due_at, run_date)
+        built = await _build(
+            deps,
+            guild,
+            followed,
+            window,
+            due_at,
+            run_date,
+            summary_for=deps.preview_summary_for,
+        )
         return GuildPreview(built.rendered, built.notes)
 
 

@@ -77,7 +77,13 @@ from newsbot.pipeline.collect import (
 from newsbot.pipeline.guild_digest import GuildDigestDeps, run_due_guilds
 from newsbot.pipeline.publisher import PublishError
 from newsbot.pipeline.run import local_run_date
-from newsbot.pipeline.summaries import SummaryDeps, prepare_summaries, retry_lookup, summary_lookup
+from newsbot.pipeline.summaries import (
+    SummaryDeps,
+    dry_run_lookup,
+    prepare_summaries,
+    retry_lookup,
+    summary_lookup,
+)
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
 from newsbot.shift.fanout import (
     FanoutDeps,
@@ -153,6 +159,8 @@ HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not 
 _RETENTION_DAYS = 90
 # `app_state` key guarding the daily owner report against a second send.
 _OWNER_REPORT_KEY = "owner_report_date"
+# `app_state` key prefix remembering that a server was told about the digest v2.2 left stuck.
+_STUCK_V22_KEY = "stuck_v22_digest:"
 _HEARTBEAT_INTERVAL_S = 60
 
 
@@ -243,6 +251,36 @@ def mentions_for(ping: object) -> discord.AllowedMentions:
             everyone=False, users=False, roles=[discord.Object(id=int(ping))], replied_user=False
         )
     return discord.AllowedMentions.none()
+
+
+class ChannelNotInGuildError(Exception):
+    """A configured channel resolved to a different server's (or to no server at all).
+
+    Not a `PublishError` on purpose: `post_alert_with_retry` retries those, and
+    nothing about waiting eight seconds moves a channel into the right guild.
+    """
+
+
+def _foreign_channel(channel: object, guild_id: int | None, channel_id: int) -> bool:
+    """True (after a WARNING, ids only) if `channel` isn't in `guild_id`; None means no check.
+
+    Channel ids are numbers an admin typed into a setting, and nothing else stops one
+    from naming another server's channel. The router refuses those at send time, and
+    the digest and the code alerts get the same rule: a channel with no server at all
+    (a stale id, a DM) counts as foreign too.
+    """
+    if guild_id is None:
+        return False
+    found = getattr(getattr(channel, "guild", None), "id", None)
+    if found == guild_id:
+        return False
+    logger.warning(
+        "not posting: channel %s isn't in guild %s (resolved to guild %s)",
+        channel_id,
+        guild_id,
+        found,
+    )
+    return True
 
 
 def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None) -> None:
@@ -336,19 +374,22 @@ class DiscordPublisher:
         on_posted: Callable[[str, int], Awaitable[None]] | None = None,
         already_posted: Mapping[str, int] | None = None,
         skip_permanent: bool = False,
+        guild_id: int | None = None,
     ) -> None:
         # `NewsBot`, not plain `discord.Client`: kept for parity with v1 and
         # in case a future non-fatal side path (the old thread-creation
         # alert was one) needs `.alert()` again. Forward-referenced since
         # `NewsBot` is defined later in this same module.
         self._client = client
-        # The four keyword arguments are the per-server digest's (design.md
+        # The keyword arguments are the per-server digest's (design.md
         # §15, plan task 6); left alone, this behaves exactly as v2.2 did.
         # `already_posted` preloads a resume's finished games, `on_posted`
         # hears about each one as it lands so the caller can write it through
         # to the database, and `skip_permanent` turns a dead channel into "skip
         # that game and carry on" (recorded in `skipped`) instead of ending the
-        # whole server's digest.
+        # whole server's digest. `guild_id` is the server being posted for: a channel that
+        # isn't in it is refused (permanently), the same rule the router applies.
+        self._guild_id = guild_id
         self._posted: dict[str, int] = dict(already_posted or {})
         self._on_posted = on_posted
         self._skip_permanent = skip_permanent
@@ -434,6 +475,12 @@ class DiscordPublisher:
                 posted_by_topic=self._posted,
                 retryable=False,
             )
+        if _foreign_channel(channel, self._guild_id, channel_id):
+            raise PublishError(
+                f"channel {channel_id} isn't in this server",
+                posted_by_topic=self._posted,
+                retryable=False,
+            )
         self._channels[channel_id] = channel
         return channel
 
@@ -493,9 +540,12 @@ class DiscordCodeAlertPoster:
         channel_id: int,
         ping_choice: str = "everyone",
         notify: Callable[[str], Awaitable[None]] | None = None,
+        guild_id: int | None = None,
     ) -> None:
         self._client = client
         self._channel_id = channel_id
+        # The server these alerts are for; a channel that isn't in it is never posted to.
+        self._guild_id = guild_id
         # v3: one poster per server, so the ping is that server's choice
         # ("everyone", a role id, or "none") and a missing-permission note goes
         # to that server's admin channel via `notify`, never to the owner. The
@@ -539,6 +589,9 @@ class DiscordCodeAlertPoster:
                 channel = await self._client.fetch_channel(self._channel_id)
             except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
                 _classify_send_error(exc)
+
+        if _foreign_channel(channel, self._guild_id, self._channel_id):
+            raise ChannelNotInGuildError(f"channel {self._channel_id} isn't in this server")
 
         mentions = discord.AllowedMentions.none()
         if alert.ping:
@@ -657,6 +710,9 @@ class NewsBot(discord.Client):
         self._ready_once = False
         # The every-minute digest job does nothing until `on_ready` flips this.
         self._digests_enabled = False
+        # The summaries job runs on its interval and once at startup; whichever gets here
+        # second skips instead of making the same summaries twice.
+        self._summaries_running = False
         self._last_two_instance_alert: datetime | None = None
 
         # Reddit's cross-call gap is honored across every collection pass,
@@ -919,6 +975,7 @@ class NewsBot(discord.Client):
             publisher_for=self._publisher_for,
             notify_guild=router.notify_guild,
             summary_for=summary_lookup(self._summary_deps),
+            preview_summary_for=dry_run_lookup(self._summary_deps),
             retry_summary=retry_lookup(self._summary_deps),
             send_report=router.send_report,
         )
@@ -947,12 +1004,13 @@ class NewsBot(discord.Client):
             on_posted=on_posted,
             already_posted=already,
             skip_permanent=True,
+            guild_id=guild.guild_id,
         )
 
     def _poster_for(
         self, guild_id: int, channel_id: int, ping: str, notify: Callable[[str], Awaitable[None]]
     ) -> DiscordCodeAlertPoster:
-        return DiscordCodeAlertPoster(self, channel_id, ping, notify)
+        return DiscordCodeAlertPoster(self, channel_id, ping, notify, guild_id=guild_id)
 
     def _fail_pending_codes_sync(self) -> list[str]:
         with closing(connect(self.db_path)) as conn:
@@ -965,14 +1023,16 @@ class NewsBot(discord.Client):
         reconnect, and none of this should repeat just because a network
         blip forced a new gateway session. On the genuine first connection:
 
-        1. the import notice, if this start did the import;
+        1. the import notice, if this start did the import, and a notice for today's
+           digest if v2.2 left it pending or half-posted;
         2. SHiFT codes a crash left pending (the owner hears a count, each
            server hears its own), then whatever is still queued is delivered;
         3. reconciliation, so servers the bot left are dropped and servers it
            joined while down get a row;
         4. the lounges: reload, chunk members, schedule the quotes;
         5. the permission sweep, with its counts to the owner;
-        6. only then, the minute digest job is switched on.
+        6. only then, the minute digest job is switched on, and the summaries job
+           gets its first run right away instead of waiting out its five minutes.
 
         Each step is wrapped on its own and only logs when it blows up: a bug
         in one of them must never be the thing that stops the bot from
@@ -985,6 +1045,7 @@ class NewsBot(discord.Client):
             return
         self._ready_once = True
         await self._startup_step("import notice", self._send_import_notice)
+        await self._startup_step("stuck v2.2 digest", self._report_stuck_v22_digest)
         await self._startup_step("pending codes", self._recover_codes)
         await self._startup_step("reconcile", self._reconcile)
         await self._startup_step("lounge reload", self.reload_lounges)
@@ -993,6 +1054,11 @@ class NewsBot(discord.Client):
         await self._startup_step("permission sweep", self._permission_sweep)
         self._digests_enabled = True
         logger.info("startup finished; per-server digests are on")
+        # The five-minute job's first turn is five minutes away, and a deploy at 08:58 would
+        # otherwise reach 09:00 with no summary ready: the digest makes one inline, which never
+        # searches the web, and posts a "reduced coverage" footer. So run it once now, after the
+        # minute job is on (a slow model call mustn't hold up a due digest).
+        await self._startup_step("summaries", self._summaries_job)
 
     async def _startup_step(self, name: str, step: Callable[[], Awaitable[object]]) -> None:
         try:
@@ -1006,6 +1072,57 @@ class NewsBot(discord.Client):
         if report is not None:
             await self.alert(report.owner_notice())
             self._import_report = None
+
+    def _stuck_v22_sync(self, now: datetime) -> list[tuple[int, str, bool]]:
+        """Today's v2.2 digest rows (imported server only) that nobody can safely finish.
+
+        A v2.2 row has no window, which is how it's told from one v3 wrote (v3 resumes its own).
+        `pending` means v2.2 died before it finished; `failed` with something posted means a
+        half-posted day. v3 won't post over either, so the server has to be told, once: each
+        is remembered in `app_state` so a restart doesn't repeat it. Returns
+        `(guild_id, run_date, has_admin_channel)` for the ones not yet told.
+        """
+        stuck: list[tuple[int, str, bool]] = []
+        with closing(connect(self.db_path)) as conn:
+            for guild in repo.list_guilds(conn):
+                if guild.imported_at is None:
+                    continue
+                try:
+                    today = local_run_date(now, guild.timezone)
+                except ZoneInfoNotFoundError, ValueError, OSError:
+                    continue
+                row = repo.get_guild_digest(conn, guild.guild_id, today)
+                if row is None or row.window_end is not None:
+                    continue
+                posted_any = bool(row.posted_by_game) or bool(row.posted_message_ids)
+                if not (row.status == "pending" or (row.status == "failed" and posted_any)):
+                    continue
+                key = f"{_STUCK_V22_KEY}{guild.guild_id}:{today.isoformat()}"
+                if repo.app_state_get(conn, key) is not None:
+                    continue
+                repo.app_state_set(conn, key, row.status)
+                stuck.append(
+                    (guild.guild_id, today.isoformat(), guild.admin_channel_id is not None)
+                )
+        return stuck
+
+    async def _report_stuck_v22_digest(self) -> None:
+        """Tell a server (or the owner, if it has no admin channel) that v2.2 left its digest stuck.
+
+        v2.2 alerted its admin channel about this at startup; v3 skips such a row, correctly,
+        and without this the friend's digest just wouldn't arrive until somebody noticed.
+        """
+        for guild_id, run_date, has_admin_channel in await asyncio.to_thread(
+            self._stuck_v22_sync, _utcnow()
+        ):
+            text = (
+                f"newsbot: {run_date}'s digest from the previous version was left unfinished "
+                "when it stopped, so I won't post over it. Check the game channels, and if it "
+                "didn't land, `/newsbot run-now` will post it."
+            )
+            await self.router.notify_guild(guild_id, text)
+            if not has_admin_channel:
+                await self.alert(f"server {guild_id}: {text}")
 
     async def _recover_codes(self) -> None:
         """Tell people about codes a crash left pending, then deliver what's still queued."""
@@ -1110,9 +1227,13 @@ class NewsBot(discord.Client):
             await self._alert_once("digests", f"newsbot: digest tick crashed: {_alert_reason(exc)}")
 
     async def _summaries_job(self) -> None:
-        """Every five minutes: make the summaries the next comped digests will need."""
+        """Every five minutes, and once at startup: make the summaries comped digests will need."""
         if self._summary_deps is None:
             raise RuntimeError("_summaries_job() ran before setup_hook() finished")
+        if self._summaries_running:
+            logger.info("summaries job skipped: another run is still going")
+            return
+        self._summaries_running = True
         try:
             done = await prepare_summaries(self._summary_deps)
             self._crash_alerted.discard("summaries")
@@ -1123,6 +1244,8 @@ class NewsBot(discord.Client):
             await self._alert_once(
                 "summaries", f"newsbot: summaries job crashed: {_alert_reason(exc)}"
             )
+        finally:
+            self._summaries_running = False
 
     def _owner_report_sync(self, now: datetime, today: str) -> str | None:
         """The report text, or None if today's has already gone out.

@@ -1760,6 +1760,20 @@ def app_state_delete(conn: sqlite3.Connection, key: str) -> None:
         conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
 
 
+# v2.2 collected inside its own digest run, so a digest it posted has no window of its own:
+# the items it used were stamped a few seconds after its due time, and a first v3 window of
+# "due minus 24 hours" would hand every one of them to the model (and the server) a second time.
+# What the data supports is that the digest was finished at `updated_at`, so that's its cutoff.
+# Only `ok` and `partial` rows get one: a v2.2 `pending` row with no window is how the schedule
+# knows nobody can say what it posted, and that has to stay true. (`julianday` is NULL for a
+# timestamp that isn't one, which keeps a hand-edited row from breaking the window math later.)
+_STAMP_V22_WINDOWS = (
+    "UPDATE digests SET window_start = created_at, window_end = updated_at "
+    "WHERE guild_id = ? AND window_end IS NULL AND status IN ('ok', 'partial') "
+    "AND julianday(created_at) IS NOT NULL AND julianday(updated_at) IS NOT NULL"
+)
+
+
 def adopt_orphan_digests(conn: sqlite3.Connection, guild_id: int) -> int:
     """Give v2.2-written digest rows (NULL `guild_id`) to the imported guild.
 
@@ -1768,7 +1782,8 @@ def adopt_orphan_digests(conn: sqlite3.Connection, guild_id: int) -> int:
     it as `guild_id`'s. Does nothing unless `guild_id` is the guild the
     import created (`imported_at` set). `UPDATE OR IGNORE` skips a row
     that would collide with a digest the guild already has for that day.
-    Returns how many rows it adopted.
+    Returns how many rows it adopted. The posted ones get a window ending where the
+    v2.2 digest finished (`_STAMP_V22_WINDOWS`), so the next v3 window starts after it.
     """
     with conn:
         cur = conn.execute(
@@ -1776,6 +1791,7 @@ def adopt_orphan_digests(conn: sqlite3.Connection, guild_id: int) -> int:
             "AND ? = (SELECT guild_id FROM guilds WHERE imported_at IS NOT NULL)",
             (guild_id, guild_id),
         )
+        conn.execute(_STAMP_V22_WINDOWS, (guild_id,))
     return cur.rowcount
 
 
@@ -1795,6 +1811,7 @@ def adopt_orphan_digests_in_tx(conn: sqlite3.Connection, guild_id: int) -> int:
     Returns the number of rows adopted.
     """
     cur = conn.execute("UPDATE digests SET guild_id = ? WHERE guild_id IS NULL", (guild_id,))
+    conn.execute(_STAMP_V22_WINDOWS, (guild_id,))
     return cur.rowcount
 
 
@@ -2713,6 +2730,25 @@ def latest_game_summary(conn: sqlite3.Connection, game_key: str) -> GameSummaryR
         (game_key,),
     ).fetchone()
     return game_summary_by_id(conn, row["id"]) if row else None
+
+
+def last_comped_digest_end(conn: sqlite3.Connection, game_key: str) -> datetime | None:
+    """Where the newest posted digest of a comped server following `game_key` ended.
+
+    This is what the very first summary of a game chains onto when no summary exists
+    yet: a digest that already went out (v2.2's last one, adopted at the import) has used
+    everything up to its cutoff, so the first v3 summary must not hand it to the model
+    again. Once a summary row exists, `latest_game_summary` takes over.
+    """
+    row = conn.execute(
+        "SELECT MAX(d.window_end) AS end FROM digests d "
+        "JOIN guilds g ON g.guild_id = d.guild_id AND g.tier = 'comped' "
+        "JOIN guild_games gg ON gg.guild_id = d.guild_id AND gg.game_key = ? "
+        "WHERE d.window_end IS NOT NULL "
+        "AND (d.status IN ('ok', 'partial') OR d.posted_by_game != '{}')",
+        (game_key,),
+    ).fetchone()
+    return datetime.fromisoformat(row["end"]) if row and row["end"] else None
 
 
 def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummaryRow | None:

@@ -170,7 +170,9 @@ def test_a_failed_import_exits_2_and_writes_nothing(tmp_path, db, capsys):
         f"guild_id: 1\ndigest: {{time: '09:00', timezone: UTC}}\ntopics:\n{games}\nsources: []\n"
     )
 
-    assert main(["--config", str(config), "--db", db, "--stub-llm", str(LLM), "--dry-run"]) == 2
+    # --post-to-stdout, because a dry run works on a copy and would prove nothing about the file.
+    argv = ["--config", str(config), "--db", db, "--stub-llm", str(LLM), "--post-to-stdout"]
+    assert main(argv) == 2
 
     assert "can follow at most 10" in capsys.readouterr().err
     assert count(db, "guilds") == 0

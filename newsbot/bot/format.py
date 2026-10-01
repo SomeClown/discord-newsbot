@@ -1348,14 +1348,16 @@ class DigestOutcome:
 
 
 # What a failed digest's notes look like is whatever the exception said, so the
-# categories are a handful of substring checks, most specific first. Anything
-# unrecognized is "other", which is honest.
+# categories are a handful of pattern checks, most specific first. Anything
+# unrecognized is "other", which is honest. The status codes and error codes
+# are matched on word boundaries: a channel id is eighteen digits, and about one
+# in twenty of them contains a 403 or a 404 without having any opinion about HTTP.
 _REASON_PATTERNS = (
-    ("missing permissions", ("403", "forbidden", "missing permissions", "50013")),
-    ("channel gone", ("404", "unknown channel", "not found", "10003")),
-    ("rate limited", ("429", "rate limit")),
-    ("timed out", ("timed out", "timeout")),
-    ("couldn't build", ("build failed",)),
+    ("missing permissions", re.compile(r"\b403\b|forbidden|missing permissions|\b50013\b")),
+    ("channel gone", re.compile(r"\b404\b|unknown channel|not found|\b10003\b")),
+    ("rate limited", re.compile(r"\b429\b|rate limit")),
+    ("timed out", re.compile(r"timed out|timeout")),
+    ("couldn't build", re.compile(r"build failed")),
 )
 
 
@@ -1373,8 +1375,8 @@ def outcome_from_digest(status: str, notes: str | None) -> DigestOutcome:
     if status == "pending":
         return DigestOutcome(False, "interrupted")
     text = (notes or "").casefold()
-    for reason, needles in _REASON_PATTERNS:
-        if any(needle in text for needle in needles):
+    for reason, pattern in _REASON_PATTERNS:
+        if pattern.search(text):
             return DigestOutcome(False, reason)
     return DigestOutcome(False, "other")
 

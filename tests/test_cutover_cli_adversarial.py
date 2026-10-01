@@ -2,13 +2,12 @@
 
 The CLI is how I check a cutover before doing it, which makes it the thing most likely to be
 pointed at the production database "just to see", and so the thing whose side effects need to
-be known rather than discovered. `--dry-run` is documented as a rehearsal that writes
-nothing, and for a server that's already been imported that's true to the byte (these tests
-compare a full dump of the database before and after). Against a database that is still
-v2.2's, it isn't: every mode except `--check-sources` runs the once-ever import first, and a
-dry run is a mode. That has consequences, worked out below, one of which is a strict xfail:
-an early dry run freezes the SHiFT ping budget at the moment of the import, and v2.2 keeps
-spending it until the real cutover.
+be known rather than discovered. `--dry-run` is a rehearsal that writes nothing, and these
+tests compare a full dump of the database before and after to prove it. Against a database
+that is still v2.2's it used to run the once-ever import on the real file, which froze the SHiFT
+ping budget at the moment of the import while v2.2 kept spending it. Now the dry run works on a
+throwaway copy, so the file stays byte-identical; the write modes (`--collect`, `--fixtures`,
+`--post-to-stdout`) still import for real, and a test says so.
 
 The rest is the flag matrix: how many servers, with and without `--guild`, `--post-to-stdout`
 and `--force` against rows v2.2 left behind, `--check-sources` never touching a database, the
@@ -135,30 +134,41 @@ def test_a_dry_run_does_not_claim_the_day_so_the_real_digest_still_posts(importe
 # --- --dry-run against a database that is still v2.2's ---
 
 
-def test_a_dry_run_against_a_v22_database_performs_the_once_ever_import(v22_db, capsys, offline):
-    # Pinned: the module docstring says so, and it's the thing to know before pointing this at
-    # the production file. The import is silent to the bot afterwards (no notice for the owner).
-    assert table(v22_db, "guilds") == []
+def test_a_dry_run_against_a_v22_database_leaves_the_file_byte_identical(v22_db, capsys, offline):
+    # The import (and the migrations before it) happen in a throwaway copy, so a rehearsal
+    # against the production file can't be the thing that runs the once-ever import.
+    before = Path(v22_db).read_bytes()
 
     assert main(args(v22_db, "--dry-run")) == 0
 
     err = capsys.readouterr().err
-    assert "[import] Imported the v2 setup" in err
+    assert "[import] Imported the v2 setup" in err and "throwaway copy" in err
+    assert Path(v22_db).read_bytes() == before
+    assert table(v22_db, "guilds") == []
+    # ...so the bot, not the rehearsal, gets to do the import and tell the owner about it.
+    assert ensure_imported(str(v22_db), load_config(PRODLIKE), lambda: NOW_DT) is not None
+
+
+def test_a_dry_run_against_a_database_that_does_not_exist_creates_nothing(
+    tmp_path, offline, capsys
+):
+    db = tmp_path / "nowhere" / "t.db"
+
+    main(args(db, "--dry-run"))
+
+    assert not db.exists() and not db.parent.exists()
+
+
+def test_a_collection_pass_still_does_the_import_for_real(v22_db, offline):
+    # `--collect` (and --fixtures, and --post-to-stdout) write to the file anyway, so they are
+    # not the read-only mode and the import runs on the real database, as the module docstring says.
+    main(args(v22_db, "--collect", "--fixtures", str(FIXTURES / "integration")))
+
     with closing(connect(v22_db)) as conn:
         assert [g.guild_id for g in repo.list_guilds(conn)] == [FRIEND]
         assert repo.app_state_get(conn, "import") is not None
-    assert ensure_imported(str(v22_db), load_config(PRODLIKE)) is None  # so the bot has no report
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the import copies the SHiFT ping budget once, and a dry run can be the one that runs "
-        "it, any time before the cutover. v2.2 keeps spending the budget in alert_state "
-        "meanwhile, and nothing carries the later count over, so a server whose three pings "
-        "were spent after an early dry run gets three more on cutover day"
-    ),
-)
 async def test_the_ping_budget_v22_spends_after_an_early_dry_run_stays_spent(
     v22_db, make_world, offline
 ):
@@ -284,7 +294,7 @@ def test_the_digest_row_a_cli_run_writes_is_stamped_with_now_not_the_wall_clock(
 
 
 def test_the_import_is_stamped_with_now_too(v22_db, offline):
-    main(args(v22_db, "--dry-run"))
+    main(args(v22_db, "--collect", "--fixtures", str(FIXTURES / "integration")))
 
     with closing(connect(v22_db)) as conn:
         (guild,) = repo.list_guilds(conn)
@@ -415,16 +425,6 @@ def test_a_placeholder_admin_channel_means_no_admin_channel_for_the_imported_ser
     assert guild.admin_channel_id is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "only the import's view of admin_channel_id treats a placeholder as none. "
-        "AppConfig.admin_channel_id, which is the owner's channel and what the Router is built "
-        "with, stays 0 (or -5), so with config.example.yaml's placeholder every owner alert "
-        "tries to fetch channel 0 from Discord, fails, and logs an exception instead of "
-        "quietly having nowhere to go"
-    ),
-)
 @pytest.mark.parametrize("written", ["0", "-5"])
 def test_a_placeholder_admin_channel_is_also_no_owner_channel(tmp_path, written):
     assert load_config(placeholder_config(tmp_path, written)).admin_channel_id is None
@@ -450,11 +450,11 @@ def test_a_server_with_no_admin_channel_still_gets_its_digest_run_without_a_repo
     assert "Patch 1.2 fixes crashes" in capsys.readouterr().out
 
 
-async def test_with_the_placeholder_an_owner_alert_asks_discord_for_channel_zero(
+async def test_with_the_placeholder_an_owner_alert_never_asks_discord_for_channel_zero(
     make_world, tmp_path, monkeypatch
 ):
-    # Pinned consequence of the xfail above: the alert has "somewhere to go", so it goes and
-    # looks for it. Harmless (the lookup fails and is logged), but it's a REST call per alert.
+    # The placeholder reads as "no owner channel", so an owner alert has nowhere to go and says
+    # so in the log instead of spending a REST call per alert on a channel that can't exist.
     from types import SimpleNamespace
 
     import discord
@@ -470,4 +470,4 @@ async def test_with_the_placeholder_an_owner_alert_asks_discord_for_channel_zero
 
     await world.ready()  # the import notice is an owner alert
 
-    assert 0 in asked
+    assert 0 not in asked

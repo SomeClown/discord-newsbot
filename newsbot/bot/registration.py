@@ -74,11 +74,16 @@ def _unique(ids: Iterable[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys(ids))
 
 
-def plan_scopes(cfg: AppConfig, lounge_guild_ids: Iterable[int]) -> ScopePlan:
+def plan_scopes(
+    cfg: AppConfig, lounge_guild_ids: Iterable[int], imported_guild_ids: Iterable[int] = ()
+) -> ScopePlan:
     """Work out the registration scopes from the config and the lounge guilds. Pure.
 
     Production (`command_guild_ids` empty): global set, `/owner` in the home guild,
-    `/lounge` in each lounge guild, and a sync of each of those guilds.
+    `/lounge` in each lounge guild, and a sync of each of those guilds, plus the
+    imported (v2.2) server whatever else it has: v2 registered `/newsbot`, `/news` and
+    `/shift` as guild commands there, and a guild sync with nothing in it is the only
+    thing that clears them, even when that server has no lounge quote and isn't the home guild.
 
     Dev and self-host (`command_guild_ids` non-empty): nothing global; the global set
     is copied into each listed guild and only those guilds are synced. `/owner` and
@@ -88,7 +93,8 @@ def plan_scopes(cfg: AppConfig, lounge_guild_ids: Iterable[int]) -> ScopePlan:
     lounges = _unique(sorted(lounge_guild_ids))
     if not cfg.command_guild_ids:
         owner = (cfg.home_guild_id,) if cfg.home_guild_id is not None else ()
-        return ScopePlan(True, (), owner, lounges, _unique([*owner, *lounges]))
+        imported = _unique(sorted(imported_guild_ids))
+        return ScopePlan(True, (), owner, lounges, _unique([*owner, *lounges, *imported]))
     listed = _unique(cfg.command_guild_ids)
     owner = (cfg.home_guild_id,) if cfg.home_guild_id in listed else ()
     return ScopePlan(False, listed, owner, tuple(g for g in lounges if g in listed), listed)
@@ -174,10 +180,17 @@ def lounge_guild_ids_sync(db_path: str | Path) -> list[int]:
         return [lounge.guild_id for lounge in repo.list_lounges(conn) if lounge.quote_enabled]
 
 
+def imported_guild_ids_sync(db_path: str | Path) -> list[int]:
+    """The server the v2 import created, if there is one: it always gets a guild-scope sync."""
+    with closing(connect(db_path)) as conn:
+        return [g.guild_id for g in repo.list_guilds(conn) if g.imported_at is not None]
+
+
 async def setup_commands(bot: NewsBot) -> dict[str, str]:
     """Register the v3 command set on `bot.tree` and sync what changed. `setup_hook` calls this."""
     lounge_ids = await asyncio.to_thread(lounge_guild_ids_sync, bot.db_path)
-    plan = plan_scopes(bot.cfg, lounge_ids)
+    imported_ids = await asyncio.to_thread(imported_guild_ids_sync, bot.db_path)
+    plan = plan_scopes(bot.cfg, lounge_ids, imported_ids)
     register_commands(bot, plan)
     return await sync_commands(bot, plan)
 
@@ -185,6 +198,7 @@ async def setup_commands(bot: NewsBot) -> dict[str, str]:
 __all__ = [
     "ScopePlan",
     "commands_hash",
+    "imported_guild_ids_sync",
     "lounge_guild_ids_sync",
     "plan_scopes",
     "register_commands",

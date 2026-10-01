@@ -9,10 +9,10 @@ belongs to nobody read as a server), it can say the same thing twice (two restar
 day), or it can say nothing for a day it should have (the guard is written before the
 send, which is the trade I made on purpose and want written down with a test next to it).
 
-`outcome_from_digest` is the other half: a handful of substring checks that turn a failed
-row's notes into a reason. They're fine for the notes the bot writes. They are less fine for
-notes that happen to contain a Discord channel id, because a snowflake is a long string of
-digits and "403" is a short one.
+`outcome_from_digest` is the other half: a handful of pattern checks that turn a failed
+row's notes into a reason. They used to be bare substrings, which is fine for the notes the bot
+writes and less fine for notes that happen to contain a Discord channel id, because a snowflake
+is a long string of digits and "403" is a short one. They match on word boundaries now.
 """
 
 from __future__ import annotations
@@ -124,15 +124,6 @@ def test_a_status_nobody_writes_counts_as_a_failure_not_as_a_post():
     assert outcome_from_digest("skipped", None) == DigestOutcome(False, "other")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the reason categories are substring checks for 403, 404 and 429, and a Discord "
-        "channel id is eighteen digits that contain one of those about one time in twenty, "
-        "so a failure about a channel that can't take messages is reported to the owner as "
-        "missing permissions (or a rate limit) because of the id and nothing else"
-    ),
-)
 @pytest.mark.parametrize(
     "notes",
     [

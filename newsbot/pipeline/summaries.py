@@ -210,7 +210,10 @@ def _inputs_sync(
             start = retrying.window_start
         else:
             latest = repo.latest_game_summary(conn, game.key)
-            start, _ = digest_window(end, latest.window_end if latest else None)
+            # With no summary yet (the first one after the cutover), start where the
+            # server's last posted digest ended, or v2.2's items would be fed in again.
+            previous = latest.window_end if latest else repo.last_comped_digest_end(conn, game.key)
+            start, _ = digest_window(end, previous)
         stored = repo.summary_items(conn, game.key, start, end)
         prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
         followed = {f.game_key for f in repo.comped_follows(conn)}

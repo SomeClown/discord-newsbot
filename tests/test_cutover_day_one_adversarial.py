@@ -15,7 +15,8 @@ fully spent, and with the quote already posted. The fake channels record every s
 "nothing changed" is an assertion about silence, which is the hardest kind to get wrong by
 accident.
 
-A few of these pin behavior I'd rather not have found (the strict xfails); each says why.
+A few of these pin behavior I'd rather not have found; each says why. The strict xfails the
+adversarial round left here are fixed and their markers are gone.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from cutover_world import (
     FRIEND,
     FRIEND_ADMIN_CH,
     LOUNGE_CH,
+    OWNER_CH,
+    OWNER_GUILD,
     PAL_CH,
     SHIFT_CH,
     TODAY,
@@ -189,14 +192,6 @@ async def test_a_v22_pending_row_is_never_posted_over(make_world, v22_db):
     assert digest_posts(world) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "v2.2 told the admin channel when it found a digest left pending or half-posted at "
-        "startup. v3 skips such a row, correctly, but says nothing to anyone, so the friend's "
-        "digest just doesn't arrive until somebody notices"
-    ),
-)
 @pytest.mark.parametrize(("status", "posted_ids"), [("pending", "[]"), ("failed", "[301]")])
 async def test_a_stuck_v22_row_is_reported_to_somebody(make_world, v22_db, status, posted_ids):
     v22_digest(v22_db, TODAY, status, posted_ids=posted_ids, notes="v2.2 stopped here")
@@ -210,6 +205,64 @@ async def test_a_stuck_v22_row_is_reported_to_somebody(make_world, v22_db, statu
     # whether anything is about the digest.
     about_it = [t for t in told + notices if "digest" in t.casefold()]
     assert about_it, (told, notices)
+
+
+def about_the_digest(world, channel_id) -> list[str]:
+    return [
+        m.content for m in world.sent(channel_id) if m.content and "previous version" in m.content
+    ]
+
+
+async def test_the_stuck_v22_notice_goes_to_the_servers_admin_channel_once(make_world, v22_db):
+    v22_digest(v22_db, TODAY, "pending")
+    first = await make_world(now=datetime(2026, 10, 1, 17, 30, tzinfo=UTC))
+    await first.ready()
+    assert len(about_the_digest(first, FRIEND_ADMIN_CH)) == 1
+    assert first.sent(FRIEND_ADMIN_CH)[-1].allowed_mentions.everyone is False
+
+    # A restart (and its on_ready) over the same database says nothing more.
+    again = await make_world(now=datetime(2026, 10, 1, 17, 40, tzinfo=UTC), channels=first.channels)
+    await again.ready()
+
+    assert len(about_the_digest(again, FRIEND_ADMIN_CH)) == 1
+
+
+async def test_a_finished_v22_digest_gets_no_stuck_notice(make_world, v22_db):
+    v22_digest(v22_db, TODAY, "ok", posted_ids="[301]")
+    world = await make_world(now=datetime(2026, 10, 1, 17, 30, tzinfo=UTC))
+
+    await world.ready()
+
+    assert about_the_digest(world, FRIEND_ADMIN_CH) == []
+
+
+async def test_a_stuck_v22_digest_with_no_admin_channel_goes_to_the_owner(make_world, v22_db):
+    v22_digest(v22_db, TODAY, "pending")
+    world = await make_world(now=datetime(2026, 10, 1, 17, 30, tzinfo=UTC), owner_channel=True)
+    world.run("UPDATE guilds SET admin_channel_id = NULL")
+
+    await world.ready()
+
+    assert about_the_digest(world, FRIEND_ADMIN_CH) == []
+    assert len(about_the_digest(world, OWNER_CH)) == 1
+
+
+async def test_a_game_channel_in_another_server_gets_no_digest_through_the_real_wiring(
+    make_world,
+):
+    # The real `_publisher_for` hands the server's id to the publisher, so a channel id that
+    # names somebody else's server is refused, and the server's other games still post.
+    world = await make_world(now=DUE, owner_channel=True)
+    stranger = world.add_channel(555000000000000001, OWNER_GUILD)
+    world.run("UPDATE guild_games SET channel_id = ? WHERE game_key = 'palworld'", stranger.id)
+    for game in ("borderlands4", "palworld"):
+        add_item(world.db_path, game, "b", DUE - timedelta(hours=2))
+    await world.ready()
+
+    await world.tick(DUE)
+
+    assert stranger.sent == []
+    assert len(world.sent(BL4_CH)) == 1
 
 
 async def test_a_collection_pass_collects_and_never_publishes(make_world, tmp_path, monkeypatch):
@@ -442,15 +495,6 @@ async def test_a_code_alert_never_comes_back_after_a_restart(make_world, monkeyp
 # --- what the first v3 digest is made of ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A first v3 window is (due - 24h, due], and v2.2 collected the items of its last "
-        "digest a few seconds after that digest's due time, so every one of them falls "
-        "inside it. The first v3 summary hands the model, and so the friend, yesterday's "
-        "news again (v2.2 itself only ever summarized items it had not stored before)"
-    ),
-)
 async def test_the_first_v3_summary_does_not_refeed_items_v22_already_posted(make_world, v22_db):
     # v2.2 collects inside its own run, so the items of its 09:00 digest are stamped a few
     # seconds after 09:00. A story from that digest cites one.
@@ -478,13 +522,18 @@ async def test_the_first_v3_summary_does_not_refeed_items_v22_already_posted(mak
     assert posted not in world.llm.urls_seen()
 
 
-async def test_an_upgrade_in_the_last_minutes_before_nine_posts_a_reduced_coverage_footer(
-    make_world,
+async def test_an_upgrade_in_the_last_minutes_before_nine_still_gets_a_clean_digest(
+    make_world, monkeypatch
 ):
-    # Pinned, and the one thing the friend can see change on day one. The prepare job (which
-    # searches the web, half an hour ahead) only gets its first turn five minutes after
-    # startup, so a start at 08:58 has no summary ready at 09:00 and the digest makes one
-    # inline, which never searches. v2.2 searched inline. The post is right, and says so.
+    # This used to post a "reduced coverage" footer: the prepare job's first interval turn is
+    # five minutes after startup, so a start at 08:58 had no summary at 09:00 and the digest made
+    # one inline, which never searches. `on_ready` now runs the prepare job once itself.
+    import newsbot.pipeline.summaries as summaries_module
+
+    async def fake_search(deps, game_keys, key, *, sleep):
+        return SimpleNamespace(sources_total=1)
+
+    monkeypatch.setattr(summaries_module, "collect_web_search", fake_search)
     world = await make_world(now=DUE - timedelta(minutes=2), brave_key="a-brave-key")
     for game in ("borderlands4", "palworld"):
         add_item(world.db_path, game, "b", DUE - timedelta(hours=2))
@@ -492,9 +541,37 @@ async def test_an_upgrade_in_the_last_minutes_before_nine_posts_a_reduced_covera
 
     await world.tick(DUE)
 
-    footer = world.sent(PAL_CH)[0].embed.footer.text
-    assert "Reduced coverage today: web search skipped" in footer
-    assert world.rows("SELECT status FROM digests WHERE run_date = ?", TODAY) == [("partial",)]
+    assert not world.sent(PAL_CH)[0].embed.footer.text
+    assert world.rows("SELECT status FROM digests WHERE run_date = ?", TODAY) == [("ok",)]
+
+
+async def test_the_startup_run_of_the_prepare_job_and_the_interval_run_never_overlap(
+    make_world, monkeypatch
+):
+    import asyncio
+
+    import newsbot.bot.client as client_module
+
+    world = await make_world(now=DUE - timedelta(minutes=2))
+    gate = asyncio.Event()
+    entered: list[int] = []
+
+    async def slow_prepare(deps):
+        entered.append(1)
+        await gate.wait()
+        return []
+
+    monkeypatch.setattr(client_module, "prepare_summaries", slow_prepare)
+    startup = asyncio.create_task(world.ready())
+    await asyncio.sleep(0.05)  # the startup run is inside prepare_summaries, holding the job
+
+    await world.bot._summaries_job()  # the five-minute interval fires meanwhile
+
+    assert entered == [1]  # it skipped instead of making the same summaries twice
+    gate.set()
+    await startup
+    await world.bot._summaries_job()
+    assert entered == [1, 1]  # and the job is usable again afterwards
 
 
 async def test_an_upgrade_a_few_minutes_earlier_gets_the_prepare_job_and_a_clean_digest(

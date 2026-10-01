@@ -20,8 +20,10 @@ retry loop).
   instead of posting. (`--sweep` is the old name; it still works for one
   release, with a note on stderr.)
 - `--dry-run` (the default) previews one server's next digest from what's
-  stored. It writes nothing, apart from the one-time import if that hasn't
-  happened yet.
+  stored. It writes nothing, not even the one-time import or the schema
+  migration: it works on a throwaway copy of `--db`, so the real file comes
+  out byte-identical. (Pointing it at a v2.2 database and having it quietly
+  freeze the SHiFT ping budget at import time was the lesson there.)
 - `--post-to-stdout [--force]` is the same server's real run, printed instead
   of posted. It claims, prints and saves, so it exercises the per-server guard.
 - `--fixtures DIR` swaps the collectors for canned JSON and implies one
@@ -31,7 +33,11 @@ retry loop).
   included.
 
 Every mode but `--check-sources` runs the v2 import first (`ensure_imported`),
-so a self-hoster's first `--dry-run` after upgrading just works.
+so a self-hoster's first `--dry-run` after upgrading just works. Only the
+read-only mode, a digest preview with no collection pass (no `--collect`, no
+`--fixtures`), runs it against the throwaway copy; `--collect`, `--fixtures` and
+`--post-to-stdout` write for real, so they import for real. Which means none of
+those three belongs anywhere near a live production database.
 
 A reminder for anyone adding an import: `guild_digest.py` and `summaries.py`
 import from this module, so this module imports them lazily, inside the
@@ -46,7 +52,9 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -445,12 +453,18 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--dry-run",
         action="store_true",
-        help="preview one server's next digest from stored items (the default mode)",
+        help=(
+            "preview one server's next digest from stored items (the default mode); works on a "
+            "throwaway copy of --db, so nothing is written, the one-time import included"
+        ),
     )
     mode.add_argument(
         "--post-to-stdout",
         action="store_true",
-        help="run one server's digest for real (claim, print, save), printing instead of posting",
+        help=(
+            "run one server's digest for real (claim, print, save), printing instead of "
+            "posting; writes to --db, so never point it at a live database"
+        ),
     )
     parser.add_argument(
         "--guild",
@@ -460,7 +474,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--collect",
         action="store_true",
-        help="run one collection pass into --db (SHiFT fan-out prints instead of posting)",
+        help=(
+            "run one collection pass into --db (SHiFT fan-out prints instead of posting, and "
+            "marks codes posted); writes to --db, so never point it at a live database"
+        ),
     )
     parser.add_argument(
         "--sweep",
@@ -548,6 +565,23 @@ def main(argv: list[str] | None = None) -> int:
     want_collect = args.collect or bool(args.fixtures)
     want_digest = args.dry_run or args.post_to_stdout or not args.collect
 
+    # The one mode that must leave the file alone: a digest preview with no collection pass.
+    read_only = want_digest and not args.post_to_stdout and not want_collect
+    with _read_only_copy(args.db) if read_only else nullcontext(args.db) as db_path:
+        return _run_modes(args, db_path, cfg, now, want_collect, want_digest, read_only=read_only)
+
+
+def _run_modes(
+    args: argparse.Namespace,
+    db_path: str,
+    cfg: AppConfig,
+    now: Callable[[], datetime],
+    want_collect: bool,
+    want_digest: bool,
+    *,
+    read_only: bool,
+) -> int:
+    """Everything `main` does once it knows which database file it's really working on."""
     # Secrets are only needed for the pieces --fixtures and --stub-llm didn't
     # replace: real collectors want BRAVE_API_KEY (and Bluesky's, if
     # configured), the real LLM wants ANTHROPIC_API_KEY.
@@ -561,22 +595,27 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 2
 
-    db_parent = Path(args.db).parent
+    db_parent = Path(db_path).parent
     if str(db_parent) not in ("", "."):
         db_parent.mkdir(parents=True, exist_ok=True)
-    with closing(connect(args.db)) as conn:
+    with closing(connect(db_path)) as conn:
         migrate(conn)
         assert_fts5(conn)
 
     from newsbot.guilds.importer import ImportFailedError, ensure_imported
 
     try:
-        report = ensure_imported(args.db, cfg, now)
+        report = ensure_imported(db_path, cfg, now)
     except ImportFailedError as exc:
         print(f"newsbot: {exc}", file=sys.stderr)
         return 2
     if report is not None:
         print(f"[import] {report.owner_notice()}", file=sys.stderr)
+        if read_only:
+            print(
+                "[import] that happened in a throwaway copy; a dry run leaves your database alone",
+                file=sys.stderr,
+            )
 
     if want_collect:
         if args.fixtures:
@@ -585,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
             from newsbot.pipeline.collect import build_collection_collectors
 
             collectors = build_collection_collectors(cfg, secrets)
-        outcome = asyncio.run(_run_collect_cli(cfg, args.db, collectors, now))
+        outcome = asyncio.run(_run_collect_cli(cfg, db_path, collectors, now))
         if outcome.skipped:
             print("newsbot: collection skipped, a run is already in progress", file=sys.stderr)
         else:
@@ -594,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     if not want_digest:
         return 0
 
-    guild_id, why_not = _pick_guild(args.db, args.guild)
+    guild_id, why_not = _pick_guild(db_path, args.guild)
     if guild_id is None:
         print(f"newsbot: {why_not}", file=sys.stderr)
         return 2
@@ -606,9 +645,32 @@ def main(argv: list[str] | None = None) -> int:
         llm = AnthropicLLM(secrets.anthropic_api_key.get_secret_value())
     return asyncio.run(
         _run_digest_cli(
-            cfg, args.db, guild_id, now, llm, post=args.post_to_stdout, force=args.force
+            cfg, db_path, guild_id, now, llm, post=args.post_to_stdout, force=args.force
         )
     )
+
+
+@contextmanager
+def _read_only_copy(db_path: str):
+    """Yield a throwaway copy of the database at `db_path`, so a rehearsal can't touch the real one.
+
+    The import, the migrations and `connect()`'s own WAL pragma all write, and a
+    dry run that "only" imports has already spent a v2.2 server's SHiFT ping
+    budget at the wrong moment. So the file is opened read-only, copied with
+    sqlite's backup API (which is safe against a live writer) into a temp
+    directory, and everything runs there. A path that doesn't exist yet just
+    starts empty in the temp directory; nothing gets created at the real one.
+    """
+    with tempfile.TemporaryDirectory(prefix="newsbot-dry-run-") as scratch:
+        copy = Path(scratch) / "copy.db"
+        if Path(db_path).exists():
+            source = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                with closing(sqlite3.connect(copy)) as target:
+                    source.backup(target)
+            finally:
+                source.close()
+        yield str(copy)
 
 
 # --- --check-sources ---

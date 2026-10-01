@@ -161,3 +161,50 @@ async def test_default_publisher_still_stops_at_a_permanent_error():
     with pytest.raises(PublishError) as excinfo:
         await publisher.publish(rendered(("a", 1)))
     assert excinfo.value.retryable is False
+
+
+# --- a channel from another server is refused, like the router refuses it ---
+
+
+def _in_guild(channel: FakeChannel, guild_id: int | None) -> FakeChannel:
+    channel.guild = None if guild_id is None else type("G", (), {"id": guild_id})()
+    return channel
+
+
+async def test_a_channel_in_another_server_is_refused_permanently_and_skipped(caplog):
+    mine, theirs = _in_guild(FakeChannel(), 7), _in_guild(FakeChannel(), 8)
+    publisher = DiscordPublisher(FakeClient({1: theirs, 2: mine}), skip_permanent=True, guild_id=7)
+
+    with caplog.at_level("WARNING", logger="newsbot.bot.client"):
+        posted = await publisher.publish(rendered(("a", 1), ("b", 2)))
+
+    assert theirs.sent == 0 and mine.sent == 1
+    assert list(posted) == ["b"] and list(publisher.skipped) == ["a"]
+    assert "isn't in guild 7 (resolved to guild 8)" in caplog.text
+
+
+async def test_a_foreign_channel_without_skip_permanent_ends_the_run_without_a_retry():
+    theirs = _in_guild(FakeChannel(), 8)
+    publisher = DiscordPublisher(FakeClient({1: theirs}), guild_id=7)
+
+    with pytest.raises(PublishError) as excinfo:
+        await publisher.publish(rendered(("a", 1)))
+
+    assert excinfo.value.retryable is False and theirs.sent == 0
+
+
+async def test_a_channel_with_no_server_counts_as_foreign():
+    stray = _in_guild(FakeChannel(), None)
+    publisher = DiscordPublisher(FakeClient({1: stray}), skip_permanent=True, guild_id=7)
+
+    await publisher.publish(rendered(("a", 1)))
+
+    assert stray.sent == 0 and list(publisher.skipped) == ["a"]
+
+
+async def test_the_guild_check_is_off_without_a_guild_id():
+    anywhere = _in_guild(FakeChannel(), 8)
+
+    await DiscordPublisher(FakeClient({1: anywhere})).publish(rendered(("a", 1)))
+
+    assert anywhere.sent == 1

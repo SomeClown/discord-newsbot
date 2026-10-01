@@ -183,3 +183,48 @@ async def test_v2_defaults_still_alert_the_owner_path():
     await DiscordCodeAlertPoster(client, 1).post(_alert(True))
 
     assert len(client.owner_alerts) == 1
+
+
+# --- a channel from another server is refused, like the router refuses it ---
+
+
+async def test_a_channel_in_another_server_is_never_posted_to_and_is_final(caplog):
+    import pytest
+
+    from newsbot.bot.client import ChannelNotInGuildError
+
+    channel = FakeChannel(can_mention_everyone=True)
+    channel.guild.id = 8
+    poster = DiscordCodeAlertPoster(FakeClient(channel), 5, "everyone", guild_id=7)
+
+    with caplog.at_level("WARNING", logger="newsbot.bot.client"):
+        with pytest.raises(ChannelNotInGuildError):
+            await poster.post(_alert(True))
+
+    assert channel.sent == []
+    assert "isn't in guild 7 (resolved to guild 8)" in caplog.text
+
+
+async def test_the_poster_posts_when_the_channel_is_in_its_guild():
+    channel = FakeChannel(can_mention_everyone=True)
+    channel.guild.id = 7
+    poster = DiscordCodeAlertPoster(FakeClient(channel), 5, "everyone", guild_id=7)
+
+    assert await poster.post(_alert(True)) == 1
+
+
+async def test_a_foreign_channel_is_a_permanent_failure_for_the_retry_loop():
+    from newsbot.shift.sweep import post_alert_with_retry
+
+    channel = FakeChannel()
+    channel.guild.id = 8
+    poster = DiscordCodeAlertPoster(FakeClient(channel), 5, "none", guild_id=7)
+    sleeps: list[float] = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    message_id, error = await post_alert_with_retry(poster, sleep, _alert(False))
+
+    assert message_id is None and error is not None
+    assert sleeps == [] and channel.sent == []  # no backoff: waiting won't move a channel

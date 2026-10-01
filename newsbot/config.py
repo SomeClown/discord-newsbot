@@ -603,6 +603,15 @@ class AppConfig(BaseModel):
     def _validate_guild_id_not_bool(cls, v: object) -> object:
         return _reject_bool_guild_id(v)
 
+    @field_validator("admin_channel_id")
+    @classmethod
+    def _placeholder_admin_channel_is_none(cls, v: int | None) -> int | None:
+        # config.example.yaml's "fill me in" is `admin_channel_id: 000000000000000000`, and
+        # nothing positive can be a channel id's placeholder. Zero (or a typo'd negative)
+        # means "no owner channel" here, at the one place every consumer reads it from, so
+        # the Router doesn't go asking Discord for channel 0 on every alert.
+        return v if v is not None and v > 0 else None
+
     @field_validator("command_guild_ids", "comped_guild_ids", mode="before")
     @classmethod
     def _validate_guild_id_list(cls, v: object) -> object:
@@ -1214,13 +1223,17 @@ def load_config(path: str | Path) -> AppConfig:
                 ", ".join(old_keys),
             )
 
-    if cfg.alerts.allow_test_command:
-        # /newsbot test-alert went away in v3 (owner decision, 2026-10-01: there
-        # is no per-server version of it). The key still loads, because v2.2's
-        # AlertsCfg forbids unknown keys and a rollback has to keep working, but
-        # it no longer does anything, and a silent no-op is how people end up
-        # wondering where their command went.
-        log.warning("alerts.allow_test_command is ignored: /newsbot test-alert was removed in v3")
+    # /newsbot test-alert went away in v3 (owner decision, 2026-10-01: there
+    # is no per-server version of it). The key still loads, because v2.2's
+    # AlertsCfg forbids unknown keys and a rollback has to keep working, but
+    # it no longer does anything, and a silent no-op is how people end up
+    # wondering where their command went. The v3 `shift:` block has the same
+    # key, so it gets the same warning.
+    for block, setting in (("alerts", cfg.alerts), ("shift", cfg.shift)):
+        if setting.allow_test_command:
+            log.warning(
+                "%s.allow_test_command is ignored: /newsbot test-alert was removed in v3", block
+            )
 
     # The v2 keys have done their job (the catalog, the shift: block and
     # `legacy` carry everything the bot still needs), so the bot gets the

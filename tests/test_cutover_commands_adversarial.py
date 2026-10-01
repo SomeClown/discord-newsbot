@@ -12,10 +12,10 @@ syncing the friend's guild with a command set that contains only `/owner` and `/
 replaces the v2 set. That is true, and these tests check each link of it: the friend's guild
 really is a sync scope, its payload really has none of the old names, and the hash gate
 (`app_state` keys `commands:<scope>`) has nothing stored at cutover because v2.2 never wrote
-an `app_state` table at all. The links that aren't unconditional get pinned too: no sync for
-a friend whose lounge quote is off and whose home guild is somewhere else, and no re-sync
-after a rollback and roll-forward, because the stored hash still matches and Discord's copy
-does not.
+an `app_state` table at all. The friend's guild is always a scope, even with the quote off and
+the home guild somewhere else. The one link that stays conditional is pinned too: no re-sync
+after a rollback and roll-forward, because the stored hash still matches and Discord's copy does
+not (the plan's deploy notes tell the owner to clear the hashes first).
 
 The second half is housekeeping with teeth: names that were deleted must stay deleted, and
 the repo functions the cutover orphaned (`claim_codes`, `save_run` and friends) must not be
@@ -118,16 +118,16 @@ async def test_clearing_the_stored_hashes_is_enough_to_resync_everything(make_wo
     assert synced_scopes(again) == [None, FRIEND]
 
 
-async def test_with_the_quote_off_and_a_separate_home_the_friends_guild_is_not_a_sync_scope(
+async def test_with_the_quote_off_and_a_separate_home_the_friends_guild_is_still_a_sync_scope(
     make_world, tmp_path
 ):
-    # Pinned: the plan's "clear the old guild copy once" step is the owner's, then. The friend's
-    # guild only joins the plan through `/owner` (home) or `/lounge` (quote on), and here it
-    # has neither, so the old v2 commands are never overwritten.
+    # The imported server is always a sync scope, so the old v2 `/newsbot`, `/news` and
+    # `/shift` guild copies are cleared there even with no lounge quote and a home guild
+    # that's somewhere else. (It used to be left out, and the duplicates stayed.)
     world = await make_world(now=T_NOON, cfg=quote_off_config(tmp_path), owner_channel=True)
 
-    assert synced_scopes(world) == [None, OWNER_GUILD]
-    assert FRIEND not in synced_scopes(world)
+    assert synced_scopes(world) == [None, OWNER_GUILD, FRIEND]
+    assert names_in(world, FRIEND) == set()  # an empty set: the overwrite that clears v2's copies
 
 
 async def test_dev_mode_never_syncs_globally_and_only_the_listed_guilds(make_world):
@@ -160,14 +160,6 @@ def test_a_v22_file_with_the_test_command_on_loads_and_says_it_is_ignored(tmp_pa
     assert "allow_test_command is ignored" in caplog.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the 'ignored' warning is only raised for the v2 `alerts.allow_test_command` key. The "
-        "v3 `shift: allow_test_command: true` loads in silence, so it is exactly the silent "
-        "no-op the warning was written to prevent"
-    ),
-)
 def test_the_v3_shift_key_gets_the_same_warning(tmp_path, caplog):
     config = _config_with(
         tmp_path,
