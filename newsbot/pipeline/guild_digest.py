@@ -151,12 +151,20 @@ class SummaryLookup(Protocol):
 
     `None` if there isn't one. The coverage (where the server's last digest left off)
     is `None` for a server's first digest. The reuse rule (see `repo.get_game_summary`)
-    needs all three;
+    needs all three. A run that ends now (a preview, a confirmed run-now) also passes
+    `fresh_upto`, its range's newest item id, so a summary made before the news arrived isn't
+    reused; a scheduled digest never does, see `repo.get_game_summary`.
     `summaries.summary_lookup` wraps the stored lookup with an inline "make one now".
     """
 
     def __call__(
-        self, game_key: str, due_at: datetime, after: Coverage | None = None, /
+        self,
+        game_key: str,
+        due_at: datetime,
+        after: Coverage | None = None,
+        /,
+        *,
+        fresh_upto: int | None = None,
     ) -> Awaitable[GameSummary | None]: ...
 
 
@@ -355,11 +363,15 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
 
 
 async def _stored_summary(
-    db_path: str, game_key: str, due_at: datetime, after: Coverage | None
+    db_path: str,
+    game_key: str,
+    due_at: datetime,
+    after: Coverage | None,
+    fresh_upto: int | None = None,
 ) -> GameSummary | None:
     def _sync() -> GameSummary | None:
         with closing(connect(db_path)) as conn:
-            row = repo.get_game_summary(conn, game_key, due_at, after)
+            row = repo.get_game_summary(conn, game_key, due_at, after, fresh_upto=fresh_upto)
             return summary_from_row(conn, row) if row is not None else None
 
     return await asyncio.to_thread(_sync)
@@ -376,6 +388,7 @@ async def _build(
     *,
     retry_fallback: bool = False,
     summary_for: SummaryLookup | None = None,
+    fresh: bool = False,
 ) -> _Built:
     """Render one server's digest from stored data.
 
@@ -384,7 +397,9 @@ async def _build(
     a missing summary (see `summaries.py`), inside a deadline (`SUMMARY_TIMEOUT_S`, and
     `SUMMARY_BUDGET_S` for the whole digest) after which that game posts as headlines.
     `retry_fallback` (a confirmed run-now) asks for one more go at a summary that already
-    fell back.
+    fell back. `fresh` (a preview or a run-now, which end at "now") refuses a stored summary
+    that was made before items this range covers were stored; a scheduled digest ends at its
+    due instant and takes the prepared summary as it stands.
     """
     channels = {g.game_key: g.channel_id for g in followed}
     games = [g for g in deps.cfg.catalog if g.key in channels]
@@ -426,8 +441,13 @@ async def _build(
         lookup = (
             summary_for
             or deps.summary_for
-            or (lambda key, at, after: _stored_summary(deps.db_path, key, at, after))
+            or (
+                lambda key, at, after, fresh_upto=None: _stored_summary(
+                    deps.db_path, key, at, after, fresh_upto
+                )
+            )
         )
+        newest = {"fresh_upto": rng.upto} if fresh else {}
         clock = asyncio.get_running_loop().time
         spend_until = clock() + deps.summary_budget_s
         for game in games:
@@ -435,14 +455,16 @@ async def _build(
             allowed = max(min(deps.summary_timeout_s, spend_until - clock()), deps.summary_min_s)
             try:
                 async with asyncio.timeout(allowed) as limit:
-                    summary = await lookup(game.key, due_at, before)
+                    summary = await lookup(game.key, due_at, before, **newest)
                     if (
                         retry_fallback
                         and deps.retry_summary is not None
                         and summary is not None
                         and summary.status == "fallback"
                     ):
-                        summary = await deps.retry_summary(game.key, due_at, before) or summary
+                        summary = (
+                            await deps.retry_summary(game.key, due_at, before, **newest) or summary
+                        )
             except Exception:
                 # A broken or slow lookup costs this game its summary, not the server its
                 # digest. (A timeout says so in one line; a bug gets its traceback.)
@@ -579,6 +601,7 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
             due_at,
             run_date,
             summary_for=deps.preview_summary_for,
+            fresh=True,
         )
         return GuildPreview(built.rendered, built.notes)
 
@@ -801,6 +824,7 @@ async def _publish_claimed(
             due_at,
             run_date,
             retry_fallback=force and kind is RunKind.RUN_NOW,
+            fresh=kind is RunKind.RUN_NOW,
         )
     except Exception as exc:
         logger.exception("building guild %s's digest failed", guild_id)

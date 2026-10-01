@@ -780,6 +780,9 @@ class NewsBot(discord.Client):
         # The summaries job runs on its interval and once at startup; whichever gets here
         # second skips instead of making the same summaries twice.
         self._summaries_running = False
+        # Fire-and-forget work (the summaries run after a held first pass) is parked here so
+        # the event loop's weak reference doesn't let it be collected mid-flight.
+        self._background_tasks: set[asyncio.Task] = set()
         self._last_two_instance_alert: datetime | None = None
 
         # Reddit's cross-call gap is honored across every collection pass,
@@ -1102,7 +1105,8 @@ class NewsBot(discord.Client):
            is scheduled (its first pass is a breath later, after the startup
            delivery above has finished, so the two can't overlap), and the
            summaries job gets its first run right away instead of waiting out
-           its five minutes.
+           its five minutes (or, when the digests are held, right after the first
+           collection pass: a summary made before the news is stored is an empty one).
 
         Each step is wrapped on its own and only logs when it blows up: a bug
         in one of them must never be the thing that stops the bot from
@@ -1391,7 +1395,15 @@ class NewsBot(discord.Client):
             )
         finally:
             if pass_over:
+                was_held = self._digests_held
                 self._release_digest_hold("the first collection pass is over")
+                if was_held:
+                    # The summaries job sat out the wait (see `_summaries_job`); now that the
+                    # items are stored it's the first moment a summary can say something. Its
+                    # own task, so a slow model call doesn't stretch the collection job.
+                    task = asyncio.create_task(self._summaries_job())
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
 
     async def _digest_job(self) -> None:
         """The every-minute tick: run the digest of every server that's due.
@@ -1425,9 +1437,22 @@ class NewsBot(discord.Client):
             await self._alert_once("digests", f"newsbot: digest tick crashed: {_alert_reason(exc)}")
 
     async def _summaries_job(self) -> None:
-        """Every five minutes, and once at startup: make the summaries comped digests will need."""
+        """Every five minutes, and once at startup: make the summaries comped digests will need.
+
+        Sits out the first-pass hold (the same one the digests wait behind): before the first
+        pass has stored anything a summary is made from an empty store, and the reuse rule
+        would happily hand it to the next digest. `_collection_job` runs this the moment the
+        pass is over; if the pass never comes, the hold's time cap ends the wait.
+        """
         if self._summary_deps is None:
             raise RuntimeError("_summaries_job() ran before setup_hook() finished")
+        if (
+            self._digests_held
+            and self._digest_hold_until is not None
+            and _utcnow() < self._digest_hold_until
+        ):
+            logger.info("summaries job skipped: waiting for the first collection pass")
+            return
         if self._summaries_running:
             logger.info("summaries job skipped: another run is still going")
             return

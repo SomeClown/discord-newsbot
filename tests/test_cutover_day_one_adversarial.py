@@ -537,6 +537,12 @@ async def test_an_upgrade_in_the_last_minutes_before_nine_still_gets_a_clean_dig
     world = await make_world(now=DUE - timedelta(minutes=2), brave_key="a-brave-key")
     for game in ("borderlands4", "palworld"):
         add_item(world.db_path, game, "b", DUE - timedelta(hours=2))
+    # The hourly pass finished 40 minutes ago, so there's no first-pass hold and the startup
+    # run goes ahead (with a hold it waits for the pass, see test_stale_summary_after_collection).
+    world.run(
+        "INSERT INTO alert_state (key, value) VALUES ('last_sweep_at', ?)",
+        (DUE - timedelta(minutes=42)).isoformat(),
+    )
     await world.ready()
 
     await world.tick(DUE)
@@ -553,6 +559,11 @@ async def test_the_startup_run_of_the_prepare_job_and_the_interval_run_never_ove
     import newsbot.bot.client as client_module
 
     world = await make_world(now=DUE - timedelta(minutes=2))
+    # A recent pass in the database: no first-pass hold, so the startup run isn't deferred.
+    world.run(
+        "INSERT INTO alert_state (key, value) VALUES ('last_sweep_at', ?)",
+        (DUE - timedelta(minutes=42)).isoformat(),
+    )
     gate = asyncio.Event()
     entered: list[int] = []
 

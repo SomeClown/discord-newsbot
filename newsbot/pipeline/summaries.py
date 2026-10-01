@@ -185,6 +185,7 @@ def _claim_sync(
     token: str,
     now,
     retry_fallback: bool,
+    fresh_upto: int | None = None,
 ):
     with closing(connect(db_path)) as conn:
         state, row = repo.claim_game_summary(
@@ -195,6 +196,7 @@ def _claim_sync(
             now=now,
             retry_fallback=retry_fallback,
             after=after,
+            fresh_upto=fresh_upto,
         )
         summary = summary_from_row(conn, row) if row is not None and state == "reusable" else None
         return state, row, summary
@@ -447,12 +449,15 @@ async def ensure_summary(
     coverage: Sequence[str] = (),
     search: bool = False,
     retry_fallback: bool = False,
+    fresh_upto: int | None = None,
 ) -> GameSummary | None:
     """The summary a digest due at `due_at` should use for `game_key`, making it if nobody has.
 
     `after` is where the asking server's coverage of this game left off (`None`
     for a first digest); with `due_at` it decides what counts as reusable, and
-    where a new summary starts, see `repo.get_game_summary`. If nothing is, this
+    where a new summary starts, see `repo.get_game_summary` (`fresh_upto` too: a run that
+    ends now passes the newest item id so a summary made before the news arrived isn't
+    reused). If nothing is, this
     claims the game (one caller wins, the rest wait and then reuse the result),
     optionally searches the web
     (`search`, which replaces `coverage` with what the search reports),
@@ -478,7 +483,15 @@ async def ensure_summary(
     lost = 0
     while True:
         state, row, stored = await asyncio.to_thread(
-            _claim_sync, deps.db_path, game_key, due_at, after, token, deps.now, retry
+            _claim_sync,
+            deps.db_path,
+            game_key,
+            due_at,
+            after,
+            token,
+            deps.now,
+            retry,
+            fresh_upto,
         )
         if state == "reusable":
             return stored
@@ -526,7 +539,11 @@ def summary_lookup(deps: SummaryDeps) -> SummaryLookup:
     """
 
     async def lookup(
-        game_key: str, due_at: datetime, after: Coverage | None = None
+        game_key: str,
+        due_at: datetime,
+        after: Coverage | None = None,
+        *,
+        fresh_upto: int | None = None,
     ) -> GameSummary | None:
         return await ensure_summary(
             deps,
@@ -535,6 +552,7 @@ def summary_lookup(deps: SummaryDeps) -> SummaryLookup:
             run_date=due_at.astimezone(UTC).date(),
             after=after,
             coverage=[_WEB_SEARCH_SKIPPED] if deps.cfg.web_search is not None else [],
+            fresh_upto=fresh_upto,
         )
 
     return lookup
@@ -544,7 +562,11 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     """The run-now lookup: like `summary_lookup`, but a `fallback` gets one more try."""
 
     async def lookup(
-        game_key: str, due_at: datetime, after: Coverage | None = None
+        game_key: str,
+        due_at: datetime,
+        after: Coverage | None = None,
+        *,
+        fresh_upto: int | None = None,
     ) -> GameSummary | None:
         return await ensure_summary(
             deps,
@@ -554,6 +576,7 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
             after=after,
             coverage=[_WEB_SEARCH_SKIPPED] if deps.cfg.web_search is not None else [],
             retry_fallback=True,
+            fresh_upto=fresh_upto,
         )
 
     return lookup
@@ -587,9 +610,13 @@ def dry_run_lookup(
     made_lately: dict[tuple[str, Coverage | None, int], tuple[datetime, GameSummary]] = {}
 
     async def lookup(
-        game_key: str, due_at: datetime, after: Coverage | None = None
+        game_key: str,
+        due_at: datetime,
+        after: Coverage | None = None,
+        *,
+        fresh_upto: int | None = None,
     ) -> GameSummary | None:
-        stored = await _stored_summary(deps.db_path, game_key, due_at, after)
+        stored = await _stored_summary(deps.db_path, game_key, due_at, after, fresh_upto)
         if stored is not None:
             return stored
         now = deps.now()

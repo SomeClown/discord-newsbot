@@ -2888,6 +2888,8 @@ def get_game_summary(
     game_key: str,
     due_at: datetime,
     after: Coverage | None = None,
+    *,
+    fresh_upto: int | None = None,
 ) -> GameSummaryRow | None:
     """The stored summary a comped server's digest due at `due_at` may reuse, if any.
 
@@ -2908,9 +2910,25 @@ def get_game_summary(
       a 23-hour DST day or a moved digest time can't break them.
     Of the rows that qualify, an `ok` one wins over a `fallback`, then the newest.
     `None` means a new summary has to be made.
+
+    `fresh_upto` is for a run that ends "now" (a preview, a confirmed run-now) and is the
+    newest item id its range covers. A row that stops short of it (`items_upto` below) is
+    skipped when an item tagged for this game sits in the gap, because it was made before
+    that news was stored and would show the server a quiet game. (A summary made at 20:52
+    from an empty store, shown at 21:00 after a pass stored 149 items: the bug that added
+    this.) A scheduled digest leaves it `None` on purpose: it ends at its due instant, so
+    what arrived after the prepare job read the store waits for the server's next window.
+    A row with no ids (before migration 007) can't be compared and is left alone.
     """
     sql = "SELECT id FROM game_summaries WHERE game_key = ? AND window_end >= ?"
     params: list[object] = [game_key, _utc_iso(due_at - SUMMARY_MAX_AGE)]
+    if fresh_upto is not None:
+        sql += (
+            " AND (items_upto IS NULL OR items_upto >= ? OR NOT EXISTS ("
+            "SELECT 1 FROM item_topics WHERE item_topics.topic_key = game_summaries.game_key "
+            "AND item_topics.item_id > game_summaries.items_upto AND item_topics.item_id <= ?))"
+        )
+        params += [fresh_upto, fresh_upto]
     if after is not None:
         sql += " AND window_end > ? AND items_after = ?"
         params += [_utc_iso(after.end), after.item_id]
@@ -3048,11 +3066,13 @@ def claim_game_summary(
     now: Callable[[], datetime] | None = None,
     retry_fallback: bool = False,
     after: Coverage | None = None,
+    fresh_upto: int | None = None,
 ) -> tuple[Literal["claimed", "reusable", "busy"], GameSummaryRow | None]:
     """Decide, under `BEGIN IMMEDIATE`, who summarizes `game_key` for a digest due at `due_at`.
 
-    `after` is where the asking server's coverage of the game left off (see
-    `get_game_summary`, which decides what "reusable" means).
+    `after` is where the asking server's coverage of the game left off, and `fresh_upto`
+    the newest id a run ending now covers (see `get_game_summary`, which decides what
+    "reusable" means).
 
     - `reusable`: a summary this server may use already exists (the row comes
       back). A `fallback` row counts unless `retry_fallback` is set.
@@ -3071,7 +3091,7 @@ def claim_game_summary(
     """
     moment = (now or (lambda: datetime.now(UTC)))()
     with _immediate(conn):
-        existing = get_game_summary(conn, game_key, due_at, after)
+        existing = get_game_summary(conn, game_key, due_at, after, fresh_upto=fresh_upto)
         live = _claim_is_live(conn, game_key, moment)
         if existing is not None and existing.status == "ok":
             return "reusable", existing

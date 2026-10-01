@@ -241,7 +241,7 @@ def _lookup_with_a_counting_model(monkeypatch, *, fallback=False):
     clock = SimpleNamespace(now=DUE, newest=9)  # `newest`: the newest stored item id
     calls: list[str] = []
 
-    async def no_stored(db_path, game_key, due_at, after):
+    async def no_stored(db_path, game_key, due_at, after, fresh_upto=None):
         return None
 
     async def made(deps, game, retrying, after=None):
