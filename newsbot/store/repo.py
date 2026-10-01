@@ -23,16 +23,18 @@ import re
 import sqlite3
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
-from newsbot.guilds.schedule import lease_is_stale, retry_is_ready
+from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
     AlertState,
     AlertStatus,
     CodeView,
     CompedFollow,
+    Coverage,
     DigestRow,
     DueCandidate,
     GameSummaryRow,
@@ -41,6 +43,7 @@ from newsbot.store.models import (
     GuildGame,
     GuildSettings,
     HeadlineItem,
+    ItemRange,
     ItemView,
     LoungeSettings,
     LoungeState,
@@ -2752,6 +2755,101 @@ def last_window_end(
     return max(ends) if ends else None
 
 
+# --- Item watermarks (migration 007) ---
+#
+# A time window over `collected_at` loses items. A collection pass stamps its
+# items with the instant it *started* and stores them only once every source has
+# answered, so a pass that starts at 08:59:30 and commits at 09:01 stores items
+# "from 08:59:30" after the 09:00 digest has read and closed its window. The next
+# window starts at 09:00 and never looks back. `items.id` is assigned at commit,
+# in commit order, so a digest that records the newest id it covered can't be
+# overtaken: whatever commits afterwards has a bigger id and belongs to the next
+# window, exactly once. `collected_at` stays as the window's label and as a floor
+# (how far back a backlog may reach).
+#
+# I picked ids over "stamp `collected_at` at write time and make readers stop short
+# of any pass in flight" because the second needs every reader to know about every
+# writer (the hourly pass, the web search, a CLI run) and to agree on what "in
+# flight" means. An id is just a number the database already hands out in the one
+# order that matters.
+
+
+def latest_item_id(conn: sqlite3.Connection, *, collected_by: datetime | None = None) -> int:
+    """The newest item id, or the newest among items stamped at or before `collected_by`. 0 if none.
+
+    With `collected_by` this is "the last item the window ending then can hold". Items
+    stamped after it, even ones already stored, are left for the next window (a window
+    reads as `(start, end]`, and a pass that started after the digest's time belongs to
+    tomorrow's), unless an id below the cut-off drags them in; that's harmless, since a
+    window reads *ids* up to this one and the next starts right after it, so nothing is
+    missed or repeated either way. The `+` before the column stops SQLite choosing the
+    `collected_at` index: walking ids downward from the newest stops at the first match,
+    which is the first few rows, where the index route would sort every row older than
+    `collected_by` (a few hundred digests at 09:00 would each do that).
+    """
+    if collected_by is None:
+        row = conn.execute("SELECT MAX(id) AS newest FROM items").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id AS newest FROM items WHERE +collected_at <= ? ORDER BY id DESC LIMIT 1",
+            (_utc_iso(collected_by),),
+        ).fetchone()
+    return (row["newest"] or 0) if row else 0
+
+
+def last_coverage(
+    conn: sqlite3.Connection, guild_id: int, *, exclude_run_date: date
+) -> Coverage | None:
+    """Where the server's previous digest left off: its window end and the item ids it covered.
+
+    The same row `last_window_end` picks (the posted digest with the latest window end,
+    never `exclude_run_date`'s own). A digest written by v3 carries its own ids. One v2.2
+    wrote, and one adopted at the import, has only a window end: its ids are derived
+    from it as "everything stored at or before that instant", which is what v2.2 had
+    used. The same derivation covers a store whose ids went backwards (every item
+    purged, so SQLite started numbering again), since a stale watermark would otherwise
+    hide every new item until the ids caught up.
+    """
+    rows = conn.execute(
+        "SELECT window_end, items_upto, game_items_upto FROM digests "
+        "WHERE guild_id = ? AND run_date != ? AND window_end IS NOT NULL "
+        "AND (status IN ('ok', 'partial') OR posted_by_game != '{}') "
+        "ORDER BY run_date DESC LIMIT 5",
+        (guild_id, exclude_run_date.isoformat()),
+    ).fetchall()
+    if not rows:
+        return None
+    best = max(rows, key=lambda row: datetime.fromisoformat(row["window_end"]))
+    end = datetime.fromisoformat(best["window_end"])
+    upto, newest = best["items_upto"], latest_item_id(conn)
+    if upto is None or upto > newest:
+        return Coverage(end, latest_item_id(conn, collected_by=end))
+    try:
+        loaded = json.loads(best["game_items_upto"] or "{}")
+    except ValueError:
+        loaded = {}
+    by_game = (
+        {k: v for k, v in loaded.items() if isinstance(v, int) and v <= newest}
+        if isinstance(loaded, dict)
+        else {}
+    )
+    return Coverage(end, upto, by_game)
+
+
+def item_range(
+    conn: sqlite3.Connection, guild_id: int, *, exclude_run_date: date, end: datetime
+) -> ItemRange:
+    """The items a digest ending at `end` covers: past the last digest's ids, up to `end`'s newest.
+
+    `upto` never falls below `after` (a window that ends before the last one did, after a
+    zone change or a clock step, is empty, not backwards).
+    """
+    previous = last_coverage(conn, guild_id, exclude_run_date=exclude_run_date)
+    after = previous.item_id if previous else None
+    upto = max(latest_item_id(conn, collected_by=end), after or 0)
+    return ItemRange(after, upto, item_floor(end, previous is not None))
+
+
 def claim_guild_digest(
     conn: sqlite3.Connection,
     guild_id: int,
@@ -2786,6 +2884,12 @@ def claim_guild_digest(
     (clean, under the attempt cap, past the ten-minute gap). A clean failure
     retried this way reuses the window it was claimed with, so the retry covers
     the same items.
+
+    The claim also fixes which items the digest covers (`item_range`: ids past the
+    previous digest's, up to the newest stored at the window's end), under the same lock,
+    and stores them on the row. A retry or a resume keeps the row's own ids, so it reads
+    what the first try read; and because they're ids rather than times, an item a slow
+    collection pass commits after this claim lands in the next digest, never in neither.
     """
     now_dt = (now or (lambda: datetime.now(UTC)))()
     now_iso = now_dt.isoformat()
@@ -2794,16 +2898,25 @@ def claim_guild_digest(
     with _immediate(conn):
         row = conn.execute(
             "SELECT id, status, posted_by_game, posted_message_ids, window_start, window_end, "
-            "attempts, updated_at FROM digests WHERE guild_id = ? AND run_date = ?",
+            "attempts, updated_at, items_after, items_upto "
+            "FROM digests WHERE guild_id = ? AND run_date = ?",
             (guild_id, run_date.isoformat()),
         ).fetchone()
+
+        def fresh_ids(end: datetime) -> tuple[int | None, int]:
+            covered = item_range(conn, guild_id, exclude_run_date=run_date, end=end)
+            return covered.after, covered.upto
+
         if row is None:
+            after_id, upto_id = fresh_ids(window[1])
             cur = conn.execute(
                 "INSERT INTO digests (guild_id, run_date, status, window_start, window_end, "
-                "attempts, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, 1, ?, ?)",
-                (guild_id, run_date.isoformat(), new_start, new_end, now_iso, now_iso),
+                "items_after, items_upto, attempts, created_at, updated_at) "
+                "VALUES (?, ?, 'pending', ?, ?, ?, ?, 1, ?, ?)",
+                (guild_id, run_date.isoformat(), new_start, new_end, after_id, upto_id)
+                + (now_iso, now_iso),
             )
-            claim = GuildClaim(cur.lastrowid, window[0], window[1], {}, False, 1)
+            claim = GuildClaim(cur.lastrowid, window[0], window[1], {}, False, 1, after_id, upto_id)
         else:
             status = row["status"]
             posted: dict[str, int] = json.loads(row["posted_by_game"])
@@ -2818,12 +2931,23 @@ def claim_guild_digest(
                 if row["window_start"] and row["window_end"]
                 else None
             )
+            # The ids a stored window goes with (a row written before migration 007 has
+            # none, so they're worked out for its window now).
+            kept = (
+                (row["items_after"], row["items_upto"])
+                if row["items_upto"] is not None
+                else fresh_ids(stored[1])
+                if stored is not None
+                else (None, 0)
+            )
             if force:
                 claim = GuildClaim(row["id"], window[0], window[1], {}, False, attempts)
             elif status in ("ok", "partial") or (status == "pending" and not resume):
                 claim = None
             elif status == "pending" and (stored is None or not lease_is_stale(updated_at, now_dt)):
                 claim = None  # a v2.2 row nobody can read, or somebody's live publish
+            elif status == "pending" and resume and row["attempts"] >= MAX_ATTEMPTS:
+                claim = None  # out of attempts: the tick abandons it (`abandon_guild_digest`)
             elif (
                 status == "failed"
                 and resume
@@ -2836,19 +2960,33 @@ def claim_guild_digest(
             ):
                 claim = None  # too soon, too many tries, or an admin's call
             elif (status == "pending" or posted) and stored is not None:
-                claim = GuildClaim(row["id"], stored[0], stored[1], posted, True, attempts)
+                claim = GuildClaim(row["id"], stored[0], stored[1], posted, True, attempts, *kept)
             elif resume and stored is not None:
-                claim = GuildClaim(row["id"], stored[0], stored[1], {}, False, attempts)
+                claim = GuildClaim(row["id"], stored[0], stored[1], {}, False, attempts, *kept)
             else:
                 claim = GuildClaim(row["id"], window[0], window[1], {}, False, attempts)
             if claim is not None:
+                if claim.items_upto is None:  # a new window: its ids are fixed now, under the lock
+                    after_id, upto_id = fresh_ids(claim.window_end)
+                    claim = replace(claim, items_after=after_id, items_upto=upto_id)
                 start_iso, end_iso = _utc_iso(claim.window_start), _utc_iso(claim.window_end)
                 conn.execute(
                     "UPDATE digests SET status = 'pending', window_start = ?, window_end = ?, "
+                    "items_after = ?, items_upto = ?, "
                     "attempts = attempts + 1, updated_at = ?, "
-                    "posted_by_game = CASE WHEN ? THEN '{}' ELSE posted_by_game END "
+                    "posted_by_game = CASE WHEN ? THEN '{}' ELSE posted_by_game END, "
+                    "game_items_upto = CASE WHEN ? THEN NULL ELSE game_items_upto END "
                     "WHERE id = ?",
-                    (start_iso, end_iso, now_iso, int(force), row["id"]),
+                    (
+                        start_iso,
+                        end_iso,
+                        claim.items_after,
+                        claim.items_upto,
+                        now_iso,
+                        int(force),
+                        int(force),
+                        row["id"],
+                    ),
                 )
     return claim
 
@@ -2930,6 +3068,82 @@ def save_guild_digest(
         )
 
 
+def abandon_guild_digest(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    run_date: date,
+    *,
+    max_attempts: int,
+    now: Callable[[], datetime] | None = None,
+) -> bool:
+    """Mark a stale `pending` digest `failed` once it has used `max_attempts`. True if it did.
+
+    Every claim, a resume included, counts as an attempt, so a digest that keeps timing
+    out or dying mid-send runs out of them instead of being resumed forever. Re-checks
+    under the lock (status, attempts, and that the lease really is stale), because the due
+    check that asked ran on a snapshot. What already posted stays on the row.
+    """
+    now_dt = (now or (lambda: datetime.now(UTC)))()
+    with _immediate(conn):
+        row = conn.execute(
+            "SELECT id, status, attempts, updated_at FROM digests "
+            "WHERE guild_id = ? AND run_date = ?",
+            (guild_id, run_date.isoformat()),
+        ).fetchone()
+        if (
+            row is None
+            or row["status"] != "pending"
+            or row["attempts"] < max_attempts
+            or not lease_is_stale(_parse_dt_or_none(row["updated_at"]), now_dt)
+        ):
+            return False
+        conn.execute(
+            "UPDATE digests SET status = 'failed', error_notes = ?, updated_at = ? WHERE id = ?",
+            (
+                f"gave up after {row['attempts']} attempts (each timed out or was interrupted)",
+                now_dt.isoformat(),
+                row["id"],
+            ),
+        )
+    return True
+
+
+def record_game_coverage(
+    conn: sqlite3.Connection,
+    digest_id: int,
+    coverage: Mapping[str, int],
+    *,
+    keep: Collection[str] = (),
+) -> None:
+    """Note, per game, the newest item id a comped digest took from a shared summary.
+
+    A summary was made before the digest was claimed, so what it covers ends earlier
+    than the digest's own `items_upto`; the next summary for this server has to start
+    where *it* ended or the items in between are lost. Games for which this digest has
+    no summary (headlines, free servers) aren't listed: they use `items_upto`.
+    `keep` names games already posted by an earlier try of this digest, whose recorded
+    coverage stands (what a resume rebuilds may not be what it posted).
+    """
+    with _immediate(conn):
+        row = conn.execute(
+            "SELECT game_items_upto FROM digests WHERE id = ?", (digest_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"digest {digest_id} doesn't exist")
+        try:
+            stored = json.loads(row["game_items_upto"] or "{}")
+        except ValueError:
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        merged = {k: v for k, v in coverage.items() if k not in keep or k not in stored}
+        merged.update({k: v for k, v in stored.items() if k in keep})
+        conn.execute(
+            "UPDATE digests SET game_items_upto = ? WHERE id = ?",
+            (json.dumps(merged, sort_keys=True), digest_id),
+        )
+
+
 def mark_guild_digest_failed(
     conn: sqlite3.Connection,
     digest_id: int,
@@ -2964,24 +3178,47 @@ def mark_guild_digest_failed(
 
 
 def items_for_window(
-    conn: sqlite3.Connection, guild_id: int, start: datetime, end: datetime
+    conn: sqlite3.Connection,
+    guild_id: int,
+    start: datetime,
+    end: datetime,
+    *,
+    after_id: int | None = None,
+    upto_id: int | None = None,
+    after_by_game: Mapping[str, int] | None = None,
 ) -> dict[str, list[HeadlineItem]]:
-    """Stored items collected in `(start, end]`, per game `guild_id` follows, newest first.
+    """Stored items for a digest, per game `guild_id` follows, newest first.
+
+    By default the window is time: items collected in `(start, end]`. With `upto_id` it's
+    the digest's item range instead (`item_range`): ids in `(after_id, upto_id]`, and
+    `start` is only the floor on `collected_at` (`end` is unused). `after_by_game` moves
+    one game's lower bound, for a comped game whose coverage ended where its summary did.
 
     Only games the guild follows come back, so another server's games can't
     leak into its digest. An item matching two followed games appears under both.
     """
+    if upto_id is None:
+        window_sql = "AND items.collected_at > ? AND items.collected_at <= ? "
+        params: tuple[object, ...] = (guild_id, _utc_iso(start), _utc_iso(end))
+    else:
+        window_sql = "AND items.collected_at > ? AND items.id > ? AND items.id <= ? "
+        lowest = min([after_id or 0, *(after_by_game or {}).values()])
+        params = (guild_id, _utc_iso(start), lowest, upto_id)
     rows = conn.execute(
-        "SELECT item_topics.topic_key, item_topics.uncertain, items.url, items.title, "
-        "items.source_name, items.trust, items.published_at, items.collected_at "
+        "SELECT item_topics.topic_key, item_topics.uncertain, items.id AS item_id, items.url, "  # noqa: S608
+        "items.title, items.source_name, items.trust, items.published_at, items.collected_at "
         "FROM item_topics JOIN items ON items.id = item_topics.item_id "
         "WHERE item_topics.topic_key IN (SELECT game_key FROM guild_games WHERE guild_id = ?) "
-        "AND items.collected_at > ? AND items.collected_at <= ? "
-        "ORDER BY items.collected_at DESC, items.id DESC",
-        (guild_id, _utc_iso(start), _utc_iso(end)),
+        + window_sql
+        + "ORDER BY items.collected_at DESC, items.id DESC",
+        params,
     ).fetchall()
     by_game: dict[str, list[HeadlineItem]] = {}
     for row in rows:
+        if upto_id is not None and row["item_id"] <= (after_by_game or {}).get(
+            row["topic_key"], after_id or 0
+        ):
+            continue
         by_game.setdefault(row["topic_key"], []).append(
             HeadlineItem(
                 url=row["url"],
@@ -3006,24 +3243,33 @@ def get_game_summary(
     conn: sqlite3.Connection,
     game_key: str,
     due_at: datetime,
-    after: datetime | None = None,
+    after: Coverage | None = None,
 ) -> GameSummaryRow | None:
     """The stored summary a comped server's digest due at `due_at` may reuse, if any.
 
-    A row qualifies when it ends strictly after `after` (the server's previous
-    digest's window end; `None` for a first digest, which has nothing to repeat)
-    and ends no earlier than `due_at - SUMMARY_MAX_AGE`. The first keeps a
-    server from reading its own last digest twice, the second keeps it from
-    reading yesterday's news. Both are instants, so a 23-hour DST day or a
-    moved digest time can't break them (the old "within 24 hours" rule did).
-    Of the rows that qualify, an `ok` one wins over a `fallback`, then the
-    newest. `None` means a new summary has to be made.
+    `after` is where the server's coverage of this game left off (`Coverage.for_game`);
+    `None` for a first digest, which has nothing to repeat and takes any fresh row. A
+    row qualifies when:
+    - it starts *exactly* where the server's coverage ended (`items_after` equals the
+      server's item id), so the summary holds the server's whole window with no gap
+      before it and nothing the server has already read. Two servers on one schedule
+      share a row because they ended in the same place; two a half day apart don't,
+      and each gets a summary of its own window. (The old rule chained summaries per
+      game, so a 09:00 server and a 21:00 server each lost the news the other one's
+      summary had consumed.) A row from before migration 007 has no ids and never
+      matches a server that has a history;
+    - it ends strictly after the server's last digest's window end (the same row
+      can't be served to the same server twice), and no earlier than
+      `due_at - SUMMARY_MAX_AGE` (nobody reads yesterday's news). Both are instants, so
+      a 23-hour DST day or a moved digest time can't break them.
+    Of the rows that qualify, an `ok` one wins over a `fallback`, then the newest.
+    `None` means a new summary has to be made.
     """
     sql = "SELECT id FROM game_summaries WHERE game_key = ? AND window_end >= ?"
-    params: list[str] = [game_key, _utc_iso(due_at - SUMMARY_MAX_AGE)]
+    params: list[object] = [game_key, _utc_iso(due_at - SUMMARY_MAX_AGE)]
     if after is not None:
-        sql += " AND window_end > ?"
-        params.append(_utc_iso(after))
+        sql += " AND window_end > ? AND items_after = ?"
+        params += [_utc_iso(after.end), after.item_id]
     sql += " ORDER BY (status = 'ok') DESC, window_end DESC, id DESC LIMIT 1"
     row = conn.execute(sql, params).fetchone()
     return game_summary_by_id(conn, row["id"]) if row else None
@@ -3067,39 +3313,11 @@ def comped_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
     ]
 
 
-def latest_game_summary(conn: sqlite3.Connection, game_key: str) -> GameSummaryRow | None:
-    """The newest summary row for `game_key`, any status: the next window chains onto it."""
-    row = conn.execute(
-        "SELECT id FROM game_summaries WHERE game_key = ? "
-        "ORDER BY window_end DESC, id DESC LIMIT 1",
-        (game_key,),
-    ).fetchone()
-    return game_summary_by_id(conn, row["id"]) if row else None
-
-
-def last_comped_digest_end(conn: sqlite3.Connection, game_key: str) -> datetime | None:
-    """Where the newest posted digest of a comped server following `game_key` ended.
-
-    This is what the very first summary of a game chains onto when no summary exists
-    yet: a digest that already went out (v2.2's last one, adopted at the import) has used
-    everything up to its cutoff, so the first v3 summary must not hand it to the model
-    again. Once a summary row exists, `latest_game_summary` takes over.
-    """
-    row = conn.execute(
-        "SELECT MAX(d.window_end) AS end FROM digests d "
-        "JOIN guilds g ON g.guild_id = d.guild_id AND g.tier = 'comped' "
-        "JOIN guild_games gg ON gg.guild_id = d.guild_id AND gg.game_key = ? "
-        "WHERE d.window_end IS NOT NULL "
-        "AND (d.status IN ('ok', 'partial') OR d.posted_by_game != '{}')",
-        (game_key,),
-    ).fetchone()
-    return datetime.fromisoformat(row["end"]) if row and row["end"] else None
-
-
 def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummaryRow | None:
     row = conn.execute(
         "SELECT id, game_key, run_date, status, window_start, window_end, coverage_notes, "
-        "note, input_tokens, output_tokens FROM game_summaries WHERE id = ?",
+        "note, input_tokens, output_tokens, items_after, items_upto "
+        "FROM game_summaries WHERE id = ?",
         (summary_id,),
     ).fetchone()
     if row is None:
@@ -3115,24 +3333,39 @@ def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummary
         note=row["note"],
         input_tokens=row["input_tokens"],
         output_tokens=row["output_tokens"],
+        items_after=row["items_after"],
+        items_upto=row["items_upto"],
     )
 
 
 def summary_items(
-    conn: sqlite3.Connection, game_key: str, start: datetime, end: datetime
+    conn: sqlite3.Connection,
+    game_key: str,
+    start: datetime,
+    end: datetime,
+    *,
+    after_id: int | None = None,
+    upto_id: int | None = None,
 ) -> list[StoredItem]:
-    """Stored items tagged `game_key` and collected in `(start, end]`, oldest first.
+    """Stored items tagged `game_key`, oldest first: what a summary is built from.
 
-    What a summary is built from: the same items v2's collect step handed the
-    model, read back out of the store instead of straight off the wire.
+    The same items v2's collect step handed the model, read back out of the store
+    instead of straight off the wire. By default the window is time (collected in
+    `(start, end]`); with `upto_id` it is ids in `(after_id, upto_id]` and `start` is
+    just the floor on `collected_at` (see `item_range` for why ids).
     """
+    if upto_id is None:
+        window_sql = "AND items.collected_at > ? AND items.collected_at <= ? "
+        params: tuple[object, ...] = (game_key, _utc_iso(start), _utc_iso(end))
+    else:
+        window_sql = "AND items.collected_at > ? AND items.id > ? AND items.id <= ? "
+        params = (game_key, _utc_iso(start), after_id or 0, upto_id)
     rows = conn.execute(
         "SELECT items.url, items.title, items.excerpt, items.source_name, items.trust, "
         "items.published_at, item_topics.uncertain "
         "FROM item_topics JOIN items ON items.id = item_topics.item_id "
-        "WHERE item_topics.topic_key = ? AND items.collected_at > ? AND items.collected_at <= ? "
-        "ORDER BY items.collected_at, items.id",
-        (game_key, _utc_iso(start), _utc_iso(end)),
+        "WHERE item_topics.topic_key = ? " + window_sql + "ORDER BY items.collected_at, items.id",
+        params,
     ).fetchall()
     return [
         StoredItem(
@@ -3170,11 +3403,11 @@ def claim_game_summary(
     token: str,
     now: Callable[[], datetime] | None = None,
     retry_fallback: bool = False,
-    after: datetime | None = None,
+    after: Coverage | None = None,
 ) -> tuple[Literal["claimed", "reusable", "busy"], GameSummaryRow | None]:
     """Decide, under `BEGIN IMMEDIATE`, who summarizes `game_key` for a digest due at `due_at`.
 
-    `after` is the asking server's previous digest window end (see
+    `after` is where the asking server's coverage of the game left off (see
     `get_game_summary`, which decides what "reusable" means).
 
     - `reusable`: a summary this server may use already exists (the row comes
@@ -3275,6 +3508,8 @@ def save_game_summary(
     now: Callable[[], datetime] | None = None,
     replace_id: int | None = None,
     require_claim: bool = False,
+    items_after: int | None = None,
+    items_upto: int | None = None,
 ) -> int | None:
     """Save a summary and its stories in one transaction, release the claim, return the row id.
 
@@ -3289,6 +3524,10 @@ def save_game_summary(
     deleted. `run_date` is only a label now; two rows with the same one are
     fine, and one can never replace the other (it used to, and an inline summary
     for a missed digest quietly ate a good prepared one).
+
+    `items_after` and `items_upto` are the item ids the summary covers (`(after, upto]`),
+    which is what lets a server tell whether it starts exactly where that server's own
+    coverage ended (`get_game_summary`).
 
     `require_claim` makes the save conditional on `token` still holding the
     claim: if the claim was taken over (or is gone) nothing is written and the
@@ -3316,6 +3555,8 @@ def save_game_summary(
             usage.input_tokens,
             usage.output_tokens,
             now_iso,
+            items_after,
+            items_upto,
         )
         if row is not None:
             summary_id = row["id"]
@@ -3323,14 +3564,15 @@ def save_game_summary(
             conn.execute(
                 "UPDATE game_summaries SET status = ?, window_start = ?, window_end = ?, "
                 "coverage_notes = ?, note = ?, input_tokens = input_tokens + ?, "
-                "output_tokens = output_tokens + ?, created_at = ? WHERE id = ?",
+                "output_tokens = output_tokens + ?, created_at = ?, items_after = ?, "
+                "items_upto = ? WHERE id = ?",
                 (*values, summary_id),
             )
         else:
             summary_id = conn.execute(
                 "INSERT INTO game_summaries (game_key, run_date, status, window_start, "
-                "window_end, coverage_notes, note, input_tokens, output_tokens, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "window_end, coverage_notes, note, input_tokens, output_tokens, created_at, "
+                "items_after, items_upto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (game_key, run_date.isoformat(), *values),
             ).lastrowid
         for story in stories:

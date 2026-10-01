@@ -40,7 +40,7 @@ from newsbot.pipeline.summaries import (
 from newsbot.pipeline.summarize import LLMError, LLMFatalError, LLMResult, StoriesOut, StoryOut
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import CompedFollow, StoredItem
+from newsbot.store.models import CompedFollow, Coverage, StoredItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 LA = "America/Los_Angeles"
@@ -378,6 +378,16 @@ async def test_a_guild_minutes_later_reuses_the_summary_and_one_hours_later_gets
     world.guild(FREE + 1, "comped", BERLIN, ["palworld"], time="09:05")
     world.guild(PAC, "comped", LA, ["palworld"])
     world.item("palworld", "raid boss patch", ago(3))
+    digest_deps = GuildDigestDeps(
+        cfg=world.cfg,
+        db_path=world.db_path,
+        now=world.clock,
+        publisher_for=lambda *a: FakePublisher(),
+        notify_guild=_noop_notify,
+        summary_for=summary_lookup(world.deps()),
+        sleep=world.sleep,
+        pace_s=0,
+    )
     world.clock.t = BERLIN_DUE - timedelta(minutes=30)
     await prepare_summaries(world.deps())
 
@@ -385,23 +395,36 @@ async def test_a_guild_minutes_later_reuses_the_summary_and_one_hours_later_gets
     world.clock.t = BERLIN_DUE - timedelta(minutes=25)
     assert await prepare_summaries(world.deps()) == []
     assert len(world.llm.calls) == 1
+    world.clock.t = BERLIN_DUE
+    await run_guild_digest(digest_deps, BER, kind=RunKind.SCHEDULED)
+    world.clock.t = BERLIN_DUE + timedelta(minutes=5)
+    await run_guild_digest(digest_deps, FREE + 1, kind=RunKind.SCHEDULED)
+    assert len(world.llm.calls) == 1
 
     # Pacific's digest is nine hours on: that summary would be 9h30 old, so it gets a new one.
     world.item("palworld", "a third thing", BERLIN_DUE + timedelta(hours=2))
     world.clock.t = PACIFIC_DUE - timedelta(minutes=30)
     assert await prepare_summaries(world.deps()) == ["palworld"]
     assert len(world.llm.calls) == 2
+    world.clock.t = PACIFIC_DUE
+    await run_guild_digest(digest_deps, PAC, kind=RunKind.SCHEDULED)
+    assert len(world.llm.calls) == 2
 
-    # Next morning is a new day and a new summary, chained onto the last window.
+    # Next morning is a new day and a new summary. It starts where the Berlin servers' own
+    # coverage ended (not at Pacific's summary, which is the last one made: that chained
+    # summaries per game and handed Berlin only half of what it hadn't read).
     world.item("palworld", "a second thing", BERLIN_DUE + timedelta(hours=10))
     world.clock.t = BERLIN_DUE + timedelta(days=1) - timedelta(minutes=30)
     assert await prepare_summaries(world.deps()) == ["palworld"]
     assert len(world.llm.calls) == 3
     third = world.summaries("palworld")[2]
-    assert third["window_start"] == (PACIFIC_DUE - timedelta(minutes=30)).isoformat()
+    assert third["window_start"] == BERLIN_DUE.isoformat()
+    shown = world.llm.calls[2][1]
+    assert "a third thing" in shown and "a second thing" in shown
+    assert "raid boss patch" not in shown  # Berlin read it yesterday
     # Yesterday's story is sent back as a prior headline (so it can say "same as yesterday").
-    assert "palworld story" in world.llm.calls[2][1]
-    assert "<prior_stories>" in world.llm.calls[2][1]
+    assert "palworld story" in shown
+    assert "<prior_stories>" in shown
 
 
 async def test_a_free_guild_following_the_same_game_never_triggers_a_summary(world):
@@ -849,7 +872,14 @@ async def test_reuse_rule_edges(world):
     world.item("palworld", "a thing", ago(2))
     world.clock.t = BERLIN_DUE
     sd = world.deps()
-    await ensure_summary(sd, "palworld", BERLIN_DUE, run_date=date(2026, 10, 1))
+    # Made for a server whose coverage of the game ended at item 0 a day ago.
+    await ensure_summary(
+        sd,
+        "palworld",
+        BERLIN_DUE,
+        run_date=date(2026, 10, 1),
+        after=Coverage(BERLIN_DUE - timedelta(days=1), 0),
+    )
     window_end = BERLIN_DUE
     assert len(world.llm.calls) == 1
 
@@ -858,18 +888,34 @@ async def test_reuse_rule_edges(world):
         await ensure_summary(sd, "palworld", due_at, after=after, run_date=day)
         return len(world.llm.calls) - before
 
+    def covered(end, item_id=0):
+        return Coverage(end, item_id)
+
     # Reused: a first digest (nothing to repeat), one due exactly six hours later, one due
-    # long before (no upper bound any more), and one whose last digest ended a moment earlier.
+    # long before (no upper bound any more), and one whose last digest ended a moment earlier
+    # and left off where the summary starts.
     assert await calls_after(window_end + repo.SUMMARY_MAX_AGE, None, date(2026, 10, 2)) == 0
     assert await calls_after(window_end - timedelta(days=30), None, date(2026, 10, 3)) == 0
-    assert await calls_after(window_end, window_end - timedelta(seconds=1), date(2026, 10, 4)) == 0
+    one_second_before = covered(window_end - timedelta(seconds=1))
+    assert await calls_after(window_end, one_second_before, date(2026, 10, 4)) == 0
     # A server whose last digest ended at that very instant would read it twice: new summary.
     world.item("palworld", "newer", window_end + timedelta(hours=1))
     world.clock.t = window_end + timedelta(hours=2)
-    assert await calls_after(window_end + timedelta(hours=2), window_end, date(2026, 10, 5)) == 1
+    assert (
+        await calls_after(window_end + timedelta(hours=2), covered(window_end), date(2026, 10, 5))
+        == 1
+    )
     # And one due more than six hours after the newest summary ended can't use it either.
     newest_end = window_end + timedelta(hours=2)
     world.item("palworld", "newest", newest_end + timedelta(hours=1))
     world.clock.t = newest_end + repo.SUMMARY_MAX_AGE + timedelta(seconds=1)
     due = world.clock.t
     assert await calls_after(due, None, date(2026, 10, 6)) == 1
+    # A server whose coverage left off somewhere else can't share a summary that starts at
+    # item 0: it would miss what's between, or read what it already has. Its own summary.
+    world.item("palworld", "newest still", due + timedelta(minutes=1))
+    world.clock.t = due + timedelta(hours=1)
+    assert (
+        await calls_after(world.clock.t, covered(due - timedelta(days=1), 3), date(2026, 10, 7))
+        == 1
+    )

@@ -685,7 +685,9 @@ async def test_a_game_a_crashed_digest_never_posted_is_not_lost_when_the_restart
     window = (DUE - timedelta(hours=24), DUE)
     with world.conn() as conn:
         claim = repo.claim_guild_digest(conn, G1, DAY, force=False, window=window, now=lambda: NOW)
-        repo.record_posted_game(conn, claim.digest_id, BL4, 424242)
+        # With the test's clock, not the real one: a lease stamped "now" in real time sits in
+        # the future of this world's clock and is never stale (it passed by luck before).
+        repo.record_posted_game(conn, claim.digest_id, BL4, 424242, now=lambda: NOW)
     world.clock = DUE + timedelta(days=1, minutes=1)  # the bot is back, a day later
     deps = world.deps()
     await run_due_guilds(deps)

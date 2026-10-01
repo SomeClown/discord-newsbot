@@ -261,6 +261,10 @@ _MUTATIONS = {
         c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
     ),
     "fail_queued_guild_followups": lambda c, g: repo.fail_queued_guild_followups(c, g),
+    "abandon_guild_digest": lambda c, g: repo.abandon_guild_digest(
+        c, g, date(2026, 9, 30), max_attempts=0, now=_clock()
+    ),
+    "advance_lounge_quote_date": lambda c, g: repo.advance_lounge_quote_date(c, g, "2099-01-01"),
     "claim_guild_digest": lambda c, g: [
         repo.claim_guild_digest(
             c, g, date(2026, 9, 30), force=True, window=(SINCE, SINCE + timedelta(days=1))
@@ -303,6 +307,11 @@ _OTHER_COVERAGE = {
     "latest_guild_digest",  # tests/test_repo_scoped_reads.py
     "last_window_end",
     "items_for_window",
+    # The item watermarks read the same digests rows (tests/test_item_watermarks.py pins that
+    # a server's coverage never comes from another server's digest).
+    "last_coverage",
+    "item_range",
+    "guild_crash_key",  # a pure string helper
     # The lounge deck and date guard: tests/test_repo_lounge_guilds.py (task 12).
     "claim_quote",
     "quote_deck_state",

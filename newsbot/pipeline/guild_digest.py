@@ -25,6 +25,8 @@ Servers are processed one after another with a pause between servers that
 actually sent something, and one server's failure is logged and left at that; it
 doesn't get to delay or break the next one. That includes a hung one: each server
 gets `GUILD_TIMEOUT_S` and then the tick moves on, leaving its row `pending`.
+A row that keeps getting cut off doesn't get unlimited tries: every resume is an
+attempt, and after `MAX_ATTEMPTS` the row is marked failed and its server told once.
 
 A `pending` row is also a lease (the rules are in `guilds/schedule.py`). The
 publisher refreshes it as each game lands and on a `HEARTBEAT_S` heartbeat, so a
@@ -63,6 +65,7 @@ from newsbot.guilds.schedule import (
     DueGuild,
     digest_window,
     due_guilds,
+    item_floor,
     local_due_instant,
 )
 from newsbot.pipeline.publisher import Publisher
@@ -71,11 +74,13 @@ from newsbot.pipeline.summarize import _FALLBACK_NOTE, StoryDraft
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import (
+    Coverage,
     GameSummaryRow,
     GuildClaim,
     GuildDigestRow,
     GuildGame,
     GuildSettings,
+    ItemRange,
 )
 from newsbot.text import plain_line
 
@@ -86,11 +91,27 @@ logger = logging.getLogger(__name__)
 # this is just manners.
 _GUILD_PACE_S = 1.0
 # The most one server's digest may take inside the tick before the tick gives up
-# on it and moves on (the row stays `pending`; the lease brings it back). Well
-# over a real digest (a few seconds of sends, plus at most 14 s of retry backoff)
-# and well under `schedule.LEASE_STALE_AFTER`, so a timed-out guild is never
-# resumed while its old publisher could still be writing.
+# on it and moves on. Well over a real digest (a few seconds of sends, plus at most
+# 14 s of retry backoff), and it exists so one hung server can't hold up every
+# server behind it. Giving up cancels the run, so its publisher (and heartbeat)
+# stop; the row stays `pending`, its lease goes stale after
+# `schedule.LEASE_STALE_AFTER`, and the next tick resumes it, as a new attempt.
+# That's the part I got wrong the first time: a digest that hangs every time was
+# resumed and cut off every ten minutes forever, so resumes now count against
+# `MAX_ATTEMPTS`. (A database write already handed to a thread can't be cancelled
+# and may finish after the timeout; those are single transactions, and the resume
+# reads the row as they left it.)
 GUILD_TIMEOUT_S = 300.0
+# What a comped digest may spend finding its summaries when the prepare job didn't
+# make them (downtime, or a server set up late): an inline model call is allowed this
+# long per game, and this long across the whole digest, both well under
+# `GUILD_TIMEOUT_S`. When the time is up the game posts as headlines with the usual
+# "summary unavailable" footer, instead of the whole digest being cancelled.
+SUMMARY_TIMEOUT_S = 120.0
+SUMMARY_BUDGET_S = 180.0
+# Even with the budget spent, a lookup gets this long, so a summary that's already
+# stored (a database read) isn't skipped just because an earlier game ate the clock.
+SUMMARY_MIN_S = 1.0
 # How often a publishing digest refreshes its row's lease.
 HEARTBEAT_S = 60.0
 # Backoff for a server whose run crashes: it's not retried until this long after
@@ -120,18 +141,22 @@ class GameSummary:
     stories: list[StoryDraft]
     coverage_notes: list[str]
     note: str | None = None
+    # The newest item id the summary covers, which is where this server's next summary
+    # for the game must start. `None` for a summary that doesn't know (a stub, an old row).
+    items_upto: int | None = None
 
 
 class SummaryLookup(Protocol):
-    """(game key, the digest's due instant, the server's previous window end) -> a summary.
+    """(game key, the digest's due instant, the server's coverage of that game) -> a summary.
 
-    `None` if there isn't one. The previous window end is `None` for a server's
-    first digest. The reuse rule (see `repo.get_game_summary`) needs all three;
+    `None` if there isn't one. The coverage (where the server's last digest left off)
+    is `None` for a server's first digest. The reuse rule (see `repo.get_game_summary`)
+    needs all three;
     `summaries.summary_lookup` wraps the stored lookup with an inline "make one now".
     """
 
     def __call__(
-        self, game_key: str, due_at: datetime, after: datetime | None = None, /
+        self, game_key: str, due_at: datetime, after: Coverage | None = None, /
     ) -> Awaitable[GameSummary | None]: ...
 
 
@@ -156,6 +181,9 @@ class GuildDigestDeps:
     sleep: Sleep = asyncio.sleep
     pace_s: float = _GUILD_PACE_S
     guild_timeout_s: float = GUILD_TIMEOUT_S
+    summary_timeout_s: float = SUMMARY_TIMEOUT_S
+    summary_budget_s: float = SUMMARY_BUDGET_S
+    summary_min_s: float = SUMMARY_MIN_S
     heartbeat_s: float = HEARTBEAT_S
     # Guilds this process is publishing for right now, so a slow digest isn't
     # mistaken for a crashed one by the due check.
@@ -307,6 +335,8 @@ class _Built:
     channels: dict[str, int]
     notes: list[str]
     degraded: bool
+    # Per game, the newest item id a shared summary covered (see `repo.record_game_coverage`).
+    game_upto: dict[str, int] = field(default_factory=dict)
 
 
 def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
@@ -321,11 +351,11 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
         )
         for v in repo.summary_stories(conn, row.id)
     ]
-    return GameSummary(row.status, stories, list(row.coverage_notes), row.note)
+    return GameSummary(row.status, stories, list(row.coverage_notes), row.note, row.items_upto)
 
 
 async def _stored_summary(
-    db_path: str, game_key: str, due_at: datetime, after: datetime | None
+    db_path: str, game_key: str, due_at: datetime, after: Coverage | None
 ) -> GameSummary | None:
     def _sync() -> GameSummary | None:
         with closing(connect(db_path)) as conn:
@@ -340,6 +370,7 @@ async def _build(
     guild: GuildSettings,
     followed: list[GuildGame],
     window: tuple[datetime, datetime],
+    rng: ItemRange,
     due_at: datetime,
     run_date: date,
     *,
@@ -348,9 +379,12 @@ async def _build(
 ) -> _Built:
     """Render one server's digest from stored data.
 
-    Writes nothing itself; a comped server's lookup may make a missing summary
-    (see `summaries.py`), and `retry_fallback` (a confirmed run-now) asks for one
-    more go at a summary that already fell back.
+    `window` is what the digest says it covers; `rng` is which items it really covers
+    (ids, see `repo.item_range`). Writes nothing itself; a comped server's lookup may make
+    a missing summary (see `summaries.py`), inside a deadline (`SUMMARY_TIMEOUT_S`, and
+    `SUMMARY_BUDGET_S` for the whole digest) after which that game posts as headlines.
+    `retry_fallback` (a confirmed run-now) asks for one more go at a summary that already
+    fell back.
     """
     channels = {g.game_key: g.channel_id for g in followed}
     games = [g for g in deps.cfg.catalog if g.key in channels]
@@ -362,17 +396,29 @@ async def _build(
 
     def _items_sync():
         with closing(connect(deps.db_path)) as conn:
-            return (
-                repo.items_for_window(conn, guild.guild_id, window[0], window[1]),
-                # What a summary has to be newer than to not be a repeat for this server.
-                repo.last_window_end(conn, guild.guild_id, exclude_run_date=run_date),
+            # Where this server's last digest left off, which a summary has to start at
+            # to be neither a gap nor a repeat for it.
+            coverage = repo.last_coverage(conn, guild.guild_id, exclude_run_date=run_date)
+            after_by_game = (
+                {key: coverage.for_game(key).item_id for key in channels} if coverage else {}
             )
+            items = repo.items_for_window(
+                conn,
+                guild.guild_id,
+                rng.floor,
+                window[1],
+                after_id=rng.after,
+                upto_id=rng.upto,
+                after_by_game=after_by_game,
+            )
+            return items, coverage
 
-    items_by_game, previous_end = await asyncio.to_thread(_items_sync)
+    items_by_game, coverage_before = await asyncio.to_thread(_items_sync)
 
     stories_by_game: dict[str, list[StoryDraft]] = {}
     notes_by_game: dict[str, str | None] = {}
     coverage: list[str] = []
+    game_upto: dict[str, int] = {}
     degraded = bool(notes)
     if guild.tier == "comped":
         lookup = (
@@ -380,23 +426,39 @@ async def _build(
             or deps.summary_for
             or (lambda key, at, after: _stored_summary(deps.db_path, key, at, after))
         )
+        clock = asyncio.get_running_loop().time
+        spend_until = clock() + deps.summary_budget_s
         for game in games:
+            before = coverage_before.for_game(game.key) if coverage_before else None
+            allowed = max(min(deps.summary_timeout_s, spend_until - clock()), deps.summary_min_s)
             try:
-                summary = await lookup(game.key, due_at, previous_end)
-                if (
-                    retry_fallback
-                    and deps.retry_summary is not None
-                    and summary is not None
-                    and summary.status == "fallback"
-                ):
-                    summary = await deps.retry_summary(game.key, due_at, previous_end) or summary
+                async with asyncio.timeout(allowed) as limit:
+                    summary = await lookup(game.key, due_at, before)
+                    if (
+                        retry_fallback
+                        and deps.retry_summary is not None
+                        and summary is not None
+                        and summary.status == "fallback"
+                    ):
+                        summary = await deps.retry_summary(game.key, due_at, before) or summary
             except Exception:
-                # A broken lookup costs this game its summary, not the server its digest.
-                logger.exception("summary lookup failed for %s", game.key)
+                # A broken or slow lookup costs this game its summary, not the server its
+                # digest. (A timeout says so in one line; a bug gets its traceback.)
+                if limit.expired():
+                    logger.warning(
+                        "summary for %s took more than %.0f s; posting headlines",
+                        game.key,
+                        allowed,
+                        extra={"guild_id": guild.guild_id},
+                    )
+                else:
+                    logger.exception("summary lookup failed for %s", game.key)
                 summary = None
             if summary is not None and summary.status == "ok":
                 stories_by_game[game.key] = summary.stories
                 coverage.extend(n for n in summary.coverage_notes if n not in coverage)
+                if summary.items_upto is not None:
+                    game_upto[game.key] = summary.items_upto
                 continue
             notes_by_game[game.key] = (summary.note if summary else None) or _FALLBACK_NOTE
             # Headlines standing in for a summary is a degraded digest, but only
@@ -423,7 +485,7 @@ async def _build(
         )
         for game in games
     }
-    return _Built(rendered, counts, games, channels, notes, degraded)
+    return _Built(rendered, counts, games, channels, notes, degraded, game_upto)
 
 
 def _window_sync(
@@ -439,6 +501,21 @@ def _window_sync(
     if previous is None and late:
         end = now
     return digest_window(end, previous)
+
+
+def _range_sync(db_path: str, guild_id: int, run_date: date, end: datetime) -> ItemRange:
+    """The item range a preview would cover (a real digest gets its range from its claim)."""
+    with closing(connect(db_path)) as conn:
+        return repo.item_range(conn, guild_id, exclude_run_date=run_date, end=end)
+
+
+def _claim_range(claim: GuildClaim) -> ItemRange:
+    """The claim's item range: its stored ids, and the floor its window end implies."""
+    return ItemRange(
+        claim.items_after,
+        claim.items_upto or 0,
+        item_floor(claim.window_end, claim.items_after is not None),
+    )
 
 
 def _load_sync(db_path: str, guild_id: int) -> tuple[GuildSettings, list[GuildGame]] | None:
@@ -485,11 +562,13 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
         window = await asyncio.to_thread(
             _window_sync, deps.db_path, guild_id, run_date, window_end, deps.now(), late=False
         )
+        rng = await asyncio.to_thread(_range_sync, deps.db_path, guild_id, run_date, window[1])
         built = await _build(
             deps,
             guild,
             followed,
             window,
+            rng,
             due_at,
             run_date,
             summary_for=deps.preview_summary_for,
@@ -541,6 +620,11 @@ def _mark_failed_sync(
 ) -> None:
     with closing(connect(db_path)) as conn:
         repo.mark_guild_digest_failed(conn, digest_id, notes, posted, now=now)
+
+
+def _coverage_sync(db_path: str, digest_id: int, game_upto: dict[str, int], keep: set[str]) -> None:
+    with closing(connect(db_path)) as conn:
+        repo.record_game_coverage(conn, digest_id, game_upto, keep=keep)
 
 
 def _touch_sync(db_path: str, digest_id: int, now: Callable[[], datetime]) -> None:
@@ -704,6 +788,7 @@ async def _publish_claimed(
             guild,
             followed,
             window,
+            _claim_range(claim),
             due_at,
             run_date,
             retry_fallback=force and kind is RunKind.RUN_NOW,
@@ -724,6 +809,9 @@ async def _publish_claimed(
         return GuildDigestOutcome(guild_id, "failed", run_date, notes=[str(exc)])
 
     already = dict(claim.posted_by_game)
+    await asyncio.to_thread(
+        _coverage_sync, deps.db_path, claim.digest_id, built.game_upto, set(already)
+    )
     to_post = RenderedDigest(
         run_date,
         [m for m in built.rendered.messages if m.topic_key not in already],
@@ -940,6 +1028,9 @@ async def run_due_guilds(deps: GuildDigestDeps) -> list[GuildDigestOutcome]:
     outcomes: list[GuildDigestOutcome] = []
     paced = False
     for due in due_guilds(candidates, now, deps.running):
+        if due.reason == "abandon":
+            outcomes.append(await _abandon(deps, due))
+            continue
         crash = await asyncio.to_thread(_crash_get_sync, deps.db_path, due.guild_id)
         if crash is not None and crash.run_date == due.run_date:
             if deps.now() - crash.last_at <= _crash_backoff(crash.attempts):
@@ -970,6 +1061,47 @@ async def run_due_guilds(deps: GuildDigestDeps) -> list[GuildDigestOutcome]:
         outcomes.append(outcome)
         paced = outcome.sent > 0
     return outcomes
+
+
+def _abandon_sync(db_path: str, due: DueGuild, now: Callable[[], datetime]) -> bool:
+    with closing(connect(db_path)) as conn:
+        return repo.abandon_guild_digest(
+            conn, due.guild_id, due.run_date, max_attempts=MAX_ATTEMPTS, now=now
+        )
+
+
+async def _abandon(deps: GuildDigestDeps, due: DueGuild) -> GuildDigestOutcome:
+    """Give up on a `pending` row that's used all its attempts, and tell its server once.
+
+    Each resume is an attempt, so a digest that times out or dies mid-send every time
+    reaches here after `MAX_ATTEMPTS` instead of being resumed until midnight. The row
+    becomes `failed` (what posted stays recorded), which the due check treats as done;
+    only an admin's run-now will touch it again. The notice carries no mentions, and
+    only the tick that actually flips the row sends it, so it goes out once.
+    """
+    try:
+        gave_up = await asyncio.to_thread(_abandon_sync, deps.db_path, due, deps.now)
+    except Exception:
+        logger.exception("couldn't abandon a guild's digest", extra={"guild_id": due.guild_id})
+        return GuildDigestOutcome(due.guild_id, "failed", due.run_date)
+    if gave_up:
+        logger.warning(
+            "guild %s's digest used all %d attempts; marked failed",
+            due.guild_id,
+            MAX_ATTEMPTS,
+            extra={"guild_id": due.guild_id},
+        )
+        await _safe_notify(
+            deps,
+            due.guild_id,
+            f"newsbot: today's digest was interrupted {MAX_ATTEMPTS} times (it ran too long "
+            "or I restarted partway through), so I've stopped retrying it. Whatever already "
+            "posted is still there. Once things look healthy, an admin can run "
+            "/newsbot run-now; /newsbot status has the details.",
+        )
+    return GuildDigestOutcome(
+        due.guild_id, "failed", due.run_date, notes=["gave up after repeated interruptions"]
+    )
 
 
 async def _record_crash(

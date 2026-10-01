@@ -85,7 +85,7 @@ from newsbot.pipeline.summaries import (
 from newsbot.pipeline.summarize import LLMError, LLMFatalError, LLMResult, StoriesOut, StoryOut
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import PriorStory, StoredItem, StoryToSave, Usage
+from newsbot.store.models import Coverage, PriorStory, StoredItem, StoryToSave, Usage
 
 DAY1 = date(2026, 10, 1)
 _T = "claim-t"  # a claim token, not a password
@@ -779,19 +779,33 @@ async def simulate(world, zones, *, days=6, outage=None, game="palworld"):
             await prepare_summaries(deps)
             continue
         with world.conn() as conn:
-            after = repo.last_window_end(conn, gid, exclude_run_date=day)
+            coverage = repo.last_coverage(conn, gid, exclude_run_date=day)
+            after = coverage.for_game(game) if coverage else None
         await lookup(game, due, after)
         with world.conn() as conn:
             row = repo.get_game_summary(conn, game, due, after)
-            # The digest posted: it ends at its due instant, which is what the next one chains on.
+            # The digest posted: it ends at its due instant, and covers the items stored by
+            # then, except that a game taken from a summary ends where the summary did. Those
+            # are what the next one chains on.
+            upto = max(
+                repo.latest_item_id(conn, collected_by=due), coverage.item_id if coverage else 0
+            )
+            taken = (
+                {game: row.items_upto}
+                if row is not None and row.status == "ok" and row.items_upto is not None
+                else {}
+            )
             conn.execute(
                 "INSERT INTO digests (guild_id, run_date, status, window_start, window_end, "
-                "created_at, updated_at) VALUES (?, ?, 'ok', ?, ?, 't', 't')",
+                "items_upto, game_items_upto, created_at, updated_at) "
+                "VALUES (?, ?, 'ok', ?, ?, ?, ?, 't', 't')",
                 (
                     gid,
                     day.isoformat(),
                     (due - timedelta(hours=24)).isoformat(),
                     due.isoformat(),
+                    upto,
+                    json.dumps(taken),
                 ),
             )
             conn.commit()
@@ -978,7 +992,19 @@ async def test_replaced_rows_add_their_tokens_and_the_spend_sum_counts_each_once
 # --- 4. windows and reuse ---
 
 
-def save(conn, game, run_date, window_end, *, status="ok", stories=(), usage=None, replace_id=None):
+def save(
+    conn,
+    game,
+    run_date,
+    window_end,
+    *,
+    status="ok",
+    stories=(),
+    usage=None,
+    replace_id=None,
+    items_after=None,
+    items_upto=None,
+):
     return repo.save_game_summary(
         conn,
         game_key=game,
@@ -993,25 +1019,33 @@ def save(conn, game, run_date, window_end, *, status="ok", stories=(), usage=Non
         token=_T,
         now=lambda: window_end,
         replace_id=replace_id,
+        items_after=items_after,
+        items_upto=items_upto,
     )
 
 
 def test_a_row_saved_exactly_on_the_reuse_boundaries(tmp_path):
-    # Was the (due - 24h, due + 30min] edges. Now: at or after due - 6h, and strictly after
-    # the server's last digest.
+    # Was the (due - 24h, due + 30min] edges. Now: at or after due - 6h, strictly after the
+    # server's last digest's window end, and starting exactly where the server's coverage ended.
     db = str(tmp_path / "t.db")
     with closing(connect(db)) as conn:
         migrate(conn)
         due = BERLIN_DUE
         limit = due - repo.SUMMARY_MAX_AGE
-        save(conn, "g", date(2026, 9, 1), limit - timedelta(microseconds=1))
+        save(conn, "g", date(2026, 9, 1), limit - timedelta(microseconds=1), items_after=7)
         assert repo.get_game_summary(conn, "g", due) is None
-        exact = save(conn, "g", date(2026, 9, 2), limit)
+        exact = save(conn, "g", date(2026, 9, 2), limit, items_after=7)
         assert repo.get_game_summary(conn, "g", due).id == exact
         assert repo.get_game_summary(conn, "h", due) is None
-        assert repo.get_game_summary(conn, "g", due, after=limit) is None  # strictly after
-        got = repo.get_game_summary(conn, "g", due, after=limit - timedelta(microseconds=1))
+        at_limit = Coverage(limit, 7)
+        assert repo.get_game_summary(conn, "g", due, after=at_limit) is None  # strictly after
+        before = Coverage(limit - timedelta(microseconds=1), 7)
+        got = repo.get_game_summary(conn, "g", due, after=before)
         assert got is not None and got.id == exact
+        # It has to start where the server's coverage ended: not before it (the server would
+        # read news twice) and not after it (the server would never see the gap).
+        assert repo.get_game_summary(conn, "g", due, after=Coverage(before.end, 6)) is None
+        assert repo.get_game_summary(conn, "g", due, after=Coverage(before.end, 8)) is None
 
 
 def test_a_summary_with_the_same_run_date_is_a_new_row_and_only_replace_id_replaces(tmp_path):
@@ -1039,9 +1073,12 @@ def test_a_summary_with_the_same_run_date_is_a_new_row_and_only_replace_id_repla
 
 
 async def test_no_item_lands_in_two_consecutive_summaries_even_across_an_outage(world):
+    # One server's consecutive summaries. (With two servers on different schedules the
+    # summaries overlap on purpose: each server's own window is whole, so what one has read
+    # another hasn't. tests/test_item_watermarks.py pins "no gaps, no repeats" per server.)
     await simulate(
         world,
-        {BER: BERLIN, PAC: LA},
+        {BER: BERLIN},
         days=5,
         outage=(datetime(2026, 10, 2, 6, 0, tzinfo=UTC), datetime(2026, 10, 2, 15, 10, tzinfo=UTC)),
     )
@@ -1060,10 +1097,17 @@ async def test_an_item_collected_exactly_at_a_window_end_belongs_to_that_window_
     world.item("palworld", "on the dot", boundary)
     world.item("palworld", "just after", boundary + timedelta(seconds=1))
     world.clock.t = boundary
-    await ensure_summary(world.deps(), "palworld", BERLIN_DUE, run_date=DAY1)
+    got = await ensure_summary(world.deps(), "palworld", BERLIN_DUE, run_date=DAY1)
     later = boundary + timedelta(hours=25)
     world.clock.t = later
-    await ensure_summary(world.deps(), "palworld", later, run_date=date(2026, 10, 2))
+    # The server's digest took that summary, so its coverage ends where the summary did.
+    await ensure_summary(
+        world.deps(),
+        "palworld",
+        later,
+        run_date=date(2026, 10, 2),
+        after=Coverage(boundary, got.items_upto),
+    )
     first, second = (titles(u) for _, u in world.llm.calls)
     assert sorted(first) == ["just before", "on the dot"]
     assert second == ["just after"]
@@ -1084,8 +1128,14 @@ async def test_a_run_now_retry_keeps_its_window_start_and_the_next_summary_does_
 
     world.item("palworld", "next day", BERLIN_DUE + timedelta(hours=20))
     world.clock.t = BERLIN_DUE + timedelta(hours=25)
+    with world.conn() as conn:
+        retried = repo.get_game_summary(conn, "palworld", BERLIN_DUE)
     await ensure_summary(
-        world.deps(), "palworld", BERLIN_DUE + timedelta(hours=25), run_date=date(2026, 10, 2)
+        world.deps(),
+        "palworld",
+        BERLIN_DUE + timedelta(hours=25),
+        run_date=date(2026, 10, 2),
+        after=Coverage(retried.window_end, retried.items_upto),
     )
     assert titles(world.llm.calls[1][1]) == ["next day"]
 
@@ -1107,7 +1157,15 @@ async def test_the_window_floor_after_a_long_outage_and_the_first_ever_window(wo
     world.item("palworld", "exactly 48h before", later - timedelta(hours=48))
     world.item("palworld", "47h before", later - timedelta(hours=47))
     world.clock.t = later
-    await ensure_summary(world.deps(), "palworld", later, run_date=date(2026, 10, 6))
+    with world.conn() as conn:
+        last = repo.get_game_summary(conn, "palworld", now)
+    await ensure_summary(
+        world.deps(),
+        "palworld",
+        later,
+        run_date=date(2026, 10, 6),
+        after=Coverage(last.window_end, last.items_upto),
+    )
     assert titles(world.llm.calls[1][1]) == ["47h before"]
 
 

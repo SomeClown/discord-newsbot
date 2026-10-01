@@ -21,7 +21,7 @@ import pytest
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem
+from newsbot.store.models import Coverage, StoredItem
 
 T0 = datetime(2026, 9, 30, 16, 0, tzinfo=UTC)
 DAY = date(2026, 9, 30)
@@ -528,12 +528,20 @@ def test_a_window_over_thousands_of_items_is_fast_and_exact(conn):
 _summary_days = iter(range(1, 10_000))
 
 
-def _summary(conn, game, end, *, status="ok"):
+def _summary(conn, game, end, *, status="ok", items_after=5):
     run_date = (date(2020, 1, 1) + timedelta(days=next(_summary_days))).isoformat()
     cur = conn.execute(
         "INSERT INTO game_summaries (game_key, run_date, status, window_start, window_end, "
-        "coverage_notes, created_at) VALUES (?, ?, ?, ?, ?, '[]', 't')",
-        (game, run_date, status, (end - timedelta(hours=24)).isoformat(), end.isoformat()),
+        "coverage_notes, created_at, items_after, items_upto) VALUES (?, ?, ?, ?, ?, '[]', 't', "
+        "?, 9)",
+        (
+            game,
+            run_date,
+            status,
+            (end - timedelta(hours=24)).isoformat(),
+            end.isoformat(),
+            items_after,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -550,10 +558,14 @@ def test_the_summary_reuse_rule_is_inclusive_at_six_hours_exclusive_after_and_pe
     far_ahead = _summary(conn, "borderlands4", T0 + timedelta(days=2))  # no upper bound
     assert repo.get_game_summary(conn, "borderlands4", T0).id == far_ahead
     # `after` excludes a row ending exactly on it, and falls back to the older qualifying row.
-    assert repo.get_game_summary(conn, "borderlands4", T0, after=T0 + timedelta(days=2)) is None
-    assert repo.get_game_summary(conn, "borderlands4", T0, after=T0 - timedelta(hours=7)).id == (
-        far_ahead
+    # (Both start at item 5, which is where this server's coverage left off.)
+    assert (
+        repo.get_game_summary(conn, "borderlands4", T0, after=Coverage(T0 + timedelta(days=2), 5))
+        is None
     )
+    assert repo.get_game_summary(
+        conn, "borderlands4", T0, after=Coverage(T0 - timedelta(hours=7), 5)
+    ).id == (far_ahead)
     assert too_old != just_inside
 
 

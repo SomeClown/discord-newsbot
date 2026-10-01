@@ -913,7 +913,7 @@ async def test_a_whole_day_for_the_friends_server(v22_db, tmp_path, monkeypatch)
 
     # The import: the v2.2 database plus the prod-like config, once.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 6
+        assert migrate(conn) == 7
     report = ensure_imported(v22_db, cfg, lambda: T_IMPORT)
     assert report is not None and len(report.games) == 3
     with closing(connect(v22_db)) as conn:

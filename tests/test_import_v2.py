@@ -150,7 +150,7 @@ def test_upgrade_with_a_pending_digest_today_adopts_it_too(v4_db, cfg):
             "UPDATE digests SET status = 'pending', posted_message_ids = '[]' WHERE id = 12"
         )
         conn.commit()
-        assert migrate(conn) == 6
+        assert migrate(conn) == 7
     ensure_imported(v4_db, cfg, _clock)
     row = _rows(v4_db, "SELECT guild_id, status FROM digests WHERE run_date = '2026-09-30'")[0]
     assert (row["guild_id"], row["status"]) == (GUILD, "pending")

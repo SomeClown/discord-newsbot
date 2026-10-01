@@ -16,7 +16,7 @@ import pytest
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem
+from newsbot.store.models import Coverage, StoredItem
 
 T0 = datetime(2026, 9, 30, 16, 0, tzinfo=UTC)
 DAY = date(2026, 9, 30)
@@ -314,10 +314,11 @@ def test_items_for_window_only_returns_games_that_guild_follows(guilds):
 _SUMMARY_DAYS = itertools.count(1)
 
 
-def _summary(conn, game, window_end, *, status="ok", notes=("n1",), note=None):
+def _summary(conn, game, window_end, *, status="ok", notes=("n1",), note=None, items_after=5):
     cur = conn.execute(
         "INSERT INTO game_summaries (game_key, run_date, status, window_start, window_end, "
-        "coverage_notes, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 't')",
+        "coverage_notes, note, created_at, items_after, items_upto) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 't', ?, 9)",
         (
             game,
             f"2026-01-{next(_SUMMARY_DAYS):02d}",  # only has to be unique per game
@@ -326,6 +327,7 @@ def _summary(conn, game, window_end, *, status="ok", notes=("n1",), note=None):
             window_end.isoformat(),
             json.dumps(list(notes)),
             note,
+            items_after,
         ),
     )
     conn.commit()
@@ -344,9 +346,14 @@ def test_get_game_summary_reuse_rule_boundaries(conn):
     got = repo.get_game_summary(conn, "g", due)
     assert got.id == newer and got.coverage_notes == ["n1"] and got.status == "ok"
     # `after` is exclusive: a summary ending exactly at the last digest's window end is a repeat.
-    assert repo.get_game_summary(conn, "g", due, after=due + timedelta(hours=3)) is None
+    # (And it has to start at item 5, where this server's coverage left off.)
+    assert (
+        repo.get_game_summary(conn, "g", due, after=Coverage(due + timedelta(hours=3), 5)) is None
+    )
     earlier = due + timedelta(hours=3) - timedelta(seconds=1)
-    assert repo.get_game_summary(conn, "g", due, after=earlier).id == newer
+    assert repo.get_game_summary(conn, "g", due, after=Coverage(earlier, 5)).id == newer
+    assert repo.get_game_summary(conn, "g", due, after=Coverage(earlier, 4)) is None
+    assert repo.get_game_summary(conn, "g", due, after=Coverage(earlier, 6)) is None
     assert repo.get_game_summary(conn, "other", due) is None
 
 

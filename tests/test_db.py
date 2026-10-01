@@ -14,15 +14,15 @@ def db_path(tmp_path):
     return tmp_path / "newsbot.db"
 
 
-def test_migrate_fresh_db_reaches_version_four(db_path):
+def test_migrate_fresh_db_reaches_the_latest_version(db_path):
     # v1.2 added migration 002 (alerted_codes/alert_state, the SHiFT code
     # alerts tables); v2.0 added 003 (alerted_codes.from_roundup). A fresh
     # database picks up all three migrations at once.
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-    assert version == 6
+    assert version == 7
     with closing(connect(db_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 def test_migrate_twice_is_a_noop(db_path):
@@ -30,7 +30,7 @@ def test_migrate_twice_is_a_noop(db_path):
         first = migrate(conn)
     with closing(connect(db_path)) as conn:
         second = migrate(conn)
-    assert first == second == 6
+    assert first == second == 7
 
 
 def test_migrate_v1_database_with_data_upgrades_intact(db_path):
@@ -54,7 +54,7 @@ def test_migrate_v1_database_with_data_upgrades_intact(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 6
+        assert version == 7
         assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 0

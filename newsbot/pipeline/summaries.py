@@ -11,14 +11,19 @@ kitchen cooking one big pot before anyone sits down, instead of a pot per
 table.
 
 Whether a pot is still good is decided per server, not per clock: a stored
-summary is reusable for a server's digest if it's newer than that server's
-previous digest (so nobody reads the same paragraph twice) and no more than
-six hours older than the digest's due time (so nobody reads yesterday's news).
-My first rule was "anything from the last 24 hours", which a 23-hour spring
-forward day, a moved digest time, and one late outage each found a way to
-break. Servers whose digests are close together still share one call; servers
-a half day apart each get their own, so the honest bound is one call per
-distinct comped cycle per game, not one per game.
+summary is reusable for a server's digest if it starts exactly where that
+server's last coverage of the game ended (so nobody misses news or reads the
+same paragraph twice) and is no more than six hours older than the digest's due
+time (so nobody reads yesterday's news). "Where it ended" is an item id, not a
+time, because a collection pass stamps its items when it starts and stores them
+minutes later (`repo.item_range` has the whole sad story). My first rule was
+"anything from the last 24 hours", which a 23-hour spring forward day, a moved
+digest time, and one late outage each found a way to break; my second chained the
+summaries per game, which shared one summary between a 09:00 server and a 21:00
+one and handed each of them half the other's news. Servers on one schedule still
+share one call; servers a half day apart each get their own window and their own
+call, so the honest bound is one call per distinct comped cycle per game, not one
+per game.
 
 The prompt is deliberately untouched. `summarize_topic` still builds the exact
 same two strings v2 did, from the same kind of inputs (the stored items in a
@@ -43,9 +48,10 @@ Claude call, not two. The claim is a row in `app_state`, written under
 check; whoever loses waits (politely, on a timer, not in a loop) and then
 reads the winner's row. The winner runs the web search and the model call
 inside the claim, refreshes it while it works, gives the model call a
-deadline, and saves only if the claim is still its own. A game whose saves keep
-failing is left alone for a while (30 minutes, doubling, kept in memory) instead
-of being paid for every five minutes.
+deadline, and saves only if the claim is still its own (lose it too many times
+running and the caller gives up and falls back). A game whose saves keep failing
+is left alone for a while (30 minutes, doubling, kept in memory) instead of being
+paid for every five minutes.
 
 `NewsBot` runs `prepare_summaries` every five minutes and hands the lookups to the
 digest job.
@@ -64,7 +70,7 @@ from zoneinfo import ZoneInfoNotFoundError
 
 from newsbot.collectors.base import RawItem
 from newsbot.config import AppConfig, GameCfg
-from newsbot.guilds.schedule import digest_window, local_due_instant
+from newsbot.guilds.schedule import digest_window, item_floor, local_due_instant
 from newsbot.pipeline.collect import CollectionDeps, collect_web_search
 from newsbot.pipeline.filter import TopicItem, _cap_key
 from newsbot.pipeline.guild_digest import (
@@ -77,7 +83,7 @@ from newsbot.pipeline.run import _PRIOR_HEADLINE_WINDOW, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, LLMClient, TopicSummary, summarize_topic
 from newsbot.store import repo
 from newsbot.store.db import connect
-from newsbot.store.models import CompedFollow, GameSummaryRow, StoryToSave, Usage
+from newsbot.store.models import CompedFollow, Coverage, GameSummaryRow, StoryToSave, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +110,10 @@ _HEARTBEAT_S = repo.SUMMARY_CLAIM_LEASE.total_seconds() / 5
 _POLL_S = 2.0
 _MAX_POLLS = int(repo.SUMMARY_CLAIM_LEASE.total_seconds() / _POLL_S)
 _WEB_SEARCH_SKIPPED = "web search skipped"
+# How many times `ensure_summary` may find its claim taken out from under it and start
+# over before it stops and lets the digest fall back to headlines. The takeover only
+# happens if a heartbeat dies, so one retry is generous and three is a leash.
+_MAX_LOST_CLAIMS = 3
 
 Sleep = Callable[[float], Awaitable[None]]
 Alert = Callable[[str], Awaitable[None]]
@@ -168,7 +178,7 @@ def _claim_sync(
     db_path: str,
     game_key: str,
     due_at: datetime,
-    after: datetime | None,
+    after: Coverage | None,
     token: str,
     now,
     retry_fallback: bool,
@@ -197,24 +207,50 @@ def _refresh_sync(db_path: str, game_key: str, token: str, now) -> bool:
         return repo.refresh_game_summary_claim(conn, game_key, token, now)
 
 
+@dataclass(frozen=True)
+class _Made:
+    """One summarize run: the window it labels, the item ids it really covers, the result."""
+
+    start: datetime
+    end: datetime
+    items_after: int | None
+    items_upto: int
+    summary: TopicSummary
+
+
 def _inputs_sync(
     db_path: str,
     cfg: AppConfig,
     game: GameCfg,
     end: datetime,
+    after: Coverage | None,
     retrying: GameSummaryRow | None,
 ):
-    """The window, the capped items and the prior headlines for one game, read together."""
+    """The window, item ids, capped items and prior headlines for one game, read together.
+
+    The items are the ids past `after` (the asking server's coverage of this game, so the
+    summary starts exactly where the server left off) up to the newest stored by `end`;
+    a retried row keeps the lower bound it was made with. The time window is only the
+    label and a floor.
+    """
     with closing(connect(db_path)) as conn:
         if retrying is not None:
-            start = retrying.window_start
+            start, items_after = retrying.window_start, retrying.items_after
         else:
-            latest = repo.latest_game_summary(conn, game.key)
-            # With no summary yet (the first one after the cutover), start where the
-            # server's last posted digest ended, or v2.2's items would be fed in again.
-            previous = latest.window_end if latest else repo.last_comped_digest_end(conn, game.key)
-            start, _ = digest_window(end, previous)
-        stored = repo.summary_items(conn, game.key, start, end)
+            # With no coverage at all (a server's first digest) there's no lower id, and the
+            # floor keeps it to a day. A server adopted from v2.2 has coverage derived from its
+            # last digest, so v2.2's items aren't fed in again.
+            start = digest_window(end, after.end if after else None)[0]
+            items_after = after.item_id if after else None
+        upto = max(repo.latest_item_id(conn, collected_by=end), items_after or 0)
+        stored = repo.summary_items(
+            conn,
+            game.key,
+            item_floor(end, items_after is not None),
+            end,
+            after_id=items_after,
+            upto_id=upto,
+        )
         prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
         followed = {f.game_key for f in repo.comped_follows(conn)}
     # The same cap `filter_items` applied in v2: confident before uncertain, then
@@ -238,19 +274,23 @@ def _inputs_sync(
         ),
         key=_cap_key,
     )[: cfg.collection.max_items_per_game]
-    return start, topic_items, prior, followed
+    return start, items_after, upto, topic_items, prior, followed
 
 
-async def _summarize(deps: SummaryDeps, game: GameCfg, retrying: GameSummaryRow | None):
-    """Run the model for one game. Returns (window start, end, summary, items' stories)."""
+async def _summarize(
+    deps: SummaryDeps, game: GameCfg, retrying: GameSummaryRow | None, after: Coverage | None = None
+) -> _Made:
+    """Run the model for one game."""
     end = deps.now()
-    start, items, prior, followed = await asyncio.to_thread(
-        _inputs_sync, deps.db_path, deps.cfg, game, end, retrying
+    start, items_after, upto, items, prior, followed = await asyncio.to_thread(
+        _inputs_sync, deps.db_path, deps.cfg, game, end, after, retrying
     )
     if not items:
         # Like v2: no items, no call, no story. Saved as `ok` so the next digest
         # doesn't go looking for a summary that will never exist.
-        return start, end, TopicSummary(game.key, [], False, None, Usage(0, 0))
+        return _Made(
+            start, end, items_after, upto, TopicSummary(game.key, [], False, None, Usage(0, 0))
+        )
     try:
         async with asyncio.timeout(deps.summarize_timeout_s):
             summary = await summarize_topic(
@@ -272,30 +312,31 @@ async def _summarize(deps: SummaryDeps, game: GameCfg, retrying: GameSummaryRow 
         # the bug I haven't met yet, which gets the same treatment.
         logger.exception("summarizing %s failed unexpectedly", game.key)
         summary = TopicSummary(game.key, [], True, _FALLBACK_NOTE, Usage(0, 0))
-    return start, end, summary
+    return _Made(start, end, items_after, upto, summary)
 
 
 def _save_sync(
     db_path: str,
     game_key: str,
     run_date: date,
-    start: datetime,
-    end: datetime,
-    summary: TopicSummary,
+    made: _Made,
     coverage: list[str],
     token: str,
     now,
     replace_id: int | None,
 ) -> GameSummary | None:
     """Save it, or `None` if the claim was lost while the model was thinking."""
+    summary = made.summary
     with closing(connect(db_path)) as conn:
         summary_id = repo.save_game_summary(
             conn,
             game_key=game_key,
             run_date=run_date,
             status="fallback" if summary.fallback else "ok",
-            window_start=start,
-            window_end=end,
+            window_start=made.start,
+            window_end=made.end,
+            items_after=made.items_after,
+            items_upto=made.items_upto,
             coverage_notes=coverage,
             note=summary.note,
             usage=summary.usage,
@@ -356,6 +397,7 @@ async def _make(
     search: bool,
     retrying: GameSummaryRow | None,
     token: str,
+    after: Coverage | None,
 ) -> GameSummary | None:
     """Do the work behind a won claim: search, summarize, save. `None` if the claim was lost."""
     beat = asyncio.create_task(_keep_claim(deps, game.key, token))
@@ -363,16 +405,14 @@ async def _make(
         if search:
             # Inside the claim, so two overlapping jobs search once, not twice.
             coverage = await _web_search(deps, [game.key])
-        start, end, summary = await _summarize(deps, game, retrying)
+        made = await _summarize(deps, game, retrying, after)
         try:
             saved = await asyncio.to_thread(
                 _save_sync,
                 deps.db_path,
                 game.key,
                 run_date,
-                start,
-                end,
-                summary,
+                made,
                 list(coverage),
                 token,
                 deps.now,
@@ -400,17 +440,18 @@ async def ensure_summary(
     due_at: datetime,
     *,
     run_date: date,
-    after: datetime | None = None,
+    after: Coverage | None = None,
     coverage: Sequence[str] = (),
     search: bool = False,
     retry_fallback: bool = False,
 ) -> GameSummary | None:
     """The summary a digest due at `due_at` should use for `game_key`, making it if nobody has.
 
-    `after` is the asking server's previous digest window end (`None` for a
-    first digest); with `due_at` it decides what counts as reusable, see
-    `repo.get_game_summary`. If nothing is, this claims the game (one caller
-    wins, the rest wait and then reuse the result), optionally searches the web
+    `after` is where the asking server's coverage of this game left off (`None`
+    for a first digest); with `due_at` it decides what counts as reusable, and
+    where a new summary starts, see `repo.get_game_summary`. If nothing is, this
+    claims the game (one caller wins, the rest wait and then reuse the result),
+    optionally searches the web
     (`search`, which replaces `coverage` with what the search reports),
     summarizes, saves, and releases. `None` means there was nothing to be had:
     an unknown game, a claim that never resolved inside its lease, or a game
@@ -422,7 +463,8 @@ async def ensure_summary(
 
     If the claim is taken over while the model is thinking (only possible if the
     heartbeat dies), the slow owner's result is thrown away, not saved beside
-    the new owner's; it goes back to looking for the answer that won.
+    the new owner's; it goes back to looking for the answer that won, at most
+    `_MAX_LOST_CLAIMS` times, and then returns `None`.
     """
     game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
     if game is None:
@@ -430,6 +472,7 @@ async def ensure_summary(
     token = uuid.uuid4().hex
     retry = retry_fallback
     polls = 0
+    lost = 0
     while True:
         state, row, stored = await asyncio.to_thread(
             _claim_sync, deps.db_path, game_key, due_at, after, token, deps.now, retry
@@ -450,9 +493,15 @@ async def ensure_summary(
             except Exception:
                 logger.exception("couldn't release the summary claim for %s", game_key)
             return None
-        saved = await _make(deps, game, run_date, coverage, search, row, token)
+        saved = await _make(deps, game, run_date, coverage, search, row, token, after)
         if saved is None:
             retry = False
+            lost += 1
+            if lost >= _MAX_LOST_CLAIMS:
+                # Somebody keeps taking the claim over (or the heartbeat keeps dying), and each
+                # lap costs a model call. Stop paying; the digest posts headlines instead.
+                logger.warning("lost the summary claim for %s %d times; giving up", game_key, lost)
+                return None
             continue
         if saved.status == "fallback":
             try:
@@ -474,7 +523,7 @@ def summary_lookup(deps: SummaryDeps) -> SummaryLookup:
     """
 
     async def lookup(
-        game_key: str, due_at: datetime, after: datetime | None = None
+        game_key: str, due_at: datetime, after: Coverage | None = None
     ) -> GameSummary | None:
         return await ensure_summary(
             deps,
@@ -492,7 +541,7 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     """The run-now lookup: like `summary_lookup`, but a `fallback` gets one more try."""
 
     async def lookup(
-        game_key: str, due_at: datetime, after: datetime | None = None
+        game_key: str, due_at: datetime, after: Coverage | None = None
     ) -> GameSummary | None:
         return await ensure_summary(
             deps,
@@ -518,7 +567,7 @@ def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
     """
 
     async def lookup(
-        game_key: str, due_at: datetime, after: datetime | None = None
+        game_key: str, due_at: datetime, after: Coverage | None = None
     ) -> GameSummary | None:
         stored = await _stored_summary(deps.db_path, game_key, due_at, after)
         if stored is not None:
@@ -526,8 +575,15 @@ def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
         game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
         if game is None:
             return None
-        _start, _end, made = await _summarize(deps, game, None)
-        return GameSummary("fallback" if made.fallback else "ok", list(made.stories), [], made.note)
+        made = await _summarize(deps, game, None, after)
+        summary = made.summary
+        return GameSummary(
+            "fallback" if summary.fallback else "ok",
+            list(summary.stories),
+            [],
+            summary.note,
+            made.items_upto,
+        )
 
     return lookup
 
@@ -537,10 +593,11 @@ def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
 
 def _needs_summary_sync(
     db_path: str, guild_id: int, game_key: str, due_at: datetime, day: date
-) -> tuple[bool, datetime | None]:
-    """Whether this server's digest has no summary it may reuse, and its previous window end."""
+) -> tuple[bool, Coverage | None]:
+    """Whether this server's digest has no summary it may reuse, and where its coverage left off."""
     with closing(connect(db_path)) as conn:
-        after = repo.last_window_end(conn, guild_id, exclude_run_date=day)
+        coverage = repo.last_coverage(conn, guild_id, exclude_run_date=day)
+        after = coverage.for_game(game_key) if coverage else None
         return repo.get_game_summary(conn, game_key, due_at, after) is None, after
 
 
@@ -571,17 +628,19 @@ async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> l
 
     Meant to run every five minutes. A game needs one when some comped server
     that follows it has a digest due within `LEAD` and no stored summary that
-    server may reuse (newer than its last digest, at most six hours older than
-    this one; a fallback counts, it isn't retried today). The game is then
-    searched and summarized, the search inside the same claim as the summary so
-    overlapping jobs search once. The new summary also serves every other server
-    whose digest is that close, which is what keeps this to about one call per
-    distinct comped cycle per game.
+    server may reuse (it starts where that server's coverage ended, and is at
+    most six hours older than this digest; a fallback counts, it isn't retried
+    today). The game is then searched and summarized for that server's window,
+    the search inside the same claim as the summary so overlapping jobs search
+    once. The new summary also serves every other server whose coverage ended
+    in the same place, which is what keeps this to about one call per distinct
+    comped cycle per game. A server whose window starts elsewhere gets its own
+    summary on a later pass (one per game per run, so one pass never makes two).
     """
     now = now or deps.now()
     follows = await asyncio.to_thread(_follows_sync, deps.db_path)
     dues = upcoming_dues(follows, now)
-    todo: list[tuple[GameCfg, datetime, date, datetime | None]] = []
+    todo: list[tuple[GameCfg, datetime, date, Coverage | None]] = []
     for game in deps.cfg.catalog:
         mine = sorted((d for d in dues if d[0].game_key == game.key), key=lambda d: d[1])
         for follow, due, run_date in mine:

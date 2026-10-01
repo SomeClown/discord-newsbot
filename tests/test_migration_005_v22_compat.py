@@ -1,4 +1,4 @@
-"""v2.2.0 must still run against a v6 database (design.md §15's rollback promise).
+"""v2.2.0 must still run against a v7 database (design.md §15's rollback promise).
 
 Rolling back to v2.2.0 is a TAG change, which means a v2.2.0 process opens
 a database that migration 005 has already reshaped. This file runs v2.2.0's
@@ -8,8 +8,9 @@ doesn't need the tag), loaded as a throwaway module, so what's exercised is
 v2.2's real SQL and not my memory of it.
 
 The populated database comes from the `v22_db` fixture: real migrations 001
-to 004, realistic rows, then 005 and 006 (006 adds the SHiFT follow-up tables,
-D14; the tests at the bottom of this file are about those).
+to 004, realistic rows, then 005, 006 and 007 (006 adds the SHiFT follow-up tables,
+D14; 007 adds the nullable item-watermark columns; the tests at the bottom of this file
+are about those).
 """
 
 import sqlite3
@@ -75,10 +76,10 @@ def test_the_snapshot_really_is_v22s_repo(v22):
 
 def test_v22_migrate_would_be_a_noop(v22_db):
     # v2.2's own runner is today's runner minus 005 (it globs the files it ships with,
-    # and 005 isn't one of them): it sees user_version 6 >= its newest, and skips.
+    # and 005 isn't one of them): it sees user_version 7 >= its newest, and skips.
     with closing(connect(v22_db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert migrate(conn) == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert migrate(conn) == 7
 
 
 # --- the digest guard ---
@@ -426,7 +427,7 @@ def test_after_v22_writes_v3_adopts_its_orphan_digest_and_the_day_is_not_due_twi
 def test_after_migration_the_v22_pipeline_helpers_survive_a_second_open(v22_db, v22):
     # A brand new process (v2.2 opening the file at boot) sees a consistent database.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 6
+        assert migrate(conn) == 7
         assert v22.get_digest(conn, TODAY + timedelta(days=0)).id == 12
         _assert_healthy(conn)
 
@@ -499,4 +500,44 @@ def test_rolling_forward_after_v22_wrote_codes_neither_crashes_nor_follows_them_
         now=_clock,
     )
     assert repo.queue_confirmed_followups(conn, [new_code], now=_clock) == 0
+    _assert_healthy(conn)
+
+
+# --- 007: the item watermark columns ---
+
+
+def test_v22_has_never_heard_of_the_watermark_columns(v22):
+    source = SNAPSHOT.read_text()
+    for name in ("items_after", "items_upto", "game_items_upto", "game_summaries"):
+        assert name not in source
+
+
+def test_every_007_column_is_nullable_so_v22s_inserts_need_not_name_them(conn):
+    for table, names in (
+        ("digests", {"items_after", "items_upto", "game_items_upto"}),
+        ("game_summaries", {"items_after", "items_upto"}),
+    ):
+        info = {r["name"]: r for r in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+        for name in names:
+            assert info[name]["notnull"] == 0 and info[name]["dflt_value"] is None, (table, name)
+
+
+def test_a_v22_digest_written_after_007_has_no_watermark_and_v3_derives_one(v22, conn):
+    # v2.2 posts the next day's digest on the migrated file: its INSERT never mentions the
+    # new columns, so they're NULL, and the roll-forward works the mark out from the window.
+    digest_id = v22.claim_digest(conn, TOMORROW, force=False, now=_clock)
+    v22.save_run(conn, digest_id, [], [], "ok", [9], None, Usage(0, 0), now=_clock)
+    row = conn.execute(
+        "SELECT guild_id, items_after, items_upto, game_items_upto FROM digests WHERE id = ?",
+        (digest_id,),
+    ).fetchone()
+    assert tuple(row) == (None, None, None, None)
+
+    repo.create_guild(conn, 42, tier="comped", set_up=True, imported_at=NOW)
+    assert repo.adopt_orphan_digests(conn, 42) >= 1
+    coverage = repo.last_coverage(conn, 42, exclude_run_date=date(2030, 1, 1))
+    assert coverage is not None
+    # Everything v2.2 had stored by the time that digest finished counts as covered.
+    stored = repo.latest_item_id(conn, collected_by=coverage.end)
+    assert coverage.item_id == stored and stored > 0
     _assert_healthy(conn)

@@ -8,7 +8,7 @@ these, it probably belongs in `repo.py` instead.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -281,6 +281,41 @@ class GameSummaryRow:
     note: str | None
     input_tokens: int
     output_tokens: int
+    # The item ids the summary covers, `(items_after, items_upto]`; `None` on a row
+    # saved before migration 007 and for `items_after` when nothing came before.
+    items_after: int | None = None
+    items_upto: int | None = None
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """How far a server has already been told the news: where its last digest left off.
+
+    `end` is that digest's window end (a time, for display and the freshness rule) and
+    `item_id` the newest stored item it covered. `by_game` overrides `item_id` for games a
+    comped digest took from a shared summary, which ends where the summary did.
+    """
+
+    end: datetime
+    item_id: int
+    by_game: dict[str, int] = field(default_factory=dict, hash=False)
+
+    def for_game(self, game_key: str) -> Coverage:
+        """This coverage as one game's: `item_id` is where that game's news left off."""
+        return Coverage(self.end, self.by_game.get(game_key, self.item_id))
+
+
+@dataclass(frozen=True)
+class ItemRange:
+    """Which stored items a digest or summary covers: ids in `(after, upto]`, newer than `floor`.
+
+    `after` is `None` for a server's first digest (the floor alone limits it). The floor is a
+    time (`collected_at`) and only ever trims an old backlog; the ids decide what's in or out.
+    """
+
+    after: int | None
+    upto: int
+    floor: datetime
 
 
 @dataclass(frozen=True)
@@ -393,3 +428,7 @@ class GuildClaim:
     # The row's attempt count after this claim, so the publisher knows whether a
     # failure is the last one the schedule will retry.
     attempts: int = 1
+    # The item ids this digest covers, `(items_after, items_upto]`, fixed when the
+    # row was first claimed so a resume or a retry reads the same items.
+    items_after: int | None = None
+    items_upto: int | None = None

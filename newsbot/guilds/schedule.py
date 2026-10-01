@@ -41,14 +41,29 @@ reading the `zoneinfo` docs twice):
   unfinished row is merely *waiting* (inside the retry gap, or a `pending` row
   whose lease hasn't gone stale), the newer day waits too, because its window
   would chain onto a digest that hasn't finished.
+- **Only yesterday's row, or today's, is worth finishing.** A retryable or
+  resumable row whose date is more than a day behind the server's local date is
+  left exactly as it is, and the next digest starts fresh (its window chains
+  from the last digest that posted, by item ids, so nothing is lost and
+  nothing repeats). Finishing a three-day-old digest would post stale news
+  over today's.
 - **A `pending` row is a lease.** The process publishing it refreshes
   `updated_at` as each game lands and on a heartbeat, so another process (or a
   restart) may only resume it once that stamp is `LEASE_STALE_AFTER` old. The
   `running` set only knows about this process; the lease is what stops a
   second one from resuming a digest the first is still busy posting.
+- **Resumes count.** Every claim, a resume included, bumps `attempts`, and a
+  stale `pending` row that has already used `MAX_ATTEMPTS` is *abandoned*
+  (`reason="abandon"`) instead of resumed: marked failed, its server told once.
+  Without this a digest that hangs every time (a timeout leaves the row
+  `pending`) would be resumed and cancelled every ten minutes until the day
+  ended.
 
-The window rule lives here too (`digest_window`), so all the time arithmetic
-is in one file I can be wrong in.
+The window rule lives here too (`digest_window`, `item_floor`), so all the time
+arithmetic is in one file I can be wrong in. Time only *describes* a window and
+trims an old backlog; which items a digest covers is decided by item ids (see
+`repo.item_range`), because a collection pass stamps `collected_at` when it
+starts and stores its items minutes later.
 """
 
 from __future__ import annotations
@@ -82,8 +97,10 @@ CATCH_UP_AFTER = timedelta(minutes=5)
 # server that was offline for a week doesn't get seven days in one embed.
 DEFAULT_WINDOW = timedelta(hours=24)
 WINDOW_FLOOR = timedelta(hours=48)
+# An unfinished row older than this many days behind the local date is left alone.
+_UNFINISHED_MAX_AGE = timedelta(days=1)
 
-DueReason = Literal["first", "retry", "resume"]
+DueReason = Literal["first", "retry", "resume", "abandon"]
 
 
 @dataclass(frozen=True)
@@ -145,7 +162,8 @@ def _unfinished(
 ) -> tuple[DueReason | None, bool]:
     """`(reason, waiting)` for the guild's newest row when it isn't finished.
 
-    `reason` is `retry` or `resume` when it should run now. `waiting` is true
+    `reason` is `retry` or `resume` when it should run now, or `abandon` for a
+    `pending` row that has used up its attempts (see the module docstring). `waiting` is true
     when it's unfinished and will be ready later (inside the retry gap, or a
     lease that hasn't gone stale), so the next day's digest must not jump the
     queue. Neither set means the row is finished, or nobody will ever touch it.
@@ -172,7 +190,7 @@ def _unfinished(
         if candidate.guild_id in running:
             return None, True
         if lease_is_stale(candidate.updated_at, now):
-            return "resume", False
+            return ("abandon" if candidate.attempts >= MAX_ATTEMPTS else "resume"), False
         return None, True
     return None, False
 
@@ -205,7 +223,10 @@ def due_guilds(
         if candidate.run_date is not None:
             if candidate.run_date > local_date:
                 continue
-            reason, waiting = _unfinished(candidate, now, running)
+            if candidate.run_date < local_date - _UNFINISHED_MAX_AGE:
+                reason, waiting = None, False
+            else:
+                reason, waiting = _unfinished(candidate, now, running)
             if reason is not None:
                 due.append(
                     DueGuild(candidate.guild_id, candidate.run_date, row_due_at, reason, True)
@@ -224,15 +245,31 @@ def due_guilds(
 def digest_window(end: datetime, previous_end: datetime | None) -> tuple[datetime, datetime]:
     """`(start, end)` for a digest that ends at `end`, chained onto the last one.
 
-    Items are selected by `collected_at` in `(start, end]`. Chaining each
-    window onto the previous digest's end leaves no gap and no overlap, which
-    is how a run-now at 08:00 followed by tomorrow's 09:00 digest stays honest.
-    The start is floored at 48 hours back; a first digest (no previous end)
-    covers 24. A previous end at or after this one (a zone change that pulled
-    the next digest earlier, or a clock step) gives an empty window that starts
-    at the previous end: nothing new, and above all nothing shown twice.
-    Instants, not calendar days, so a 23-hour or 25-hour DST day just works.
+    This is the window as *shown* (the run report, `/newsbot status`, the
+    freshness rule for summaries). Which items a digest covers is decided by
+    item ids, chained the same way (`repo.item_range`): a pass that started
+    before `end` and stored its items after the digest read them is in no time
+    window at all, but its ids are newer than the digest's, so the next one
+    takes them. Chaining each window onto the previous digest's end leaves no
+    gap and no overlap, which is how a run-now at 08:00 followed by tomorrow's
+    09:00 digest stays honest. The start is floored at 48 hours back; a first
+    digest (no previous end) covers 24. A previous end at or after this one (a
+    zone change that pulled the next digest earlier, or a clock step) gives an
+    empty window that starts at the previous end: nothing new, and above all
+    nothing shown twice. Instants, not calendar days, so a 23-hour or 25-hour
+    DST day just works.
     """
     if previous_end is None:
         return end - DEFAULT_WINDOW, end
     return max(previous_end, end - WINDOW_FLOOR), end
+
+
+def item_floor(end: datetime, chained: bool) -> datetime:
+    """The oldest `collected_at` a digest or summary ending at `end` may still read.
+
+    A first digest (nothing `chained` before it) looks back a day; a chained
+    one at most two, so a server that was offline for a week doesn't get a
+    week. It's only a floor: *which* items are covered is decided by item ids
+    (`repo.item_range`), and the floor just keeps an old backlog out.
+    """
+    return end - (WINDOW_FLOOR if chained else DEFAULT_WINDOW)

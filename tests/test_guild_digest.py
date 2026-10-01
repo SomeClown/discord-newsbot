@@ -402,7 +402,9 @@ async def test_a_comped_lookup_is_told_when_the_servers_last_digest_ended(world)
     world.clock = tomorrow + timedelta(seconds=20)
     await run_guild_digest(deps, G1, kind=RunKind.SCHEDULED)
     assert {(due, after) for _, due, after in seen if due == DUE} == {(DUE, None)}
-    assert {(due, after) for _, due, after in seen if due == tomorrow} == {(tomorrow, DUE)}
+    [(_, told)] = {(due, after) for _, due, after in seen if due == tomorrow}
+    # It's told the window end and the item id its last digest covered (the one headline).
+    assert (told.end, told.item_id) == (DUE, 1)
 
 
 async def test_a_free_guild_never_asks_for_summaries(world):
