@@ -253,7 +253,16 @@ def test_render_report_handles_unicode_and_empty_source_names():
 # --- exit code is always 0, whatever the run's own outcome ---
 
 
-async def test_cli_exit_code_is_zero_even_when_every_source_fails(tmp_path):
+async def test_cli_exit_code_is_zero_even_when_every_source_fails(tmp_path, monkeypatch):
+    # The CLI builds its own client, so hand it one whose transport answers 500 to everything.
+    # (This used to open a real socket to api.steampowered.com, which is how a test suite
+    # ends up waiting on somebody else's network.)
+    real_client = httpx.AsyncClient
+    failing = httpx.MockTransport(lambda request: httpx.Response(500))
+    monkeypatch.setattr(
+        "newsbot.pipeline.run.httpx.AsyncClient",
+        lambda **kwargs: real_client(transport=failing, **kwargs),
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "guild_id: 1\n"

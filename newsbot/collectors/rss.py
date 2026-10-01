@@ -47,6 +47,10 @@ _RETRY_BACKOFFS_S = (3.0, 6.0)
 # gives.
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
+# The redirect check's own DNS lookup gets this long. `getaddrinfo` has no timeout of its own,
+# and a resolver that never answers would park the whole collection pass behind one feed.
+_DNS_TIMEOUT_S = 10.0
+
 
 async def _reject_private_redirect(response: httpx.Response) -> None:
     """Raise if `response.url`'s host resolves to a private/loopback/link-local address.
@@ -71,7 +75,14 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
         # will have their own opinion about a response that never came.
         try:
             loop = asyncio.get_running_loop()
-            infos = await loop.getaddrinfo(host, None)
+            async with asyncio.timeout(_DNS_TIMEOUT_S):
+                infos = await loop.getaddrinfo(host, None)
+        except TimeoutError:
+            # Unlike a plain DNS failure, a resolver that stalls is a host nobody vetted, and a
+            # stalled lookup is how a collection pass could hang. Refuse the source. (This
+            # clause goes first because TimeoutError is an OSError, and the next one waves
+            # those through.)
+            raise ValueError(f"could not check where {host} points: DNS lookup timed out") from None
         except OSError:
             return
         addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
