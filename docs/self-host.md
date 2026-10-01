@@ -15,8 +15,7 @@ app makes you share anything with it. What changed is how it's set up: your
 config file now holds the bot's global settings and a catalog of games, and
 everything that belongs to one server (its channels, digest time, time zone,
 SHiFT alerts) is set from Discord with `/newsbot setup` and kept in the
-database. §14 covers upgrading a v2 copy, which needs no edits, and starting a
-fresh one.
+database. §14 covers starting a fresh copy and the command line.
 
 **This guide describes v3.0.0 and later,** with notes where an older version
 differs. `--check-sources`, `NEWSBOT_CONTACT`, and multi-arch (amd64 + arm64)
@@ -121,8 +120,7 @@ different things: `home_guild_id` (your server, where the owner-only
 home server: a source that has failed for half a day, a crashed job, a
 daily summary of how the bot is doing. It has to be a channel in
 `home_guild_id`. (`admin_channel_id` is the older name for the same key and
-still works when `owner_channel_id` is unset, so an existing copy needs no
-edit.) Your server's own problems and run reports (the
+still works when `owner_channel_id` is unset.) Your server's own problems and run reports (the
 one-message summary after each digest, a channel the bot can't post in) go to
 a different, per-server setting, `/newsbot settings admin_channel:`. They can
 be the same channel on a one-server copy. Make it private, since it's meant
@@ -595,15 +593,8 @@ A rollback undoes the running code, not anything already written to the
 database; if bad data (not bad code) is the problem, restore from a backup
 instead ([`docs/deploy.md` §9, "Restore from backup"](deploy.md#restore-from-backup)
 has the restore procedure, database path aside). Check the version you're
-rolling back past for a breaking config change first: v2.0.0, for example,
-needs a v1-shaped `config.yaml` restored alongside the image tag, not just
-the tag by itself. [`docs/deploy.md` §8](deploy.md#8-rollback) and
-[§17](deploy.md#17-upgrading-to-v20) have the specifics for that particular
-upgrade if you're coming from an older version. v3.0.0 is a breaking change
-in the shape of the config, but a v2 config keeps loading (§14 below), and
-rolling a copy back to 2.2.0 just works as long as you haven't deleted the old
-keys from `config.yaml`; [`docs/deploy.md` §19](deploy.md#19-upgrading-to-v30-the-public-app)
-has the whole rollback, including the thin first digest afterward.
+rolling back past for a breaking config change first. [`docs/deploy.md`
+§8](deploy.md#8-rollback) lists the older ones.
 
 ## 12. One bot for several servers, or one copy each
 
@@ -767,55 +758,16 @@ error type and Discord's HTTP status and code, and the log has the rest.
 Welcome failures log only the error type and status, nothing about the
 member.
 
-**Rollback.** Set `TAG` back to a release before 2.2.0 (say 2.1.1) as in §11
-and switch Discord's built-in welcome back on. The database change is
-additive, so no restore is needed. The `lounge:` block can stay in
-`config.yaml` (older versions ignore it), and so can the Server Members
-Intent in the portal.
-
-## 14. Upgrading from v2, and the CLI since v3
-
-### Upgrading a v2 copy
-
-Nothing in your `config.yaml` has to change. Back up the database (§10), set
-`TAG` to the v3 release, `pull` and `up -d` as in §11, and watch the log.
-On the first start, the bot:
-
-- applies the new migrations (005 to 008). Migration 005 refuses to run on a
-  database that already has a foreign-key violation, rolling back and naming
-  the table; to check ahead of time, on a *copy* of the database,
-  `sqlite3 -readonly copy.db "PRAGMA foreign_key_check;"` should print
-  nothing;
-- derives a catalog from your old `topics:` and `sources:` (a source that
-  names exactly one topic belongs to that game; the rest become shared
-  sources), so what gets collected is the same;
-- imports your server **once**, in one transaction: its games and channels,
-  digest time and zone, admin channel, SHiFT settings (an `@everyone` ping,
-  or none if `max_pings_per_day` was 0, with today's spent pings carried
-  over) and lounge. It's marked comped, so you keep AI summaries, and today's
-  digest, if it already posted, counts as posted, so nothing goes out twice. A
-  v2 config with more than 10 topics fails the import with a message and
-  writes nothing; trim `topics:` and start again.
-- logs what it wrote (lines starting `import:`) and the old keys that can now
-  be deleted. The import never runs again, even if you delete them. Keep them
-  until you're sure you won't roll back to v2.2, which needs them.
-
-Two small edits are worth making, neither required. Add `command_guild_ids:
-[your server's ID]` so the commands appear in your server instantly: without it
-they're registered globally, and v2's per-server copies are cleared at the
-first start, so for up to an hour (Discord's delay for global commands) you
-may be short a command or two. And if you want the bot's own alerts somewhere
-specific, set `home_guild_id` to your server (it defaults to your old
-`guild_id`) with `owner_channel_id` in it. (Your old `admin_channel_id` keeps working as
-that channel if you'd rather not add the key, and the import also copies it in
-as your server's own admin channel.)
+## 14. Starting a fresh copy, and the CLI since v3
 
 ### Starting a fresh copy
 
-Nothing to import: steps 4 to 6 above are the whole story. Your server shows
-up as a free server with nothing set up until you run `/newsbot setup`, and
-free means headlines, so list your server in `comped_guild_ids` if you want
-the AI summaries.
+Steps 4 to 6 above are the whole story. Your server shows up as a free
+server with nothing set up until you run `/newsbot setup`, and free means
+headlines, so list your server in `comped_guild_ids` if you want the AI
+summaries. Put its ID in `command_guild_ids` too, so the commands show up at
+once and not after Discord's delay for global ones (up to an hour), and set
+`home_guild_id` and `owner_channel_id` for the bot's own alerts.
 
 ### The CLI
 
@@ -852,4 +804,4 @@ collection pass stores items and releases SHiFT codes into the queue the real
 bot delivers from; `--post-to-stdout` claims the day's digest for real. Point
 them at a copy of your database (`sqlite3 data/newsbot.db ".backup 'copy.db'"`),
 never the live file. Every mode except `--check-sources` runs the v2 import
-first, so a first `--dry-run` after upgrading just works.
+first, which does nothing on a database that has no v2 config to import.

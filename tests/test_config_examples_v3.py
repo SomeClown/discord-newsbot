@@ -3,8 +3,8 @@
 `config.example.yaml` and `config.minimal.yaml` are the first things a stranger
 copies, and a doc that doesn't load is a doc that lies. `test_config.py` pins
 that both load; this pins the parts the comments make claims about: the catalog
-order the comped prompt depends on, the commented "v2 keys" block really being
-the shape the one-time import reads, and the commented lounge block really being
+order the comped prompt depends on, the commented single-server block really being
+the shape the lounge's one-time read expects, and the commented lounge block really being
 a lounge that loads. The commented blocks are uncommented in memory and run
 through `load_config`, so a comment can't drift from the loader without a test
 noticing.
@@ -59,9 +59,9 @@ def test_the_example_shift_games_exist_in_the_catalog():
     assert set(cfg.shift.games) <= {g.key for g in cfg.catalog}
 
 
-def test_the_commented_v2_keys_are_the_shape_the_import_reads(tmp_path):
+def test_the_commented_single_server_keys_are_the_shape_the_import_reads(tmp_path):
     text = EXAMPLE.read_text()
-    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge (a welcome")
+    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge works on that one server")
     path = tmp_path / "config.yaml"
     path.write_text(text + "\n" + v2)
     cfg = load_config(path)
@@ -73,7 +73,7 @@ def test_the_commented_v2_keys_are_the_shape_the_import_reads(tmp_path):
 
 def test_the_commented_lounge_block_loads_as_the_lounge_the_import_reads(tmp_path):
     text = EXAMPLE.read_text()
-    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge (a welcome")
+    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge works on that one server")
     lounge = _commented_block(text, "# lounge:\n", "#\n# To try it without")
     path = tmp_path / "config.yaml"
     path.write_text(text + "\n" + v2 + "\n" + lounge)

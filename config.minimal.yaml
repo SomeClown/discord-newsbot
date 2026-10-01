@@ -17,10 +17,6 @@
 # Run `python -m newsbot.pipeline.run --config config.yaml --check-sources`
 # once you've replaced the last two, before spending a Discord post or a
 # Claude call on finding out the hard way; see docs/self-host.md step 6.
-#
-# Upgrading a v2 copy? Don't start over. Your old config.yaml still works as
-# it is: v3 carries its server setup into the database once, on the first
-# start (see the "v2 keys" block at the end of config.example.yaml).
 
 home_guild_id: 123456789012345678     # placeholder: your server's ID
 owner_channel_id: 123456789012345679  # placeholder: a channel in that server for health alerts; optional
@@ -95,7 +91,7 @@ web_search:
 # See config.example.yaml's own shift: block and README.md's "SHiFT code
 # alerts" section if your game actually has redeem codes.
 
-# Lounge welcomes and a daily quote (design.md §14) work only through the v2
-# import, and only for one server: they have no command of their own. The whole
-# thing, every option explained, is the commented-out `lounge:` block at the
-# end of config.example.yaml, and docs/self-host.md walks through it.
+# Lounge welcomes and a daily quote (design.md §14) work for one server only
+# and have no command of their own. The whole thing, every option explained,
+# is the commented-out `lounge:` block at the end of config.example.yaml, and
+# docs/self-host.md walks through it.

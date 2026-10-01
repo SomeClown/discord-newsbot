@@ -1186,6 +1186,8 @@ Estimated 1 to 2 agent days.
 
 ## 9. Release, going public, rollout, rollback
 
+**Update (2026-10-01):** the owner decided the operator docs carry no v2 migration or rollback instructions (nobody else has deployed the older versions), so the steps below are the historical plan, no longer mirrored in `docs/deploy.md`; production's one-time v2 to v3 migration is done by hand.
+
 **Release:**
 1. Merge after qa, the checklist and docs. Tag `v3.0.0`, then **wait for the tag's CI build** (amd64 plus arm64).
 

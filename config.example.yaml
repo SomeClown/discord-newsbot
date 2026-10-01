@@ -12,8 +12,8 @@
 # catalog of games (with each game's sources). Everything that belongs to one
 # server (its channels, digest time, time zone, SHiFT settings) lives in the
 # database and is set from Discord with /newsbot setup. docs/design.md §15 has
-# the why, and the commented "v2 keys" block at the bottom explains how an old
-# single-server config gets carried over once.
+# the why, and the commented "single-server keys" block at the bottom covers
+# the one feature (the lounge) that still hangs off a server named in this file.
 #
 # Every ID below that says "placeholder" is fake and must be replaced; the
 # bot will happily start up pointed at a channel that doesn't exist and then
@@ -23,8 +23,8 @@
 
 # Your own server, where the owner-only /owner servers command lives and
 # where bot-wide alerts (a source that's been dead for half a day, a crashed
-# job, the daily owner report) land. If you leave it out and a v2 guild_id is
-# present, it defaults to that. A public bot should always set it, so the
+# job, the daily owner report) land. If you leave it out and the bottom block's
+# guild_id is present, it defaults to that. A public bot should always set it, so the
 # alerts don't show up in a stranger's server.
 home_guild_id: 123456789012345678     # placeholder: your server's ID
 
@@ -36,8 +36,8 @@ home_guild_id: 123456789012345678     # placeholder: your server's ID
 # fallback: when owner_channel_id is unset, the owner alerts go to it. A v3
 # file has no use for it. A server's own admin channel (where its run reports
 # and notices land) is set per server from Discord with /newsbot settings, and
-# the one place this file still carries an `admin_channel_id` is the v2 import
-# block at the bottom, where it names the imported server's own channel.
+# the one place this file still carries an `admin_channel_id` is the bottom
+# block, where it names that server's own admin channel.
 owner_channel_id: 000000000000000000  # placeholder: a channel in your home server
 
 # The Discord permission an admin needs to run /newsbot. Also what Discord's
@@ -55,8 +55,8 @@ command_guild_ids: []
 # Servers that get AI summaries and web search on your own keys, not just
 # headlines. This is how a self-hosted copy keeps summaries: list your own
 # server's id. Listed servers are set to comped when the bot joins them and
-# at every startup, and nothing is ever downgraded automatically. A server you
-# import from a v2 config is comped anyway; listing it here as well is what
+# at every startup, and nothing is ever downgraded automatically. The server named by
+# the bottom block's guild_id is comped anyway; listing it here as well is what
 # keeps a kick and a re-invite from bringing it back as free.
 #
 # Don't list your home or test server on the public bot. The summarizer's
@@ -474,32 +474,21 @@ catalog:
       - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
       - {type: rss, name: "r/WarDogs", url: "https://www.reddit.com/r/WarDogs/top/.rss?t=day", trust: community}
 
-# --- v2 keys, read only by the one-time import ---
+# --- Single-server keys (needed only for the lounge) ---
 #
-# Before v3 this bot served one server, and that server's whole setup lived in
-# this file. If your config.yaml still has those keys (`guild_id`, `digest:`,
-# `topics:` with a channel_id each, `sources:`, `alerts:`, `lounge:`), the
-# first v3 start does the following exactly once, in one transaction:
+# The lounge (a welcome for new members and a daily quote) has no setup
+# command. It's configured here, for one server, through the keys below: the
+# first start reads them once into the database, and the lounge: block further
+# down is re-applied at every start. If you don't want a lounge, leave all of
+# this commented out; everything else about a server is set from Discord with
+# /newsbot setup.
 #
-# - writes that server into the database as a comped server with its games and
-#   channels, digest time and zone, SHiFT settings and lounge;
-# - logs what it wrote, and the keys that can now be deleted: guild_id,
-#   admin_channel_id (once owner_channel_id is set),
-#   digest.time, digest.timezone, topics[].channel_id, alerts.enabled,
-#   alerts.channel_id, and lounge (plus topics and sources once catalog: is in
-#   place);
-# - never runs again, even after you delete them.
+# The keys describe that one server: guild_id names it, topics: lists the games
+# it follows with a channel each, and alerts: is its SHiFT channel. Every game
+# in topics: has to be in the catalog above, and a server can follow at most 10
+# games. That server is comped (AI summaries).
 #
-# With no `catalog:` in the file, v3 derives one from the old `topics:` and
-# `sources:`, so an untouched v2 config upgrades with nothing to change. With a
-# catalog: like the one above, the old keys are read only by the import. Keep
-# them until you're sure you won't roll back to v2.2 (which needs them).
-#
-# This is the shape the import reads. Every game in `topics:` has to also be in
-# the catalog, and a server can follow at most 10 games, so more than 10
-# topics fails the import and writes nothing.
-#
-# guild_id: 123456789012345678            # placeholder: the server being imported
+# guild_id: 123456789012345678            # placeholder: the server the lounge belongs to
 # admin_channel_id: 111111111111111113    # placeholder: that server's own admin channel
 # digest:
 #   time: "09:00"
@@ -514,20 +503,17 @@ catalog:
 # alerts:
 #   enabled: true
 #   channel_id: 111111111111111114        # placeholder: the SHiFT codes channel
-#   max_pings_per_day: 3                  # 0 imports as "no ping"; anything else as @everyone
+#   max_pings_per_day: 3                  # 0 means no ping; anything else pings @everyone
 #
-# The lounge (a welcome message for new members, and a daily quote) is
-# imported the same way, and it's the only way to have one: there's no command
-# for it, and it works on the imported server only. Both features are off
-# unless this block is present. Full walkthrough: docs/self-host.md ("Lounge
+# The lounge works on that one server only. Both features are off unless
+# the lounge: block below is present. Full walkthrough: docs/self-host.md ("Lounge
 # welcomes and a daily quote").
 #
-# While a lounge: block stays in this file, v3 re-applies it to the imported
-# server's database row at every startup and logs when something changed, so
-# you can keep editing the welcome text or quote sources here and restart.
-# Delete the block and the database row stands alone, with no way to edit it
-# short of the database. The re-sync needs `guild_id` above to be present
-# too.
+# While a lounge: block stays in this file, it's re-applied to the server's
+# database row at every startup (and the log says when something changed), so
+# you edit the welcome text or quote sources here and restart. Delete the
+# block and the database row stands alone, with no way to edit it short of the
+# database. This needs `guild_id` above to be present too.
 #
 # FIRST, if you turn on the welcome: in the Discord Developer Portal, open
 # your application's Bot page and switch on Server Members Intent (under
@@ -562,7 +548,7 @@ catalog:
 #       That's it. No test, no dress code, and the only real rule is "don't be the reason we need more rules." Grab a drink, say hello, and try not to judge the rest of us too harshly. We were like this when you found us.
 #   daily_quote:
 #     enabled: true
-#     # HH:MM, 24-hour, in the imported server's time zone (digest.timezone).
+#     # HH:MM, 24-hour, in that server's time zone (digest.timezone).
 #     # Default 08:00. A quote missed because the bot was down is skipped,
 #     # never caught up. Known quirk: the scheduling library (APScheduler 3.x)
 #     # skips a job set between 00:00 and 00:59 on the day after the

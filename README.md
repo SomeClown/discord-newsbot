@@ -14,8 +14,7 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** v3.0.0 is built and in testing. Production still runs v2.2.0 until
-the rollout described in [`docs/deploy.md`](docs/deploy.md) §19, and the bot
+**Status.** v3.0.0 is built and in testing. Production still runs v2.2.0, and the bot
 isn't open to the public yet.
 
 ## Free and comped servers
@@ -46,8 +45,7 @@ Two documents cover this:
   that came out of doing this for the games above.
 - **[`docs/self-host.md`](docs/self-host.md)**: the actual setup guide:
   prerequisites, creating your own Discord application, keys and costs,
-  `config.yaml` and `.env`, choosing an image, the first run, and upgrading a
-  v2 copy (no edits needed).
+  `config.yaml` and `.env`, choosing an image, and the first run.
 
 [`docs/deploy.md`](docs/deploy.md) is a different document: it's the maintainer's own
 Droplet-specific runbook (see [Maintainer notes](#maintainer-notes) below),
@@ -181,9 +179,8 @@ never go there, and the owner's alerts never go to a server.
 
 ## Lounge
 
-Optional, for one server only (v2.2, kept by v3): the one the maintainer
-imported from the old single-server setup. It's off unless that server's old
-`config.yaml` has a `lounge:` block. Two things, both posted to one channel:
+Optional, for one server only (v2.2, kept by v3): the one named by `guild_id`
+in `config.yaml`. It's off unless the file has a `lounge:` block. Two things, both posted to one channel:
 
 - **A welcome** for each new member, written by you in `config.yaml`, with
   `{member}` and `{server}` as the only placeholders. Bots are never
@@ -201,9 +198,9 @@ imported from the old single-server setup. It's off unless that server's old
   in `config.example.yaml`, never a default.
 
 There's no command to set a lounge up, and no other server can have one: the
-settings come in with the one-time import and live in the database, and a
-`lounge:` block left in `config.yaml` is re-applied to them at every start.
-Setup, source types, Docker paths and rollback are in
+settings are read from `config.yaml` into the database, and a `lounge:` block
+left there is re-applied to them at every start.
+Setup, source types and Docker paths are in
 [`docs/self-host.md`](docs/self-host.md) §13; the design is
 [`docs/design.md`](docs/design.md) §14.
 
@@ -378,9 +375,8 @@ python -m newsbot.pipeline.run --dry-run --config tests/fixtures/config_v2_examp
 
 This runs against the pre-v3 single-server example (a v2-shaped config, kept
 as a fixture) rather than `config.example.yaml`, because a dry run previews one
-server's digest and the v3 example has no server in it; the v2 file is
-imported into the scratch database first, exactly as an upgrading copy would
-be. Its game keys (`borderlands4`, `palworld`) match the fixture items, and
+server's digest and the v3 example has no server in it; the file's server is
+imported into the scratch database first. Its game keys (`borderlands4`, `palworld`) match the fixture items, and
 `--now` pins the clock to the fixture data's own frozen date (2026-09-23) so
 this stays deterministic no matter when you happen to run it: see
 `docs/self-host.md` step 6 for why. Drop `--fixtures`/`--stub-llm`/`--now` to
@@ -459,11 +455,10 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
   summaries. **`command_guild_ids`**: copy the commands into just these
   servers (instant, for dev and self-hosting) instead of registering them
   globally (up to an hour to show a change).
-- **The v2 keys** (`guild_id`, `digest`, `topics` with a `channel_id`,
-  `alerts`, `lounge`): a v2 config still loads. A catalog is derived from it,
-  and the server it describes is imported into the database once, as a comped
-  server; the import log lists the keys you can then delete. See the last block
-  of `config.example.yaml` and `docs/self-host.md` §14.
+- **The single-server keys** (`guild_id`, `digest`, `topics` with a
+  `channel_id`, `alerts`, `lounge`): only the lounge needs them, since it has
+  no command. See the last block of `config.example.yaml` and
+  `docs/self-host.md` §13.
 - **Secrets** (`.env`): `DISCORD_TOKEN`, `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`,
   and optionally `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` for authenticated
   Bluesky search (see Limitations below).
@@ -602,13 +597,12 @@ The standard path from a change to a running production bot:
 5. **Deploy** with `./scripts/deploy.sh` on the Droplet: see
    [`docs/deploy.md`](docs/deploy.md). Pin `TAG=1.1.0` in the Droplet's
    `.env` for a deliberate upgrade; rolling back is changing `TAG` back
-   to the previous value (the v3 upgrade has conditions, in
-   [`docs/deploy.md`](docs/deploy.md) §19).
+   to the previous value.
 
 ### The Droplet
 
 See [`docs/deploy.md`](docs/deploy.md) for the Droplet runbook (install,
-secrets, rollback, backups, log viewing, the v3 upgrade). It's written for that specific
+secrets, rollback, backups, log viewing). It's written for that specific
 server, but doubles as a worked example of most of what
 [`docs/self-host.md`](docs/self-host.md) describes in general terms.
 
