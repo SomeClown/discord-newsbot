@@ -204,9 +204,15 @@ async def test_the_minute_job_does_nothing_before_on_ready(bot, monkeypatch):
 
 
 async def test_the_minute_job_runs_once_on_ready_has_finished(bot, monkeypatch):
+    # On ready, but held: a fresh start has no recent pass, so the first one goes first
+    # (tests/test_digest_first_pass_hold.py has the rest of that story).
     seen = _spy_ticks(monkeypatch)
 
     await bot.on_ready()
+    await bot._digest_job()
+    assert seen == []
+
+    bot._release_digest_hold("the first pass is over")
     await bot._digest_job()
 
     assert seen == [bot.guild_digest_deps()]
@@ -227,6 +233,7 @@ async def test_the_minute_job_is_not_enabled_by_a_reconnect_alone(bot, monkeypat
     await bot.on_ready()
 
     assert steps == ["reload"]
+    bot._release_digest_hold("the first pass is over")
     await bot._digest_job()
     assert len(seen) == 1
 

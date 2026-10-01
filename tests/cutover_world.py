@@ -186,8 +186,16 @@ class World:
             self.set_now(when)
         await self.bot._digest_job()
 
-    async def ready(self) -> None:
+    async def ready(self, *, hold: bool = False) -> None:
+        """Run `on_ready`. By default the first-pass hold on digests is lifted again.
+
+        Most of these tests are about what a digest does, not about the wait for the first
+        collection pass, so they get a bot that's already past it. `hold=True` leaves the
+        gate as `on_ready` set it.
+        """
         await self.bot.on_ready()
+        if not hold:
+            self.bot._release_digest_hold("test world")
 
     async def close(self) -> None:
         if self.bot.scheduler is not None:

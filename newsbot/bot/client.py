@@ -167,6 +167,9 @@ _OWNER_REPORT_KEY = "owner_report_date"
 # `app_state` key prefix remembering that a server was told about the digest v2.2 left stuck.
 _STUCK_V22_KEY = repo.STUCK_V22_KEY_PREFIX
 _HEARTBEAT_INTERVAL_S = 60
+# After a process start, the minute job waits for the first collection pass before it posts
+# anyone's digest; this is how long it waits at most, counted from the end of `on_ready`.
+_DIGEST_HOLD_CAP = timedelta(minutes=15)
 
 
 def _parse_digest_time(time_str: str) -> dt_time:
@@ -769,6 +772,11 @@ class NewsBot(discord.Client):
         self._ready_once = False
         # The every-minute digest job does nothing until `on_ready` flips this.
         self._digests_enabled = False
+        # Set by `on_ready` when a digest due at startup would otherwise beat the first
+        # collection pass to the post (it posted 0 items for every game once). Released by
+        # that pass, however it ends, or by `_digest_hold_until`, whichever comes first.
+        self._digests_held = False
+        self._digest_hold_until: datetime | None = None
         # The summaries job runs on its interval and once at startup; whichever gets here
         # second skips instead of making the same summaries twice.
         self._summaries_running = False
@@ -1088,7 +1096,9 @@ class NewsBot(discord.Client):
            server hears its own), then whatever is still queued is delivered;
         4. the lounges: reload, chunk members, schedule the quotes;
         5. the permission sweep, with its counts to the owner;
-        6. only then, the minute digest job is switched on, the hourly collection
+        6. only then, the minute digest job is switched on (held, unless a pass finished
+           within the last interval, until the first collection pass is over or 15 minutes
+           have gone by), the hourly collection
            is scheduled (its first pass is a breath later, after the startup
            delivery above has finished, so the two can't overlap), and the
            summaries job gets its first run right away instead of waiting out
@@ -1113,6 +1123,7 @@ class NewsBot(discord.Client):
         await self._startup_step("lounge chunking", self.chunk_lounge_guilds)
         await self._startup_step("lounge quotes", self.schedule_lounge_quotes)
         await self._startup_step("permission sweep", self._permission_sweep)
+        await self._arm_digest_hold()
         self._digests_enabled = True
         logger.info("startup finished; per-server digests are on")
         await self._startup_step("collection job", self._start_collection_job)
@@ -1121,6 +1132,43 @@ class NewsBot(discord.Client):
         # searches the web, and posts a "reduced coverage" footer. So run it once now, after the
         # minute job is on (a slow model call mustn't hold up a due digest).
         await self._startup_step("summaries", self._summaries_job)
+
+    def _recent_pass_sync(self, now: datetime) -> bool:
+        """True if the database says a collection pass finished within one interval."""
+        with closing(connect(self.db_path)) as conn:
+            last = repo.get_alert_state(conn).last_sweep_at
+        if last is None:
+            return False
+        return now - last <= timedelta(minutes=self.cfg.collection.interval_minutes)
+
+    async def _arm_digest_hold(self) -> None:
+        """Hold the minute job's digests until this process's first collection pass is done.
+
+        A restart at 13:52 with yesterday's digest still owed used to post at 13:53, a minute
+        before the first pass had stored anything, so every game read "0 items". The hold is
+        skipped when the database shows a pass finished within the last interval: the items
+        are already there. Can't read the database? Hold; the cap bounds the damage.
+        """
+        now = _utcnow()
+        try:
+            recent = await asyncio.to_thread(self._recent_pass_sync, now)
+        except Exception:
+            logger.exception("couldn't read the last collection pass; holding digests")
+            recent = False
+        if recent:
+            logger.info("a collection pass finished recently; digests won't wait for the first one")
+            return
+        self._digests_held = True
+        self._digest_hold_until = now + _DIGEST_HOLD_CAP
+        logger.info(
+            "holding digests until the first collection pass finishes",
+            extra={"cap_minutes": _DIGEST_HOLD_CAP.total_seconds() / 60},
+        )
+
+    def _release_digest_hold(self, reason: str) -> None:
+        if self._digests_held:
+            self._digests_held = False
+            logger.info("releasing held digests", extra={"reason": reason})
 
     async def _start_collection_job(self) -> None:
         """Schedule the hourly collection; only `on_ready` calls this, once.
@@ -1319,10 +1367,13 @@ class NewsBot(discord.Client):
         deps = self._collection_deps
         if deps is None:
             raise RuntimeError("_collection_job() ran before setup_hook() finished")
+        pass_over = True
         try:
             deps.collectors = build_collection_collectors(self.cfg, self.secrets)
             outcome = await run_collection(deps)
             if outcome.skipped:
+                # Nothing was collected, so a held digest keeps waiting (for the cap).
+                pass_over = False
                 logger.info("collection pass skipped: run lock held")
             else:
                 self._crash_alerted.discard("collection")
@@ -1338,17 +1389,26 @@ class NewsBot(discord.Client):
             await self._alert_once(
                 "collection", f"newsbot: collection pass crashed: {_alert_reason(exc)}"
             )
+        finally:
+            if pass_over:
+                self._release_digest_hold("the first collection pass is over")
 
     async def _digest_job(self) -> None:
         """The every-minute tick: run the digest of every server that's due.
 
         A no-op until the first `on_ready` has finished its startup work (the
-        channel cache isn't ready before then). `run_due_guilds` already
-        isolates one server's failure from the next; this is the boundary for
-        whatever it can't (a locked database, say), and it alerts once, not once a minute.
+        channel cache isn't ready before then), and, after a start, until the first
+        collection pass is over (or `_DIGEST_HOLD_CAP` passes) so a catch-up digest has
+        items. `run_due_guilds` already isolates one server's failure from the next; this is
+        the boundary for whatever it can't (a locked database, say), and it alerts once, not
+        once a minute.
         """
         if not self._digests_enabled:
             return
+        if self._digests_held:
+            if self._digest_hold_until is not None and _utcnow() < self._digest_hold_until:
+                return
+            self._release_digest_hold("the hold's time cap passed")
         try:
             outcomes = await run_due_guilds(self.guild_digest_deps())
             self._crash_alerted.discard("digests")
