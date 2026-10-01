@@ -28,10 +28,10 @@ def test_006_upgrades_a_v5_database_and_keeps_its_guild_code_posts(
             conn.commit()
 
     with closing(connect(path)) as conn:
-        assert migrate(conn) == 7
+        assert migrate(conn) == 8
         row = conn.execute("SELECT status, followup_ok FROM guild_code_posts").fetchone()
         assert (row["status"], row["followup_ok"]) == ("posted", 0)  # no retroactive follow-ups
         assert conn.execute("SELECT COUNT(*) FROM code_sightings").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM guild_code_followups").fetchone()[0] == 0
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert migrate(conn) == 7  # idempotent
+        assert migrate(conn) == 8  # idempotent

@@ -173,19 +173,10 @@ async def test_a_purge_that_takes_items_above_the_mark_before_anyone_saw_them_is
     assert shown(world) == ["item-1", "item-3"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "items has no AUTOINCREMENT, so a purge that empties it makes SQLite number from 1 again. "
-        "`last_coverage` only distrusts a mark that is higher than the newest id, so a burst of "
-        "more new items than the old mark is hidden behind it: ids 1..mark are new items the "
-        "digest believes it already covered. Needs an empty store (collection stalled for the "
-        "whole retention period), which is rare, and silent when it happens."
-    ),
-)
 async def test_ids_that_restart_after_a_full_purge_do_not_hide_a_burst_bigger_than_the_old_mark(
     world,
 ):
+    """Fixed by migration 008: items.id is AUTOINCREMENT, so a purge can't make ids start over."""
     world.add_guild(G1, games=(BL4,))
     for n in range(1, 4):
         world.add_item(BL4, f"item-{n}", DUE - timedelta(hours=10 - n))

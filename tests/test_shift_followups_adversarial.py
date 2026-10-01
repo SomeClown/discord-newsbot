@@ -427,7 +427,7 @@ def test_a_migration_that_dies_halfway_rolls_back_whole_and_runs_cleanly_next_ti
                 ).fetchall()
                 == []
             )
-        assert migrate(conn) == 7  # the real files, from where it stopped
+        assert migrate(conn) == 8  # the real files, from where it stopped
         assert column in _columns(conn, table)
 
 

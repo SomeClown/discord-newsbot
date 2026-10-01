@@ -197,7 +197,8 @@ async def test_across_the_fall_back_day_every_item_lands_in_exactly_one_digest(w
 
 
 def test_the_derived_mark_survives_an_id_restart_after_everything_was_purged(world):
-    """If SQLite starts numbering again (every item purged), an old mark must not hide new items."""
+    """If numbering starts over anyway (a store restored without its sequence), a stale mark
+    must not hide new items. Migration 008 makes that a can't-happen; this is the belt."""
     world.add_guild(G1, games=(BL4,))
     for n in range(1, 6):
         world.add_item(BL4, f"item-{n}", DUE - timedelta(hours=10 - n))
@@ -207,7 +208,8 @@ def test_the_derived_mark_survives_an_id_restart_after_everything_was_purged(wor
         )
         repo.save_guild_digest(conn, claim.digest_id, "ok", {}, None, (claim.window_start, DUE))
         assert claim.items_upto == 5
-        conn.execute("DELETE FROM items")  # retention took everything; ids start over at 1
+        conn.execute("DELETE FROM items")  # retention took everything...
+        conn.execute("DELETE FROM sqlite_sequence")  # ...and the sequence is gone: ids start at 1
         conn.commit()
     world.add_item(BL4, "item-9", DUE + timedelta(hours=2))  # id 1 again
     with world.conn() as conn:

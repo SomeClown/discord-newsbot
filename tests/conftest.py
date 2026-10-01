@@ -283,7 +283,7 @@ def v4_db(tmp_path, monkeypatch) -> Path:
 def v22_db(v4_db) -> Path:
     """The populated v4 database after migrations 005 to 007 (prod once v3 is live)."""
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 7
+        assert migrate(conn) == 8
     return v4_db
 
 

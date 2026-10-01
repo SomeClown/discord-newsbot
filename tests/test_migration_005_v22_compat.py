@@ -78,8 +78,8 @@ def test_v22_migrate_would_be_a_noop(v22_db):
     # v2.2's own runner is today's runner minus 005 (it globs the files it ships with,
     # and 005 isn't one of them): it sees user_version 7 >= its newest, and skips.
     with closing(connect(v22_db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
-        assert migrate(conn) == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert migrate(conn) == 8
 
 
 # --- the digest guard ---
@@ -427,7 +427,7 @@ def test_after_v22_writes_v3_adopts_its_orphan_digest_and_the_day_is_not_due_twi
 def test_after_migration_the_v22_pipeline_helpers_survive_a_second_open(v22_db, v22):
     # A brand new process (v2.2 opening the file at boot) sees a consistent database.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 7
+        assert migrate(conn) == 8
         assert v22.get_digest(conn, TODAY + timedelta(days=0)).id == 12
         _assert_healthy(conn)
 
@@ -540,4 +540,27 @@ def test_a_v22_digest_written_after_007_has_no_watermark_and_v3_derives_one(v22,
     # Everything v2.2 had stored by the time that digest finished counts as covered.
     stored = repo.latest_item_id(conn, collected_by=coverage.end)
     assert coverage.item_id == stored and stored > 0
+    _assert_healthy(conn)
+
+
+def test_v22_purge_then_insert_never_reuses_an_item_id_after_008(v22, conn):
+    # 008 made items.id AUTOINCREMENT. v2.2's plain DELETE and its INSERT, which never
+    # names id, must get the same never-again numbering (a rollback must not reopen the
+    # id-restart hole that the watermarks would then fall into on the way forward).
+    highest = conn.execute("SELECT MAX(id) FROM items").fetchone()[0]
+    v22.purge_older_than(conn, datetime(2030, 1, 1, tzinfo=UTC))
+    assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+    digest_id = v22.claim_digest(conn, TOMORROW, force=False, now=_clock)
+    v22.save_run(
+        conn,
+        digest_id,
+        [_item("https://example.com/after-purge")],
+        [],
+        "ok",
+        [],
+        None,
+        Usage(0, 0),
+        now=_clock,
+    )
+    assert conn.execute("SELECT MIN(id) FROM items").fetchone()[0] == highest + 1
     _assert_healthy(conn)

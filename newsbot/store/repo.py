@@ -2374,9 +2374,9 @@ def last_coverage(
     never `exclude_run_date`'s own). A digest written by v3 carries its own ids. One v2.2
     wrote, and one adopted at the import, has only a window end: its ids are derived
     from it as "everything stored at or before that instant", which is what v2.2 had
-    used. The same derivation covers a store whose ids went backwards (every item
-    purged, so SQLite started numbering again), since a stale watermark would otherwise
-    hide every new item until the ids caught up.
+    used. The same derivation covers a store whose ids went backwards. Migration 008
+    (AUTOINCREMENT) means a purge can't do that anymore, so this is the belt to its
+    braces, for a database restored without its sequence.
     """
     rows = conn.execute(
         "SELECT window_end, items_upto, game_items_upto FROM digests "
