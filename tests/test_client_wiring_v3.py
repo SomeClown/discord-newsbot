@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -249,6 +250,7 @@ def _record_steps(bot: NewsBot, monkeypatch, *, boom: str | None = None) -> list
     for attr, name in (
         ("_send_import_notice", "import notice"),
         ("_reconcile", "reconcile"),
+        ("_check_owner_channel", "owner channel check"),
         ("_recover_codes", "pending codes"),
         ("_start_collection_job", "collection job"),
         ("reload_lounges", "lounge reload"),
@@ -268,6 +270,7 @@ async def test_on_ready_does_its_work_in_the_documented_order(bot, monkeypatch):
     assert [name for name, _ in log] == [
         "import notice",
         "reconcile",  # QA M1: startup delivery waits for it (the guild cache is warm by then)
+        "owner channel check",  # after reconcile (it counts servers), before the first owner alert
         "pending codes",
         "lounge reload",
         "lounge chunking",
@@ -277,6 +280,129 @@ async def test_on_ready_does_its_work_in_the_documented_order(bot, monkeypatch):
     ]
     # The digests wait for every step but the collection job, which comes after they're on.
     assert all(enabled is False for name, enabled in log if name != "collection job")
+    assert bot._digests_enabled is True
+
+
+# --- the owner channel check ---
+
+
+def _with_servers(bot: NewsBot, count: int) -> None:
+    with closing(connect(bot.db_path)) as conn:
+        for gid in range(31, 31 + count):
+            repo.create_guild(conn, gid, set_up=False)
+
+
+def _channel_in(guild_id: int | None):
+    return SimpleNamespace(id=OWNER_CHANNEL, guild=SimpleNamespace(id=guild_id))
+
+
+async def _check(bot: NewsBot, monkeypatch, *, home, channel_id, channel, servers, caplog, capsys):
+    bot.cfg = bot.cfg.model_copy(update={"home_guild_id": home, "admin_channel_id": channel_id})
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    _with_servers(bot, servers)
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    return errors, capsys.readouterr().err
+
+
+async def test_a_good_owner_channel_says_nothing(bot, monkeypatch, caplog, capsys):
+    errors, err = await _check(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=OWNER_CHANNEL,
+        channel=_channel_in(HOME),
+        servers=3,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert errors == [] and err == ""
+
+
+async def test_an_owner_channel_in_another_server_is_an_error_on_both_logs(
+    bot, monkeypatch, caplog, capsys
+):
+    errors, err = await _check(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=OWNER_CHANNEL,
+        channel=_channel_in(HOME + 1),
+        servers=3,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert len(errors) == 1 and "isn't in home_guild_id" in errors[0] and "Fix:" in errors[0]
+    assert err.strip() == errors[0]
+
+
+async def test_an_owner_channel_the_bot_cannot_see_is_an_error(bot, monkeypatch, caplog, capsys):
+    errors, err = await _check(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=OWNER_CHANNEL,
+        channel=None,
+        servers=1,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert len(errors) == 1 and "isn't a channel I can see" in errors[0]
+    assert err.strip() == errors[0]
+
+
+async def test_no_home_server_with_several_servers_is_an_error(bot, monkeypatch, caplog, capsys):
+    errors, err = await _check(
+        bot,
+        monkeypatch,
+        home=None,
+        channel_id=OWNER_CHANNEL,
+        channel=_channel_in(HOME),
+        servers=2,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert len(errors) == 1 and "home_guild_id isn't set" in errors[0]
+    assert err.strip() == errors[0]
+
+
+async def test_no_admin_channel_with_several_servers_is_an_error(bot, monkeypatch, caplog, capsys):
+    errors, _err = await _check(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=None,
+        channel=None,
+        servers=2,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert len(errors) == 1 and "admin_channel_id isn't set" in errors[0]
+
+
+async def test_a_self_hosted_one_server_bot_without_either_setting_is_left_alone(
+    bot, monkeypatch, caplog, capsys
+):
+    errors, err = await _check(
+        bot,
+        monkeypatch,
+        home=None,
+        channel_id=None,
+        channel=None,
+        servers=1,
+        caplog=caplog,
+        capsys=capsys,
+    )
+    assert errors == [] and err == ""
+
+
+async def test_a_misconfigured_owner_channel_does_not_stop_startup(bot, monkeypatch):
+    bot.cfg = bot.cfg.model_copy(update={"home_guild_id": HOME, "admin_channel_id": OWNER_CHANNEL})
+    monkeypatch.setattr(bot, "get_channel", lambda cid: _channel_in(HOME + 1))
+
+    await bot.on_ready()  # the real steps; the check complains and the rest carries on
+
     assert bot._digests_enabled is True
 
 

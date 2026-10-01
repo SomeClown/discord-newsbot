@@ -31,6 +31,7 @@ import logging
 import random
 import re
 import socket
+import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import closing
@@ -1077,7 +1078,8 @@ class NewsBot(discord.Client):
         1. the import notice, if this start did the import, and a notice for today's
            digest if v2.2 left it pending or half-posted;
         2. reconciliation, so servers the bot left are dropped and servers it
-           joined while down get a row;
+           joined while down get a row, then a check that the owner's admin channel and
+           home server are set sensibly (it complains loudly and carries on);
         3. SHiFT codes a crash left pending (the owner hears a count, each
            server hears its own), then whatever is still queued is delivered;
         4. the lounges: reload, chunk members, schedule the quotes;
@@ -1101,6 +1103,7 @@ class NewsBot(discord.Client):
         await self._startup_step("import notice", self._send_import_notice)
         await self._startup_step("stuck v2.2 digest", self._report_stuck_v22_digest)
         await self._startup_step("reconcile", self._reconcile)
+        await self._startup_step("owner channel check", self._check_owner_channel)
         await self._startup_step("pending codes", self._recover_codes)
         await self._startup_step("lounge reload", self.reload_lounges)
         await self._startup_step("lounge chunking", self.chunk_lounge_guilds)
@@ -1218,6 +1221,53 @@ class NewsBot(discord.Client):
 
     async def _reconcile(self) -> None:
         await self.lifecycle.reconcile(self)
+
+    async def _check_owner_channel(self) -> None:
+        """Say so, loudly, if the owner's alert channel or home server is misconfigured.
+
+        Every bot-wide alert goes to `admin_channel_id`, which has to be in `home_guild_id`
+        (the router refuses to post it anywhere else). Get either wrong and the owner hears
+        nothing, which looks exactly like a quiet day. So at startup: the log gets an ERROR
+        and stderr gets the same line, each with a one-line fix. It never exits, because the
+        friend's digests are working fine and shouldn't pay for the owner's typo.
+        """
+        cfg = self.cfg
+        servers = await asyncio.to_thread(self._server_count_sync)
+        problems: list[str] = []
+        if cfg.home_guild_id is None and servers > 1:
+            problems.append(
+                f"home_guild_id isn't set and I'm in {servers} servers, so nothing can tell "
+                "which one is yours. Fix: set home_guild_id in config.yaml to your own server's id."
+            )
+        if cfg.admin_channel_id is None:
+            if servers > 1:
+                problems.append(
+                    "admin_channel_id isn't set, so bot-wide alerts go nowhere. "
+                    "Fix: set admin_channel_id in config.yaml to a channel in your home server."
+                )
+        else:
+            channel = self.get_channel(cfg.admin_channel_id)
+            if channel is None:
+                problems.append(
+                    f"admin_channel_id {cfg.admin_channel_id} isn't a channel I can see. "
+                    "Fix: set it to a channel in your home server that I can view."
+                )
+            elif cfg.home_guild_id is not None:
+                found = getattr(getattr(channel, "guild", None), "id", None)
+                if found != cfg.home_guild_id:
+                    problems.append(
+                        f"admin_channel_id {cfg.admin_channel_id} isn't in home_guild_id "
+                        f"{cfg.home_guild_id}. Fix: set admin_channel_id to a channel "
+                        "in your home server."
+                    )
+        for problem in problems:
+            message = f"newsbot: owner alerts won't arrive: {problem}"
+            logger.error(message)
+            print(message, file=sys.stderr)
+
+    def _server_count_sync(self) -> int:
+        with closing(connect(self.db_path)) as conn:
+            return repo.guild_counts(conn)["servers"]
 
     async def _permission_sweep(self) -> None:
         """Check every set-up server's channels; each is told on change, the owner gets counts."""
