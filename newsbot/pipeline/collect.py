@@ -17,6 +17,16 @@ lock, plus `max_instances=1` and `coalesce` on the job; see
 that's more than half the interval. And `estimate_pass_seconds` does the
 worst-case arithmetic up front, so a config that can't possibly fit says so.
 
+So Reddit rotates. The subreddits that need to be fresh (SHiFT games, whose
+codes go stale fast, and games a comped server follows, whose digest reads
+them) go every pass. The rest take turns, a few per pass, stalest first, so
+each lands about every `reddit_rotation_hours`; fifteen games is seven
+requests a pass instead of fifteen. The last-fetch times live in `app_state`
+so a restart doesn't reshuffle the queue. And a 429 ends Reddit for the pass
+(and, if Reddit sent a Retry-After, for the passes that period covers): the
+sources left over were never asked, so they aren't failures, they just stay
+due and go first next time.
+
 Source health is global and hourly, which changes what "three failures in a
 row" means: v2's threshold was three days, and three hours is just a
 Tuesday. The owner hears about a source once, at twelve in a row, and the
@@ -31,17 +41,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
 from newsbot.collectors.base import (
     _DEFAULT_RATE_LIMIT_GAP_S,
+    SKIP_BACKED_OFF,
+    SKIP_RATE_LIMITED,
     Collector,
     CollectorResult,
     RateLimitState,
@@ -55,7 +68,15 @@ from newsbot.pipeline.lock import run_lock_or_skip
 from newsbot.pipeline.normalize import canonicalize_items, normalize
 from newsbot.store.db import connect
 from newsbot.store.models import StoredItem
-from newsbot.store.repo import existing_urls, record_source_result, record_sweep, store_items
+from newsbot.store.repo import (
+    app_state_get,
+    app_state_set,
+    comped_follows,
+    existing_urls,
+    record_source_result,
+    record_sweep,
+    store_items,
+)
 from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
@@ -79,6 +100,9 @@ _ALERT_NAME_CAP = 100
 
 # A pass that takes more than this share of the interval gets a warning.
 _SLOW_PASS_FRACTION = 0.5
+
+_REDDIT_KEY = "reddit"
+_REDDIT_FETCHED_PREFIX = "reddit_fetched:"
 
 # Called with every collected item (before dedupe, so a code edited into an
 # already-seen Reddit thread still counts) and the raw results; returns how
@@ -171,6 +195,94 @@ def estimate_pass_seconds(
         typical_s=(biggest - 1) * gap_s,
         worst_s=gap_s + biggest * timeout_s + (biggest - 1) * gap_s,
     )
+
+
+@dataclass(frozen=True)
+class RedditPlan:
+    """Which Reddit sources this pass fetches, and how many sat it out."""
+
+    selected: list[Collector]
+    rotated_out: int
+
+
+def _reddit_games(cfg: AppConfig) -> dict[str, frozenset[str] | None]:
+    """Source name -> the games it feeds (None: a shared source with no game list)."""
+    games: dict[str, frozenset[str] | None] = {}
+    for game in cfg.catalog:
+        for source in game.sources:
+            if source.name:
+                games[source.name] = frozenset({game.key})
+    for shared in cfg.shared_sources:
+        if shared.type != "web_search" and shared.name:
+            covers = getattr(shared, "games", None)
+            games[shared.name] = frozenset(covers) if covers else None
+    return games
+
+
+def priority_games(cfg: AppConfig, db_path: str) -> frozenset[str]:
+    """The games whose subreddits go every pass: SHiFT's, and any comped server's.
+
+    Worked out fresh each pass, so a comped server following a new game moves
+    that game's subreddit into the hourly set on the next one.
+    """
+    with closing(connect(db_path)) as conn:
+        comped = {follow.game_key for follow in comped_follows(conn)}
+    return frozenset(cfg.shift.games) | comped
+
+
+def _read_fetch_times(db_path: str, names: Sequence[str]) -> dict[str, datetime]:
+    out: dict[str, datetime] = {}
+    with closing(connect(db_path)) as conn:
+        for name in names:
+            raw = app_state_get(conn, _REDDIT_FETCHED_PREFIX + name)
+            if raw is None:
+                continue
+            try:
+                out[name] = datetime.fromisoformat(raw)
+            except ValueError:
+                continue  # junk reads as "never fetched", which is the safe way to be wrong
+    return out
+
+
+def _write_fetch_times(db_path: str, names: Sequence[str], now: datetime) -> None:
+    with closing(connect(db_path)) as conn:
+        for name in names:
+            app_state_set(conn, _REDDIT_FETCHED_PREFIX + name, now.isoformat())
+
+
+def plan_reddit(
+    collectors: Sequence[Collector],
+    cfg: AppConfig,
+    priority: frozenset[str],
+    fetched: dict[str, datetime],
+) -> RedditPlan:
+    """Pick this pass's Reddit sources; everything not on Reddit comes along untouched.
+
+    Priority sources always go. The rest are ranked stalest first (never
+    fetched counts as stalest; ties keep config order) and the top
+    `ceil(n / passes per rotation)` go. A never-fetched source gets no
+    special pass around that cap: after a deploy the whole rotating pile is
+    "never fetched", and letting them all through is the burst this exists to
+    prevent. Order within the result follows `collectors`, so the run is
+    deterministic.
+    """
+    games = _reddit_games(cfg)
+    reddit = [c for c in collectors if getattr(c, "rate_limit_key", None) == _REDDIT_KEY]
+    rotating = [c for c in reddit if not (games.get(c.name) or frozenset()) & priority]
+    passes = max(1, (cfg.collection.reddit_rotation_hours * 60) // cfg.collection.interval_minutes)
+    quota = math.ceil(len(rotating) / passes)
+    oldest = datetime.min.replace(tzinfo=UTC)
+    ranked = sorted(
+        range(len(rotating)),
+        key=lambda i: (
+            fetched.get(rotating[i].name, oldest).astimezone(UTC),
+            i,
+        ),
+    )
+    chosen = {id(rotating[i]) for i in ranked[:quota]}
+    rotating_ids = {id(c) for c in rotating}
+    selected = [c for c in collectors if id(c) not in rotating_ids or id(c) in chosen]
+    return RedditPlan(selected=selected, rotated_out=len(rotating) - len(chosen))
 
 
 def collection_job_options(cfg: AppConfig) -> dict[str, object]:
@@ -309,6 +421,40 @@ def _log_results(results: list[CollectorResult]) -> None:
         )
 
 
+async def _note_reddit(
+    deps: CollectionDeps, plan: RedditPlan, results: list[CollectorResult], now: datetime
+) -> None:
+    """Stamp the Reddit sources that were actually asked, and log the pass's one summary line.
+
+    A source that was backed off or 429'd isn't stamped: it stays the stalest
+    and goes first next pass. One that ran and failed is stamped, or a dead
+    feed would sit at the front of the queue forever.
+    """
+    reddit_names = {
+        c.name for c in plan.selected if getattr(c, "rate_limit_key", None) == _REDDIT_KEY
+    }
+    if not reddit_names:
+        return
+    mine = [r for r in results if r.source_name in reddit_names]
+    asked = [r.source_name for r in mine if r.skipped is None]
+    backed_off = sum(1 for r in mine if r.skipped in (SKIP_RATE_LIMITED, SKIP_BACKED_OFF))
+    try:
+        await asyncio.to_thread(_write_fetch_times, deps.db_path, asked, now)
+    except Exception:
+        logger.exception("couldn't record the Reddit fetch times")
+    logger.info(
+        "Reddit fetched %d, rotated out %d, backed off %d",
+        len(asked),
+        plan.rotated_out,
+        backed_off,
+        extra={
+            "reddit_fetched": len(asked),
+            "reddit_rotated_out": plan.rotated_out,
+            "reddit_backed_off": backed_off,
+        },
+    )
+
+
 async def _alert_owner(deps: CollectionDeps, message: str) -> None:
     # An alert that can't be sent must not take the pass down with it.
     try:
@@ -351,7 +497,24 @@ async def run_collection(deps: CollectionDeps) -> CollectionOutcome:
         started = deps.clock()
         now = deps.now()
         interval_s = deps.cfg.collection.interval_minutes * 60
-        estimate = estimate_pass_seconds(deps.collectors)
+        try:
+            priority = await asyncio.to_thread(priority_games, deps.cfg, deps.db_path)
+            fetched = await asyncio.to_thread(
+                _read_fetch_times,
+                deps.db_path,
+                [
+                    c.name
+                    for c in deps.collectors
+                    if getattr(c, "rate_limit_key", None) == _REDDIT_KEY
+                ],
+            )
+        except Exception:
+            # No rotation state is a worse day, not a dead pass: fetch the
+            # priority-less, never-fetched picture and carry on.
+            logger.exception("couldn't read the Reddit rotation state")
+            priority, fetched = frozenset(deps.cfg.shift.games), {}
+        plan = plan_reddit(deps.collectors, deps.cfg, priority, fetched)
+        estimate = estimate_pass_seconds(plan.selected)
         if estimate.worst_s > interval_s:
             logger.warning(
                 "worst-case pass length exceeds the interval",
@@ -363,7 +526,7 @@ async def run_collection(deps: CollectionDeps) -> CollectionOutcome:
             )
 
         results = await run_collectors(
-            deps.collectors,
+            plan.selected,
             deps.http,
             timeout_s=_COLLECT_TIMEOUT_S,
             sleep=deps.sleep,
@@ -371,6 +534,7 @@ async def run_collection(deps: CollectionDeps) -> CollectionOutcome:
             clock=deps.clock,
         )
         _log_results(results)
+        await _note_reddit(deps, plan, results, now)
 
         new_items, flagged = await _health_and_store(deps, results, now)
 
@@ -483,9 +647,12 @@ __all__ = [
     "CollectionDeps",
     "CollectionOutcome",
     "PassEstimate",
+    "RedditPlan",
     "build_collection_collectors",
     "collect_web_search",
     "collection_job_options",
     "estimate_pass_seconds",
+    "plan_reddit",
+    "priority_games",
     "run_collection",
 ]

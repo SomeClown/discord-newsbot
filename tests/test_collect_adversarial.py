@@ -144,6 +144,16 @@ def make_deps(cfg, db_path, http, collectors, alerts, **kw):
     )
 
 
+@pytest.fixture
+def no_rotation(monkeypatch):
+    """Every Reddit source every pass: these tests are about pacing and overlap, not rotation."""
+    monkeypatch.setattr(
+        collect_mod,
+        "plan_reddit",
+        lambda collectors, *_a: collect_mod.RedditPlan(list(collectors), 0),
+    )
+
+
 def with_collection(cfg, **changes):
     return cfg.model_copy(update={"collection": cfg.collection.model_copy(update=changes)})
 
@@ -206,7 +216,7 @@ def clocked_deps(cfg, db_path, http, collectors, alerts, clock, **kw):
 
 
 async def test_fifteen_reddit_feeds_that_all_time_out_still_finish_and_get_counted(
-    cfg, db_path, http, alerts, monkeypatch
+    no_rotation, cfg, db_path, http, alerts, monkeypatch
 ):
     monkeypatch.setattr(collect_mod, "_COLLECT_TIMEOUT_S", 0.01)
     clock = FakeClock()
@@ -231,7 +241,7 @@ async def test_fifteen_reddit_feeds_that_all_time_out_still_finish_and_get_count
 
 
 async def test_three_passes_due_at_once_run_exactly_one_and_fetch_nothing_twice(
-    cfg, db_path, http, alerts
+    no_rotation, cfg, db_path, http, alerts
 ):
     clock = FakeClock()
     feeds = reddit_feeds(clock, 15)
@@ -245,7 +255,7 @@ async def test_three_passes_due_at_once_run_exactly_one_and_fetch_nothing_twice(
 
 
 async def test_a_pass_that_crosses_the_next_interval_boundary_skips_that_tick_and_warns(
-    cfg, db_path, http, alerts, caplog
+    no_rotation, cfg, db_path, http, alerts, caplog
 ):
     short = with_collection(cfg, interval_minutes=15)
     clock = FakeClock()
@@ -302,7 +312,7 @@ async def test_a_crashed_pass_does_not_hold_the_lock_forever(
 
 
 async def test_a_pass_cancelled_mid_fetch_releases_the_lock_and_leaves_the_db_clean(
-    cfg, db_path, http, alerts
+    no_rotation, cfg, db_path, http, alerts
 ):
     clock = FakeClock()
     feeds = reddit_feeds(clock, 15)

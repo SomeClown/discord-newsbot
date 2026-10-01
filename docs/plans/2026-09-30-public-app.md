@@ -376,6 +376,8 @@ CREATE INDEX idx_item_topics_topic ON item_topics (topic_key, item_id);
 5. **SHiFT detection** runs on *all* this pass's collected items, before dedupe, filtered to `shift.games`. That keeps v2's behavior of catching a code edited into an already-seen Reddit thread. Fan-out is in §3.10.
 6. **Record the pass** with `record_sweep` (the summary text becomes "17/19 sources ok, 214 new items, 1 new code") and keep per-pass counts in memory for the owner's daily report.
 
+**Owner decision, 2026-10-01 (Reddit rotation).** The first live pass with 15 subreddits took 553 s and got five 429s. Step 1 now fetches priority subreddits (the `shift.games` games and the games any comped server follows) every pass, and rotates the rest, stalest first, `ceil(n / passes per rotation)` a pass (`collection.reddit_rotation_hours`, default 3). A 429 ends Reddit for the pass (and for `Retry-After`, if sent); skipped sources aren't failures. See design §15 "As built".
+
 **Web search** (comped only): `collect_web_search(deps, games)` builds `WebSearchCollector(web_search_cfg, games, key)` for exactly the games followed by a comped guild. It runs once per game per summary day, from the summaries job (§3.6), and stores items the same way. Brave usage is unchanged for the friend: 2 queries times 3 games.
 
 **What `run_daily` becomes.** Its pieces are reused and the function itself is retired at cutover:

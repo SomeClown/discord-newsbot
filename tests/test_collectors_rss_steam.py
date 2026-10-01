@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from newsbot.collectors.base import RawItem, build_catalog_collectors, run_collectors
+from newsbot.collectors.base import RateLimited, RawItem, build_catalog_collectors, run_collectors
 from newsbot.collectors.rss import _RETRY_BACKOFFS_S, RssCollector, _fetch_body
 from newsbot.collectors.steam import SteamCollector
 from newsbot.config import (
@@ -189,8 +189,8 @@ async def test_rss_collector_retries_on_429_then_succeeds():
 
     source = RssSource(
         type="rss",
-        name="r/Palworld",
-        url="https://www.reddit.com/r/Palworld/top/.rss?t=day",
+        name="Palworld blog",
+        url="https://example.com/palworld/feed.xml",
         topics=["palworld"],
         trust="community",
     )
@@ -220,8 +220,8 @@ async def test_rss_collector_gives_up_after_retries_and_raises():
 
     source = RssSource(
         type="rss",
-        name="r/Palworld",
-        url="https://www.reddit.com/r/Palworld/top/.rss?t=day",
+        name="Palworld blog",
+        url="https://example.com/palworld/feed.xml",
         topics=["palworld"],
         trust="community",
     )
@@ -229,6 +229,28 @@ async def test_rss_collector_gives_up_after_retries_and_raises():
     async with httpx.AsyncClient(transport=transport) as http:
         with pytest.raises(httpx.HTTPStatusError):
             await RssCollector(source, sleep=_noop_sleep).collect(http)
+
+
+async def test_reddit_429_is_not_retried_and_carries_retry_after():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "120"}, text="Too Many Requests")
+
+    source = RssSource(
+        type="rss",
+        name="r/Palworld",
+        url="https://www.reddit.com/r/Palworld/top/.rss?t=day",
+        topics=["palworld"],
+        trust="community",
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(RateLimited) as caught:
+            await RssCollector(source, sleep=_noop_sleep).collect(http)
+    assert len(calls) == 1
+    assert caught.value.retry_after_s == 120.0
 
 
 # --- byte cap (QA step 20, group 6f) ---
@@ -562,10 +584,10 @@ async def test_rss_collector_unparseable_pubdate_gives_none_not_a_crash():
     assert items[0].published_at is None
 
 
-# --- run_collectors: 429 exhaustion counts as a failure, not a skip ---
+# --- run_collectors: a Reddit 429 is a skip, a blog's exhausted 429 is a failure ---
 
 
-async def test_rss_collector_429_exhaustion_becomes_error_via_run_collectors():
+async def test_reddit_429_becomes_a_skip_via_run_collectors():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="Too Many Requests")
 
@@ -582,9 +604,29 @@ async def test_rss_collector_429_exhaustion_becomes_error_via_run_collectors():
             [RssCollector(source, sleep=_noop_sleep)], http, sleep=_noop_sleep
         )
 
+    assert results[0].error is None
+    assert results[0].skipped == "rate limited"
+    assert results[0].items == []
+
+
+async def test_blog_429_exhaustion_becomes_error_via_run_collectors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="Too Many Requests")
+
+    source = RssSource(
+        type="rss",
+        name="Palworld blog",
+        url="https://example.com/palworld/feed.xml",
+        topics=["palworld"],
+        trust="press",
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        results = await run_collectors(
+            [RssCollector(source, sleep=_noop_sleep)], http, sleep=_noop_sleep
+        )
     assert results[0].error is not None
     assert results[0].skipped is None
-    assert results[0].items == []
 
 
 async def test_run_collectors_exception_in_one_reddit_collector_does_not_sink_its_group_mate():

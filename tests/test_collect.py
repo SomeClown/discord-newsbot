@@ -426,7 +426,16 @@ async def test_run_collection_never_searches_the_web(cfg, db_path, alerts):
 
 def fifteen_subreddits(cfg, clock):
     games = [GameCfg(key=f"game{i}", name=f"Game Number {i}") for i in range(15)]
-    cfg = cfg.model_copy(update={"catalog": games, "shared_sources": [], "shift": cfg.shift})
+    # Rotation off (every subreddit, every pass): this test is about pacing.
+    collection = cfg.collection.model_copy(update={"reddit_rotation_hours": 1})
+    cfg = cfg.model_copy(
+        update={
+            "catalog": games,
+            "shared_sources": [],
+            "shift": cfg.shift,
+            "collection": collection,
+        }
+    )
     collectors = [
         FakeCollector(
             f"r/game{i}",
@@ -503,11 +512,20 @@ async def test_a_pass_still_running_when_the_next_is_due_is_skipped_not_stacked(
 
 async def test_a_slow_pass_logs_a_warning(cfg, db_path, http, alerts, caplog):
     clock = FakeClock()
-    cfg15, collectors = fifteen_subreddits(cfg, clock)
-    short = cfg15.model_copy(
-        update={"collection": cfg15.collection.model_copy(update={"interval_minutes": 15})}
+
+    class Slow:
+        name = "slow feed"
+        source_type = "rss"
+        rate_limit_key = None
+
+        async def collect(self, http):
+            clock.now += 490.0  # what a pass of fifteen paced subreddits used to cost
+            return []
+
+    short = cfg.model_copy(
+        update={"collection": cfg.collection.model_copy(update={"interval_minutes": 15})}
     )
-    deps = make_deps(short, db_path, http, collectors, alerts, sleep=clock.sleep, clock=clock)
+    deps = make_deps(short, db_path, http, [Slow()], alerts, sleep=clock.sleep, clock=clock)
     with caplog.at_level("INFO", logger="newsbot.pipeline.collect"):
         await run_collection(deps)
     messages = [(r.levelname, r.getMessage()) for r in caplog.records]

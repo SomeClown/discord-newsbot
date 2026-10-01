@@ -80,11 +80,19 @@ owner_report:
 # nothing is fetched when a digest posts. Shortening the interval buys fresher
 # SHiFT codes and costs more requests to people who didn't ask for them.
 # Reddit is the slow part: the collector spaces Reddit feeds 35 seconds apart,
-# so the 15 subreddits below add up to about 9 minutes of every pass.
+# and Reddit still answers 429 to a burst of fifteen from a datacenter address.
+# So most subreddits take turns. The ones that must stay fresh go every pass
+# (the SHiFT games' subreddits, and the subreddits of any game a comped server
+# follows); the rest rotate, stalest first, a few per pass, so each is fetched
+# about every reddit_rotation_hours. With the 15 below that is about 7 Reddit
+# requests a pass (about 4 minutes) instead of 15. A 429 stops Reddit for the
+# rest of that pass, and for longer if Reddit says so (Retry-After); that's a
+# skip, never a source failure.
 collection:
   interval_minutes: 60      # 15 to 1440
   lookback_hours: 24
   max_items_per_game: 60
+  reddit_rotation_hours: 3  # 1 to 24; 1 fetches every subreddit every pass
 
 # What the summarizer prompt calls the things in the catalog ("the video
 # games Borderlands 4, Palworld and Diablo IV"). Any change here still needs
