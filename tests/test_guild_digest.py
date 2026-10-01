@@ -8,6 +8,7 @@ and so does the pause between servers.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -925,6 +926,71 @@ async def test_is_guild_busy_while_a_run_holds_the_lock(world):
     async with deps.lock_for(G1):
         assert is_guild_busy(deps, G1) is True
         assert is_guild_busy(deps, G2) is False
+
+
+async def test_an_idle_guild_lock_is_pruned_and_a_busy_one_is_kept(world):
+    deps = world.deps()
+    async with deps.guild_lock(G1):
+        assert G1 in deps._locks
+        deps.forget_guild(G1)  # held, so it stays (the guild-removed hook can land mid-run)
+        assert G1 in deps._locks
+    assert deps._locks == {} and deps._users == {}
+    assert is_guild_busy(deps, G2) is False
+    assert deps._locks == {}  # asking whether a server is busy doesn't make it a lock
+
+
+async def test_a_lock_pruned_as_a_new_run_starts_still_serializes(world):
+    """The holder's exit prunes while a second task is already queued behind it."""
+    deps = world.deps()
+    order: list[str] = []
+    seen: list[asyncio.Lock] = []
+    release = asyncio.Event()
+
+    async def first():
+        async with deps.guild_lock(G1):
+            seen.append(deps._locks[G1])
+            order.append("first in")
+            await release.wait()
+            order.append("first out")
+
+    async def second():
+        async with deps.guild_lock(G1):
+            seen.append(deps._locks[G1])
+            order.append("second in")
+            await asyncio.sleep(0)
+            order.append("second out")
+
+    async def third():
+        # Arrives in the same wakeup the first one releases in.
+        await release.wait()
+        async with deps.guild_lock(G1):
+            seen.append(deps._locks[G1])
+            order.append("third in")
+            await asyncio.sleep(0)
+            order.append("third out")
+
+    tasks = [asyncio.create_task(c()) for c in (first, second, third)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert order.index("first out") < order.index("second in")
+    for name in ("second", "third"):
+        assert order.index(f"{name} out") == order.index(f"{name} in") + 1  # never interleaved
+    assert len({id(lock) for lock in seen}) == 1  # one server, one lock, start to finish
+    assert deps._locks == {} and deps._users == {}
+
+
+async def test_a_cancelled_waiter_doesnt_leave_a_lock_behind(world):
+    deps = world.deps()
+    async with deps.guild_lock(G1):
+        waiter = asyncio.create_task(deps.guild_lock(G1).__aenter__())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        assert deps._users == {G1: 1}
+    assert deps._locks == {} and deps._users == {}
 
 
 # --- import day (closes the task 3 note) ---

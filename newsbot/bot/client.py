@@ -283,11 +283,26 @@ def _foreign_channel(channel: object, guild_id: int | None, channel_id: int) -> 
     return True
 
 
+def _retry_after_s(exc: discord.HTTPException) -> float | None:
+    """Seconds Discord asked us to wait, from the exception or the response header, if any."""
+    for raw in (
+        getattr(exc, "retry_after", None),
+        getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After"),
+    ):
+        try:
+            seconds = float(raw)
+        except TypeError, ValueError:
+            continue
+        if seconds >= 0:
+            return seconds
+    return None
+
+
 def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None) -> None:
     """Classify a send/fetch failure for `DiscordCodeAlertPoster`.
 
-    Wraps as `PublishError` (worth retrying: a 5xx, a network blip, a
-    timeout) or re-raises `exc` unwrapped (a 4xx, or anything else): a
+    Wraps as `PublishError` (worth retrying: a 5xx, a 429, a network blip, a
+    timeout) or re-raises `exc` unwrapped (any other 4xx, or anything else): a
     permissions problem shouldn't burn a retry budget, and
     `shift/sweep.py` already has its own claim/post/record bookkeeping
     that doesn't lean on `PublishError.posted_by_topic` the way
@@ -298,10 +313,16 @@ def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None)
     retrying it rather than escaping unwrapped.
     """
     if isinstance(exc, discord.HTTPException):
-        if exc.status is not None and 400 <= exc.status < 500:
+        # A 429 is Discord's rate limit, which waiting fixes (unlike a missing
+        # permission). Until this was here a 429 that got past discord.py's own
+        # retries counted as final, and that server never got its code.
+        rate_limited = exc.status == 429
+        if exc.status is not None and 400 <= exc.status < 500 and not rate_limited:
             raise exc
         raise PublishError(
-            f"discord send failed: {exc}", posted_ids=list(posted_ids or [])
+            f"discord send failed: {exc}",
+            posted_ids=list(posted_ids or []),
+            retry_after=_retry_after_s(exc) if rate_limited else None,
         ) from exc
     if isinstance(exc, _TRANSIENT_ERRORS):
         raise PublishError(
@@ -1285,6 +1306,8 @@ class NewsBot(discord.Client):
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.lifecycle.on_guild_remove(guild)
+        if self._digest_deps is not None:
+            self._digest_deps.forget_guild(guild.id)
         # Its lounge row went with the guild's; the quote job would notice at its
         # next fire and remove itself, but there's no reason to wait.
         self._lounges.pop(guild.id, None)

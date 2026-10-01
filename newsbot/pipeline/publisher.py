@@ -42,6 +42,9 @@ class PublishError(Exception):
     something no amount of waiting will fix; whatever's in
     `posted_by_topic` at that point is what gets recorded on the `failed`
     row.
+
+    `retry_after` is how many seconds Discord said to wait, when the failure
+    was a 429 that said so. Only the SHiFT code alert retry reads it.
     """
 
     def __init__(
@@ -51,6 +54,7 @@ class PublishError(Exception):
         *,
         posted_by_topic: Mapping[str, int] | None = None,
         retryable: bool = True,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.posted_by_topic: dict[str, int] = dict(posted_by_topic or {})
@@ -58,6 +62,7 @@ class PublishError(Exception):
             list(posted_ids) if posted_ids is not None else list(self.posted_by_topic.values())
         )
         self.retryable = retryable
+        self.retry_after = retry_after
 
 
 class Publisher(Protocol):

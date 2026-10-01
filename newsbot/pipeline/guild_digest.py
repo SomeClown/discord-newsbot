@@ -42,8 +42,8 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
-from contextlib import closing
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Literal, Protocol
@@ -161,10 +161,57 @@ class GuildDigestDeps:
     # mistaken for a crashed one by the due check.
     running: set[int] = field(default_factory=set)
     _locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    # How many `guild_lock` blocks are inside (holding or waiting) for each server.
+    # A server with no entry here has nobody who could be about to take its lock.
+    _users: dict[int, int] = field(default_factory=dict)
 
     def lock_for(self, guild_id: int) -> asyncio.Lock:
-        """One lock per server: the scheduler, run-now and preview take turns on it."""
+        """One lock per server: the scheduler, run-now and preview take turns on it.
+
+        This hands out the lock and never takes it back, so a caller that only wants
+        to take turns should use `guild_lock`, which also tidies up after itself.
+        """
         return self._locks.setdefault(guild_id, asyncio.Lock())
+
+    @asynccontextmanager
+    async def guild_lock(self, guild_id: int) -> AsyncIterator[None]:
+        """Hold this server's lock, and drop its table entry on the way out if nobody's left.
+
+        Without the pruning the table keeps a lock for every server the process has
+        ever digested (300 servers, 300 locks; a server that left keeps its entry
+        too). Pruning is safe because it only happens here, in `forget_guild`, and
+        nowhere else, and none of it awaits: `lock_for` plus the user count below
+        run with no suspension point between them, and so does the check and pop in
+        `forget_guild`. On the one event loop that makes each of them atomic, so a
+        task can't be handed a lock that's about to be popped, and two tasks can't
+        end up holding different locks for one server. (A count, rather than asking
+        the lock whether it has waiters, because a lock that was just released has
+        woken its next waiter without that waiter having taken it yet, and from the
+        outside that looks exactly like idle.)
+        """
+        lock = self.lock_for(guild_id)
+        self._users[guild_id] = self._users.get(guild_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            left = self._users[guild_id] - 1
+            if left:
+                self._users[guild_id] = left
+            else:
+                del self._users[guild_id]
+                self.forget_guild(guild_id)
+
+    def forget_guild(self, guild_id: int) -> None:
+        """Drop a server's lock if it's idle: not held, not running, nobody inside `guild_lock`.
+
+        Also called when the bot leaves a server. A server that's mid-digest at that
+        moment keeps its entry; its own run prunes it when it finishes.
+        """
+        lock = self._locks.get(guild_id)
+        if lock is None or lock.locked() or guild_id in self.running or guild_id in self._users:
+            return
+        del self._locks[guild_id]
 
 
 @dataclass(frozen=True)
@@ -230,7 +277,9 @@ def guild_needs_confirmation(existing: GuildDigestRow | None) -> bool:
 
 def is_guild_busy(deps: GuildDigestDeps, guild_id: int) -> bool:
     """True while a digest (scheduled, run-now or preview) holds this server's lock."""
-    return deps.lock_for(guild_id).locked()
+    # `.get`, not `lock_for`: asking whether a server is busy mustn't create its lock.
+    lock = deps._locks.get(guild_id)
+    return lock is not None and lock.locked()
 
 
 async def todays_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildDigestRow | None:
@@ -427,7 +476,7 @@ async def preview_guild_digest(deps: GuildDigestDeps, guild_id: int) -> GuildPre
     included: with `preview_summary_for` set, a missing summary is made in memory and dropped
     when the preview ends, which is why a preview costs a model call of its own.
     """
-    async with deps.lock_for(guild_id):
+    async with deps.guild_lock(guild_id):
         loaded = await asyncio.to_thread(_load_sync, deps.db_path, guild_id)
         if loaded is None:
             return None
@@ -543,7 +592,7 @@ async def run_guild_digest(
     Raises `GuildTimeZoneError` before claiming anything if the server's stored
     zone can't be used and `due` didn't already settle the date.
     """
-    async with deps.lock_for(guild_id):
+    async with deps.guild_lock(guild_id):
         deps.running.add(guild_id)
         try:
             return await _run_locked(deps, guild_id, kind=kind, force=force, due=due)

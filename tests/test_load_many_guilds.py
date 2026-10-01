@@ -281,19 +281,12 @@ def test_nothing_per_guild_is_kept_but_one_lock(rush):
     # 300 digests, 300 publishers, and none of them (or their channel caches) outlive their run.
     assert len(world.publishers) == GUILDS
     assert [ref for ref in world.publishers if ref() is not None] == []
-    # The lock table is the one thing that remembers servers. It's one entry per server
-    # ever digested, so it grows with the server count and with nothing else.
-    assert len(deps._locks) == GUILDS
-    assert not any(lock.locked() for lock in deps._locks.values())
+    # The lock table used to be the one thing that remembered servers; it prunes now.
+    assert deps._locks == {} and deps._users == {}
     # (No tracemalloc here: it would measure SQLite's page cache and the fake's ledger as
     # happily as anything of ours, and a flaky memory test is worse than none.)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="GuildDigestDeps._locks is never pruned: one asyncio.Lock per server ever digested, "
-    "kept for the life of the process (a server that leaves keeps its entry)",
-)
 def test_idle_locks_are_released_after_the_run(rush):
     assert len(rush.deps._locks) == 0
 
@@ -555,13 +548,6 @@ class _Script:
         return 0.0 if self.calls == 1 else 1.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DiscordCodeAlertPoster re-raises a 4xx unwrapped (_classify_send_error), so a 429 "
-    "that reaches it is final: post_alert_with_retry never retries it and the code is lost. "
-    "DiscordPublisher special-cases 429; the poster doesn't. discord.py absorbs most 429s "
-    "internally, so this only bites when its own retries run out",
-)
 def test_a_429_on_a_code_alert_is_retried(tmp_path, cfg):
     clock = VirtualClock()
     run = make_shift_run(tmp_path, cfg, clock, latency=0.1, rng=_Script())

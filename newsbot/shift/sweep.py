@@ -74,6 +74,11 @@ async def post_alert_with_retry(
 ) -> tuple[int | None, Exception | None]:
     """Post one message, retrying only on `PublishError`, up to `_POST_BACKOFF_S`'s length.
 
+    A 429 arrives as a `PublishError` too. If Discord said how long to wait, we
+    wait that long instead when it's longer than the step's backoff, but never
+    past the budget's last step (`_POST_BACKOFF_S[-1]`): a server told to wait a
+    minute isn't worth a minute of the whole fan-out's time.
+
     Any other exception is treated as final without a retry: a poster
     bug or an auth failure isn't going to fix itself by waiting eight
     seconds. `asyncio.CancelledError` (a `BaseException`, not an
@@ -105,7 +110,10 @@ async def post_alert_with_retry(
             if current.ping:
                 current = _strip_ping(current)
             if attempt < len(_POST_BACKOFF_S):
-                await sleep(_POST_BACKOFF_S[attempt])
+                wait = _POST_BACKOFF_S[attempt]
+                if exc.retry_after is not None:
+                    wait = max(wait, min(exc.retry_after, _POST_BACKOFF_S[-1]))
+                await sleep(wait)
         except Exception as exc:  # non-PublishError: final immediately, no retry
             return None, exc
     return None, last_error
