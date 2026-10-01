@@ -414,6 +414,26 @@ def test_resync_clobber_check_with_a_changed_row_date(v22_db, cfg):
     assert _rows(v22_db, "SELECT last_quote_date FROM guild_lounge")[0][0] == "2026-10-02"
 
 
+def test_resync_takes_the_later_quote_date_after_a_rollback_and_roll_forward(v22_db, cfg):
+    """v2.2 posted a quote and wrote only `lounge_state`; v3 mustn't post it again."""
+    ensure_imported(v22_db, cfg, _clock)
+    assert _rows(v22_db, "SELECT last_quote_date FROM guild_lounge")[0][0] == "2026-09-30"
+    with closing(connect(v22_db)) as conn:
+        conn.execute("UPDATE lounge_state SET value = '2026-10-02' WHERE key = 'last_quote_date'")
+        conn.commit()
+
+    assert resync_lounge_from_config(v22_db, cfg) is True  # nothing else changed; the date did
+    assert _rows(v22_db, "SELECT last_quote_date FROM guild_lounge")[0][0] == "2026-10-02"
+    assert resync_lounge_from_config(v22_db, cfg) is False  # and now it's settled
+
+    # It never goes backwards: an older v2.2 date leaves a later row alone.
+    with closing(connect(v22_db)) as conn:
+        conn.execute("UPDATE lounge_state SET value = '2026-09-01' WHERE key = 'last_quote_date'")
+        conn.commit()
+    assert resync_lounge_from_config(v22_db, cfg) is False
+    assert _rows(v22_db, "SELECT last_quote_date FROM guild_lounge")[0][0] == "2026-10-02"
+
+
 def test_a_noop_resync_writes_and_logs_nothing(v22_db, cfg, caplog):
     ensure_imported(v22_db, cfg, _clock)
     before = _everything(v22_db)

@@ -1384,15 +1384,36 @@ def update_guild_settings(
     return cur.rowcount == 1
 
 
+# `app_state` keys that belong to one server, named here so the code that writes them and
+# `delete_guild` (which clears them) can't drift apart.
+STUCK_V22_KEY_PREFIX = "stuck_v22_digest:"
+
+
+def guild_crash_key(guild_id: int) -> str:
+    return f"guild_digest_crash:{guild_id}"
+
+
 def delete_guild(conn: sqlite3.Connection, guild_id: int) -> bool:
     """Delete a guild and, through ON DELETE CASCADE, everything it owns.
 
     Shared data stays: items, alerted_codes, and any story a deleted digest
     pointed at (its `digest_id` just goes NULL). Needs foreign keys on,
     which `connect()` always does.
+
+    `app_state` has no foreign key to hang a cascade on, so the per-server
+    bookkeeping keys (the digest crash backoff, the "told them about the stuck
+    v2.2 digest" markers) are deleted here by name, in the same transaction.
+    A server that leaves shouldn't leave its id behind in a table nobody
+    reads. (The import report stays: it's a record of what the import did, not
+    a setting of anyone's.)
     """
     with conn:
         cur = conn.execute("DELETE FROM guilds WHERE guild_id = ?", (guild_id,))
+        stuck = f"{STUCK_V22_KEY_PREFIX}{guild_id}:"
+        conn.execute(
+            "DELETE FROM app_state WHERE key = ? OR substr(key, 1, ?) = ?",
+            (guild_crash_key(guild_id), len(stuck), stuck),
+        )
     return cur.rowcount == 1
 
 
@@ -1666,6 +1687,24 @@ def upsert_lounge(conn: sqlite3.Connection, lounge: LoungeSettings) -> None:
                 lounge.last_quote_date,
             ),
         )
+
+
+def advance_lounge_quote_date(conn: sqlite3.Connection, guild_id: int, day: str | None) -> bool:
+    """Move a lounge row's `last_quote_date` forward to `day`, never back. True if it moved.
+
+    `upsert_lounge` leaves an existing row's date alone on purpose; this is the one
+    deliberate way to push it later (the startup re-sync, when v2.2 has posted a quote the
+    row hasn't heard about). ISO dates compare correctly as text.
+    """
+    if day is None:
+        return False
+    with conn:
+        cur = conn.execute(
+            "UPDATE guild_lounge SET last_quote_date = ? WHERE guild_id = ? "
+            "AND (last_quote_date IS NULL OR last_quote_date < ?)",
+            (day, guild_id, day),
+        )
+    return cur.rowcount == 1
 
 
 def add_notice(

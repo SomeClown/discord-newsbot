@@ -735,8 +735,12 @@ async def _publish_claimed(
             _record_posted_sync, deps.db_path, claim.digest_id, game_key, message_id, deps.now
         )
 
-    # A forced re-run gets a fresh nonce scope: Discord would otherwise dedupe the
-    # deliberate repost against the original and quietly hand back the old message.
+    # A forced re-run gets a fresh nonce scope. discord.py 2.7.1 sends `enforce_nonce: true`
+    # with every nonce (`discord/http.py`, `handle_message_parameters`), and Discord then
+    # hands back the earlier message instead of posting when it has seen the same nonce in
+    # that channel recently, so a deliberate repost a minute later would quietly vanish.
+    # "Recently" is a few minutes and Discord doesn't promise more, so don't read this
+    # as the resume's safety net: a resume waits out the 10 minute lease and is long past it.
     scope = f"{guild_id}|{run_date.isoformat()}" + (f"|{uuid.uuid4().hex}" if force else "")
     publisher = deps.publisher_for(guild, scope, already, on_posted)
     posted_new, error = await _publish_with_retry(publisher, to_post, sleep=deps.sleep)
@@ -874,7 +878,7 @@ def _candidates_sync(db_path: str):
 # retention policy (it's cleared the next time the server's run gets anywhere).
 # `guild_notices` is a capped log for admins to read, not something to query for dedupe.
 def _crash_key(guild_id: int) -> str:
-    return f"guild_digest_crash:{guild_id}"
+    return repo.guild_crash_key(guild_id)
 
 
 @dataclass(frozen=True)

@@ -163,7 +163,7 @@ _RETENTION_DAYS = 90
 # `app_state` key guarding the daily owner report against a second send.
 _OWNER_REPORT_KEY = "owner_report_date"
 # `app_state` key prefix remembering that a server was told about the digest v2.2 left stuck.
-_STUCK_V22_KEY = "stuck_v22_digest:"
+_STUCK_V22_KEY = repo.STUCK_V22_KEY_PREFIX
 _HEARTBEAT_INTERVAL_S = 60
 
 
@@ -427,16 +427,21 @@ class DiscordPublisher:
         self._skip_permanent = skip_permanent
         self.skipped: dict[str, str] = {}
         self._channels: dict[int, discord.abc.Messageable] = {}
-        # One salt per instance, not per send: a retry on *this* instance
-        # (the same run, backing off after a transient failure) reuses the
-        # salt and so reuses each topic's nonce, letting Discord's own
-        # dedup catch a send that actually landed before the retry thought
-        # it failed. A confirmed run-now builds a fresh `DiscordPublisher`,
-        # hence a fresh salt: that repost is deliberate, not a dupe.
-        # With a `nonce_scope` (`"{guild_id}|{run_date}"`) the salt is that
-        # instead, stable across a restart, so a resume after a crash mid-send
-        # can be deduplicated by Discord too. (A forced re-run passes a fresh
-        # scope: that repost is deliberate.)
+        # One salt per instance, not per send. discord.py 2.7.1 sends `enforce_nonce: true`
+        # along with any nonce (`discord/http.py`, `handle_message_parameters`), and
+        # `send()` mints a random one when you pass none, so Discord really does check:
+        # a second send with the same nonce in the same channel returns the first message
+        # instead of posting again. But it only remembers a nonce for a short while (a few
+        # minutes; Discord doesn't say), so this is a seatbelt for a retry on *this*
+        # instance (the same run, backing off after a transient failure, which reuses the
+        # salt and so each topic's nonce and catches a send that landed before the retry
+        # thought it failed). It is not what makes a restart safe. A resume after a crash
+        # waits out the 10 minute lease, long past that window, and relies on the digest
+        # row's write-through instead; the leftover risk is one duplicate game post (D7).
+        # A confirmed run-now builds a fresh `DiscordPublisher` with a fresh scope, so its
+        # deliberate repost isn't mistaken for a duplicate. With a `nonce_scope`
+        # (`"{guild_id}|{run_date}"`) the salt is that instead of a random one, so a retry
+        # after a quick restart can still be deduplicated.
         self._nonce_salt = nonce_scope if nonce_scope is not None else uuid.uuid4().hex
 
     @property
@@ -620,7 +625,7 @@ class DiscordCodeAlertPoster:
         claim/post/record bookkeeping rather than `PublishError`'s.
 
         The returned message must say it landed in *this* channel. discord.py
-        sends `enforce_nonce`, and if Discord ever answers a send with some
+        sends `enforce_nonce` with every nonce, and if Discord ever answers a send with some
         other message it deduped against, recording that as posted would lose
         a code without a trace. So a mismatch raises `ForeignMessageError`
         (final, no retry) and the code is marked failed instead.

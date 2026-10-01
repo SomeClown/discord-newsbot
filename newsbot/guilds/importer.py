@@ -388,10 +388,13 @@ def resync_lounge_from_config(db_path: str | Path, cfg: AppConfig) -> bool:
     """D5: re-apply a `lounge:` block from config to the imported guild's lounge row.
 
     Runs at every start while the block (and the `guild_id` it hangs off)
-    is still in `config.yaml`. The row's `last_quote_date` is never touched,
-    so a restart can't earn anyone a second quote. Writes nothing if the row
-    already matches, and logs only when it changed something. Returns True
-    if it wrote. Delete the block and the database row stands alone.
+    is still in `config.yaml`. The row's `last_quote_date` is never set backwards
+    (it takes the later of its own and v2.2's `lounge_state` one: after a rollback
+    v2.2 posts a quote and records it only in `lounge_state`, and a roll-forward that
+    kept the older date would post today's quote a second time), so a restart can't
+    earn anyone a second quote. Writes nothing if the row already matches, and logs
+    only when it changed something. Returns True if it wrote. Delete the block and
+    the database row stands alone.
     """
     legacy = cfg.legacy
     if legacy is None or legacy.lounge is None:
@@ -403,11 +406,11 @@ def resync_lounge_from_config(db_path: str | Path, cfg: AppConfig) -> bool:
             return False
         guild_id = found["guild_id"]
         existing = repo.get_lounge(conn, guild_id)
-        # A row we're about to create starts from v2.2's date, like the import
-        # would have; an existing row keeps its own.
-        last_quote_date = (
-            existing.last_quote_date if existing else repo.get_lounge_state(conn).last_quote_date
-        )
+        # The later of the row's own date and v2.2's: see the docstring. A row we're
+        # about to create starts from v2.2's date, like the import would have.
+        v22_date = repo.get_lounge_state(conn).last_quote_date
+        dates = [d for d in (existing.last_quote_date if existing else None, v22_date) if d]
+        last_quote_date = max(dates) if dates else None
         wanted = _lounge_settings(guild_id, legacy.lounge, last_quote_date)
         if wanted is None:
             # Both features off: switch an existing row off, but there's
@@ -422,11 +425,12 @@ def resync_lounge_from_config(db_path: str | Path, cfg: AppConfig) -> bool:
                 quote_enabled=False,
                 quote_time=legacy.lounge.daily_quote.time,
                 quote_sources=_quote_sources(legacy.lounge),
-                last_quote_date=existing.last_quote_date,
+                last_quote_date=last_quote_date,
             )
         if wanted == existing:
             return False
         repo.upsert_lounge(conn, wanted)
+        repo.advance_lounge_quote_date(conn, guild_id, last_quote_date)
     log.info(
         "lounge: re-synced guild %s from the lounge: block in config.yaml "
         "(channel %s, welcome %s, quote %s at %s, %d quote sources)",

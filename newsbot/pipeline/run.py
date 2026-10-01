@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -659,6 +660,39 @@ def _run_modes(
     )
 
 
+def _backup_read_only(db_path: Path, copy: Path) -> None:
+    """Back `db_path` up into `copy` through a read-only connection (safe against a live writer)."""
+    source = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        with closing(sqlite3.connect(copy)) as target:
+            source.backup(target)
+    finally:
+        source.close()
+
+
+def _backup_from_file_copy(db_path: Path, copy: Path, scratch: Path) -> None:
+    """The fallback: copy the file and its `-wal` into `scratch`, and back up from that.
+
+    A WAL database wants to write a `-shm` file next to itself even to be read, and a
+    read-only data directory (a root-owned volume, a mounted backup) won't allow
+    it, so `mode=ro` can fail with "unable to open database file". Copying the
+    pair somewhere writable gets SQLite to do the WAL recovery itself. It isn't atomic
+    against a live writer (a checkpoint between the two copies could tear it); for a
+    rehearsal on a throwaway copy I'll take that over refusing to run.
+    """
+    staged = scratch / "staged.db"
+    shutil.copyfile(db_path, staged)
+    wal = Path(f"{db_path}-wal")
+    if wal.exists():
+        shutil.copyfile(wal, Path(f"{staged}-wal"))
+    source = sqlite3.connect(staged)
+    try:
+        with closing(sqlite3.connect(copy)) as target:
+            source.backup(target)
+    finally:
+        source.close()
+
+
 @contextmanager
 def _read_only_copy(db_path: str):
     """Yield a throwaway copy of the database at `db_path`, so a rehearsal can't touch the real one.
@@ -667,18 +701,21 @@ def _read_only_copy(db_path: str):
     dry run that "only" imports has already spent a v2.2 server's SHiFT ping
     budget at the wrong moment. So the file is opened read-only, copied with
     sqlite's backup API (which is safe against a live writer) into a temp
-    directory, and everything runs there. A path that doesn't exist yet just
+    directory, and everything runs there. If it can't be opened read-only (a
+    read-only data directory can't hold the WAL's `-shm`), the file and its `-wal`
+    are copied instead and backed up from the copy. A path that doesn't exist yet just
     starts empty in the temp directory; nothing gets created at the real one.
     """
     with tempfile.TemporaryDirectory(prefix="newsbot-dry-run-") as scratch:
         copy = Path(scratch) / "copy.db"
-        if Path(db_path).exists():
-            source = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+        source = Path(db_path)
+        if source.exists():
             try:
-                with closing(sqlite3.connect(copy)) as target:
-                    source.backup(target)
-            finally:
-                source.close()
+                _backup_read_only(source, copy)
+            except sqlite3.OperationalError:
+                logger.info("couldn't open the database read-only; copying its files instead")
+                copy.unlink(missing_ok=True)
+                _backup_from_file_copy(source, copy, Path(scratch))
         yield str(copy)
 
 
