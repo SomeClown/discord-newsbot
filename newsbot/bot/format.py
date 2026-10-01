@@ -697,12 +697,18 @@ def _alert_block(
     return f"{code_block}\n{prefix}{truncated_name}"
 
 
+def _nonce_salt(scope: str) -> str:
+    """The text a nonce hash starts with: nothing for no scope, else the scope and a bar."""
+    return f"{scope}|" if scope else ""
+
+
 def render_code_alerts(
     candidates: list[CodeCandidate],
     *,
     ping: bool,
     ping_mention: str | None = None,
     test: bool = False,
+    nonce_scope: str = "",
 ) -> list[RenderedAlert]:
     """Render a batch of new SHiFT codes into one or more alert messages.
 
@@ -717,6 +723,12 @@ def render_code_alerts(
     `ping_mention` is the text a ping starts with: `"@everyone"` (the
     default, which is all v2 ever used) or a role mention like `"<@&123>"`
     for a server that picked a role. It only matters when `ping` is true.
+
+    `nonce_scope` salts every message's nonce (the fan-out passes the server
+    and channel ids). Without it, two servers getting the same batch would
+    send the same nonce, and Discord may hand the second one the first one's
+    message back instead of posting. Same scope, same nonces: a retry to the
+    same channel still reuses its own.
     """
     if not candidates:
         return []
@@ -778,7 +790,9 @@ def render_code_alerts(
                 f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
             )
         batch_codes = [code for code, _ in batch]
-        nonce = hashlib.sha256(f"{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+        nonce = hashlib.sha256(
+            f"{_nonce_salt(nonce_scope)}{'|'.join(batch_codes)}|{i}".encode()
+        ).hexdigest()[:25]
         rendered.append(
             RenderedAlert(
                 content=content,
@@ -826,7 +840,9 @@ def _roundup_code_block(candidate: CodeCandidate) -> str:
     return f"```\n{candidate.code}\n```"
 
 
-def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert]:
+def render_roundup_alerts(
+    candidates: list[CodeCandidate], *, nonce_scope: str = ""
+) -> list[RenderedAlert]:
     """Render fresh roundup-only codes into unpinged "from a roundup" messages (design.md §13).
 
     v1 recorded every roundup-only code silently, forever; v2.0 posts the
@@ -846,6 +862,8 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
     `_CONTINUATION_HEADER`, and no group's codes ever share a message with
     another group's (a header names one specific roundup post; mixing two
     posts' codes under one header would misattribute them).
+
+    `nonce_scope` salts the nonces per server and channel; see `render_code_alerts`.
     """
     if not candidates:
         return []
@@ -908,7 +926,9 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
             # so a normal and a roundup message for the same code (which
             # can't actually happen, once-per-code, but nonces are cheap
             # insurance) could never collide.
-            nonce = hashlib.sha256(f"roundup|{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+            nonce = hashlib.sha256(
+                f"{_nonce_salt(nonce_scope)}roundup|{'|'.join(batch_codes)}|{i}".encode()
+            ).hexdigest()[:25]
             rendered.append(
                 RenderedAlert(content=content, codes=batch_codes, ping=False, nonce=nonce)
             )

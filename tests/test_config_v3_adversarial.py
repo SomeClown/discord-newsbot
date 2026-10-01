@@ -755,7 +755,8 @@ def test_hybrid_ignores_the_old_digest_for_collection_ai_and_run_report(tmp_path
     assert cfg.collection.interval_minutes == 60
     assert cfg.ai.subject == "video games"
     assert cfg.run_report is True
-    assert cfg.shift.games == [] and cfg.shift.max_pings_per_day == 3
+    # Changed with the v3 shift.games rule: left out means borderlands4, not every game.
+    assert cfg.shift.games == ["borderlands4"] and cfg.shift.max_pings_per_day == 3
     # ...while the legacy view still sees them.
     assert cfg.legacy is not None and cfg.legacy.shift_ping == "none"
     assert cfg.legacy.digest_time == "09:00"

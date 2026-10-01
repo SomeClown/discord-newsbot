@@ -21,10 +21,10 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import lease_is_stale, retry_is_ready
 from newsbot.store.db import StoreError
@@ -1902,7 +1902,7 @@ def record_released_codes(
         guild_ids = [g.guild_id for g, _ in eligible_shift_guilds(conn, queue_for_games, moment)]
         for guild_id in guild_ids:
             for code in inserted:
-                golden, trusted = (flags or {}).get(code, (False, True))
+                golden, trusted = (flags or {}).get(code, (False, False))
                 conn.execute(
                     "INSERT INTO guild_code_posts "
                     "(guild_id, code, status, pinged, from_roundup, golden, trusted, claimed_at) "
@@ -2031,8 +2031,11 @@ def guild_posted_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]
     return found
 
 
-class ClaimLostError(StoreError):
-    """Another pass already claimed (or skipped) one of the codes; nothing was changed."""
+class ClaimedCodes(NamedTuple):
+    """What `claim_guild_codes` got: the codes now `pending`, and whether the ping was spent."""
+
+    codes: list[str]
+    pinged: bool
 
 
 def claim_guild_codes(
@@ -2045,19 +2048,24 @@ def claim_guild_codes(
     now: Callable[[], datetime] | None = None,
     max_pings: int | None = None,
     from_roundup: bool = False,
-) -> bool:
+    ping_codes: Collection[str] | None = None,
+) -> ClaimedCodes:
     """`claim_codes`, for one server: move its `queued` `codes` to `pending`, spending its ping.
 
     Same record-then-post shape and the same `BEGIN IMMEDIATE` reasoning as
     `claim_codes`, but the budget is the server's own (`guild_shift.ping_day` and
-    `ping_count`), and `local_day` is that server's local date. Each code must
-    still be `queued` under the write lock; if any isn't (another pass got
-    there first, which is the whole point of checking), nothing changes, the
-    ping isn't spent, and `ClaimLostError` is raised. Returns whether the ping
-    was really spent (the cap is re-checked under the write lock).
+    `ping_count`), and `local_day` is that server's local date.
+
+    Takes whichever of `codes` are still `queued` under the write lock and
+    returns those, in the order given. Another pass may have claimed (or the
+    server skipped) some of them since the caller looked; the rest are still
+    ours to send, so one lost code no longer strands its siblings. Claiming
+    nothing spends nothing. The ping is spent only if some claimed code
+    deserves one (`ping_codes`, when given, names the codes that do) and the
+    cap, re-checked here under the lock, still has room.
     """
     if not codes:
-        return False
+        return ClaimedCodes([], False)
     now_iso = _resolve_now(now)
     old_isolation = conn.isolation_level
     conn.isolation_level = None
@@ -2068,9 +2076,16 @@ def claim_guild_codes(
         ).fetchone()
         if row is None:
             raise StoreError(f"guild {guild_id} has no SHiFT settings to claim against")
+        still_queued = _queued_among(conn, guild_id, codes)
+        claimed = [code for code in codes if code in still_queued]
+        if not claimed:
+            conn.execute("COMMIT")
+            return ClaimedCodes([], False)
         count = row["ping_count"] if row["ping_day"] == local_day else 0
         actual_pinged = pinged
-        if max_pings is not None and pinged and count >= max_pings:
+        if ping_codes is not None and not any(code in ping_codes for code in claimed):
+            actual_pinged = False
+        if max_pings is not None and actual_pinged and count >= max_pings:
             actual_pinged = False
         if actual_pinged:
             count += 1
@@ -2078,42 +2093,61 @@ def claim_guild_codes(
             "UPDATE guild_shift SET ping_day = ?, ping_count = ? WHERE guild_id = ?",
             (local_day, count, guild_id),
         )
-        for code in codes:
-            cur = conn.execute(
+        for code in claimed:
+            conn.execute(
                 "UPDATE guild_code_posts SET status = 'pending', pinged = ?, from_roundup = ?, "
                 "claimed_at = ? WHERE guild_id = ? AND code = ? AND status = 'queued'",
                 (int(actual_pinged), int(from_roundup), now_iso, guild_id, code),
             )
-            if cur.rowcount != 1:
-                raise ClaimLostError(f"guild {guild_id} code {code} is no longer queued")
         conn.execute("COMMIT")
     except BaseException:
-        conn.execute("ROLLBACK")
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.isolation_level = old_isolation
-    return actual_pinged
+    return ClaimedCodes(claimed, actual_pinged)
+
+
+def _queued_among(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> set[str]:
+    """The subset of `codes` this server still has `queued`."""
+    found: set[str] = set()
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # Literal "?"s sized to the chunk; the values are bound below.
+        query = (
+            "SELECT code FROM guild_code_posts "  # noqa: S608
+            f"WHERE guild_id = ? AND status = 'queued' AND code IN ({placeholders})"
+        )
+        found.update(row["code"] for row in conn.execute(query, [guild_id, *chunk]))
+    return found
 
 
 def mark_guild_codes_posted(
     conn: sqlite3.Connection, guild_id: int, codes: list[str], *, message_id: int | None
 ) -> None:
-    """Flip this guild's `pending` `codes` to `posted`, all sharing one message id."""
+    """Flip this guild's `pending` `codes` to `posted`, all sharing one message id.
+
+    Only `pending` rows move: a startup recovery that already failed one must
+    not have it flipped back by a send that finished late.
+    """
     with conn:
         for code in codes:
             conn.execute(
                 "UPDATE guild_code_posts SET status = 'posted', message_id = ? "
-                "WHERE guild_id = ? AND code = ?",
+                "WHERE guild_id = ? AND code = ? AND status = 'pending'",
                 (message_id, guild_id, code),
             )
 
 
 def mark_guild_codes_failed(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
-    """Flip this guild's `codes` to `failed` after a send that never landed."""
+    """Flip this guild's `pending` `codes` to `failed` after a send that never landed."""
     with conn:
         for code in codes:
             conn.execute(
-                "UPDATE guild_code_posts SET status = 'failed' WHERE guild_id = ? AND code = ?",
+                "UPDATE guild_code_posts SET status = 'failed' "
+                "WHERE guild_id = ? AND code = ? AND status = 'pending'",
                 (guild_id, code),
             )
 

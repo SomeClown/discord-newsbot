@@ -614,7 +614,7 @@ def test_many_threads_claiming_for_one_guild_spend_exactly_the_cap(db_path):
                 conn, 1, [_code(i)], pinged=True, local_day="2026-10-01", max_pings=3
             )
         with lock:
-            results.append(got)
+            results.append(got.pinged)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
     for t in threads:

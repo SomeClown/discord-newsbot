@@ -117,6 +117,9 @@ _HOSTNAME = socket.gethostname()
 _TWO_INSTANCE_ERROR_CODES = frozenset({10062, 40060})
 _TWO_INSTANCE_ALERT_COOLDOWN = timedelta(hours=1)
 
+# The first collection pass starts this long after `on_ready` finishes its steps.
+_COLLECTION_FIRST_RUN_DELAY = timedelta(seconds=30)
+
 
 def _alert_reason(exc: BaseException) -> str:
     """One inert line of `exc`'s text for a job-boundary crash alert.
@@ -258,6 +261,13 @@ class ChannelNotInGuildError(Exception):
 
     Not a `PublishError` on purpose: `post_alert_with_retry` retries those, and
     nothing about waiting eight seconds moves a channel into the right guild.
+    """
+
+
+class ForeignMessageError(Exception):
+    """A send returned a message that isn't in the channel we sent to (a deduped nonce, say).
+
+    Not a `PublishError`, for the same reason as `ChannelNotInGuildError`: no retry fixes it.
     """
 
 
@@ -541,11 +551,11 @@ class DiscordCodeAlertPoster:
     channel-resolution dance, same error classification (`_classify_send_error`,
     factored out of `DiscordPublisher._reraise_or_wrap` for exactly this
     reuse), but with none of that class's resumability bookkeeping,
-    since `shift/sweep.py` already tracks per-message claim/post state of
-    its own (`claim_codes`/`mark_codes_posted`) and only ever asks this to
-    post one message at a time.
+    since `shift/fanout.py` already tracks per-message claim/post state of
+    its own (`claim_guild_codes` and the `mark_guild_codes_*` functions) and
+    only ever asks this to post one message at a time.
 
-    `alert.ping` is `decide.plan_alerts`'s call, not this class's: all
+    `alert.ping` is the fan-out's call (`shift/fanout.py`), not this class's: all
     this does is turn that into the one `AllowedMentions` that's actually
     allowed to set `everyone=True` anywhere in this codebase (`_PING_EVERYONE`,
     A5), or `AllowedMentions.none()` otherwise. Before honoring a ping, it
@@ -574,17 +584,21 @@ class DiscordCodeAlertPoster:
         # defaults are exactly v2's: @everyone, told to the admin channel.
         self._ping_choice = ping_choice
         self._notify = notify if notify is not None else client.alert
-        # Dedupes the missing-permission admin alert within one sweep
-        # (design.md §12 step 8): `begin_batch()` resets this at the start
-        # of every `shift/sweep.py._apply_plan` call, so a batch that
-        # spills into several messages (or a single message that
-        # `_post_with_retry` retries several times) alerts an admin once
-        # per sweep, not once per message and not once per retry.
+        # Dedupes the missing-permission admin alert within one server's batch:
+        # `begin_batch()` resets this at the start of each server's turn in
+        # `shift/fanout.py`, so a batch that spills into several messages (or a
+        # single message that `post_alert_with_retry` retries several times)
+        # alerts an admin once per turn, not once per message and not once per retry.
         self._missing_permission_alerted = False
 
     def begin_batch(self) -> None:
-        """Reset the missing-permission dedupe flag; called once per sweep."""
+        """Reset the missing-permission dedupe flag; called once per server's turn."""
         self._missing_permission_alerted = False
+
+    @property
+    def missing_ping_permission(self) -> bool:
+        """True if this turn wanted a ping the bot's role can't deliver (the fan-out logs it)."""
+        return self._missing_permission_alerted
 
     async def post(self, alert: RenderedAlert) -> int | None:
         """Send one alert message to the SHiFT codes channel and return its message id.
@@ -597,13 +611,19 @@ class DiscordCodeAlertPoster:
         in this channel (`_can_mention_everyone`); if not, it still posts
         with the ping's content intact (Discord silently drops the
         notification rather than the message) and sends one admin alert
-        about the missing permission, deduped per sweep by
+        about the missing permission, deduped per turn by
         `self._missing_permission_alerted`. Any failure resolving the
         channel or sending the message goes through `_classify_send_error`,
         which raises `PublishError` for whatever's worth retrying (a 5xx, a
         network blip, a timeout) and re-raises everything else (a 4xx, a
-        permissions problem) unwrapped, per `shift/sweep.py`'s own
+        permissions problem) unwrapped, per `shift/fanout.py`'s own
         claim/post/record bookkeeping rather than `PublishError`'s.
+
+        The returned message must say it landed in *this* channel. discord.py
+        sends `enforce_nonce`, and if Discord ever answers a send with some
+        other message it deduped against, recording that as posted would lose
+        a code without a trace. So a mismatch raises `ForeignMessageError`
+        (final, no retry) and the code is marked failed instead.
         """
         channel = self._client.get_channel(self._channel_id)
         if channel is None:
@@ -638,6 +658,16 @@ class DiscordCodeAlertPoster:
             )
         except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
             _classify_send_error(exc)
+        # Fakes and old objects without a channel are skipped; a real message always has one.
+        landed_in = getattr(getattr(message, "channel", None), "id", None)
+        if landed_in is not None and landed_in != self._channel_id:
+            logger.error(
+                "SHiFT alert send returned a message from another channel",
+                extra={"guild_id": self._guild_id, "channel_id": self._channel_id},
+            )
+            raise ForeignMessageError(
+                f"send to channel {self._channel_id} returned a message from channel {landed_in}"
+            )
         return message.id
 
     def _can_ping(self, channel: object) -> bool:
@@ -895,15 +925,9 @@ class NewsBot(discord.Client):
 
         tz = ZoneInfo(self.cfg.owner_report.timezone)
         self.scheduler = AsyncIOScheduler(timezone=tz)
-        # Hourly shared collection (SHiFT detection and fan-out ride along). The
-        # first pass is two minutes after startup, not immediately: setup_hook
-        # is still finishing, and a pass at t=0 would race it.
-        self.scheduler.add_job(
-            self._collection_job,
-            id="collection",
-            next_run_time=datetime.now(tz) + timedelta(minutes=2),
-            **collection_job_options(self.cfg),
-        )
+        # The hourly shared collection is added in `on_ready` (`_start_collection_job`):
+        # its SHiFT fan-out needs the guild cache, and a pass before it has
+        # filled would see no bot member and cry "missing permission" at servers.
         # Every minute: whichever servers are due. Inert until `on_ready` is done.
         self.scheduler.add_job(
             self._digest_job,
@@ -1047,14 +1071,17 @@ class NewsBot(discord.Client):
 
         1. the import notice, if this start did the import, and a notice for today's
            digest if v2.2 left it pending or half-posted;
-        2. SHiFT codes a crash left pending (the owner hears a count, each
-           server hears its own), then whatever is still queued is delivered;
-        3. reconciliation, so servers the bot left are dropped and servers it
+        2. reconciliation, so servers the bot left are dropped and servers it
            joined while down get a row;
+        3. SHiFT codes a crash left pending (the owner hears a count, each
+           server hears its own), then whatever is still queued is delivered;
         4. the lounges: reload, chunk members, schedule the quotes;
         5. the permission sweep, with its counts to the owner;
-        6. only then, the minute digest job is switched on, and the summaries job
-           gets its first run right away instead of waiting out its five minutes.
+        6. only then, the minute digest job is switched on, the hourly collection
+           is scheduled (its first pass is a breath later, after the startup
+           delivery above has finished, so the two can't overlap), and the
+           summaries job gets its first run right away instead of waiting out
+           its five minutes.
 
         Each step is wrapped on its own and only logs when it blows up: a bug
         in one of them must never be the thing that stops the bot from
@@ -1068,19 +1095,36 @@ class NewsBot(discord.Client):
         self._ready_once = True
         await self._startup_step("import notice", self._send_import_notice)
         await self._startup_step("stuck v2.2 digest", self._report_stuck_v22_digest)
-        await self._startup_step("pending codes", self._recover_codes)
         await self._startup_step("reconcile", self._reconcile)
+        await self._startup_step("pending codes", self._recover_codes)
         await self._startup_step("lounge reload", self.reload_lounges)
         await self._startup_step("lounge chunking", self.chunk_lounge_guilds)
         await self._startup_step("lounge quotes", self.schedule_lounge_quotes)
         await self._startup_step("permission sweep", self._permission_sweep)
         self._digests_enabled = True
         logger.info("startup finished; per-server digests are on")
+        await self._startup_step("collection job", self._start_collection_job)
         # The five-minute job's first turn is five minutes away, and a deploy at 08:58 would
         # otherwise reach 09:00 with no summary ready: the digest makes one inline, which never
         # searches the web, and posts a "reduced coverage" footer. So run it once now, after the
         # minute job is on (a slow model call mustn't hold up a due digest).
         await self._startup_step("summaries", self._summaries_job)
+
+    async def _start_collection_job(self) -> None:
+        """Schedule the hourly collection; only `on_ready` calls this, once.
+
+        Starting it here (not in `setup_hook`) is what guarantees no pass runs
+        before the guild cache is warm and startup's SHiFT delivery is done.
+        """
+        if self.scheduler is None:
+            raise RuntimeError("_start_collection_job() called before setup_hook() finished")
+        tz = ZoneInfo(self.cfg.owner_report.timezone)
+        self.scheduler.add_job(
+            self._collection_job,
+            id="collection",
+            next_run_time=datetime.now(tz) + _COLLECTION_FIRST_RUN_DELAY,
+            **collection_job_options(self.cfg),
+        )
 
     async def _startup_step(self, name: str, step: Callable[[], Awaitable[object]]) -> None:
         try:
@@ -1467,7 +1511,7 @@ class NewsBot(discord.Client):
                 member_mention=member.mention,
                 server_name=member.guild.name,
             )
-            channel = await self._channel_by_id(lounge.channel_id)
+            channel = await self._channel_by_id(lounge.channel_id, guild_id)
             await channel.send(
                 text,
                 allowed_mentions=discord.AllowedMentions(
@@ -1486,10 +1530,13 @@ class NewsBot(discord.Client):
                 "Check that I can view and send in the lounge channel.",
             )
 
-    async def _channel_by_id(self, channel_id: int) -> discord.abc.Messageable:
+    async def _channel_by_id(self, channel_id: int, guild_id: int) -> discord.abc.Messageable:
+        """The lounge channel, refused (`ChannelNotInGuildError`) if it isn't in `guild_id`."""
         channel = self.get_channel(channel_id)
         if channel is None:
             channel = await self.fetch_channel(channel_id)
+        if _foreign_channel(channel, guild_id, channel_id):
+            raise ChannelNotInGuildError(f"channel {channel_id} isn't in this server")
         return channel  # type: ignore[return-value]
 
     def build_guild_quote_deps(self, lounge: LoungeSettings, timezone: str) -> QuoteDeps:
@@ -1505,7 +1552,7 @@ class NewsBot(discord.Client):
         channel_id = lounge.channel_id
 
         async def post(text: str) -> int:
-            channel = await self._channel_by_id(channel_id)
+            channel = await self._channel_by_id(channel_id, lounge.guild_id)
             sent = await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
             return sent.id
 

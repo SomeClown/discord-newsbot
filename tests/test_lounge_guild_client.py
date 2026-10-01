@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import types
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,6 +109,7 @@ class FakeChannel:
     def __init__(self) -> None:
         self.sent: list[tuple[str, discord.AllowedMentions]] = []
         self.next_error: Exception | None = None
+        self.guild = None  # `_bot` sets it to the lounge's own server
 
     async def send(self, content: str, *, allowed_mentions: discord.AllowedMentions):
         if self.next_error is not None:
@@ -125,6 +127,15 @@ def _bot(db_path, lounges, channels=None):
     cfg = load_config(CONFIG_PATH)
     bot = NewsBot(cfg, _secrets(), db_path, lounges=lounges)
     chans = channels if channels is not None else {CH1: FakeChannel(), CH2: FakeChannel()}
+    # The usual world: CH1 is in G1 and CH2 is in G2 (a lounge send refuses any other pairing).
+    for channel_id, guild_id in ((CH1, G1), (CH2, G2)):
+        if channel_id in chans and chans[channel_id].guild is None:
+            chans[channel_id].guild = types.SimpleNamespace(id=guild_id)
+    for (
+        lounge
+    ) in lounges:  # QA: the lounge sends refuse a channel that isn't in the lounge's server
+        if lounge.channel_id in chans:
+            chans[lounge.channel_id].guild = types.SimpleNamespace(id=lounge.guild_id)
     bot.chans = chans  # type: ignore[attr-defined]
     bot.notices = []  # type: ignore[attr-defined]
     bot.owner_alerts = []  # type: ignore[attr-defined]

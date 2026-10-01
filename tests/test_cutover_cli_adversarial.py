@@ -230,24 +230,43 @@ def test_fixtures_imply_a_collection_pass_so_that_dry_run_does_write_items(impor
     assert len(table(imported, "items")) > before  # documented: --fixtures is a collection pass
 
 
-def test_a_cli_collection_pass_marks_codes_posted_that_it_only_printed(
+def test_a_cli_collection_pass_prints_codes_but_delivers_nothing(
     imported, capsys, offline, tmp_path
 ):
-    # Pinned, and the same as v2's `--sweep`: the CLI's poster prints, but the fan-out records
-    # the code as posted for every SHiFT server. Run against the production file, it eats
-    # codes the real bot would have announced.
+    # Changed with QA H2. This used to be pinned as "marks codes posted that it only
+    # printed": the CLI's poster printed, but the fan-out claimed, marked posted and spent
+    # pings for every SHiFT server, so a `--collect` against a live file ate the queue.
+    # Now the CLI releases and prints, and never claims, marks or spends anything.
     new = "EATEN-EATEN-EATEN-EATEN-EATE1"
     directory = write_fixture_items(tmp_path / "pass", "borderlands4", [code_item("c", new)])
+    with closing(connect(imported)) as conn:
+        pings_before = conn.execute(
+            "SELECT guild_id, ping_day, ping_count FROM guild_shift"
+        ).fetchall()
+        posts_before = conn.execute(
+            "SELECT * FROM guild_code_posts ORDER BY guild_id, code"
+        ).fetchall()
 
     assert main(args(imported, "--collect", "--fixtures", str(directory))) == 0
 
     assert new in capsys.readouterr().out
     with closing(connect(imported)) as conn:
-        status = conn.execute("SELECT status FROM alerted_codes WHERE code = ?", (new,)).fetchone()
-        posted = conn.execute(
+        released = conn.execute(
+            "SELECT status FROM alerted_codes WHERE code = ?", (new,)
+        ).fetchone()
+        queued = conn.execute(
             "SELECT status FROM guild_code_posts WHERE code = ? AND guild_id = ?", (new, FRIEND)
         ).fetchone()
-    assert status[0] == "posted" and posted[0] == "posted"
+        pings_after = conn.execute(
+            "SELECT guild_id, ping_day, ping_count FROM guild_shift"
+        ).fetchall()
+        others = conn.execute(
+            "SELECT * FROM guild_code_posts WHERE code != ? ORDER BY guild_id, code", (new,)
+        ).fetchall()
+    assert released[0] == "posted"  # "released": the code is known, once, as always
+    assert queued[0] == "queued"  # and the real bot's walk is still the one that delivers it
+    assert [tuple(r) for r in pings_after] == [tuple(r) for r in pings_before]
+    assert [tuple(r) for r in others] == [tuple(r) for r in posts_before]
 
 
 # --- --post-to-stdout and --force against what v2.2 left behind ---

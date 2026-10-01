@@ -336,3 +336,30 @@ def test_missing_brave_key_warns_once_for_a_v3_web_search_block(monkeypatch, cap
     with caplog.at_level(logging.WARNING, logger="newsbot.config"):
         load_config(V3)
     assert sum("BRAVE_API_KEY is not set" in r.message for r in caplog.records) == 1
+
+
+# --- shift.games in the v3 shape (QA M4): left out means borderlands4, empty is refused ---
+
+
+def test_v3_shift_games_left_out_means_borderlands4_not_every_game(tmp_path):
+    assert load_config(_write(tmp_path, _MIN)).shift.games == ["borderlands4"]
+    assert load_config(_write(tmp_path, _MIN + "shift: {max_pings_per_day: 1}\n")).shift.games == [
+        "borderlands4"
+    ]
+
+
+def test_v3_explicit_shift_games_are_kept(tmp_path):
+    cfg = load_config(_write(tmp_path, _MIN + "shift: {games: [palworld]}\n"))
+    assert cfg.shift.games == ["palworld"]
+
+
+def test_v3_empty_shift_games_is_an_error(tmp_path):
+    assert "shift.games is empty" in _errors(tmp_path, _MIN + "shift: {games: []}\n")
+
+
+def test_v2_shape_derives_shift_games_from_alerts_topics_including_empty(tmp_path):
+    prod = (Path(__file__).parent / "fixtures" / "config_v2_prodlike.yaml").read_text()
+    assert load_config(_write(tmp_path, prod)).shift.games == ["borderlands4"]
+    emptied = prod.replace("topics: [borderlands4]\n  interval", "topics: []\n  interval")
+    assert emptied != prod
+    assert load_config(_write(tmp_path, emptied)).shift.games == []  # v2's "every game", unchanged

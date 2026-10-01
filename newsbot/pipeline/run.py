@@ -16,9 +16,12 @@ retry loop).
 
 - `--check-sources [--game KEY ...]` runs the real sources once and reports.
   It needs no database, no Anthropic key and no Discord token.
-- `--collect` runs one collection pass into `--db`. SHiFT fan-out prints
-  instead of posting. (`--sweep` is the old name; it still works for one
-  release, with a note on stderr.)
+- `--collect` runs one collection pass into `--db`. SHiFT detection runs and
+  newly found codes are released (queued for each server), but delivery is a
+  preview: the queue is printed, and nothing is claimed, marked posted or
+  failed, and no server's ping count moves. The real bot's own walk delivers
+  the queue, so a CLI run next to it can't drain it. (`--sweep` is the old
+  name; it still works for one release, with a note on stderr.)
 - `--dry-run` (the default) previews one server's next digest from what's
   stored. It writes nothing, not even the one-time import or the schema
   migration: it works on a throwaway copy of `--db`, so the real file comes
@@ -300,7 +303,11 @@ def _parse_now(text: str) -> datetime:
 async def _run_collect_cli(
     cfg: AppConfig, db_path: str, collectors: list[Collector], now: Callable[[], datetime]
 ):
-    """One collection pass into `db_path`; SHiFT fan-out prints instead of posting."""
+    """One collection pass into `db_path`; SHiFT codes are released and printed, never delivered.
+
+    The fan-out runs in preview mode: no claim, no posted or failed marks, no
+    ping spent, no pending recovery. Delivering for real is the bot's job.
+    """
     from newsbot.pipeline.collect import CollectionDeps, run_collection
     from newsbot.shift.fanout import FanoutDeps, make_shift_hook
     from newsbot.shift.sweep import PrintCodeAlertPoster
@@ -312,6 +319,7 @@ async def _run_collect_cli(
         poster_for=lambda _guild_id, _channel_id, _ping, _notify: PrintCodeAlertPoster(),
         notify_guild=_stdout_guild_notice,
         alert_owner=_stdout_alert,
+        preview=True,
     )
     async with httpx.AsyncClient(headers=user_agent_headers()) as http:
         deps = CollectionDeps(
@@ -475,8 +483,9 @@ def main(argv: list[str] | None = None) -> int:
         "--collect",
         action="store_true",
         help=(
-            "run one collection pass into --db (SHiFT fan-out prints instead of posting, and "
-            "marks codes posted); writes to --db, so never point it at a live database"
+            "run one collection pass into --db (new SHiFT codes are released and printed; "
+            "nothing is delivered, claimed or marked posted, and no ping is spent); "
+            "still writes to --db, so never point it at a live database"
         ),
     )
     parser.add_argument(

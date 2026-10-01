@@ -435,6 +435,7 @@ def make_shift_run(tmp_path, cfg, clock, *, latency, rng=None) -> ShiftRun:
         poster_for=poster_for,
         notify_guild=notify_guild,
         sleep=asyncio.sleep,
+        clock=lambda: clock.value,  # the walk's 100 s deadline runs on the virtual clock too
     )
     return ShiftRun(deps, discord_, clock, notices, queued_after=[])
 
@@ -467,11 +468,14 @@ async def hourly_passes(run: ShiftRun, drops: list[list[int]], *, max_passes: in
     ("latency", "expected_passes", "expected_timeouts"),
     [
         # Per server a turn costs the 0.2 s pace plus one round trip. At 0.1 s that's 0.3 s and
-        # all 300 fit under the hook's 120 s; at 0.5 s it's 0.7 s and only about 170 do; at 1 s
-        # (Discord having a bad day) about 100 do. The plan's "about 170" assumes the middle one.
+        # all 300 fit in the walk's 100 s; at 0.5 s it's 0.7 s and only about 143 do; at 1 s
+        # (Discord having a bad day) about 84 do. Changed with QA M2: the walk now stops
+        # *starting* servers at 100 s of the hook's 120, so it ends a pass early (one more
+        # pass than before at the slow speeds) instead of being cut off mid-send (no timeouts,
+        # nobody stranded `failed`).
         (0.1, 1, 0),
-        (0.5, 2, 1),
-        (1.0, 3, 2),
+        (0.5, 3, 0),
+        (1.0, 4, 0),
     ],
 )
 def test_one_code_drop_to_300_guilds_drains_over_hourly_passes(
@@ -494,9 +498,10 @@ def test_one_code_drop_to_300_guilds_drains_over_hourly_passes(
         channel_id = channel_for(guild_id_for(gid), SHIFT_SLOT)
         assert run.discord.messages_in(channel_id) <= 1
         assert sum(m.everyone for m in run.discord.landed.get(channel_id, [])) <= 1
-    # Every server was owed one code. Each timeout can strand the one server it caught mid-send
+    # Every server was owed one code. A timeout would strand the one server it caught mid-send
     # (its claim is written first, so a cut-off send is `failed`, never re-sent: lose one, never
-    # double one), and that server is told. Everyone else got theirs.
+    # double one), and that server is told. The deadline means there are none now; the
+    # arithmetic below still allows for them. Everyone else got theirs.
     posted = final.get("posted", 0)
     failed = final.get("failed", 0)
     assert posted + failed == GUILDS

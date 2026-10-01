@@ -362,7 +362,8 @@ class WebSearchCfg(BaseModel, extra="forbid"):
 class ShiftCfg(BaseModel, extra="forbid"):
     """Global SHiFT detection. Per-server channel and ping live in the database."""
 
-    # Empty means every game, same as v2's alerts.topics.
+    # In the v2 shape, empty means every game (alerts.topics' old reading). In the
+    # v3 shape, leaving it out means borderlands4 and an empty list is an error.
     games: list[str] = []
     max_item_age_hours: int = Field(48, ge=1, le=720)
     # Per server, per that server's local day; 0 means codes post but never ping.
@@ -910,6 +911,31 @@ def _derive_catalog(
     return list(games.values()), shared, web_search
 
 
+# The one game with SHiFT codes. A v3 `shift.games` that's left out defaults to
+# it, because the v2 reading of an empty list ("every game") would hand every
+# server's codes to every other game's feeds. A catalog without it just never
+# matches anything: quiet, and safe.
+_SHIFT_GAME = "borderlands4"
+
+
+def _v3_shift_games(cfg: AppConfig, raw: dict) -> tuple[AppConfig, list[str]]:
+    """Apply v3's `shift.games` rule: left out means Borderlands 4, an empty list is an error.
+
+    Only the v3 shape gets this. The v2 shape keeps its old reading (empty
+    means every game), because `alerts.topics: []` has always meant that.
+    """
+    shift_raw = raw.get("shift")
+    if isinstance(shift_raw, dict) and "games" in shift_raw:
+        if not cfg.shift.games:
+            return cfg, [
+                "shift.games is empty: list the games to watch for SHiFT codes "
+                f"(or leave it out for {_SHIFT_GAME})"
+            ]
+        return cfg, []
+    shift = cfg.shift.model_copy(update={"games": [_SHIFT_GAME]})
+    return cfg.model_copy(update={"shift": shift}), []
+
+
 def _v3_problems(cfg: AppConfig) -> list[str]:
     """Cross-checks on a v3 catalog: keys, sources, and everything that names a game."""
     errors: list[str] = []
@@ -1129,6 +1155,8 @@ def load_config(path: str | Path) -> AppConfig:
 
     if is_v3:
         errors += _v3_problems(cfg)
+        cfg, shift_errors = _v3_shift_games(cfg, raw)
+        errors += shift_errors
     else:
         # Derive mode: no catalog, so build one from the v2 keys, before the
         # web_search filter below throws the Brave source away for lack of a

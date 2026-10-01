@@ -1,17 +1,17 @@
-"""Decide what to do about the SHiFT codes a sweep just found. No I/O in here.
+"""Decide what to do about the SHiFT codes a collection pass just found. No I/O in here.
 
 `shift/match.py` finds codes in text; this module decides what happens to
 them, which is the part with all the actual judgment calls: is this code
 new, is it too old to bother anyone about, has today already spent its
 `@everyone` budget. Every one of those is a pure function of its inputs, on
-purpose: `shift/sweep.py` is where a plan produced here actually turns
+purpose: `shift/fanout.py` is where a plan produced here actually turns
 into a database write or a Discord message, and keeping the deciding and
 the doing in separate modules is what let this file's tests run in
 milliseconds against a list of dataclasses instead of a temp SQLite file.
 
 Game scoping (A6, plan step 5b) lives here too: an item only counts toward
 a sighting if `pipeline.filter.filter_items` would have matched it to one
-of `cfg.alerts.topics`: the same confident/dedicated-source rules the
+of `cfg.shift.games`: the same confident/dedicated-source rules the
 digest itself uses, not a separate keyword check invented for this module.
 """
 

@@ -38,12 +38,15 @@ T_NOON = datetime(2026, 10, 1, 19, 0, tzinfo=UTC)
 
 STEPS = (
     ("_send_import_notice", "import notice"),
-    ("_recover_codes", "pending codes"),
+    # QA M1: startup delivery runs after reconcile, and the hourly collection is
+    # scheduled by the last step instead of by setup_hook.
     ("_reconcile", "reconcile"),
+    ("_recover_codes", "pending codes"),
     ("reload_lounges", "lounge reload"),
     ("chunk_lounge_guilds", "lounge chunking"),
     ("schedule_lounge_quotes", "lounge quotes"),
     ("_permission_sweep", "permission sweep"),
+    ("_start_collection_job", "collection job"),
 )
 
 
@@ -381,6 +384,7 @@ async def test_after_startup_the_jobs_are_the_v3_set_and_none_of_the_v2_ones(mak
 
 async def test_how_late_each_job_may_run_and_how_many_may_overlap(make_world):
     world = await make_world(now=T_NOON)
+    await world.ready()  # the collection job is scheduled by on_ready
     jobs = {job.id: job for job in world.bot.scheduler.get_jobs()}
 
     settings = {

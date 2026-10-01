@@ -178,8 +178,8 @@ def collection_job_options(cfg: AppConfig) -> dict[str, object]:
 
     `max_instances=1` and `coalesce` are the scheduler's half of "never
     stack passes"; `run_collection` skipping on a held lock is the other
-    half, and it holds even if somebody forgets these. First run two minutes
-    after startup, per the plan.
+    half, and it holds even if somebody forgets these. The bot schedules the
+    first run from `on_ready` (`NewsBot._start_collection_job`), not at setup.
     """
     from apscheduler.triggers.interval import IntervalTrigger
 

@@ -7,6 +7,7 @@ Discord, and the clock only moves when a test moves it.
 
 from __future__ import annotations
 
+import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -635,7 +636,10 @@ async def test_the_hook_returns_the_released_count_and_judges_seeding_from_resul
 # --- the repo pieces the fan-out leans on ---
 
 
-def test_claim_guild_codes_duplicate_aborts_the_whole_claim_ping_spend_included(db_path):
+def test_claim_guild_codes_takes_whatever_is_still_queued_and_spends_the_ping_once(db_path):
+    # Changed with QA M1: the claim used to be all-or-nothing (ClaimLostError), so a
+    # pass that lost one code to a concurrent pass stranded every sibling. Now it
+    # takes what's still queued, says what it took, and spends the ping for those.
     add_guild(db_path, 1, ping="everyone")
     with closing(connect(db_path)) as conn:
         repo.record_released_codes(
@@ -647,15 +651,72 @@ def test_claim_guild_codes_duplicate_aborts_the_whole_claim_ping_spend_included(
         repo.claim_guild_codes(
             conn, 1, [CODE_A], pinged=False, local_day="2026-10-01", now=lambda: NOW
         )
-        # Changed with the delivery queue: the old failure was a UNIQUE violation on a
-        # second INSERT; now it's a code that's no longer `queued` (someone else
-        # claimed it), which is the guard that stops two passes double-sending.
-        with pytest.raises(repo.ClaimLostError):
-            repo.claim_guild_codes(
-                conn, 1, [CODE_B, CODE_A], pinged=True, local_day="2026-10-01", now=lambda: NOW
-            )
+        got = repo.claim_guild_codes(
+            conn, 1, [CODE_B, CODE_A], pinged=True, local_day="2026-10-01", now=lambda: NOW
+        )
+        assert got.codes == [CODE_B] and got.pinged is True
+        assert repo.get_shift(conn, 1).ping_count == 1
+        assert repo.queued_guild_codes(conn, 1) == []
+
+
+def test_claim_guild_codes_with_nothing_queued_claims_nothing_and_spends_nothing(db_path):
+    add_guild(db_path, 1, ping="everyone")
+    with closing(connect(db_path)) as conn:
+        repo.record_released_codes(
+            conn, [(CODE_A, "s", "https://x.test", False)], now=lambda: NOW, queue_for_games=[]
+        )
+        repo.claim_guild_codes(conn, 1, [CODE_A], pinged=False, local_day="2026-10-01")
+        got = repo.claim_guild_codes(conn, 1, [CODE_A], pinged=True, local_day="2026-10-01")
+        assert got == ([], False)
         assert repo.get_shift(conn, 1).ping_count == 0
-        assert [q.code for q in repo.queued_guild_codes(conn, 1)] == [CODE_B]
+
+
+def test_claim_guild_codes_ping_codes_decides_whether_the_claimed_ones_deserve_a_ping(db_path):
+    add_guild(db_path, 1, ping="everyone")
+    with closing(connect(db_path)) as conn:
+        repo.record_released_codes(
+            conn,
+            [(CODE_A, "s", "https://x.test", False), (CODE_B, "s", "https://x.test", False)],
+            now=lambda: NOW,
+            queue_for_games=[],
+        )
+        got = repo.claim_guild_codes(
+            conn, 1, [CODE_B], pinged=True, local_day="2026-10-01", ping_codes={CODE_A}
+        )
+        assert got == ([CODE_B], False)  # the one trusted code isn't among the claimed
+        assert repo.get_shift(conn, 1).ping_count == 0
+
+
+def test_a_late_mark_cannot_flip_a_startup_failed_row_back_to_posted(db_path):
+    add_guild(db_path, 1, ping="none")
+    with closing(connect(db_path)) as conn:
+        repo.record_released_codes(
+            conn, [(CODE_A, "s", "https://x.test", False)], now=lambda: NOW, queue_for_games=[]
+        )
+        repo.claim_guild_codes(conn, 1, [CODE_A], pinged=False, local_day="2026-10-01")
+        repo.fail_pending_guild_codes(conn)
+        repo.mark_guild_codes_posted(conn, 1, [CODE_A], message_id=5)
+        repo.mark_guild_codes_failed(conn, 1, [CODE_A])
+        assert rows(db_path, "SELECT status, message_id FROM guild_code_posts") == [
+            ("failed", None)
+        ]
+
+
+def test_a_locked_database_surfaces_as_operational_error_not_a_rollback_error(db_path):
+    # QA M3: BEGIN IMMEDIATE itself failing leaves no transaction to roll back, and the
+    # unguarded ROLLBACK used to replace the real "database is locked" with its own error.
+    add_guild(db_path, 1, ping="everyone")
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        victim = sqlite3.connect(db_path, timeout=0.05)
+        victim.row_factory = sqlite3.Row
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            repo.claim_guild_codes(victim, 1, [CODE_A], pinged=False, local_day="2026-10-01")
+        victim.close()
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
 
 
 def test_record_released_codes_reports_only_what_it_inserted(db_path):

@@ -24,6 +24,7 @@ No gateway, no network; quotes are teapots.
 from __future__ import annotations
 
 import asyncio
+import types
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -230,6 +231,7 @@ def _quote_file(tmp_path: Path, quotes=None) -> QuoteSourceCfg:
 def _real_bot(cfg, db_path):
     bot = NewsBot(cfg, _secrets(), db_path)
     bot.lounge_channel = FakeChannel()  # type: ignore[attr-defined]
+    bot.lounge_channel.guild = types.SimpleNamespace(id=GUILD)  # a lounge send checks the server
     admin_channel = FakeChannel()
     bot.admin_channel = admin_channel  # type: ignore[attr-defined]
     channels = {LOUNGE_ID: bot.lounge_channel, cfg.admin_channel_id: admin_channel}  # type: ignore[attr-defined]

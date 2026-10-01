@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import types
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -85,8 +86,15 @@ class _Resp:
         self.reason = reason
 
 
+def _channel_in(guild_id):
+    """A fake channel that really lives in `guild_id` (a lounge send checks that)."""
+    channel = FakeChannel()
+    channel.guild = types.SimpleNamespace(id=guild_id)
+    return channel
+
+
 def _three_channels():
-    return {CH1: FakeChannel(), CH2: FakeChannel(), CH3: FakeChannel()}
+    return {CH1: _channel_in(G1), CH2: _channel_in(G2), CH3: _channel_in(G3)}
 
 
 def _date_of(db_path, gid):
@@ -171,11 +179,26 @@ async def test_a_quote_never_lands_in_another_guilds_channel_even_if_channels_ar
         _row(G1, CH2, src=[_files(tmp_path, "a.txt", ["alpha"])]),
         _row(G2, CH1, src=[_files(tmp_path, "b.txt", ["beta"])]),
     )
-    bot = _bot(db_path, [])
+    # Each channel really lives in the guild whose row points at it.
+    bot = _bot(db_path, [], channels={CH2: _channel_in(G1), CH1: _channel_in(G2)})
     await _with_http(bot)
     try:
         await bot.run_guild_quote(G1, False)
         assert "alpha" in bot.chans[CH2].sent[0][0] and bot.chans[CH1].sent == []
+    finally:
+        await bot.http_client.aclose()
+
+
+async def test_a_lounge_row_naming_another_servers_channel_posts_nothing(tmp_path, db_path):
+    """QA: the quote and welcome sends take the same foreign-channel check as the digest."""
+    _seed(db_path, _row(G1, CH2, src=[_files(tmp_path, "a.txt", ["alpha"])]))
+    bot = _bot(db_path, [])  # CH2 lives in G2, but G1's row points at it
+    await _with_http(bot)
+    try:
+        assert (await bot.run_guild_quote(G1, False)).status == "post_failed"
+        assert bot.chans[CH2].sent == []
+        await bot.handle_member_join(FakeMember(FakeGuild(G1)))
+        assert bot.chans[CH2].sent == []
     finally:
         await bot.http_client.aclose()
 
@@ -228,7 +251,7 @@ async def test_upgrade_day_the_friend_gets_no_second_quote_but_tomorrow_gets_one
                 row, quote_enabled=True, quote_sources=[{"kind": "file", "value": str(source)}]
             ),
         )
-    chan = FakeChannel()
+    chan = _channel_in(report.guild_id)
     bot = _bot(path, [], channels={row.channel_id: chan})
     await _with_http(bot)
     try:

@@ -147,6 +147,7 @@ class FakeChannel:
     def __init__(self) -> None:
         self.sent: list[tuple[str, discord.AllowedMentions]] = []
         self.next_error: Exception | None = None
+        self.guild: FakeGuild | None = None  # `_bot` sets it to the lounge's own server
 
     async def send(self, content: str, *, allowed_mentions: discord.AllowedMentions):
         if self.next_error is not None:
@@ -160,6 +161,7 @@ def _bot(setup: Setup, db_path, *, channel: FakeChannel | None = None, via_fetch
     _seed(db_path, setup)
     bot = NewsBot(setup.cfg, _secrets(), db_path, lounges=[setup.lounge])
     channel = channel if channel is not None else FakeChannel()
+    channel.guild = FakeGuild(setup.guild_id)  # QA: the lounge sends refuse a foreign channel
     bot.fake_channel = channel  # type: ignore[attr-defined]
     bot.alerts = []  # type: ignore[attr-defined]
     fetched: list[int] = []

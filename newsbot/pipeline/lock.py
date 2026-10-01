@@ -1,15 +1,15 @@
-"""The one run lock, shared by the daily job and the SHiFT alert sweep.
+"""The collection pass's lock: one shared collection at a time, and no queueing behind it.
 
-This used to live entirely inside `pipeline/run.py`, which was fine right
-up until the sweep (design.md §12, `shift/sweep.py`) needed the same lock
-for a different reason: the daily job *waits* for it (nobody wants
-`/newsbot run-now` silently skipped because an hourly sweep happened to be
-running), but a sweep should just skip and try again next interval (A10):
-waiting up to two minutes behind a digest run isn't worth it for
-something that runs 24 times a day anyway. Pulling the lock itself out
-here, with both waiting and skipping styles of access on top of it, is
-what lets both callers share one lock without either one importing the
-other's module.
+This used to be the one lock the daily digest, `/newsbot run-now`, the preview
+and the hourly SHiFT sweep all shared. Then v3 split the work up: the digests
+went per-server (`pipeline/guild_digest.py` keeps its own per-guild locks), and
+the only thing that holds this lock now is `run_collection`
+(`pipeline/collect.py`), whose SHiFT delivery rides inside the pass and so
+inside the lock. A pass that finds it held skips, writing nothing (A10): the
+next interval is an hour away at most, and waiting up to a pass's length
+behind the previous one is how passes stack. Startup's SHiFT delivery doesn't
+use this lock; it takes the fan-out's own delivery lock (`FanoutDeps.delivery_lock`),
+because it has no business waiting behind a nine-minute collection.
 """
 
 from __future__ import annotations
@@ -18,19 +18,16 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-# One process-wide lock. Every entry point that can trigger a run (the
-# daily job, `/newsbot run-now`, `/newsbot preview`, and now the hourly
-# sweep) holds this for the duration of its work, so no two of them can
-# ever be collecting, summarizing, or posting at the same time.
+# One process-wide lock. A collection pass holds it for its whole run, so no
+# two passes can ever be collecting, storing, or delivering SHiFT codes at once.
 _run_lock = asyncio.Lock()
 
 
 def is_run_in_progress() -> bool:
-    """True if `_run_lock` is currently held by anything.
+    """True if `_run_lock` is currently held (that is, a collection pass is running).
 
-    Exists so a slash command can give a quick "already running" reply
-    instead of blocking on the lock for however long a run takes:
-    nobody wants a command to sit there looking hung for two minutes.
+    Nothing in the bot calls this today; it's here for a command that wants a
+    quick "already running" instead of looking hung.
     """
     return _run_lock.locked()
 
@@ -40,9 +37,9 @@ async def run_lock_or_skip() -> AsyncIterator[bool]:
     """Acquire `_run_lock`, skipping instead of queuing up behind a long wait, almost always.
 
     Yields `True` (lock held) if it looked free, or `False` (lock
-    untouched) if something else already had it: a sweep uses this to
-    skip its turn entirely rather than queue up behind a digest run that
-    could still be going when the *next* sweep interval arrives too.
+    untouched) if something else already had it: a collection pass uses this
+    to skip its turn entirely rather than queue up behind a pass that
+    could still be going when the *next* interval arrives too.
 
     This is *not* a strict, always-non-blocking try-acquire, and it's
     worth being honest about that rather than claiming otherwise:
@@ -56,7 +53,7 @@ async def run_lock_or_skip() -> AsyncIterator[bool]:
     fast path only when *no* waiter is already queued; otherwise it
     waits its turn behind that waiter, same as any other `acquire()`
     would. In practice that's a handful of event-loop iterations, not a
-    multi-minute digest run, so it doesn't change the shape of what this
+    multi-minute collection pass, so it doesn't change the shape of what this
     function is for; it just means "no waiting, ever" was never quite
     true, and reaching into `asyncio.Lock`'s private `_waiters` to make
     it true would trade an honest, rare, sub-millisecond wait for a

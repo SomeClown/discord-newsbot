@@ -14,6 +14,7 @@ trade away. A retry never risks a second live ping that could have landed.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
@@ -46,6 +47,8 @@ class PrintCodeAlertPoster:
         return None
 
 
+logger = logging.getLogger(__name__)
+
 _PING_PREFIX = "@everyone "
 
 
@@ -70,7 +73,10 @@ def _strip_ping(alert: RenderedAlert) -> RenderedAlert:
 
 
 async def post_alert_with_retry(
-    poster: CodeAlertPoster, sleep: Callable[[float], Awaitable[None]], alert: RenderedAlert
+    poster: CodeAlertPoster,
+    sleep: Callable[[float], Awaitable[None]],
+    alert: RenderedAlert,
+    on_ping_stripped: Callable[[], None] | None = None,
 ) -> tuple[int | None, Exception | None]:
     """Post one message, retrying only on `PublishError`, up to `_POST_BACKOFF_S`'s length.
 
@@ -107,6 +113,9 @@ async def post_alert_with_retry(
     (a run of 429s), but each was refused, so only the last one can have
     delivered a ping. The ping budget is claimed once, before any of this, and
     isn't touched by retries.
+
+    `on_ping_stripped` is called when a ping gets stripped (the fan-out uses it
+    to say why a server's alert went out unpinged).
     """
     current = alert
     last_error: Exception | None = None
@@ -121,6 +130,13 @@ async def post_alert_with_retry(
                 ambiguous = True
             if ambiguous and current.ping:
                 current = _strip_ping(current)
+                # The one place a server's ping quietly turns into no ping; say so.
+                logger.warning(
+                    "SHiFT ping stripped after an ambiguous failure",
+                    extra={"codes": len(alert.codes)},
+                )
+                if on_ping_stripped is not None:
+                    on_ping_stripped()
             if attempt < len(_POST_BACKOFF_S):
                 wait = _POST_BACKOFF_S[attempt]
                 if exc.retry_after is not None:

@@ -110,10 +110,10 @@ def _alerts(bot: NewsBot, monkeypatch) -> list[str]:
 
 
 async def test_setup_hook_adds_exactly_these_jobs(bot):
-    # The per-server quote jobs (daily-quote-<guild>) come from `on_ready`, once the
-    # lounge rows are loaded; nothing else is a job.
+    # The per-server quote jobs (daily-quote-<guild>) and the hourly collection come from
+    # `on_ready` (QA M1: a pass before the guild cache is warm saw no bot member); nothing
+    # else is a job.
     assert {job.id for job in bot.scheduler.get_jobs()} == {
-        "collection",
         "guild-digests",
         "summaries",
         "retention",
@@ -129,6 +129,8 @@ async def test_collection_job_follows_the_configured_interval(v3_cfg, db_path):
     b = NewsBot(cfg, _secrets(), db_path)
     try:
         await _setup(b)
+        assert b.scheduler.get_job("collection") is None  # not before `on_ready`
+        await b._start_collection_job()
         job = b.scheduler.get_job("collection")
         assert job.trigger.interval == timedelta(minutes=15)
         assert job.max_instances == 1
@@ -138,15 +140,16 @@ async def test_collection_job_follows_the_configured_interval(v3_cfg, db_path):
         await _stopped(b)
 
 
-async def test_collection_job_first_run_is_about_two_minutes_out(v3_cfg, db_path):
+async def test_collection_job_first_run_is_a_breath_after_on_ready(v3_cfg, db_path):
     tz = ZoneInfo(v3_cfg.owner_report.timezone)
     before = datetime.now(tz)
     b = NewsBot(v3_cfg, _secrets(), db_path)
     try:
         await _setup(b)
+        await b._start_collection_job()
         delta = (b.scheduler.get_job("collection").next_run_time - before).total_seconds()
-        # Generous bounds around "2 minutes after start" to absorb however long setup_hook took.
-        assert 110 <= delta <= 130
+        # Generous bounds around the 30 second settle, to absorb however long setup took.
+        assert 25 <= delta <= 45
     finally:
         await _stopped(b)
 
@@ -245,8 +248,9 @@ def _record_steps(bot: NewsBot, monkeypatch, *, boom: str | None = None) -> list
 
     for attr, name in (
         ("_send_import_notice", "import notice"),
-        ("_recover_codes", "pending codes"),
         ("_reconcile", "reconcile"),
+        ("_recover_codes", "pending codes"),
+        ("_start_collection_job", "collection job"),
         ("reload_lounges", "lounge reload"),
         ("chunk_lounge_guilds", "lounge chunking"),
         ("schedule_lounge_quotes", "lounge quotes"),
@@ -263,15 +267,17 @@ async def test_on_ready_does_its_work_in_the_documented_order(bot, monkeypatch):
 
     assert [name for name, _ in log] == [
         "import notice",
+        "reconcile",  # QA M1: startup delivery waits for it (the guild cache is warm by then)
         "pending codes",
-        "reconcile",
         "lounge reload",
         "lounge chunking",
         "lounge quotes",
         "permission sweep",
+        "collection job",  # last of the steps: after startup delivery, so they can't overlap
     ]
-    assert all(enabled is False for _, enabled in log)  # the digests wait for every step
-    assert bot._digests_enabled is True  # and are switched on last
+    # The digests wait for every step but the collection job, which comes after they're on.
+    assert all(enabled is False for name, enabled in log if name != "collection job")
+    assert bot._digests_enabled is True
 
 
 async def test_a_step_that_blows_up_is_reported_and_does_not_stop_the_rest(bot, monkeypatch):
@@ -280,7 +286,7 @@ async def test_a_step_that_blows_up_is_reported_and_does_not_stop_the_rest(bot, 
 
     await bot.on_ready()
 
-    assert [name for name, _ in log][-1] == "permission sweep"
+    assert [name for name, _ in log][-1] == "collection job"
     assert bot._digests_enabled is True
     assert len(alerts) == 1 and "'reconcile'" in alerts[0] and "RuntimeError" not in alerts[0]
 

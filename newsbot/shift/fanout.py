@@ -17,9 +17,10 @@ The queue exists because my first draft delivered inside the collection hook's
 120 second timeout and recorded nobody until their turn came. A few hundred
 servers at a pace of 0.2 s each is a long walk, the timeout is not patient,
 and a server the crier never reached had no record of ever being owed the
-code. Now the list is written before the walk starts, a walk cut short leaves
-the rest of the list queued, and the next pass (or startup) picks up where it
-stopped. At a server's turn its *current* settings decide what happens: alerts
+code. Now the list is written before the walk starts, the walk stops starting
+new servers at 100 of the hook's 120 seconds (so the timeout never cuts a send
+in half), and whoever's left stays queued for the next pass (or startup) to
+pick up where it stopped. At a server's turn its *current* settings decide what happens: alerts
 switched off or the channel gone means `skipped`; a new ping choice is the
 one used. Codes are not stale-checked beyond that; a queued code for a server
 that's still listening is news to it.
@@ -41,9 +42,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from newsbot.bot.format import RenderedAlert, render_code_alerts, render_roundup_alerts
@@ -63,7 +66,7 @@ from newsbot.shift.sweep import _ROUNDUP_CAP_ALERT, CodeAlertPoster, post_alert_
 from newsbot.store.db import connect
 from newsbot.store.models import GuildSettings, QueuedCode, ShiftSettings
 from newsbot.store.repo import (
-    ClaimLostError,
+    ClaimedCodes,
     claim_guild_codes,
     current_shift_delivery,
     fail_pending_guild_codes,
@@ -91,6 +94,14 @@ NotifyGuild = Callable[[int, str], Awaitable[None]]
 # the same instant; Discord's rate limiter is patient, but not infinitely.
 _GUILD_PACE_S = 0.2
 
+# The collection hook gets 120 s in all (`pipeline/collect.py`). The walk stops
+# *starting* servers at 100 s and leaves the rest `queued` for the next pass; the
+# hard stop is the backstop for a server whose sends were already under way.
+_WALK_STOP_S = 100.0
+_WALK_HARD_S = 115.0
+# A walk that starts late still gets this long before the hard stop.
+_WALK_FLOOR_S = 5.0
+
 # A `pending` row older than this is a send that died, not one in flight (the
 # hook's own timeout is 120 s). Startup doesn't need the wait: nothing is in flight.
 _PENDING_STALE_S = 600.0
@@ -108,6 +119,12 @@ class FanoutDeps:
     # The bot-wide owner alert path (never a server's channel). None means
     # nobody is listening, which is how tests that don't care run.
     alert_owner: Notify | None = None
+    clock: Callable[[], float] = time.monotonic
+    # Walks (a pass's, the startup one) take turns on this: startup fails every
+    # `pending` row, which is only safe when no pass has a send in flight.
+    delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Release and print only: never claim, mark or spend a ping. The CLI's mode.
+    preview: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,8 @@ class GuildOutcome:
     pinged: bool = False
     cap_reached: bool = False
     error: str | None = None
+    # Why a server's alert went out without a ping (or lost it on the way); for logs.
+    reasons: tuple[str, ...] = ()
 
 
 def _mention_for(ping: str) -> str:
@@ -135,6 +154,7 @@ async def _post_batch(
     poster: CodeAlertPoster,
     rendered: list[RenderedAlert],
     notify: Notify,
+    reasons: set[str] | None = None,
 ) -> tuple[int, int]:
     """Post `rendered` in order to one server; return (posted, failed) code counts.
 
@@ -148,7 +168,16 @@ async def _post_batch(
     for alert in rendered:
         message_id: int | None = None
         if not failed_from_here:
-            message_id, error = await post_alert_with_retry(poster, deps.sleep, alert)
+            message_id, error = await post_alert_with_retry(
+                poster,
+                deps.sleep,
+                alert,
+                on_ping_stripped=lambda: (
+                    reasons.add("ping_stripped_after_ambiguous_failure")
+                    if reasons is not None
+                    else None
+                ),
+            )
             if error is not None:
                 failed_from_here = True
                 logger.error(
@@ -198,29 +227,41 @@ async def _claim(
     codes: list[str],
     *,
     pinged: bool,
-    local_day: str,
-    now: datetime,
+    ping_codes: set[str] | None,
+    timezone: str,
     from_roundup: bool,
-) -> bool | None:
-    """Claim queued -> pending; None if another pass beat us to these codes."""
+) -> ClaimedCodes:
+    """Claim queued -> pending; returns what was really claimed (maybe nothing).
 
-    def _sync() -> bool | None:
+    The clock is read here, at claim time: a walk that's been going a while
+    must not claim against the moment it started (or spend a ping on the
+    wrong local day). A busy or locked database claims nothing and leaves
+    the codes `queued` for the next pass; it isn't this server's fault.
+    """
+
+    def _sync() -> ClaimedCodes:
+        now = deps.now()
         with closing(connect(deps.db_path)) as conn:
             return claim_guild_codes(
                 conn,
                 guild_id,
                 codes,
                 pinged=pinged,
-                local_day=local_day,
+                local_day=local_run_date(now, timezone).isoformat(),
                 now=lambda: now,
                 max_pings=None if from_roundup else deps.cfg.shift.max_pings_per_day,
                 from_roundup=from_roundup,
+                ping_codes=ping_codes,
             )
 
     try:
         return await asyncio.to_thread(_sync)
-    except ClaimLostError:
-        return None
+    except sqlite3.OperationalError:
+        logger.warning(
+            "SHiFT claim hit a busy database; codes stay queued",
+            extra={"guild_id": guild_id, "codes": len(codes)},
+        )
+        return ClaimedCodes([], False)
 
 
 def _candidate(queued: QueuedCode) -> CodeCandidate:
@@ -235,7 +276,7 @@ def _candidate(queued: QueuedCode) -> CodeCandidate:
     )
 
 
-async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildOutcome:
+async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     """One server's turn. Raises freely; `deliver_queued_codes` catches it so nobody else waits."""
 
     def _load_sync() -> tuple[GuildSettings, ShiftSettings, list[QueuedCode]] | int:
@@ -245,7 +286,8 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
             queued = queued_guild_codes(conn, guild_id)
             state = current_shift_delivery(conn, guild_id, deps.cfg.shift.games)
             if state is None:
-                skip_queued_guild_codes(conn, guild_id, [q.code for q in queued])
+                if not deps.preview:
+                    skip_queued_guild_codes(conn, guild_id, [q.code for q in queued])
                 return len(queued)
             guild, shift = state
             # Alerts switched off and back on since the release: the no-backlog
@@ -253,13 +295,13 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
             stale = [
                 q for q in queued if shift.enabled_at is None or shift.enabled_at > q.queued_at
             ]
-            if stale:
+            if stale and not deps.preview:
                 skip_queued_guild_codes(conn, guild_id, [q.code for q in stale])
             return guild, shift, [q for q in queued if q not in stale]
 
     loaded = await asyncio.to_thread(_load_sync)
     if isinstance(loaded, int):
-        return GuildOutcome(guild_id, skipped=loaded)
+        return GuildOutcome(guild_id, skipped=0 if deps.preview else loaded)
     guild, shift, queued = loaded
     channel_id = shift.channel_id
     if channel_id is None or not queued:  # the first can't happen; the second is a stale-only turn
@@ -271,7 +313,9 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
     normal = [_candidate(q) for q in queued if not q.from_roundup]
     roundup = [_candidate(q) for q in queued if q.from_roundup]
 
-    local_day = local_run_date(now, guild.timezone).isoformat()
+    # Two servers sending the same batch must not share nonces (Discord may
+    # answer the second with the first's message); a retry to the same channel must.
+    scope = f"{guild_id}|{channel_id}"
     poster = deps.poster_for(guild_id, channel_id, shift.ping, notify)
     begin_batch = getattr(poster, "begin_batch", None)
     if begin_batch is not None:
@@ -279,30 +323,46 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
 
     posted = roundup_posted = failed = 0
     final_ping = cap_reached = False
+    reasons: set[str] = set()
 
     if normal:
-        want_ping = shift.ping != "none" and any(c.trusted for c in normal)
+        trusted_codes = {c.code for c in normal if c.trusted}
+        want_ping = shift.ping != "none" and bool(trusted_codes)
+        if shift.ping == "none":
+            reasons.add("ping_off")
+        elif not trusted_codes:
+            reasons.add("untrusted")
         mention = _mention_for(shift.ping)
         # Render before claiming, worst case first: a claim can only turn a ping
         # off, and a message that fits under the longer pinged header fits
         # under the shorter one. (A row stranded `pending` by a render that
         # blew up afterwards would sit there until it goes stale.)
-        rendered = render_code_alerts(normal, ping=want_ping, ping_mention=mention)
-        claimed = await _claim(
+        rendered = render_code_alerts(
+            normal, ping=want_ping, ping_mention=mention, nonce_scope=scope
+        )
+        if deps.preview:
+            await _print_batch(poster, rendered)
+            return GuildOutcome(guild_id, posted=sum(len(r.codes) for r in rendered))
+        claim = await _claim(
             deps,
             guild_id,
             [c.code for c in normal],
             pinged=want_ping,
-            local_day=local_day,
-            now=now,
+            ping_codes=trusted_codes,
+            timezone=guild.timezone,
             from_roundup=False,
         )
-        if claimed is not None:  # None: a concurrent pass has these, and will send them
-            final_ping = claimed
-            if want_ping and not final_ping:
+        if claim.codes:  # codes a concurrent pass took are its to send; ours are the rest
+            sent = [c for c in normal if c.code in set(claim.codes)]
+            final_ping = claim.pinged
+            if want_ping and any(c.trusted for c in sent) and not final_ping:
                 cap_reached = True
-                rendered = render_code_alerts(normal, ping=False)
-            posted, failed = await _post_batch(deps, guild_id, poster, rendered, notify)
+                reasons.add("cap_reached")
+            if len(sent) != len(normal) or final_ping != want_ping:
+                rendered = render_code_alerts(
+                    sent, ping=final_ping, ping_mention=mention, nonce_scope=scope
+                )
+            posted, failed = await _post_batch(deps, guild_id, poster, rendered, notify, reasons)
             if cap_reached and deps.cfg.shift.max_pings_per_day > 0:
                 await _safe_notify(
                     notify,
@@ -310,23 +370,35 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
                 )
 
     if roundup:
+        reasons.add("roundup")
         # Never pinged, never counted against the cap; it claims with its own flag.
-        rendered_roundup = render_roundup_alerts(roundup)
-        claimed = await _claim(
+        rendered_roundup = render_roundup_alerts(roundup, nonce_scope=scope)
+        if deps.preview:
+            await _print_batch(poster, rendered_roundup)
+            return GuildOutcome(
+                guild_id, roundup_posted=sum(len(r.codes) for r in rendered_roundup)
+            )
+        claim = await _claim(
             deps,
             guild_id,
             [c.code for c in roundup],
             pinged=False,
-            local_day=local_day,
-            now=now,
+            ping_codes=None,
+            timezone=guild.timezone,
             from_roundup=True,
         )
-        if claimed is not None:
+        if claim.codes:
+            if len(claim.codes) != len(roundup):
+                rendered_roundup = render_roundup_alerts(
+                    [c for c in roundup if c.code in set(claim.codes)], nonce_scope=scope
+                )
             roundup_posted, roundup_failed = await _post_batch(
-                deps, guild_id, poster, rendered_roundup, notify
+                deps, guild_id, poster, rendered_roundup, notify, reasons
             )
             failed += roundup_failed
 
+    if getattr(poster, "missing_ping_permission", False):
+        reasons.add("no_permission")
     return GuildOutcome(
         guild_id,
         posted=posted,
@@ -334,51 +406,113 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int, now: datetime) -> GuildO
         failed=failed,
         pinged=final_ping,
         cap_reached=cap_reached,
+        reasons=tuple(sorted(reasons)),
     )
 
 
-async def deliver_queued_codes(deps: FanoutDeps, *, startup: bool = False) -> list[GuildOutcome]:
+async def _print_batch(poster: CodeAlertPoster, rendered: list[RenderedAlert]) -> None:
+    """Preview mode: hand each message to the (printing) poster, record nothing."""
+    for alert in rendered:
+        await poster.post(alert)
+
+
+def _log_outcome(outcome: GuildOutcome) -> None:
+    """One INFO line per server's turn: ids and counts only, never message text."""
+    if outcome.error is not None or not (
+        outcome.posted or outcome.roundup_posted or outcome.failed
+    ):
+        return
+    logger.info(
+        "SHiFT delivery for a guild",
+        extra={
+            "guild_id": outcome.guild_id,
+            "codes": outcome.posted + outcome.roundup_posted + outcome.failed,
+            "pinged": outcome.pinged,
+            "unpinged_or_stripped_because": ",".join(outcome.reasons) or "none",
+        },
+    )
+
+
+async def deliver_queued_codes(
+    deps: FanoutDeps, *, startup: bool = False, deadline: float | None = None
+) -> list[GuildOutcome]:
     """Work through the delivery queue: every server with `queued` codes, in guild id order.
 
-    Runs at the end of every collection pass (so a walk the hook timeout cut
-    short is finished by the next one) and can be called at startup
-    (`startup=True`) to do the same after a crash. It starts with crash
-    recovery: a `pending` row is a claim whose send never got confirmed, so it
-    becomes `failed` and its server is told; at startup that is every
-    `pending` row, mid-run only the stale ones. Nothing `pending` is ever
-    sent again.
+    Runs at the end of every collection pass (so a walk cut short is finished
+    by the next one) and can be called at startup (`startup=True`) to do the
+    same after a crash. It starts with crash recovery: a `pending` row is a
+    claim whose send never got confirmed, so it becomes `failed` and its
+    server is told; at startup that is every `pending` row, mid-run only the
+    stale ones. Nothing `pending` is ever sent again.
 
-    A timeout or cancellation leaves whatever hasn't had its turn `queued`.
-    Two passes running at once can't double-send: the queued -> pending claim
-    is atomic, and the loser sees it lost and moves on.
+    `deadline` is a `deps.clock()` reading: once it passes, no new server is
+    started and everyone who hasn't had a turn stays `queued` for the next
+    pass. (A server already in progress finishes; that's the point of
+    stopping early instead of letting the hook's timeout cut a send in half.)
+
+    One walk at a time per `deps` (`delivery_lock`): startup's fail-everything
+    recovery can't land in the middle of a pass's sends. Two *processes* or
+    separate `deps` can still overlap, and the claim copes: it takes whatever
+    is still `queued` and sends only that.
     """
-    now = deps.now()
-    stale_before = None if startup else now - timedelta(seconds=_PENDING_STALE_S)
-    await recover_pending_guild_codes(deps.db_path, deps.notify_guild, claimed_before=stale_before)
-
-    def _queued_sync() -> list[int]:
-        with closing(connect(deps.db_path)) as conn:
-            return queued_guild_ids(conn)
-
-    outcomes: list[GuildOutcome] = []
-    for i, guild_id in enumerate(await asyncio.to_thread(_queued_sync)):
-        if i:
-            await deps.sleep(deps.pace_s)
-        try:
-            outcomes.append(await _deliver_one(deps, guild_id, now))
-        except Exception as exc:
-            # One server's broken channel (or a bug that only its settings
-            # tickle) is its own business; the rest of the list still gets its turn.
-            # What it hadn't claimed yet is failed, not left queued: a bug
-            # doesn't fix itself by the next pass, and an hourly notice isn't a fix.
-            logger.exception("SHiFT delivery failed for a guild", extra={"guild_id": guild_id})
-            outcomes.append(GuildOutcome(guild_id, error=str(exc)))
-            await asyncio.to_thread(_fail_queued_sync, deps.db_path, guild_id)
-            await _safe_notify(
-                lambda text, g=guild_id: deps.notify_guild(g, text),
-                "newsbot: a SHiFT code alert couldn't be posted to your server this time.",
+    async with deps.delivery_lock:
+        if not deps.preview:
+            now = deps.now()
+            stale_before = None if startup else now - timedelta(seconds=_PENDING_STALE_S)
+            await recover_pending_guild_codes(
+                deps.db_path, deps.notify_guild, claimed_before=stale_before
             )
-    return outcomes
+
+        def _queued_sync() -> list[int]:
+            with closing(connect(deps.db_path)) as conn:
+                return queued_guild_ids(conn)
+
+        outcomes: list[GuildOutcome] = []
+        guild_ids = await asyncio.to_thread(_queued_sync)
+        for i, guild_id in enumerate(guild_ids):
+            if i:
+                await deps.sleep(deps.pace_s)
+            if deadline is not None and deps.clock() >= deadline:
+                logger.warning(
+                    "SHiFT delivery out of time; the rest stay queued for the next pass",
+                    extra={"servers_left": len(guild_ids) - i},
+                )
+                break
+            try:
+                outcome = await _deliver_one(deps, guild_id)
+            except sqlite3.OperationalError:
+                # A busy database is the next pass's problem, not this server's.
+                logger.warning(
+                    "SHiFT delivery hit a busy database; codes stay queued",
+                    extra={"guild_id": guild_id},
+                )
+                outcomes.append(GuildOutcome(guild_id, error="database busy"))
+                continue
+            except Exception as exc:
+                # One server's broken channel (or a bug that only its settings
+                # tickle) is its own business; the rest of the list still gets its turn.
+                # What it hadn't claimed yet is failed, not left queued: a bug
+                # doesn't fix itself by the next pass, and an hourly notice isn't a fix.
+                logger.exception("SHiFT delivery failed for a guild", extra={"guild_id": guild_id})
+                outcomes.append(GuildOutcome(guild_id, error=str(exc)))
+                if not deps.preview:
+                    await _fail_queued_safely(deps, guild_id)
+                    await _safe_notify(
+                        lambda text, g=guild_id: deps.notify_guild(g, text),
+                        "newsbot: a SHiFT code alert couldn't be posted to your server this time.",
+                    )
+                continue
+            _log_outcome(outcome)
+            outcomes.append(outcome)
+        return outcomes
+
+
+async def _fail_queued_safely(deps: FanoutDeps, guild_id: int) -> None:
+    try:
+        await asyncio.to_thread(_fail_queued_sync, deps.db_path, guild_id)
+    except Exception:
+        # The handler that called this must not become the walk's next casualty.
+        logger.exception("couldn't fail a guild's queued codes", extra={"guild_id": guild_id})
 
 
 def _fail_queued_sync(db_path: str, guild_id: int) -> None:
@@ -394,9 +528,27 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
     into an already-seen thread still counts, and the code tables do their own
     dedupe. Delivery runs even when nothing new was found, because the queue
     may still hold codes from a pass that ran out of time.
+
+    Delivery trouble (a timeout, a bug) stays here: the codes are released and
+    queued, so reporting it as "detection failed" would be telling the owner
+    the wrong thing. Only detection's own failures propagate to the hook's caller.
     """
+    started = deps.clock()
     released = await _release(deps, items, seeding_ok=seeding_ok)
-    await deliver_queued_codes(deps)
+    if deps.preview:
+        await deliver_queued_codes(deps)
+        return released
+    hard_stop = max(started + _WALK_HARD_S - deps.clock(), _WALK_FLOOR_S)
+    try:
+        await asyncio.wait_for(
+            deliver_queued_codes(deps, deadline=started + _WALK_STOP_S), timeout=hard_stop
+        )
+    except TimeoutError:
+        logger.warning("SHiFT delivery timed out; unsent codes stay queued or fail on recovery")
+    except Exception:
+        logger.exception("SHiFT delivery failed")
+        if deps.alert_owner is not None:
+            await _safe_notify(deps.alert_owner, "newsbot: SHiFT delivery failed during collection")
     return released
 
 
@@ -512,8 +664,15 @@ async def recover_pending_guild_codes(
     for guild_id, codes in by_guild.items():
         await _safe_notify(
             lambda text, g=guild_id: notify_guild(g, text),
-            "newsbot restarted while a SHiFT code alert was in flight; it may or may not "
-            "have posted. Codes not retried: " + ", ".join(codes),
+            (
+                "newsbot restarted while a SHiFT code alert was in flight; it may or may not "
+                "have posted. "
+                if claimed_before is None
+                else "a SHiFT code alert was cut off before newsbot could confirm it; it may "
+                "or may not have posted. "
+            )
+            + "Codes not retried: "
+            + ", ".join(codes),
         )
     return sum(len(codes) for codes in by_guild.values())
 
