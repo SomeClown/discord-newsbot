@@ -339,10 +339,20 @@ def parse_digest_time(text: str) -> str | None:
     return text if _DIGEST_TIME_RE.fullmatch(text) else None
 
 
+# Files that live in some systems' zoneinfo directories without being zones anyone
+# should pick. Ubuntu's tzdata ships `localtime` (a link to the host's own zone), which
+# `available_timezones()` happily lists; macOS doesn't, so this one only bit in CI.
+_NOT_REALLY_ZONES = frozenset({"localtime", "posixrules"})
+
+
 @functools.cache
 def _zone_index() -> dict[str, str]:
     """Casefolded zone name to its canonical spelling, for everything tzdata knows."""
-    return {name.casefold(): name for name in sorted(zoneinfo.available_timezones())}
+    return {
+        name.casefold(): name
+        for name in sorted(zoneinfo.available_timezones())
+        if name.casefold() not in _NOT_REALLY_ZONES
+    }
 
 
 def resolve_timezone(text: str) -> str | None:

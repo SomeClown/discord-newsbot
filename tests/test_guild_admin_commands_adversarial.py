@@ -883,8 +883,34 @@ async def test_bad_zones_are_refused_and_nothing_is_saved(admin, v3_db, problems
 
 @pytest.mark.parametrize("name", sorted(__import__("zoneinfo").available_timezones()))
 def test_every_zone_tzdata_lists_resolves_to_itself(name):
-    # A zone the autocomplete offers must be one the command accepts.
-    assert resolve_timezone(name) == name
+    # A zone the autocomplete offers must be one the command accepts. Ubuntu's tzdata
+    # also lists `localtime`, which is the host's zone wearing a fake moustache; that
+    # one is refused on purpose (see the bad-zones test above).
+    if name.casefold() in {"localtime", "posixrules"}:
+        assert resolve_timezone(name) is None
+    else:
+        assert resolve_timezone(name) == name
+
+
+def test_not_really_zones_are_refused_even_when_tzdata_lists_them(monkeypatch):
+    # macOS doesn't ship `localtime` in zoneinfo, so fake a Linux-shaped list to prove
+    # the filter, not the platform, is what refuses it.
+    import zoneinfo
+
+    from newsbot.bot import commands
+
+    monkeypatch.setattr(
+        zoneinfo, "available_timezones", lambda: {"UTC", "Factory", "localtime", "posixrules"}
+    )
+    commands._zone_index.cache_clear()
+    try:
+        assert resolve_timezone("UTC") == "UTC"
+        assert resolve_timezone("Factory") == "Factory"  # odd, but a real tzdata zone
+        for name in ("localtime", "posixrules"):
+            assert resolve_timezone(name) is None
+        assert [c.value for c in commands.zone_choices("local")] == []
+    finally:
+        commands._zone_index.cache_clear()
 
 
 # --- follow edge cases ---
