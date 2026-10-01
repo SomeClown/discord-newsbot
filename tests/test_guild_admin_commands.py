@@ -651,18 +651,66 @@ async def test_shift_is_per_server_and_reports_permission_problems(admin, v3_db,
 # --- status ---
 
 
-async def test_status_shows_this_server_and_never_spend(admin, v3_db):
+def _seed_health(db_path, names, failures=0):
+    with closing(connect(db_path)) as conn, conn:
+        for name in names:
+            conn.execute(
+                "INSERT OR REPLACE INTO source_health (source_name, consecutive_failures) "
+                "VALUES (?, ?)",
+                (name, failures),
+            )
+
+
+async def _status_text(admin):
+    interaction = FakeInteraction()
+    await admin.callback("status")(interaction)
+    embed = interaction.sent[-1]["embed"]
+    return "\n".join(f"{f.name}\n{f.value}" for f in embed.fields)
+
+
+async def test_status_says_never_checked_sources_are_not_checked_yet(admin, v3_cfg, v3_db):
+    from newsbot.bot.commands import _game_source_names
+
+    make_guild(v3_db, GUILD_A, games=[("borderlands4", 5)])
+    total = len(_game_source_names(v3_cfg, "borderlands4"))
+    text = await _status_text(admin)
+    assert f"Borderlands 4 in <#5>: {total} sources not checked yet" in text
+    assert "sources ok" not in text
+
+
+async def test_status_mixes_ok_failing_and_not_checked(admin, v3_cfg, v3_db):
+    from newsbot.bot.commands import _game_source_names
+
+    make_guild(v3_db, GUILD_A, games=[("borderlands4", 5)])
+    names = _game_source_names(v3_cfg, "borderlands4")
+    _seed_health(v3_db, names[:1])  # one passes
+    _seed_health(v3_db, names[1:2], failures=3)  # one fails
+    text = await _status_text(admin)
+    assert f"Borderlands 4 in <#5>: 1 of {len(names)} ok, {len(names) - 2} not checked yet" in text
+
+
+async def test_status_all_checked_keeps_the_plain_count(admin, v3_cfg, v3_db):
+    from newsbot.bot.commands import _game_source_names
+
+    make_guild(v3_db, GUILD_A, games=[("borderlands4", 5)])
+    names = _game_source_names(v3_cfg, "borderlands4")
+    _seed_health(v3_db, names)
+    text = await _status_text(admin)
+    assert f"Borderlands 4 in <#5>: {len(names)} of {len(names)} sources ok" in text
+
+
+async def test_status_shows_this_server_and_never_spend(admin, v3_cfg, v3_db):
     make_guild(v3_db, GUILD_A, tier="comped", games=[("borderlands4", 5), ("palworld", 6)])
     make_guild(v3_db, GUILD_B, games=[("rust", 7)])
     with closing(connect(v3_db)) as conn:
         repo.add_notice(conn, GUILD_A, "A's problem")
         repo.add_notice(conn, GUILD_B, "B's secret problem")
         repo.set_shift(conn, GUILD_A, enabled=True, channel_id=9, ping="everyone")
-        conn.execute(
-            "INSERT INTO source_health (source_name, consecutive_failures) "
-            "VALUES ('Borderlands 4 Steam', 3)"
-        )
         conn.commit()
+    from newsbot.bot.commands import _game_source_names
+
+    _seed_health(v3_db, _game_source_names(v3_cfg, "borderlands4"))
+    _seed_health(v3_db, ["Borderlands 4 Steam"], failures=3)
     interaction = FakeInteraction()
     await admin.callback("status")(interaction)
     embed = interaction.sent[-1]["embed"]

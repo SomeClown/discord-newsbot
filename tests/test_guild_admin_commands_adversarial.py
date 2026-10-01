@@ -411,7 +411,7 @@ async def test_status_in_a_with_bs_notices_and_failing_sources_shows_only_health
     interaction = FakeInteraction()
     await admin.callback("status")(interaction)
     text = blob(interaction)
-    assert "of 4 sources ok" in text
+    assert "0 of 4 ok, 3 not checked yet" in text
     assert "secret.example" not in text and "exploded" not in text and B_NOTICE not in text
 
 

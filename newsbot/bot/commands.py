@@ -745,6 +745,22 @@ def _lounge_lines(lounge: LoungeSettings, timezone: str) -> list[str]:
     ]
 
 
+def _source_health_text(sources: list[str], failing: set[str], checked: set[str]) -> str:
+    """The short health clause after a game in `/newsbot status`, for a game with sources.
+
+    A source with no health row has never been collected, which isn't the same as
+    being fine (a fresh server's first status used to cheerfully say "8 of 8 ok").
+    """
+    total = len(sources)
+    unchecked = sum(1 for name in sources if name not in checked)
+    if unchecked == total:
+        return f": {total} {'source' if total == 1 else 'sources'} not checked yet"
+    ok = total - unchecked - len(failing & set(sources))
+    if unchecked:
+        return f": {ok} of {total} ok, {unchecked} not checked yet"
+    return f": {ok} of {total} sources ok"
+
+
 def _status_embed_sync(
     cfg: AppConfig, db_path: str, guild_id: int, now: datetime
 ) -> discord.Embed | None:
@@ -759,6 +775,7 @@ def _status_embed_sync(
         notices = repo.recent_notices(conn, guild_id, 5)
         lounge = repo.get_lounge(conn, guild_id)
         failing = {row.source_name for row in repo.failing_sources(conn)}
+        checked = repo.checked_source_names(conn)
     names = {game.key: game.name for game in cfg.catalog}
 
     schedule = _next_due_line(guild, now)
@@ -779,7 +796,7 @@ def _status_embed_sync(
     game_lines = []
     for game in games:
         sources = _game_source_names(cfg, game.game_key)
-        health = f": {len(sources) - len(failing & set(sources))} of {len(sources)} sources ok"
+        health = _source_health_text(sources, failing, checked)
         game_lines.append(
             f"{esc(names.get(game.game_key, game.game_key))} in <#{game.channel_id}>"
             f"{health if sources else ''}"

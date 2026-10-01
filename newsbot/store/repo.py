@@ -1338,6 +1338,16 @@ def recent_notices(conn: sqlite3.Connection, guild_id: int, limit: int = 20) -> 
     ]
 
 
+def checked_source_names(conn: sqlite3.Connection) -> set[str]:
+    """Names of sources that have been collected at least once (they have a health row).
+
+    `record_source_result` creates the row on a source's first attempt, pass or
+    fail, so a name missing from here has simply never been tried. For `/newsbot
+    status`, which shouldn't call a never-checked source "ok".
+    """
+    return {row["source_name"] for row in conn.execute("SELECT source_name FROM source_health")}
+
+
 def failing_sources(conn: sqlite3.Connection, min_failures: int = 1) -> list[SourceHealthRow]:
     """Every source with at least `min_failures` failed collections in a row, worst first.
 
