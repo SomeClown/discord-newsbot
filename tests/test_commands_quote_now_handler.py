@@ -76,10 +76,14 @@ class FakeInteraction:
 
 
 class SpyBot:
-    def __init__(self, db_path: str, outcome: QuoteOutcome) -> None:
+    def __init__(self, db_path: str, outcome: QuoteOutcome, *, in_server: bool = True) -> None:
         self.db_path = db_path
         self.outcome = outcome
+        self.in_server = in_server
         self.calls: list[tuple[int, bool]] = []
+
+    def get_guild(self, guild_id: int):
+        return object() if self.in_server else None
 
     async def run_guild_quote(self, guild_id: int, force: bool) -> QuoteOutcome:
         self.calls.append((guild_id, force))
@@ -151,6 +155,27 @@ async def test_non_admin_is_denied_and_nothing_runs(cfg, db_path):
     assert interaction.response.messages == [(DENIAL, True)]
     assert interaction.followup.messages == []
     assert bot.calls == []
+
+
+async def test_without_the_bot_in_the_server_the_command_is_refused_and_nothing_runs(cfg, db_path):
+    from newsbot.bot.commands import _NOT_IN_SERVER
+
+    bot = SpyBot(db_path, QuoteOutcome("posted", message_id=1), in_server=False)
+    interaction = FakeInteraction(permissions=_admin(cfg))
+
+    await _run(cfg, bot).callback(interaction)
+
+    assert interaction.response.messages == [(_NOT_IN_SERVER, True)]
+    assert interaction.response.deferred == [] and bot.calls == []
+
+
+async def test_a_non_admin_gets_the_permission_denial_not_the_bot_gate(cfg, db_path):
+    bot = SpyBot(db_path, QuoteOutcome("posted", message_id=1), in_server=False)
+    interaction = FakeInteraction(permissions=discord.Permissions.none())
+
+    await _run(cfg, bot).callback(interaction)
+
+    assert interaction.response.messages == [(DENIAL, True)]
 
 
 async def test_fresh_day_defers_ephemerally_and_runs_unforced(cfg, db_path):

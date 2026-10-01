@@ -1354,6 +1354,11 @@ def make_lounge_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             return
         if not await _check_admin(interaction, cfg.admin_permission):
             return
+        # The same gate as the other admin commands: a server that installed only the
+        # commands has no bot to post the quote.
+        if bot.get_guild(interaction.guild_id) is None:
+            await interaction.response.send_message(_NOT_IN_SERVER, ephemeral=True)
+            return
         guild, _games = await asyncio.to_thread(_guild_state_sync, db_path, interaction.guild_id)
         lounge = await asyncio.to_thread(_get_lounge_sync, db_path, interaction.guild_id)
         if guild is None or lounge is None or not lounge.quote_enabled:

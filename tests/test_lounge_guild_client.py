@@ -140,6 +140,7 @@ def _bot(db_path, lounges, channels=None):
     bot.notices = []  # type: ignore[attr-defined]
     bot.owner_alerts = []  # type: ignore[attr-defined]
     bot.get_channel = lambda cid: chans.get(cid)  # type: ignore[method-assign]
+    bot.get_guild = lambda gid: object()  # type: ignore[method-assign]  # in every server
 
     async def notify(gid: int, text: str) -> None:
         bot.notices.append((gid, text))  # type: ignore[attr-defined]

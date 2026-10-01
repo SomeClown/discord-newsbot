@@ -185,6 +185,9 @@ class SpyBot:
         self.action = action
         self.calls: list[bool] = []
 
+    def get_guild(self, guild_id: int):
+        return object()  # in the server
+
     async def run_guild_quote(self, guild_id: int, force: bool) -> QuoteOutcome:
         assert guild_id == GUILD
         self.calls.append(force)
@@ -237,6 +240,7 @@ def _real_bot(cfg, db_path):
     channels = {LOUNGE_ID: bot.lounge_channel, cfg.admin_channel_id: admin_channel}  # type: ignore[attr-defined]
     bot.get_channel = lambda channel_id: channels.get(channel_id)  # type: ignore[method-assign]
     bot.http_client = httpx.AsyncClient()
+    bot.get_guild = lambda guild_id: object()  # type: ignore[method-assign]  # the bot is in the server
     return bot
 
 
