@@ -587,9 +587,13 @@ async def test_channel_delete_in_another_guild_does_not_touch_this_one(life, v3_
         assert len(repo.recent_notices(conn, G2)) == 1
 
 
-# --- not wired into the v2 client ---
+# --- wired into the client, through the lifecycle class ---
 
 
-def test_the_v2_client_has_no_guild_event_handlers():
+def test_the_client_forwards_the_guild_events_and_the_lifecycle_class_has_the_work():
+    # v2 kept these off `NewsBot` so the v2 bot wouldn't pick the events up by name. At the
+    # cutover the client has the three handlers and each one forwards to `GuildLifecycle`,
+    # which is where the behavior (and the tests above) live.
     for name in ("on_guild_join", "on_guild_remove", "on_guild_channel_delete"):
-        assert not hasattr(NewsBot, name)
+        assert hasattr(NewsBot, name)
+        assert hasattr(GuildLifecycle, name)

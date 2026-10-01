@@ -16,7 +16,6 @@ import asyncio
 import re
 from contextlib import closing
 from datetime import UTC, datetime
-from pathlib import Path
 
 import discord
 import pytest
@@ -25,17 +24,13 @@ from newsbot.bot import permissions
 from newsbot.bot.permissions import (
     ChannelRequirement,
     SweepResult,
-    check_channels,
     check_guild,
     check_guild_channels,
     render_guild_permission_notice,
-    render_permission_alert,
     render_sweep_counts,
-    required_channels,
     required_channels_for_guild,
     sweep_guild_permissions,
 )
-from newsbot.config import load_config
 from newsbot.guilds.notify import Router, client_sender
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
@@ -46,7 +41,6 @@ ALL = discord.Permissions.all()
 GUILD = 111
 OTHER = 222
 OWNER_CHANNEL = 9000
-FIXTURE_CONFIG = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 
 
 # --- fakes ---
@@ -597,81 +591,87 @@ def test_notice_with_many_astral_problem_lines_stays_under_the_cap():
     assert text.startswith("newsbot: I can't do everything")
 
 
-# --- v2 unchanged ---
+# --- the lines v2 produced, and still do ---
+#
+# This section pinned v2's `required_channels` and `check_channels` against the fixture config so
+# the per-server builder couldn't quietly change a word. v2 retired at the cutover; the same
+# channels, purposes, merges and one-line texts are asserted here against a server's rows, which
+# is the only thing that builds them now.
+
+_GAMES = [
+    GuildGame(GUILD, "borderlands4", 123456789012345690),
+    GuildGame(GUILD, "palworld", 123456789012345691),
+    GuildGame(GUILD, "diablo4", 123456789012345692),
+]
+_NAMES = {"borderlands4": "Borderlands 4", "palworld": "Palworld", "diablo4": "Diablo IV"}
+_ADMIN = 123456789012345679
+_SHIFT = 999999999999999999
 
 
-def _cfg(**alerts):
-    cfg = load_config(FIXTURE_CONFIG)
-    return cfg.model_copy(update={"alerts": cfg.alerts.model_copy(update=alerts)})
+def _fixture_reqs(*, shift_channel=_SHIFT):
+    guild = GuildSettings(GUILD, "09:00", "UTC", _ADMIN, "free", True, T0, None, None, T0)
+    shift = ShiftSettings(GUILD, True, shift_channel, "everyone", None, None, 0)
+    return required_channels_for_guild(guild, _GAMES, shift, None, game_names=_NAMES)
 
 
-def test_v2_required_channels_are_exactly_what_they_were_for_the_fixture_config():
-    cfg = _cfg(enabled=True, channel_id=999999999999999999)
-    got = [
-        (r.channel_id, r.purpose, sorted(r.needed), r.ping_role_id) for r in required_channels(cfg)
-    ]
+def test_required_channels_are_exactly_what_they_were_for_the_fixture_setup():
+    got = {r.channel_id: (r.purpose, sorted(r.needed), r.ping_role_id) for r in _fixture_reqs()}
     base = ["embed_links", "send_messages", "view_channel"]
-    assert got[:3] == [
-        (123456789012345690, "Borderlands 4", base, None),
-        (123456789012345691, "Palworld", base, None),
-        (123456789012345692, "Diablo IV", base, None),
-    ]
-    assert got[3] == (
-        999999999999999999,
+    assert got[123456789012345690] == ("Borderlands 4", base, None)
+    assert got[123456789012345691] == ("Palworld", base, None)
+    assert got[123456789012345692] == ("Diablo IV", base, None)
+    assert got[_SHIFT] == (
         "SHiFT codes",
         ["mention_everyone", "send_messages", "view_channel"],
         None,
     )
-    assert got[4] == (123456789012345679, "admin", ["send_messages", "view_channel"], None)
+    assert got[_ADMIN] == ("admin", ["send_messages", "view_channel"], None)
+    assert len(got) == 5
 
 
-def test_v2_shared_channel_purpose_join_is_unchanged():
-    cfg = _cfg(enabled=True, channel_id=123456789012345679)  # SHiFT shares the admin channel
-    merged = {r.channel_id: r for r in required_channels(cfg)}[123456789012345679]
+def test_shared_channel_purpose_join_is_unchanged():
+    merged = {r.channel_id: r for r in _fixture_reqs(shift_channel=_ADMIN)}[_ADMIN]
     assert merged.purpose == "SHiFT codes / admin"
     assert merged.needed == {"view_channel", "send_messages", "mention_everyone"}
 
 
-async def test_v2_check_channels_lines_are_unchanged():
-    cfg = _cfg()
-    guild = FakeGuild(cfg.guild_id)
+async def test_check_lines_are_unchanged():
+    guild = FakeGuild(GUILD)
     no_embed = discord.Permissions(view_channel=True, send_messages=True)
     client = FakeClient(
         {
-            cfg.topics[0].channel_id: _chan(discord.TextChannel, guild, no_embed),
-            cfg.topics[1].channel_id: _chan(discord.VoiceChannel, guild),
-            cfg.topics[2].channel_id: _chan(discord.TextChannel, FakeGuild(OTHER)),
+            123456789012345690: _chan(discord.TextChannel, guild, no_embed),
+            123456789012345691: _chan(discord.VoiceChannel, guild),
+            123456789012345692: _chan(discord.TextChannel, FakeGuild(OTHER)),
+            _SHIFT: _chan(discord.TextChannel, guild),
         }
     )
-    assert await check_channels(client, cfg) == [
-        f"Borderlands 4 channel <#{cfg.topics[0].channel_id}>: missing Embed Links",
-        f"Palworld channel <#{cfg.topics[1].channel_id}>: not a text channel",
-        f"Diablo IV channel <#{cfg.topics[2].channel_id}>: not in the configured guild",
-        f"admin channel <#{cfg.admin_channel_id}>: not found or not visible to the bot",
+    result = await check_guild_channels(client, GUILD, _fixture_reqs())
+    assert result.lines() == [
+        "Borderlands 4 channel <#123456789012345690>: missing Embed Links",
+        "Palworld channel <#123456789012345691>: not a text channel",
+        "Diablo IV channel <#123456789012345692>: not in the configured guild",
+        f"admin channel <#{_ADMIN}>: not found or not visible to the bot",
     ]
 
 
-async def test_v2_check_channels_crash_line_keeps_its_shape_for_plain_messages():
-    cfg = _cfg()
-    client = FakeClient(raises={cfg.topics[0].channel_id: RuntimeError("boom")})
-    lines = await check_channels(client, cfg)
-    assert lines[0] == (
-        f"Borderlands 4 channel <#{cfg.topics[0].channel_id}>: permission check failed (boom)"
-    )
+async def test_check_crash_line_keeps_its_shape_for_plain_messages():
+    client = FakeClient(raises={123456789012345690: RuntimeError("boom")})
+    lines = (await check_guild_channels(client, GUILD, _fixture_reqs())).lines()
+    assert lines[0] == "Borderlands 4 channel <#123456789012345690>: permission check failed (boom)"
 
 
-async def test_v2_check_channels_crash_line_now_escapes_and_caps_the_exception():
-    """Documented change from v2: the exception text is run through esc() and plain_line(100)."""
-    cfg = _cfg()
-    client = FakeClient(raises={cfg.topics[0].channel_id: RuntimeError("a_b " + "z" * 300)})
-    line = (await check_channels(client, cfg))[0]
+async def test_check_crash_line_escapes_and_caps_the_exception():
+    """The exception text is run through esc() and plain_line(100)."""
+    client = FakeClient(raises={123456789012345690: RuntimeError("a_b " + "z" * 300)})
+    line = (await check_guild_channels(client, GUILD, _fixture_reqs())).lines()[0]
     assert "a\\_b" in line
     assert line.endswith("…)")
     assert "z" * 150 not in line
 
 
-def test_v2_render_permission_alert_is_unchanged():
-    assert render_permission_alert(["a", "b"]) == (
-        "newsbot: startup permission check found problems:\n- a\n- b"
+def test_the_notice_text_is_the_header_and_one_bullet_per_problem():
+    assert render_guild_permission_notice(["a", "b"]) == (
+        "newsbot: I can't do everything I'm set up to do here:\n- a\n- b"
     )
-    assert render_permission_alert([]) == ""
+    assert render_guild_permission_notice([]) == ""

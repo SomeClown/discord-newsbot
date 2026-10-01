@@ -197,50 +197,6 @@ async def run_collectors(
     return [result for group in grouped for result in group]
 
 
-def build_collectors(
-    cfg: AppConfig, secrets: Secrets, *, include_web_search: bool = True
-) -> list[Collector]:
-    """Turn every configured source into its matching collector.
-
-    A `web_search` source with no `BRAVE_API_KEY` is skipped here too, as a
-    second line of defense: `config.py` already warns and is expected to
-    have dropped it, but a collector built without a key it needs would
-    just fail on every run instead of being invisible, which is worse.
-
-    `include_web_search=False` is the SHiFT alert sweep's own reason to
-    call this (design.md §12): Brave News has a modest free allowance, and
-    an hourly sweep calling it 24x a day on top of the daily digest's own
-    calls would eat through it for a collector type that's the least
-    likely place to find a redeem code anyway.
-    """
-    from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
-    from newsbot.collectors.rss import RssCollector
-    from newsbot.collectors.steam import SteamCollector
-    from newsbot.collectors.web_search import WebSearchCollector
-
-    bluesky_session = None
-    if secrets.bluesky_handle and secrets.bluesky_app_password:
-        bluesky_session = BlueskySession(
-            secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
-        )
-
-    collectors: list[Collector] = []
-    for source in cfg.sources:
-        if isinstance(source, RssSource):
-            collectors.append(RssCollector(source))
-        elif isinstance(source, SteamSource):
-            collectors.append(SteamCollector(source))
-        elif isinstance(source, BlueskySource):
-            collectors.append(BlueskyCollector(source, bluesky_session))
-        elif isinstance(source, WebSearchSource):
-            if not include_web_search or not secrets.brave_api_key:
-                continue
-            collectors.append(
-                WebSearchCollector(source, cfg.topics, secrets.brave_api_key.get_secret_value())
-            )
-    return collectors
-
-
 def build_catalog_collectors(
     cfg: AppConfig,
     secrets: Secrets,
@@ -253,8 +209,7 @@ def build_catalog_collectors(
     A source listed under a game gets that game as its `topics`, so its
     items are confident matches for it (design.md §4, unchanged). A shared
     source gets its `games` restriction as `topics`, or none, and the keyword
-    matcher decides. `build_collectors` stays for the v2 path until the
-    cutover.
+    matcher decides.
 
     Web search is built only if `BRAVE_API_KEY` is set (same second line of
     defense as above), and searches `web_search_games`, which defaults to

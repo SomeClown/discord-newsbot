@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from v3_fakes import raw_v2
 
 from newsbot.collectors.base import RawItem
 from newsbot.config import load_config
@@ -112,6 +113,8 @@ class World:
         with closing(connect(self.db_path)) as conn:
             migrate(conn)
         self.cfg = load_config(FIXTURES / cfg_name)
+        # The v2 view of the same file, the yardstick for "byte-identical to what v2 sent".
+        self.v2 = raw_v2(FIXTURES / cfg_name)
         self.clock = Clock(now or BERLIN_DUE - timedelta(minutes=20))
         self.llm = FakeLLM()
         self.alerts: list[str] = []
@@ -492,7 +495,7 @@ async def test_the_model_input_for_the_friends_server_is_byte_identical_to_v22s(
                 topics=topics,
             )
         )
-    grouped = filter_items(raw, w.cfg.topics, w.cfg.digest.max_items_per_topic)
+    grouped = filter_items(raw, w.v2.topics, w.v2.digest.max_items_per_topic)
     with w.conn() as conn:
         stored = {}
         for key, topic_items in grouped.items():
@@ -522,13 +525,13 @@ async def test_the_model_input_for_the_friends_server_is_byte_identical_to_v22s(
         conn.commit()
         prior = repo.recent_headlines(conn, "borderlands4", PACIFIC_DUE - timedelta(days=3))
     assert prior and grouped["borderlands4"]
-    topic = next(t for t in w.cfg.topics if t.key == "borderlands4")
+    topic = next(t for t in w.v2.topics if t.key == "borderlands4")
     expected = build_prompt(
         topic,
         grouped["borderlands4"],
         prior,
-        all_topics=w.cfg.topics,
-        subject=w.cfg.digest.subject,
+        all_topics=w.v2.topics,
+        subject=w.v2.digest.subject,
     )
 
     w.clock.t = PACIFIC_DUE - timedelta(minutes=10)

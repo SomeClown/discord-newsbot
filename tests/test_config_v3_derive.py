@@ -17,6 +17,7 @@ from newsbot.config import (
     ConfigError,
     LoungeCfg,
     SharedRssSource,
+    configured_source_names,
     load_config,
 )
 
@@ -123,13 +124,19 @@ def test_explicit_v3_blocks_win_over_derived_ones(tmp_path):
     assert load_config(p).ai.subject == "card games"
 
 
-def test_the_v2_fields_stay_populated_for_the_running_bot():
+def test_the_v2_setup_is_in_legacy_and_nothing_else_carries_the_v2_keys():
+    # Before the cutover the v2 fields stayed on `AppConfig` for the running bot. They're gone
+    # now: the one server's old setup is `legacy` (read once, by the import), and everything
+    # else the bot needs lives in the catalog and the v3 blocks.
     cfg = load_config(PRODLIKE)
-    assert cfg.guild_id == 100000000000000001
-    assert len(cfg.topics) == 3
-    assert len(cfg.sources) == 11
-    assert cfg.digest is not None and cfg.digest.time == "09:00"
-    assert cfg.alerts.enabled and cfg.lounge.daily_quote.enabled
+    assert cfg.legacy.guild_id == 100000000000000001
+    assert len(cfg.catalog) == 3
+    assert sum(len(g.sources) for g in cfg.catalog) + len(cfg.shared_sources) + 1 == 11
+    assert cfg.web_search is not None  # the eleventh source, now its own block
+    assert cfg.legacy.digest_time == "09:00"
+    assert cfg.legacy.shift_enabled and cfg.legacy.lounge.daily_quote.enabled
+    for gone in ("guild_id", "digest", "topics", "sources", "alerts", "lounge"):
+        assert not hasattr(cfg, gone), gone
 
 
 def test_derive_without_a_brave_key_still_derives_web_search_but_drops_the_source(
@@ -139,7 +146,7 @@ def test_derive_without_a_brave_key_still_derives_web_search_but_drops_the_sourc
     with caplog.at_level(logging.WARNING, logger="newsbot.config"):
         cfg = load_config(PRODLIKE)
     assert cfg.web_search is not None
-    assert all(s.type != "web_search" for s in cfg.sources)
+    assert "Brave Search" not in configured_source_names(cfg)  # derived, but nothing runs it
     assert sum("BRAVE_API_KEY is not set" in r.message for r in caplog.records) == 1
 
 
@@ -257,4 +264,4 @@ def test_a_hybrid_config_keeps_the_v22_alerts_and_lounge_key_sets(tmp_path):
     assert set(LoungeCfg.model_fields) == {"channel_id", "welcome", "daily_quote"}
     # And the hybrid file itself loads with those blocks exactly as v2.2 wrote them.
     cfg = load_config(_hybrid(tmp_path))
-    assert cfg.alerts.enabled and cfg.lounge.welcome.enabled
+    assert cfg.legacy.shift_enabled and cfg.legacy.lounge.welcome.enabled

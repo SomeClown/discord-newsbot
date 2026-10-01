@@ -1,77 +1,74 @@
-"""Adversarial registration tests for `/newsbot quote-now` (plan task 9).
+"""Adversarial registration tests for `/lounge quote-now` (plan task 9, ported at the cutover).
 
-The rule is small and easy to get subtly wrong: the command exists exactly
-when `lounge.daily_quote.enabled` is true, and nothing else in the config gets
-a vote. Welcomes, alerts, the dev-only test command and a missing channel id
-all take a turn here, as a full grid rather than the four cases I'd have
-picked by hand. The other half is Discord's own limits: a name of 32 characters
-and a description of 100, either of which makes the whole sync fail instead of
-just the one command, which is a lot of blast radius for one long sentence.
+The rule is small and easy to get subtly wrong: a server gets the command
+exactly when it has a lounge row with the quote on, and nothing else in the row
+gets a vote. Welcomes, the channel and the quote time all take a turn here as a
+full grid rather than the four cases I'd have picked by hand. The other half is
+Discord's own limits: a name of 32 characters and a description of 100, either
+of which makes the whole sync fail instead of just the one command, which is a
+lot of blast radius for one long sentence.
+
+(This began as v2's "`/newsbot quote-now` is registered iff `daily_quote` is
+enabled" grid, with config switches. The switches live in the `guild_lounge`
+row now; the rule underneath is the same.)
 """
 
 from __future__ import annotations
 
 import itertools
+from contextlib import closing
 
 import pytest
+from v3_fakes import GUILD_A, make_guild
 
-from newsbot.bot.commands import make_admin_group
-from newsbot.config import DailyQuoteCfg, LoungeCfg, QuoteSourceCfg, WelcomeCfg, load_config
-
-FIXTURE = "tests/fixtures/config_valid.yaml"
+from newsbot.bot.commands import make_lounge_group
+from newsbot.bot.registration import lounge_guild_ids_sync, plan_scopes
+from newsbot.store import repo
+from newsbot.store.db import connect
+from newsbot.store.models import LoungeSettings
 
 
 class _FakeBot:
     db_path = ":memory:"
 
 
-def _cfg(*, welcome, quote, alerts, test_command, channel_id=555000000000000001):
-    cfg = load_config(FIXTURE)
-    alerts_cfg = cfg.alerts.model_copy(
-        update={
-            "enabled": alerts,
-            "channel_id": 777000000000000001 if alerts else None,
-            "allow_test_command": test_command,
-        }
+def _lounge(*, welcome: bool, quote: bool, quote_time: str = "08:00") -> LoungeSettings:
+    return LoungeSettings(
+        guild_id=GUILD_A,
+        channel_id=555000000000000001,
+        welcome_enabled=welcome,
+        welcome_message="Hi {member}",
+        quote_enabled=quote,
+        quote_time=quote_time,
+        quote_sources=[{"kind": "wikiquote", "value": "Oscar Wilde"}],
+        last_quote_date=None,
     )
-    lounge = LoungeCfg(
-        channel_id=channel_id,
-        welcome=WelcomeCfg(enabled=welcome, message="Hi {member}"),
-        daily_quote=DailyQuoteCfg(
-            enabled=quote, sources=[QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")]
-        ),
-    )
-    return cfg.model_copy(update={"alerts": alerts_cfg, "lounge": lounge})
 
 
 @pytest.mark.parametrize(
-    ("welcome", "quote", "alerts", "test_command"),
-    list(itertools.product([False, True], repeat=4)),
+    ("welcome", "quote", "quote_time"),
+    list(itertools.product([False, True], [False, True], ["00:00", "08:00", "23:59"])),
 )
-def test_quote_now_is_registered_iff_daily_quote_is_enabled(welcome, quote, alerts, test_command):
-    cfg = _cfg(welcome=welcome, quote=quote, alerts=alerts, test_command=test_command)
+def test_quote_now_is_registered_iff_the_quote_is_on(v3_db, v3_cfg, welcome, quote, quote_time):
+    make_guild(v3_db, GUILD_A, games=[("borderlands4", 11)])
+    with closing(connect(v3_db)) as conn:
+        repo.upsert_lounge(conn, _lounge(welcome=welcome, quote=quote, quote_time=quote_time))
 
-    names = {c.name for c in make_admin_group(cfg, _FakeBot()).commands}
+    lounge_ids = lounge_guild_ids_sync(v3_db)
 
-    assert ("quote-now" in names) is quote
-
-
-def test_quote_now_registration_does_not_need_a_channel_id():
-    # Documented: the registration rule looks at daily_quote.enabled only. If
-    # channel_id is None (config validation should stop that; model_copy skips
-    # validation) the command still exists and its "Posted" reply degrades to
-    # the generic one. See the handler tests.
-    cfg = _cfg(welcome=False, quote=True, alerts=False, test_command=False, channel_id=None)
-
-    names = {c.name for c in make_admin_group(cfg, _FakeBot()).commands}
-
-    assert "quote-now" in names
+    assert (GUILD_A in lounge_ids) is quote
+    assert (GUILD_A in plan_scopes(v3_cfg, lounge_ids).lounge_guilds) is quote
 
 
-def test_every_admin_command_fits_discords_name_and_description_limits():
-    cfg = _cfg(welcome=True, quote=True, alerts=True, test_command=True)
+def test_a_server_with_no_lounge_row_never_gets_the_command(v3_db, v3_cfg):
+    make_guild(v3_db, GUILD_A, games=[("borderlands4", 11)])
 
-    commands = make_admin_group(cfg, _FakeBot()).commands
+    assert lounge_guild_ids_sync(v3_db) == []
+    assert plan_scopes(v3_cfg, []).lounge_guilds == ()
+
+
+def test_every_lounge_command_fits_discords_name_and_description_limits(v3_cfg):
+    commands = make_lounge_group(v3_cfg, _FakeBot()).commands
 
     assert "quote-now" in {c.name for c in commands}
     for command in commands:
@@ -79,10 +76,11 @@ def test_every_admin_command_fits_discords_name_and_description_limits():
         assert 1 <= len(command.description) <= 100, command.name
 
 
-def test_quote_now_takes_no_options():
+def test_quote_now_takes_no_options(v3_cfg):
     # An option would be a way for an admin to type a quote into the lounge.
     # The design has none; this keeps it that way.
-    cfg = _cfg(welcome=False, quote=True, alerts=False, test_command=False)
-    command = next(c for c in make_admin_group(cfg, _FakeBot()).commands if c.name == "quote-now")
+    command = next(
+        c for c in make_lounge_group(v3_cfg, _FakeBot()).commands if c.name == "quote-now"
+    )
 
     assert command.parameters == []

@@ -1,6 +1,6 @@
 """Post one server's digest, and find the servers that are owed one.
 
-`run_daily` in `run.py` is the v2 version of this: one server, one claim, one
+v2's `run_daily` was the ancestor of this: one server, one claim, one
 publish, one save. This is the same guard with the server as a parameter. The
 part I'd rather not get wrong is unchanged from v2: claim the day with a
 `pending` row *before* anything slow, publish, write what landed, and only then
@@ -32,8 +32,8 @@ second process only resumes a digest once the first has been quiet for
 `LEASE_STALE_AFTER`. A graceful cancel (a deploy) deliberately leaves the row
 `pending` for the same reason: it's a pause, not a failure.
 
-The bot's scheduler isn't wired to any of this yet (that's the cutover, plan
-task 13), so for now the only thing calling it is the test suite.
+`NewsBot` runs the tick every minute (once its startup work is done), and the
+CLI's `--dry-run` and `--post-to-stdout` call the same functions.
 """
 
 from __future__ import annotations

@@ -47,7 +47,8 @@ deadline, and saves only if the claim is still its own. A game whose saves keep
 failing is left alone for a while (30 minutes, doubling, kept in memory) instead
 of being paid for every five minutes.
 
-The bot's scheduler doesn't run any of this yet (plan task 13).
+`NewsBot` runs `prepare_summaries` every five minutes and hands the lookups to the
+digest job.
 """
 
 from __future__ import annotations
@@ -66,7 +67,12 @@ from newsbot.config import AppConfig, GameCfg
 from newsbot.guilds.schedule import digest_window, local_due_instant
 from newsbot.pipeline.collect import CollectionDeps, collect_web_search
 from newsbot.pipeline.filter import TopicItem, _cap_key
-from newsbot.pipeline.guild_digest import GameSummary, SummaryLookup, summary_from_row
+from newsbot.pipeline.guild_digest import (
+    GameSummary,
+    SummaryLookup,
+    _stored_summary,
+    summary_from_row,
+)
 from newsbot.pipeline.run import _PRIOR_HEADLINE_WINDOW, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, LLMClient, TopicSummary, summarize_topic
 from newsbot.store import repo
@@ -498,6 +504,31 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     return lookup
 
 
+def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
+    """The CLI's `--dry-run` lookup: a reusable stored summary, else one made in memory.
+
+    Never saves anything. A dry run is a rehearsal, and a rehearsal that
+    quietly writes a summary row for the real digest to reuse is a rehearsal
+    with side effects, which is the one thing it's not allowed to have. If
+    nothing stored qualifies this does call the model (the stub, offline), and
+    the result lives exactly as long as the preview does.
+    """
+
+    async def lookup(
+        game_key: str, due_at: datetime, after: datetime | None = None
+    ) -> GameSummary | None:
+        stored = await _stored_summary(deps.db_path, game_key, due_at, after)
+        if stored is not None:
+            return stored
+        game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
+        if game is None:
+            return None
+        _start, _end, made = await _summarize(deps, game, None)
+        return GameSummary("fallback" if made.fallback else "ok", list(made.stories), [], made.note)
+
+    return lookup
+
+
 # --- The prepare job ---
 
 
@@ -579,6 +610,7 @@ __all__ = [
     "SAVE_BACKOFF_MAX",
     "SUMMARIZE_TIMEOUT_S",
     "SummaryDeps",
+    "dry_run_lookup",
     "ensure_summary",
     "prepare_summaries",
     "retry_lookup",

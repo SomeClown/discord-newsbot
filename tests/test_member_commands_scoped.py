@@ -366,7 +366,8 @@ def test_the_member_groups_are_guild_only_and_guild_installed(v3_cfg, v3_db):
         assert group.default_permissions is None  # members, not admins
 
 
-def test_commands_module_reexports_nothing_v2_needs_changed():
-    # The v2 factories are still there for the running bot until the cutover.
+def test_the_v2_factories_are_gone_from_the_commands_module():
+    # They were kept "for the running bot until the cutover" (this test used to say the
+    # opposite). The cutover is done, and a stray import of one should fail loudly.
     for name in ("make_news_group", "make_admin_group", "make_shift_group"):
-        assert callable(getattr(commands_module, name))
+        assert not hasattr(commands_module, name)

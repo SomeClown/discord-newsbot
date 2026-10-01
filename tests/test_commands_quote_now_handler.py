@@ -1,9 +1,14 @@
-"""Gateway-free tests for the `/newsbot quote-now` handler.
+"""Gateway-free tests for the `/lounge quote-now` handler.
 
-Same hand-written fake-interaction approach as
-`test_commands_test_alert_handler.py`. The bot is a spy: `run_quote` records
-the `force` it was called with and returns whatever outcome the test set up,
-so nothing here posts, sleeps or touches a network.
+A hand-written fake interaction drives the handler against a real temp
+database. The bot is a spy: `run_guild_quote` records the server and the
+`force` it was called with and returns whatever outcome the test set up, so
+nothing here posts, sleeps or touches a network.
+
+These were the v2 `/newsbot quote-now` tests (one lounge, config-driven). They
+moved to the per-server `/lounge quote-now` when v2 retired: the same
+confirm, cancel, timeout and reply assertions, with the "already posted today"
+state now read from the server's own `guild_lounge` row.
 """
 
 from __future__ import annotations
@@ -17,13 +22,16 @@ import discord
 import pytest
 
 import newsbot.bot.commands as commands_module
-from newsbot.bot.commands import make_admin_group
-from newsbot.config import DailyQuoteCfg, LoungeCfg, QuoteSourceCfg, WelcomeCfg, load_config
+from newsbot.bot.commands import make_lounge_group
+from newsbot.config import load_config
 from newsbot.lounge.daily import QuoteOutcome
 from newsbot.pipeline.run import local_run_date
+from newsbot.store import repo
 from newsbot.store.db import connect, migrate
+from newsbot.store.models import LoungeSettings
 
-CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_v3.yaml"
+GUILD = 300000000000000001
 LOUNGE_ID = 555000000000000001
 DENIAL = "You don't have permission to run this."
 
@@ -33,10 +41,15 @@ class FakeResponse:
         self.messages: list[tuple[str, bool]] = []
         self.deferred: list[bool] = []
 
+    def is_done(self) -> bool:
+        return bool(self.messages or self.deferred)
+
     async def defer(self, *, ephemeral: bool = False) -> None:
         self.deferred.append(ephemeral)
 
-    async def send_message(self, content: str = "", *, ephemeral: bool = False, view=None) -> None:
+    async def send_message(
+        self, content: str = "", *, ephemeral: bool = False, view=None, **kwargs
+    ) -> None:
         self.messages.append((content, ephemeral))
 
 
@@ -51,10 +64,11 @@ class FakeFollowup:
 class FakeInteraction:
     def __init__(self, *, permissions: discord.Permissions) -> None:
         self.permissions = permissions
+        self.guild_id = GUILD
         self.user = SimpleNamespace(id=1)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
-        self.command = SimpleNamespace(qualified_name="newsbot quote-now")
+        self.command = SimpleNamespace(qualified_name="lounge quote-now")
         self.edits: list[str | None] = []
 
     async def edit_original_response(self, *, content=None, view=None) -> None:
@@ -65,10 +79,10 @@ class SpyBot:
     def __init__(self, db_path: str, outcome: QuoteOutcome) -> None:
         self.db_path = db_path
         self.outcome = outcome
-        self.calls: list[bool] = []
+        self.calls: list[tuple[int, bool]] = []
 
-    async def run_quote(self, force: bool) -> QuoteOutcome:
-        self.calls.append(force)
+    async def run_guild_quote(self, guild_id: int, force: bool) -> QuoteOutcome:
+        self.calls.append((guild_id, force))
         return self.outcome
 
 
@@ -89,33 +103,38 @@ def db_path(tmp_path):
     path = str(tmp_path / "newsbot.db")
     with closing(connect(path)) as conn:
         migrate(conn)
+        repo.create_guild(conn, GUILD, set_up=True, timezone="America/Los_Angeles")
+        repo.upsert_lounge(
+            conn,
+            LoungeSettings(
+                guild_id=GUILD,
+                channel_id=LOUNGE_ID,
+                welcome_enabled=False,
+                welcome_message="Hi {member}",
+                quote_enabled=True,
+                quote_time="08:00",
+                quote_sources=[{"kind": "wikiquote", "value": "Oscar Wilde"}],
+                last_quote_date=None,
+            ),
+        )
     return path
 
 
 @pytest.fixture
 def cfg():
-    base = load_config(CONFIG_PATH)
-    lounge = LoungeCfg(
-        channel_id=LOUNGE_ID,
-        welcome=WelcomeCfg(enabled=False, message="Hi {member}"),
-        daily_quote=DailyQuoteCfg(
-            enabled=True, sources=[QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")]
-        ),
-    )
-    return base.model_copy(update={"lounge": lounge})
+    return load_config(CONFIG_PATH)
 
 
-def _mark_posted_today(db_path: str, cfg) -> None:
-    today = local_run_date(datetime.now(UTC), cfg.digest.timezone).isoformat()
+def _mark_posted_today(db_path: str) -> None:
+    today = local_run_date(datetime.now(UTC), "America/Los_Angeles").isoformat()
     with closing(connect(db_path)) as conn, conn:
         conn.execute(
-            "INSERT OR REPLACE INTO lounge_state (key, value) VALUES ('last_quote_date', ?)",
-            (today,),
+            "UPDATE guild_lounge SET last_quote_date = ? WHERE guild_id = ?", (today, GUILD)
         )
 
 
 def _run(cfg, bot):
-    group = make_admin_group(cfg, bot)
+    group = make_lounge_group(cfg, bot)
     return next(c for c in group.commands if c.name == "quote-now")
 
 
@@ -142,7 +161,7 @@ async def test_fresh_day_defers_ephemerally_and_runs_unforced(cfg, db_path):
 
     assert interaction.response.deferred == [True]
     assert interaction.response.messages == []
-    assert bot.calls == [False]
+    assert bot.calls == [(GUILD, False)]
 
 
 async def test_posted_reply_carries_the_jump_link(cfg, db_path):
@@ -151,7 +170,7 @@ async def test_posted_reply_carries_the_jump_link(cfg, db_path):
 
     await _run(cfg, bot).callback(interaction)
 
-    link = f"https://discord.com/channels/{cfg.guild_id}/{LOUNGE_ID}/987654321"
+    link = f"https://discord.com/channels/{GUILD}/{LOUNGE_ID}/987654321"
     assert interaction.followup.messages == [(f"Posted: {link}", True)]
 
 
@@ -173,7 +192,7 @@ async def test_each_outcome_maps_to_its_reply(cfg, db_path, outcome, reply):
 
 
 async def test_already_posted_asks_first_and_cancel_posts_nothing(cfg, db_path, monkeypatch):
-    _mark_posted_today(db_path, cfg)
+    _mark_posted_today(db_path)
     FakeConfirmView.answer = False
     monkeypatch.setattr(commands_module, "ConfirmView", FakeConfirmView)
     bot = SpyBot(db_path, QuoteOutcome("posted", message_id=1))
@@ -190,7 +209,7 @@ async def test_already_posted_asks_first_and_cancel_posts_nothing(cfg, db_path, 
 
 
 async def test_timeout_counts_as_cancel(cfg, db_path, monkeypatch):
-    _mark_posted_today(db_path, cfg)
+    _mark_posted_today(db_path)
     FakeConfirmView.answer = None
     monkeypatch.setattr(commands_module, "ConfirmView", FakeConfirmView)
     bot = SpyBot(db_path, QuoteOutcome("posted", message_id=1))
@@ -201,7 +220,7 @@ async def test_timeout_counts_as_cancel(cfg, db_path, monkeypatch):
 
 
 async def test_confirmed_run_forces_the_post(cfg, db_path, monkeypatch):
-    _mark_posted_today(db_path, cfg)
+    _mark_posted_today(db_path)
     FakeConfirmView.answer = True
     monkeypatch.setattr(commands_module, "ConfirmView", FakeConfirmView)
     bot = SpyBot(db_path, QuoteOutcome("posted", message_id=7))
@@ -209,5 +228,5 @@ async def test_confirmed_run_forces_the_post(cfg, db_path, monkeypatch):
 
     await _run(cfg, bot).callback(interaction)
 
-    assert bot.calls == [True]
+    assert bot.calls == [(GUILD, True)]
     assert interaction.followup.messages[0][0].startswith("Posted: https://discord.com/channels/")

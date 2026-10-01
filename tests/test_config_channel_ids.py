@@ -158,7 +158,7 @@ alerts:
   channel_id: 5
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.channel_id == 5
+    assert cfg.legacy.shift_channel_id == 5
 
 
 def test_alerts_disabled_without_channel_id_is_fine(tmp_path):
@@ -170,8 +170,8 @@ digest:
 {VALID_TOPIC}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.enabled is False
-    assert cfg.alerts.channel_id is None
+    assert cfg.legacy.shift_enabled is False
+    assert cfg.legacy.shift_channel_id is None
 
 
 def test_alerts_channel_id_zero_is_rejected(tmp_path):

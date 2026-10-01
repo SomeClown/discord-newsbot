@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from v3_fakes import legacy_lounge
 
 from newsbot.config import ConfigError, QuoteSourceCfg, load_config
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
@@ -63,9 +64,9 @@ def _sources_block(*lines: str) -> str:
 
 def test_absent_block_means_both_features_off():
     cfg = load_config(VALID)
-    assert cfg.lounge.channel_id is None
-    assert cfg.lounge.welcome.enabled is False
-    assert cfg.lounge.daily_quote.enabled is False
+    assert legacy_lounge(cfg).channel_id is None
+    assert legacy_lounge(cfg).welcome.enabled is False
+    assert legacy_lounge(cfg).daily_quote.enabled is False
 
 
 def test_shipped_examples_still_load():
@@ -75,26 +76,28 @@ def test_shipped_examples_still_load():
 
 def test_fixture_loads_with_both_features_on():
     cfg = load_config(FIXTURE)
-    assert cfg.lounge.channel_id == 123456789012345700
-    assert cfg.lounge.welcome.enabled and cfg.lounge.daily_quote.enabled
-    kinds = [s.kind for s in cfg.lounge.daily_quote.sources]
+    assert legacy_lounge(cfg).channel_id == 123456789012345700
+    assert legacy_lounge(cfg).welcome.enabled and legacy_lounge(cfg).daily_quote.enabled
+    kinds = [s.kind for s in legacy_lounge(cfg).daily_quote.sources]
     assert kinds == ["wikiquote", "wikiquote", "file", "url"]
 
 
 def test_default_time_is_eight_am(tmp_path):
-    assert _load(tmp_path, "lounge: {}\n").lounge.daily_quote.time == "08:00"
+    assert legacy_lounge(_load(tmp_path, "lounge: {}\n")).daily_quote.time == "08:00"
 
 
 def test_sources_omitted_gives_the_default_list_in_order(tmp_path):
     cfg = _load(tmp_path, "lounge:\n  daily_quote:\n    enabled: false\n")
-    sources = cfg.lounge.daily_quote.sources
+    sources = legacy_lounge(cfg).daily_quote.sources
     assert [s.value for s in sources] == list(DEFAULT_WIKIQUOTE_PAGES)
     assert {s.kind for s in sources} == {"wikiquote"}
 
 
 def test_sources_null_is_the_same_as_omitted(tmp_path):
     cfg = _load(tmp_path, "lounge:\n  daily_quote:\n    sources: null\n")
-    assert [s.value for s in cfg.lounge.daily_quote.sources] == list(DEFAULT_WIKIQUOTE_PAGES)
+    assert [s.value for s in legacy_lounge(cfg).daily_quote.sources] == list(
+        DEFAULT_WIKIQUOTE_PAGES
+    )
 
 
 def test_empty_sources_list_is_an_error(tmp_path):
@@ -157,7 +160,7 @@ def test_too_long_wikiquote_title_says_how_long_without_echoing_it(tmp_path):
 
 def test_a_255_character_title_is_fine(tmp_path):
     cfg = _load(tmp_path, _sources_block(f'{{wikiquote: "{"x" * 255}"}}'))
-    assert len(cfg.lounge.daily_quote.sources) == 1
+    assert len(legacy_lounge(cfg).daily_quote.sources) == 1
 
 
 @pytest.mark.parametrize("url", ["http://example.invalid/q.txt", "HTTP://x"])
@@ -174,7 +177,7 @@ def test_other_url_schemes_and_hostless_urls_are_rejected(tmp_path, url):
 
 def test_https_url_is_accepted(tmp_path):
     cfg = _load(tmp_path, _sources_block('{url: "https://example.invalid/q.txt"}'))
-    assert cfg.lounge.daily_quote.sources[0].key == "url:https://example.invalid/q.txt"
+    assert legacy_lounge(cfg).daily_quote.sources[0].key == "url:https://example.invalid/q.txt"
 
 
 def test_duplicate_after_normalization_is_an_error(tmp_path):
@@ -230,8 +233,8 @@ def test_key_is_stable_across_reordering_and_unrelated_edits(tmp_path):
         "lounge:\n  channel_id: 9\n  daily_quote:\n    time: '17:30'\n    sources:\n"
         "      - {url: 'https://x.invalid/q'}\n      - {wikiquote: A}\n      - {wikiquote: B}\n",
     )
-    keys_a = {s.key for s in a.lounge.daily_quote.sources}
-    keys_b = {s.key for s in b.lounge.daily_quote.sources}
+    keys_a = {s.key for s in legacy_lounge(a).daily_quote.sources}
+    keys_b = {s.key for s in legacy_lounge(b).daily_quote.sources}
     assert keys_a <= keys_b
 
 
@@ -243,14 +246,14 @@ def test_relative_file_path_resolves_against_the_config_directory(tmp_path, monk
     (cfg_dir / "config.yaml").write_text(_BASE + _sources_block("{file: quotes.txt}"))
     monkeypatch.chdir(elsewhere)
     cfg = load_config(cfg_dir / "config.yaml")
-    src = cfg.lounge.daily_quote.sources[0]
+    src = legacy_lounge(cfg).daily_quote.sources[0]
     assert src.value == str(cfg_dir.absolute() / "quotes.txt")
     assert src.key == f"file:{cfg_dir.absolute() / 'quotes.txt'}"
 
 
 def test_missing_file_is_not_a_load_time_error(tmp_path):
     cfg = _load(tmp_path, _sources_block("{file: nope.txt}"))
-    assert not Path(cfg.lounge.daily_quote.sources[0].value).exists()
+    assert not Path(legacy_lounge(cfg).daily_quote.sources[0].value).exists()
 
 
 # --- the default list ---
@@ -264,7 +267,7 @@ def test_default_list_is_nonempty_and_unique():
 def test_default_list_entries_pass_the_same_title_validation(tmp_path):
     lines = [f'{{wikiquote: "{t}"}}' for t in DEFAULT_WIKIQUOTE_PAGES]
     cfg = _load(tmp_path, _sources_block(*lines))
-    assert len(cfg.lounge.daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
+    assert len(legacy_lounge(cfg).daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
 
 
 def test_no_modern_work_is_an_active_default_entry():
@@ -287,7 +290,7 @@ def test_enabled_feature_without_channel_is_an_error(tmp_path, block):
 
 def test_disabled_block_needs_no_channel(tmp_path):
     cfg = _load(tmp_path, "lounge:\n  welcome:\n    enabled: false\n")
-    assert cfg.lounge.channel_id is None
+    assert legacy_lounge(cfg).channel_id is None
 
 
 def test_enabled_welcome_needs_a_message(tmp_path):
@@ -312,7 +315,10 @@ def test_bad_times_fail(tmp_path, t):
 @pytest.mark.parametrize("t", ["00:00", "23:59"])
 def test_time_edges_pass(tmp_path, t):
     assert (
-        _load(tmp_path, f"lounge:\n  daily_quote:\n    time: '{t}'\n").lounge.daily_quote.time == t
+        legacy_lounge(
+            _load(tmp_path, f"lounge:\n  daily_quote:\n    time: '{t}'\n")
+        ).daily_quote.time
+        == t
     )
 
 

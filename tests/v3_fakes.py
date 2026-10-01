@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import discord
 
-from newsbot.config import load_config
+from newsbot.config import LoungeCfg, _RawConfig, load_config
 from newsbot.store import repo
 from newsbot.store.db import connect
 
@@ -119,3 +119,27 @@ def make_guild(db_path, guild_id=GUILD_A, *, set_up=True, tier="free", games=(),
 
 def command(group, name):
     return next(c for c in group.commands if c.name == name)
+
+
+def legacy_lounge(cfg) -> LoungeCfg:
+    """The v2 `lounge:` block as the loader parsed it (switched off, the v2 default, if absent).
+
+    The loaded `AppConfig` no longer carries the v2 keys; the one server's old lounge setup
+    is `cfg.legacy.lounge`, which the import reads exactly once. The config tests that check
+    how the block is parsed and validated read it back from there.
+    """
+    if cfg.legacy is not None and cfg.legacy.lounge is not None:
+        return cfg.legacy.lounge
+    return LoungeCfg()
+
+
+def raw_v2(path):
+    """The v2 keys as a file spells them (`topics`, `digest`, `sources`...), before any deriving.
+
+    `AppConfig` has no v2 fields any more, but a few tests need the v2 view as their yardstick:
+    "the prompt for the friend is byte-identical to what v2 built" can only be checked against
+    what v2 built it from.
+    """
+    import yaml
+
+    return _RawConfig.model_validate(yaml.safe_load(Path(path).read_text()))

@@ -34,12 +34,9 @@ from v3_fakes import GUILD_A, GUILD_B, HOME, OWNER_ID, FakeInteraction, command,
 
 from newsbot.bot.client import NewsBot
 from newsbot.bot.commands import (
-    make_admin_group,
     make_guild_admin_group,
     make_member_news_group,
     make_member_shift_group,
-    make_news_group,
-    make_shift_group,
 )
 from newsbot.bot.owner_commands import make_owner_group
 from newsbot.bot.registration import (
@@ -49,7 +46,7 @@ from newsbot.bot.registration import (
     setup_commands,
     sync_commands,
 )
-from newsbot.config import Secrets, load_config
+from newsbot.config import Secrets
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import LoungeSettings
@@ -483,9 +480,11 @@ async def test_the_friends_guild_is_cleaned_of_v2s_newsbot_only_because_it_is_sy
 async def test_a_friends_guild_without_a_live_lounge_is_not_synced_so_v2s_newsbot_survives(
     v3_cfg, v3_db, lounge_state
 ):
-    # The gap task 13 has to close (and `docs/deploy.md` should say so): with no lounge
-    # quote, nothing syncs this guild, so v2's guild-scoped `/newsbot` stays next to the
-    # new global one. Pinned here so the clean-up is a tracked to-do, not a surprise.
+    # A gap the cutover leaves to an owner step (task 18's `docs/deploy.md` should say so):
+    # with no lounge quote, nothing syncs this guild, so v2's guild-scoped `/newsbot` stays
+    # next to the new global one until somebody clears that guild's copy once
+    # (`tree.clear_commands(guild=...)` plus a sync). Pinned here so it's a tracked to-do,
+    # not a surprise.
     make_guild(v3_db, L1)
     if lounge_state == "quote-off":
         lounge_row(v3_db, L1, quote=False)
@@ -494,13 +493,16 @@ async def test_a_friends_guild_without_a_live_lounge_is_not_synced_so_v2s_newsbo
     assert L1 not in bot.synced
 
 
-async def test_registering_v3_on_top_of_v2s_tree_fails_loudly_instead_of_doubling_up(v3_db):
-    cfg = load_config("tests/fixtures/config_valid.yaml")
-    bot = make_bot(cfg, v3_db)
-    bot.tree.add_command(make_news_group(cfg, v3_db))
-    bot.tree.add_command(make_admin_group(cfg, bot))
+async def test_registering_on_top_of_a_populated_tree_fails_loudly_instead_of_doubling_up(
+    v3_cfg, v3_db
+):
+    # Was "v3 on top of v2's tree" before v2 retired; a tree that already has /news and
+    # /newsbot in it is the same mistake whoever put them there.
+    bot = make_bot(v3_cfg, v3_db)
+    bot.tree.add_command(make_member_news_group(v3_cfg, v3_db))
+    bot.tree.add_command(make_guild_admin_group(v3_cfg, bot))
     with pytest.raises(app_commands.CommandAlreadyRegistered):
-        register_commands(bot, plan_scopes(cfg, []))
+        register_commands(bot, plan_scopes(v3_cfg, []))
 
 
 async def test_registering_twice_fails_loudly_too(v3_cfg, v3_db):
@@ -729,49 +731,20 @@ async def test_a_new_lounge_guild_is_synced_alone(v3_cfg, v3_db):
     assert bot.synced == [L2]
 
 
-# --- v2 is still what the bot registers today ---
+# --- What setup_hook registers now that v2 is gone ---
 
 
-async def test_the_running_bots_setup_path_still_registers_the_v2_set_only(v3_db):
-    cfg = load_config("tests/fixtures/config_valid.yaml")
-    bot = make_bot(cfg, v3_db)
+async def test_the_running_bots_setup_path_registers_the_v3_set_globally(v3_cfg, v3_db):
+    bot = make_bot(v3_cfg, v3_db)
     try:
         await bot.setup_hook()
     finally:
         if bot.scheduler is not None:
             bot.scheduler.shutdown(wait=False)
-    guild = discord.Object(id=cfg.guild_id)
-    names = {c.name for c in bot.tree.get_commands(guild=guild)}
-    assert names <= {"news", "newsbot", "shift"} and {"news", "newsbot"} <= names
-    assert "owner" not in names and "lounge" not in names
-    assert bot.synced == [cfg.guild_id]  # per-guild, never global, exactly as in v2
-    sub = {
-        c.name
-        for g in bot.tree.get_commands(guild=guild)
-        if g.name == "newsbot"
-        for c in g.commands
-    }
-    assert {"status", "run-now", "preview"} <= sub
-    assert not {"follow", "unfollow", "games", "settings"} & sub  # v3's admin verbs aren't there
-
-
-def test_the_v2_factories_still_build_their_v2_shapes(v3_db):
-    cfg = load_config("tests/fixtures/config_valid.yaml")
-    assert {c.name for c in make_news_group(cfg, v3_db).commands} == {"recent", "search"}
-    assert {c.name for c in make_shift_group(cfg, v3_db).commands} == {"codes"}
-    admin = make_admin_group(cfg, SimpleNamespace(db_path=v3_db))
-    assert {"status", "run-now", "preview"} <= {c.name for c in admin.commands}
-    assert not {"follow", "unfollow", "games", "settings", "shift"} & {
-        c.name for c in admin.commands
-    }
-
-
-def test_v3_builds_its_own_groups_without_touching_v2s(v3_cfg, v3_db):
-    # The v3 factories share names with v2's on purpose (same slash commands) but are
-    # distinct objects with distinct commands; building one set must not mutate the other.
-    v2 = make_news_group(v3_cfg, v3_db)
-    v3 = make_member_news_group(v3_cfg, v3_db)
-    assert v2 is not v3
-    assert [c.name for c in v2.commands] == ["recent", "search"]
-    v3.commands[0].description = "changed"
-    assert v2.commands[0].description != "changed"
+    names = {c.name for c in bot.tree.get_commands()}
+    assert names == {"news", "newsbot", "shift"}
+    assert "lounge" not in names and "owner" not in names  # those are per-guild scopes
+    assert None in bot.synced  # global, not per-guild like v2 was
+    sub = {c.name for g in bot.tree.get_commands() if g.name == "newsbot" for c in g.commands}
+    assert {"setup", "follow", "unfollow", "games", "settings", "shift", "status"} <= sub
+    assert "test-alert" not in sub and "quote-now" not in sub  # v2's two are gone

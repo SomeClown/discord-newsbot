@@ -26,7 +26,7 @@ strings, each flattened and escaped again on the way in (`_safe`), so the text
 is inert on its own. A failed post reports the exception's class name and
 Discord's status codes, never its message. Quote text, member names and URL
 credentials never go into it. This module builds no Discord objects: the
-caller injects `post` and `alert`, the way `SweepDeps` does.
+caller injects `post` and `alert`, the way the other `Deps` classes do.
 """
 
 from __future__ import annotations

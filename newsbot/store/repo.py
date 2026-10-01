@@ -440,6 +440,41 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
     return items_deleted, stories_deleted
 
 
+def purge_guild_data_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, int]:
+    """Delete shared summaries and server notices older than `cutoff`.
+
+    Returns (summaries_deleted, notices_deleted). The public app's half of
+    retention, next to `purge_older_than`: the stories a summary owns are
+    already gone by the same age (they're purged by `created_at` too), and any
+    that aren't have their `summary_id` nulled by the foreign key, not orphaned.
+    """
+    cutoff_iso = _utc_iso(cutoff)
+    with conn:
+        summaries = conn.execute(
+            "DELETE FROM game_summaries WHERE created_at < ?", (cutoff_iso,)
+        ).rowcount
+        notices = conn.execute(
+            "DELETE FROM guild_notices WHERE created_at < ?", (cutoff_iso,)
+        ).rowcount
+    return summaries, notices
+
+
+def recent_guild_digests(conn: sqlite3.Connection, since: datetime) -> list[tuple[str, str | None]]:
+    """`(status, error notes)` for each server's newest digest row touched since `since`.
+
+    One row per server, so a server isn't counted twice because two of its days
+    straddle the window. Rows from v2.2 with no server (`guild_id` NULL) aren't
+    anybody's and are left out. For the owner's daily report.
+    """
+    rows = conn.execute(
+        "SELECT status, error_notes FROM digests WHERE id IN ("
+        "SELECT MAX(id) FROM digests WHERE guild_id IS NOT NULL AND updated_at >= ? "
+        "GROUP BY guild_id) ORDER BY guild_id",
+        (_utc_iso(since),),
+    ).fetchall()
+    return [(row["status"], row["error_notes"]) for row in rows]
+
+
 # --- SHiFT code alerts (design.md §12) ---
 #
 # `alerted_codes` is the once-per-code-ever guard and `alert_state` is a
@@ -1180,8 +1215,9 @@ def status_snapshot(
 # here that can be asked about "all guilds' games" by accident. (The two that
 # do span guilds, `list_set_up_guilds` and `list_lounges`, say so in their names.)
 #
-# The old single-server functions above are untouched on purpose: the running
-# bot still uses them until the cutover task.
+# The old single-server functions above are untouched on purpose: v2.2's rollback
+# compatibility and their guard tests lean on them, even though nothing in the
+# running bot calls the digest ones any more.
 
 MAX_GAMES_PER_GUILD = 10
 _MAX_NOTICES_PER_GUILD = 20
@@ -2249,7 +2285,7 @@ def search_items(
 # The v2 guard, keyed on `(guild_id, run_date)` instead of `run_date` alone:
 # claim a `pending` row before anything slow, post, write each game's message
 # id through as it lands (D7), then save the final status. The v2 functions
-# above stay as they are; the running bot still uses them until the cutover.
+# above stay as they are (rollback to v2.2 reads the same tables).
 
 _GUILD_DIGEST_COLUMNS = (
     "id, guild_id, run_date, status, posted_message_ids, posted_by_game, "

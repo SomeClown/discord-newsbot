@@ -354,8 +354,8 @@ async def summarize_topic(
     not; a response we can't use still cost money.
 
     `all_topics` and `subject` just pass through to `build_prompt` (see
-    its docstring); `build_digest` is the one real caller and always has
-    `cfg.topics` and `cfg.digest.subject` on hand to pass.
+    its docstring); the summaries job is the one real caller and always has
+    the followed games and `cfg.ai.subject` on hand to pass.
     """
     system, user = build_prompt(topic, items, prior, all_topics=all_topics, subject=subject)
     input_tokens = output_tokens = 0

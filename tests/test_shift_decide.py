@@ -1,7 +1,7 @@
 """Tests for newsbot.shift.decide: the pure planner behind the SHiFT alert sweep.
 
 No database, no clock, no network -- every case here is a list of
-dataclasses in, a list of dataclasses out. `test_shift_sweep.py` covers the
+dataclasses in, a list of dataclasses out. `test_shift_fanout.py` covers the
 I/O side (what actually gets written and posted); this file is the
 contract for the judgment calls: fresh vs. stale, seeded vs. not, who gets
 to spend today's ping.

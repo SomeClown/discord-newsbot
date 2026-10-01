@@ -4,10 +4,12 @@ Angle (public app, task 1, test-engineer brief 2026-09-30): the friend's
 server runs on a v2 config that nobody is going to rewrite for me, so the
 derived catalog has to carry every topic, every source assignment and every
 match rule across without a single opinion of its own. The central test
-builds collectors the old way (`build_collectors`) and the new way
-(`build_catalog_collectors`) from one file and compares what comes out, by
-name, type, endpoint and game tag. If those two ever disagree, the running
-bot changes behavior on upgrade, which is the one thing this task must not do.
+builds collectors the old way (`_old_build_collectors`, a copy of v2's
+`build_collectors` kept in this file as the oracle once the real one retired
+at the cutover) and the new way (`build_catalog_collectors`) from one file and
+compares what comes out, by name, type, endpoint and game tag. If those two
+ever disagree, the running bot changes behavior on upgrade, which is the one
+thing this task must not do.
 
 Where derive mode differs from v2 on purpose, the test pins the difference
 and says so. Where it differs by accident, the test is `xfail(strict=True)`.
@@ -21,13 +23,20 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.collectors.base import RawItem, build_catalog_collectors, build_collectors
+from newsbot.collectors.base import RawItem, build_catalog_collectors
 from newsbot.config import (
+    BlueskySource,
     ConfigError,
+    RssSource,
     Secrets,
+    SteamSource,
+    WebSearchSource,
+    _RawConfig,
+    _with_default_name,
     configured_source_names,
     load_config,
 )
+from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.pipeline.filter import build_matchers, filter_items
 
 ROOT = Path(__file__).parent.parent
@@ -83,6 +92,53 @@ def _signature(c) -> tuple:
     return (c.name, c.source_type, _endpoint(c), tag, c._source.trust)
 
 
+def _raw(path) -> _RawConfig:
+    """The v2 keys as the file spells them, before the loader derives anything.
+
+    Until the cutover these were `cfg.topics`, `cfg.sources` and friends on the loaded config,
+    and they were the yardstick every derived value was measured against. The loaded config
+    doesn't carry them any more, so the yardstick parses the file itself.
+    """
+    import yaml
+
+    return _RawConfig.model_validate(yaml.safe_load(Path(path).read_text()))
+
+
+def _old_build_collectors(path, secrets, *, include_web_search=True):
+    """v2's `build_collectors`, as it was, reading the old keys straight from the file.
+
+    The real one was deleted at the cutover (the v2 fields left `AppConfig`). It lives on here
+    as the oracle for the one claim this file exists to make: a derived catalog builds the
+    collectors the old config would have.
+    """
+    from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
+    from newsbot.collectors.rss import RssCollector
+    from newsbot.collectors.steam import SteamCollector
+    from newsbot.collectors.web_search import WebSearchCollector
+
+    raw = _raw(path)
+    session = None
+    if secrets.bluesky_handle and secrets.bluesky_app_password:
+        session = BlueskySession(
+            secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
+        )
+    collectors = []
+    for source in (_with_default_name(src) for src in raw.sources):
+        if isinstance(source, RssSource):
+            collectors.append(RssCollector(source))
+        elif isinstance(source, SteamSource):
+            collectors.append(SteamCollector(source))
+        elif isinstance(source, BlueskySource):
+            collectors.append(BlueskyCollector(source, session))
+        elif isinstance(source, WebSearchSource):
+            if not include_web_search or not secrets.brave_api_key:
+                continue
+            collectors.append(
+                WebSearchCollector(source, raw.topics, secrets.brave_api_key.get_secret_value())
+            )
+    return collectors
+
+
 def _sigs(collectors) -> list[tuple]:
     return sorted((_signature(c) for c in collectors), key=repr)
 
@@ -133,21 +189,23 @@ def brave(request, monkeypatch):
 
 def test_catalog_collectors_equal_the_old_collectors_by_name_type_endpoint_and_tag(v2_path, brave):
     cfg = load_config(v2_path)
-    old = build_collectors(cfg, _secrets(brave))
+    old = _old_build_collectors(v2_path, _secrets(brave))
     new = build_catalog_collectors(cfg, _secrets(brave))
     assert _sigs(new) == _sigs(old)
 
 
 def test_the_same_holds_with_web_search_switched_off(v2_path, brave):
     cfg = load_config(v2_path)
-    old = build_collectors(cfg, _secrets(brave), include_web_search=False)
+    old = _old_build_collectors(v2_path, _secrets(brave), include_web_search=False)
     new = build_catalog_collectors(cfg, _secrets(brave), include_web_search=False)
     assert _sigs(new) == _sigs(old)
 
 
 def test_web_search_sees_the_same_games_with_the_same_queries(v2_path, brave):
     cfg = load_config(v2_path)
-    old_ws = [c for c in build_collectors(cfg, _secrets(brave)) if c.source_type == "web_search"]
+    old_ws = [
+        c for c in _old_build_collectors(v2_path, _secrets(brave)) if c.source_type == "web_search"
+    ]
     new_ws = [
         c for c in build_catalog_collectors(cfg, _secrets(brave)) if c.source_type == "web_search"
     ]
@@ -172,15 +230,15 @@ def test_collector_names_equal_configured_source_names(v2_path, brave):
 # --- match behavior ---
 
 
-def _battery(cfg) -> list[RawItem]:
+def _battery(topics) -> list[RawItem]:
     """Headlines aimed at every name, alias and entity, plus prose that should hit nothing."""
     words: list[str] = ["a quiet news day", "Hello, world", "  ", ""]
-    for t in cfg.topics:
+    for t in topics:
         words += [t.name, t.name.lower(), f"{t.name}'s big patch", f"pre{t.name}post"]
         words += list(t.aliases) + list(t.entities)
     scopes: list[tuple[str, ...] | None] = [None]
-    scopes += [(t.key,) for t in cfg.topics]
-    scopes.append(tuple(t.key for t in cfg.topics[:2]))
+    scopes += [(t.key,) for t in topics]
+    scopes.append(tuple(t.key for t in topics[:2]))
     return [
         RawItem(
             url=f"https://example.com/{i}-{j}",
@@ -198,7 +256,7 @@ def _battery(cfg) -> list[RawItem]:
 
 def test_derived_matchers_are_the_v2_matchers(v2_path):
     cfg = load_config(v2_path)
-    old = build_matchers(cfg.topics)
+    old = build_matchers(_raw(v2_path).topics)
     new = build_matchers(cfg.catalog)
     assert list(new) == list(old)
     for key in old:
@@ -207,10 +265,11 @@ def test_derived_matchers_are_the_v2_matchers(v2_path):
 
 def test_filtering_a_battery_of_items_is_identical_under_the_derived_catalog(v2_path):
     cfg = load_config(v2_path)
-    items = _battery(cfg)
+    topics = _raw(v2_path).topics
+    items = _battery(topics)
     cap = cfg.collection.max_items_per_game
     got = filter_items(items, cfg.catalog, cap)
-    assert got == filter_items(items, cfg.topics, cap)
+    assert got == filter_items(items, topics, cap)
     assert got, "the battery should hit something, or this test proves nothing"
 
 
@@ -220,8 +279,9 @@ def test_every_derived_game_matches_by_name_because_v2_topics_always_did(v2_path
 
 def test_derived_games_carry_topic_fields_verbatim(v2_path):
     cfg = load_config(v2_path)
-    assert [g.key for g in cfg.catalog] == [t.key for t in cfg.topics]
-    for game, topic in zip(cfg.catalog, cfg.topics, strict=True):
+    topics = _raw(v2_path).topics
+    assert [g.key for g in cfg.catalog] == [t.key for t in topics]
+    for game, topic in zip(cfg.catalog, topics, strict=True):
         assert (game.name, game.aliases, game.entities, game.search_queries) == (
             topic.name,
             topic.aliases,
@@ -233,7 +293,7 @@ def test_derived_games_carry_topic_fields_verbatim(v2_path):
 def test_every_v2_source_lands_in_exactly_one_place(v2_path, brave):
     cfg = load_config(v2_path)
     placed = [s.name for g in cfg.catalog for s in g.sources] + [s.name for s in cfg.shared_sources]
-    v2_names = [s.name for s in cfg.sources if s.type != "web_search"]
+    v2_names = [_with_default_name(s).name for s in _raw(v2_path).sources if s.type != "web_search"]
     assert sorted(placed) == sorted(v2_names)
 
 
@@ -259,17 +319,16 @@ def test_assignment_rules_on_every_scope_shape(tmp_path):
 def test_a_source_scoped_to_one_topic_twice_stays_shared_with_its_restriction(tmp_path):
     # Pinned: `topics: [c, c]` is not "exactly one key", so it's shared and
     # keyword-matched, as v2's filter always did (dedicated needs len == 1).
-    cfg = load_config(
-        _v2(
-            tmp_path,
-            "  - {type: rss, name: T, url: 'https://e.com/t', topics: [c, c], trust: press}\n",
-        )
+    path = _v2(
+        tmp_path,
+        "  - {type: rss, name: T, url: 'https://e.com/t', topics: [c, c], trust: press}\n",
     )
+    cfg = load_config(path)
     (twice,) = cfg.shared_sources
     assert twice.games == ["c", "c"]
     item = RawItem("https://e.com/1", "unrelated", "", "T", "press", None, ("c", "c"))
     grouped = filter_items([item], cfg.catalog, 60)
-    assert grouped == filter_items([item], cfg.topics, 60) == {}
+    assert grouped == filter_items([item], _raw(path).topics, 60) == {}
 
 
 # --- errors in derive mode must stay ConfigErrors ---
@@ -369,7 +428,7 @@ def test_a_negative_v2_lookback_is_clamped_too(tmp_path, caplog):
         cfg = load_config(p)
     assert cfg.collection.lookback_hours == 1
     # The v2 view keeps what the file said; only the derived block is clamped.
-    assert cfg.digest.lookback_hours == -5
+    assert _raw(p).digest.lookback_hours == -5
     assert "digest.lookback_hours is -5" in caplog.text
 
 
@@ -412,10 +471,11 @@ def test_derive_maps_every_digest_and_alerts_field(tmp_path):
 
 
 def test_derive_lookback_and_cap_match_what_the_v2_digest_used(tmp_path):
-    cfg = load_config(_v2(tmp_path, "  []\n", digest_extra=", lookback_hours: 6"))
-    assert cfg.digest is not None
-    assert cfg.collection.lookback_hours == cfg.digest.lookback_hours == 6
-    assert cfg.collection.max_items_per_game == cfg.digest.max_items_per_topic
+    path = _v2(tmp_path, "  []\n", digest_extra=", lookback_hours: 6")
+    cfg, digest = load_config(path), _raw(path).digest
+    assert digest is not None
+    assert cfg.collection.lookback_hours == digest.lookback_hours == 6
+    assert cfg.collection.max_items_per_game == digest.max_items_per_topic
 
 
 def test_derive_without_alerts_gives_the_v2_default_shift(tmp_path):
@@ -527,8 +587,11 @@ def test_two_web_search_sources_build_one_catalog_collector_where_v2_built_two(
     # running bot's second Brave source (if anyone ever had one) stops
     # searching after the cutover. The warning above is the only notice.
     monkeypatch.setenv("BRAVE_API_KEY", "k")
-    cfg = load_config(_two_brave(tmp_path))
-    old = [c.name for c in build_collectors(cfg, _secrets(True)) if c.source_type == "web_search"]
+    path = _two_brave(tmp_path)
+    cfg = load_config(path)
+    old = [
+        c.name for c in _old_build_collectors(path, _secrets(True)) if c.source_type == "web_search"
+    ]
     new = [
         c.name
         for c in build_catalog_collectors(cfg, _secrets(True))
@@ -571,14 +634,21 @@ def test_legacy_admin_channel_is_the_top_level_one(tmp_path):
 
 
 def test_legacy_lounge_matches_the_v2_lounge_object(tmp_path):
-    cfg = load_config(
-        _v2(
-            tmp_path,
-            "  []\n",
-            tail="lounge:\n  channel_id: 5\n  welcome: {enabled: true, message: 'Hi {member}'}\n",
-        )
+    path = _v2(
+        tmp_path,
+        "  []\n",
+        tail="lounge:\n  channel_id: 5\n  welcome: {enabled: true, message: 'Hi {member}'}\n",
     )
-    assert cfg.legacy is not None and cfg.legacy.lounge == cfg.lounge
+    cfg, raw = load_config(path), _raw(path).lounge
+    assert cfg.legacy is not None
+    # The loader resolves the quote sources (the file named none, so: the built-in list);
+    # everything the file did say comes through untouched.
+    assert (cfg.legacy.lounge.channel_id, cfg.legacy.lounge.welcome) == (
+        raw.channel_id,
+        raw.welcome,
+    )
+    assert raw.daily_quote.sources is None
+    assert [s.value for s in cfg.legacy.lounge.daily_quote.sources] == list(DEFAULT_WIKIQUOTE_PAGES)
 
 
 @pytest.mark.parametrize("n, expected", [(1, "everyone"), (3, "everyone"), (0, "none")])

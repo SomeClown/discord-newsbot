@@ -1,32 +1,20 @@
-"""Tests for the pure logic behind /newsbot: permission check, confirm-flow decision, spend.
+"""Tests for the pure logic behind /newsbot: the permission check and the spend estimate.
 
 Per plan section 5: no gateway mocking. `has_admin_permission` is tested
 against a real `discord.Permissions` object (plain data, no bot token
-needed), `needs_confirmation` against `DigestRow`, and `estimate_spend_usd`
-as arithmetic.
+needed) and `estimate_spend_usd` as arithmetic. The run-now confirmation
+rule that used to live here (`needs_confirmation`, v2) is now
+`guild_needs_confirmation`, and its whole status matrix is pinned in
+`test_guild_digest.py` and `test_guild_digest_adversarial.py`.
 """
 
 from __future__ import annotations
 
-from datetime import date
-
 import discord
 import pytest
 
-from newsbot.bot.commands import estimate_spend_usd, has_admin_permission, needs_confirmation
-from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK
-from newsbot.store.models import DigestRow
-
-
-def _digest_row(status: str, posted_message_ids: list[int] | None = None) -> DigestRow:
-    return DigestRow(
-        id=1,
-        run_date=date(2026, 9, 23),
-        status=status,
-        posted_message_ids=posted_message_ids or [],
-        error_notes=None,
-    )
-
+from newsbot.bot.commands import has_admin_permission
+from newsbot.pipeline.summarize import PRICE_IN_PER_MTOK, PRICE_OUT_PER_MTOK, estimate_spend_usd
 
 # --- has_admin_permission ---
 
@@ -92,48 +80,6 @@ def test_has_admin_permission_configured_permission_name_variants():
     )
 
 
-# --- needs_confirmation ---
-
-
-def test_needs_confirmation_no_row_is_false():
-    assert needs_confirmation(None) is False
-
-
-def test_needs_confirmation_ok_row_is_true():
-    assert needs_confirmation(_digest_row("ok")) is True
-
-
-def test_needs_confirmation_partial_row_is_true():
-    assert needs_confirmation(_digest_row("partial")) is True
-
-
-def test_needs_confirmation_failed_row_is_false():
-    assert needs_confirmation(_digest_row("failed")) is False
-
-
-def test_needs_confirmation_pending_row_is_true():
-    # Behavior change (QA step 20, group 4): a pending row used to be
-    # handled entirely by run-now's caller before this function was ever
-    # consulted; it's now folded in here, since claim_digest(force=True)
-    # can reclaim a pending row too, and an admin should be asked before
-    # that happens, same as for ok/partial.
-    assert needs_confirmation(_digest_row("pending")) is True
-
-
-def test_needs_confirmation_failed_row_with_posted_ids_is_true():
-    # A publish that got the header out before dying leaves a real
-    # message in the channel: re-running unconfirmed would post a
-    # second header on top of it.
-    assert needs_confirmation(_digest_row("failed", posted_message_ids=[111])) is True
-
-
-def test_needs_confirmation_failed_row_with_no_posted_ids_is_false():
-    # Nothing reached Discord, so a plain re-run is safe: this is the
-    # same case test_needs_confirmation_failed_row_is_false pins, spelled
-    # out explicitly now that "failed" isn't a single monolithic case.
-    assert needs_confirmation(_digest_row("failed", posted_message_ids=[])) is False
-
-
 # --- estimate_spend_usd ---
 
 
@@ -168,14 +114,3 @@ def test_estimate_spend_usd_small_counts_round_via_plain_float_arithmetic():
     # value here so a future switch to Decimal, if it ever happens,
     # doesn't happen by accident.
     assert estimate_spend_usd(1, 1) == pytest.approx(0.000_006, abs=1e-12)
-
-
-def test_commands_reexports_the_same_function_object_summarize_owns():
-    # a45548d moved estimate_spend_usd from bot/commands.py to
-    # pipeline/summarize.py so format.py could use it too. `commands.py`
-    # importing the name back keeps `/newsbot status`'s spend figure
-    # wired to the exact same function (not a copy that could drift),
-    # so this pins identity, not just equal output.
-    from newsbot.pipeline import summarize
-
-    assert estimate_spend_usd is summarize.estimate_spend_usd

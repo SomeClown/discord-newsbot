@@ -369,6 +369,7 @@ class ShiftCfg(BaseModel, extra="forbid"):
     max_pings_per_day: int = Field(3, ge=0)
     ping_trust: list[Trust] = ["official", "press"]
     max_codes_per_item: int = Field(5, ge=1)
+    # Ignored since the cutover (/newsbot test-alert is gone); kept so a v2.2 file still loads.
     allow_test_command: bool = False
 
 
@@ -571,6 +572,16 @@ class LegacySetup(BaseModel):
 
 
 class AppConfig(BaseModel):
+    """What the running bot reads: the v3 settings, and nothing from the v2 keys.
+
+    The v2 keys (`guild_id`, `digest`, `topics`, `sources`, `alerts`, `lounge`)
+    live on `_RawConfig` below, which only `load_config` ever sees. Whatever
+    the rest of the bot needs from them is already in here by the time the
+    loader returns: games and sources in the catalog, the SHiFT and collection
+    settings in their blocks, and the one server's old setup in `legacy` for
+    the import to chew on exactly once.
+    """
+
     # Global settings (v3).
     home_guild_id: int | None = Field(None, gt=0)
     admin_channel_id: int | None = None
@@ -586,20 +597,8 @@ class AppConfig(BaseModel):
     shared_sources: list[SharedSourceCfg] = []
     catalog: list[GameCfg] = []
     legacy: LegacySetup | None = None
-    # The v2 fields. Optional now, because a v3 config has none of them; they
-    # stay populated for old-shape configs so the running v2 path keeps
-    # working until the cutover deletes them.
-    guild_id: int | None = Field(None, gt=0)
-    digest: DigestCfg | None = None
-    topics: list[Topic] = []
-    sources: list[Source] = []
-    alerts: AlertsCfg = AlertsCfg()
-    lounge: LoungeCfg = LoungeCfg()
 
-    # `guild_id` is v2's key and gets the same checks as `home_guild_id`, since
-    # it's copied into it. v2.2 would have failed at runtime on a non-positive
-    # one anyway; this just says so at startup.
-    @field_validator("home_guild_id", "guild_id", mode="before")
+    @field_validator("home_guild_id", mode="before")
     @classmethod
     def _validate_guild_id_not_bool(cls, v: object) -> object:
         return _reject_bool_guild_id(v)
@@ -618,6 +617,30 @@ class AppConfig(BaseModel):
         if any(i <= 0 for i in v):
             raise ValueError("guild ids must be positive integers")
         return v
+
+
+class _RawConfig(AppConfig):
+    """`AppConfig` plus the v2 keys: what the YAML parses into, before `load_config` is done.
+
+    The v2 fields are optional because a v3 file has none of them. They stay
+    here, not on `AppConfig`, so nothing past the loader can quietly keep
+    reading a v2 setting that the database now owns.
+    """
+
+    guild_id: int | None = Field(None, gt=0)
+    digest: DigestCfg | None = None
+    topics: list[Topic] = []
+    sources: list[Source] = []
+    alerts: AlertsCfg = AlertsCfg()
+    lounge: LoungeCfg = LoungeCfg()
+
+    # `guild_id` is v2's key and gets the same checks as `home_guild_id`, since
+    # it's copied into it. v2.2 would have failed at runtime on a non-positive
+    # one anyway; this just says so at startup.
+    @field_validator("guild_id", mode="before")
+    @classmethod
+    def _validate_legacy_guild_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_guild_id(v)
 
 
 class Secrets(BaseModel):
@@ -711,7 +734,7 @@ def _source_problem(i: int, src: QuoteSourceCfg) -> str | None:
     return None
 
 
-def _check_lounge(cfg: AppConfig, config_path: Path, errors: list[str]) -> AppConfig:
+def _check_lounge(cfg: _RawConfig, config_path: Path, errors: list[str]) -> _RawConfig:
     """Cross-check the `lounge:` block, appending to `errors`; return `cfg` with sources filled in.
 
     Pydantic has already checked each field on its own. This is the part that
@@ -944,11 +967,16 @@ def _v3_problems(cfg: AppConfig) -> list[str]:
     return errors
 
 
-def _build_legacy(cfg: AppConfig, guild_id: int, digest: DigestCfg, raw: dict) -> LegacySetup:
+def _build_legacy(cfg: _RawConfig, guild_id: int, digest: DigestCfg, raw: dict) -> LegacySetup:
     alerts = cfg.alerts
     return LegacySetup(
         guild_id=guild_id,
-        admin_channel_id=cfg.admin_channel_id,
+        # config.example.yaml ships `admin_channel_id: 000000000000000000` as its "fill me in"
+        # placeholder, and v2 only ever failed to post to channel 0. The database wants a real
+        # id or nothing (a CHECK says so), and a first `python -m newsbot` after copying the
+        # example shouldn't die in the import over a placeholder, so zero reads as "no admin
+        # channel", which is what it always meant.
+        admin_channel_id=cfg.admin_channel_id if (cfg.admin_channel_id or 0) > 0 else None,
         digest_time=digest.time,
         timezone=digest.timezone,
         games=[(t.key, t.channel_id) for t in cfg.topics],
@@ -1003,7 +1031,7 @@ def load_config(path: str | Path) -> AppConfig:
     pre_errors += _catalog_raw_problems(raw)
 
     try:
-        cfg = AppConfig.model_validate(raw)
+        cfg = _RawConfig.model_validate(raw)
     except ValidationError as exc:
         errors = pre_errors + [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
@@ -1012,7 +1040,7 @@ def load_config(path: str | Path) -> AppConfig:
     # loader doesn't read), so they can't be errors; but `comped_guild_id`
     # quietly dropping a server's premium tier is exactly the kind of thing a
     # log line is for. `legacy` is ours, not something a file gets to set.
-    unknown_top = sorted(str(k) for k in raw if k not in AppConfig.model_fields or k == "legacy")
+    unknown_top = sorted(str(k) for k in raw if k not in _RawConfig.model_fields or k == "legacy")
     if unknown_top:
         log.warning(
             "ignoring unknown top-level keys in config (typos?): %s", ", ".join(unknown_top)
@@ -1072,7 +1100,8 @@ def load_config(path: str | Path) -> AppConfig:
         # said everything looked fine.
         errors.append(
             "alerts.allow_test_command is true but alerts.enabled is false: "
-            "/newsbot test-alert has nothing to test with alerts disabled"
+            "v2.2's /newsbot test-alert has nothing to test with alerts disabled "
+            "(v3 ignores the key, but a file v2.2 would refuse is refused here too)"
         )
 
     # Fill in Bluesky default names before the uniqueness check, since
@@ -1186,13 +1215,17 @@ def load_config(path: str | Path) -> AppConfig:
             )
 
     if cfg.alerts.allow_test_command:
-        # /newsbot test-alert lets anyone with admin_permission post a fake
-        # SHiFT code alert on demand: exactly what the private test guild
-        # needs and exactly what a production config should never carry,
-        # so a startup log line is the one place this gets said out loud.
-        log.warning("alerts.allow_test_command is true; /newsbot test-alert will be registered")
+        # /newsbot test-alert went away in v3 (owner decision, 2026-10-01: there
+        # is no per-server version of it). The key still loads, because v2.2's
+        # AlertsCfg forbids unknown keys and a rollback has to keep working, but
+        # it no longer does anything, and a silent no-op is how people end up
+        # wondering where their command went.
+        log.warning("alerts.allow_test_command is ignored: /newsbot test-alert was removed in v3")
 
-    return cfg
+    # The v2 keys have done their job (the catalog, the shift: block and
+    # `legacy` carry everything the bot still needs), so the bot gets the
+    # v3 view and nothing else.
+    return AppConfig(**{name: getattr(cfg, name) for name in AppConfig.model_fields})
 
 
 def configured_source_names(cfg: AppConfig) -> set[str]:
@@ -1203,15 +1236,13 @@ def configured_source_names(cfg: AppConfig) -> set[str]:
     default name filled in by the time `load_config` returns them (see
     above), so this is just "read `.name` off what's configured" with one
     place to fix if a fifth source type ever shows up and someone forgets.
-    Covers the v2 `sources` list plus the catalog's and the shared sources
-    (a derived catalog repeats the v2 names, which a set doesn't mind). Web
+    Covers the catalog's sources and the shared ones. Web
     search counts only while `BRAVE_API_KEY` is set, same as it always has.
     Used to filter `/newsbot status` down to sources that still exist,
     instead of every source that ever recorded health (see the IGN
     incident in CLAUDE.md).
     """
-    names = {source.name for source in cfg.sources}
-    names |= {source.name for game in cfg.catalog for source in game.sources}
+    names = {source.name for game in cfg.catalog for source in game.sources}
     names |= {source.name for source in cfg.shared_sources}
     if cfg.web_search is not None and os.environ.get("BRAVE_API_KEY"):
         names.add(cfg.web_search.name)
@@ -1219,22 +1250,21 @@ def configured_source_names(cfg: AppConfig) -> set[str]:
 
 
 def count_configured_web_search_sources(path: str | Path) -> int:
-    """How many `web_search` sources `path` names, before `load_config` gets a chance to drop any.
+    """How many web searches `path` asks for, counted from the raw YAML.
 
-    `load_config` silently disables a `web_search` source (with its own
-    startup warning) when `BRAVE_API_KEY` isn't set, which is the right
-    call at boot but means `AppConfig.sources` can no longer answer "was
-    web_search ever configured at all": exactly the question
-    `--check-sources` needs answered, to tell "not configured" apart from
-    "configured, but skipped for lack of a key". Re-reads the raw YAML
-    rather than reusing `load_config`'s own parse, since that parse is
-    already past the point where the answer got thrown away.
+    `load_config` warns and carries on when `BRAVE_API_KEY` isn't set, which is
+    the right call at boot, but it means the loaded config can't tell "web
+    search was never configured" from "configured, and I have no key for it".
+    That's exactly the question `--check-sources` needs answered, so this
+    re-reads the file: a top-level `web_search:` block (v3) counts as one, and
+    so does each v2 `type: web_search` entry under `sources:`.
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(raw, dict):
         return 0
     sources = raw.get("sources") or []
-    return sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
+    legacy = sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
+    return legacy + (1 if raw.get("web_search") is not None else 0)
 
 
 def load_check_sources_secrets(env: Mapping[str, str] = os.environ) -> Secrets:

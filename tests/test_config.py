@@ -1,17 +1,25 @@
-"""Tests for newsbot.config: loading config.yaml and secrets from the env."""
+"""Tests for newsbot.config: loading config.yaml and secrets from the env.
+
+Most of these load a v2-shaped file (`guild_id`, `digest`, `topics`, `sources`, `alerts`) and
+check what the loader made of it. Since the cutover the loaded `AppConfig` has no v2 fields:
+the games and sources are the catalog (and shared sources), the old `alerts:` numbers are
+`shift:` and `collection:`, the digest subject is `ai.subject`, and the one server's old
+setup is `legacy`. The assertions are the same ones; they read from where the values live now.
+"""
 
 from pathlib import Path
 
 import pytest
 
+from newsbot.collectors.base import build_catalog_collectors
 from newsbot.config import (
     BlueskySource,
     ConfigError,
     RssSource,
     Secrets,
+    ShiftCfg,
     SteamSource,
     Topic,
-    WebSearchSource,
     configured_source_names,
     load_config,
     load_secrets,
@@ -22,20 +30,27 @@ EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
 MINIMAL = Path(__file__).parent.parent / "config.minimal.yaml"
 
 
+def _all_sources(cfg):
+    """Every source the catalog and the shared list carry (web search is its own block)."""
+    return [s for g in cfg.catalog for s in g.sources] + list(cfg.shared_sources)
+
+
 def test_valid_fixture_loads(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
-    assert cfg.guild_id == 123456789012345678
-    assert cfg.digest.timezone == "America/Los_Angeles"
-    assert len(cfg.topics) == 3
-    assert len(cfg.sources) == 4
+    assert cfg.legacy.guild_id == 123456789012345678
+    assert cfg.home_guild_id == 123456789012345678
+    assert cfg.legacy.timezone == "America/Los_Angeles"
+    assert len(cfg.catalog) == 3
+    assert len(_all_sources(cfg)) + (cfg.web_search is not None) == 4
 
 
 def test_source_union_routes_each_type(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
-    types = {type(s) for s in cfg.sources}
-    assert types == {RssSource, SteamSource, BlueskySource, WebSearchSource}
+    types = {type(s) for s in _all_sources(cfg)}
+    assert types == {RssSource, SteamSource, BlueskySource}
+    assert cfg.web_search is not None  # the fourth type, now its own block
 
 
 # --- configured_source_names ---
@@ -55,7 +70,7 @@ def test_configured_source_names_includes_every_source_type(monkeypatch):
 
 def test_configured_source_names_matches_what_collectors_actually_record(monkeypatch):
     # The whole point of this helper is that it can't drift from what
-    # build_collectors wires up: every Collector sets `self.name =
+    # build_catalog_collectors wires up: every Collector sets `self.name =
     # source.name`, so these two sets have to be exactly equal.
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
@@ -67,9 +82,7 @@ def test_configured_source_names_matches_what_collectors_actually_record(monkeyp
         bluesky_app_password=None,
     )
 
-    from newsbot.collectors.base import build_collectors
-
-    collectors = build_collectors(cfg, secrets)
+    collectors = build_catalog_collectors(cfg, secrets)
 
     assert configured_source_names(cfg) == {c.name for c in collectors}
 
@@ -308,7 +321,7 @@ sources:
     trust: community
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.sources[0].name == "Bluesky: Palworld"
+    assert cfg.catalog[0].sources[0].name == "Bluesky: Palworld"
 
 
 def test_web_search_without_brave_key_disables_source(tmp_path, caplog, monkeypatch):
@@ -330,8 +343,17 @@ sources:
     trust: press
 """
     cfg = _load_with(tmp_path, text)
-    # web_search source is dropped when BRAVE_API_KEY isn't set.
-    assert all(s.type != "web_search" for s in cfg.sources)
+    # Web search is quietly off when BRAVE_API_KEY isn't set: configured, but nothing records
+    # health under its name and no collector is built for it.
+    assert "Brave Search" not in configured_source_names(cfg)
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="anthropic-key",
+        brave_api_key=None,
+        bluesky_handle=None,
+        bluesky_app_password=None,
+    )
+    assert all(c.source_type != "web_search" for c in build_catalog_collectors(cfg, secrets))
 
 
 def test_example_config_loads(monkeypatch):
@@ -339,7 +361,7 @@ def test_example_config_loads(monkeypatch):
     # if this doesn't load, the README's setup instructions are lying.
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(EXAMPLE)
-    assert {t.key for t in cfg.topics} == {"borderlands4", "palworld", "diablo4"}
+    assert {g.key for g in cfg.catalog} == {"borderlands4", "palworld", "diablo4"}
 
 
 def test_minimal_config_loads(monkeypatch):
@@ -349,9 +371,9 @@ def test_minimal_config_loads(monkeypatch):
     # anchor is lying.
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(MINIMAL)
-    assert {t.key for t in cfg.topics} == {"yourgame"}
-    assert len(cfg.sources) == 3
-    assert cfg.alerts.enabled is False
+    assert {g.key for g in cfg.catalog} == {"yourgame"}
+    assert len(_all_sources(cfg)) + (cfg.web_search is not None) == 3
+    assert cfg.legacy.shift_enabled is False
 
 
 def test_minimal_config_loads_without_brave_key_too(monkeypatch):
@@ -360,7 +382,7 @@ def test_minimal_config_loads_without_brave_key_too(monkeypatch):
     # a config error.
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     cfg = load_config(MINIMAL)
-    assert all(s.type != "web_search" for s in cfg.sources)
+    assert "Brave Search" not in configured_source_names(cfg)
 
 
 def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):
@@ -369,12 +391,10 @@ def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monke
     # @everyone-capable feature): loading the example file as-is should
     # produce exactly AlertsCfg()'s untouched defaults, not whatever the
     # commented-out values happen to say.
-    from newsbot.config import AlertsCfg
-
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(EXAMPLE)
-    assert cfg.alerts == AlertsCfg()
-    assert cfg.alerts.enabled is False
+    assert cfg.shift == ShiftCfg()
+    assert cfg.legacy.shift_enabled is False
 
 
 def test_example_config_alerts_comment_documents_the_same_defaults_as_the_code(monkeypatch):
@@ -444,7 +464,7 @@ sources:
 def test_digest_subject_defaults_to_video_games(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
-    assert cfg.digest.subject == "video games"
+    assert cfg.ai.subject == "video games"
 
 
 def test_digest_subject_is_overridable(tmp_path):
@@ -466,7 +486,7 @@ sources:
     trust: official
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.digest.subject == "tabletop RPGs"
+    assert cfg.ai.subject == "tabletop RPGs"
 
 
 def test_load_secrets_reads_env():
@@ -526,13 +546,13 @@ digest:
 {VALID_TAIL}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.enabled is False
-    assert cfg.alerts.interval_minutes == 60
-    assert cfg.alerts.max_item_age_hours == 48
-    assert cfg.alerts.max_pings_per_day == 3
-    assert cfg.alerts.allow_test_command is False
-    assert cfg.alerts.ping_trust == ["official", "press"]
-    assert cfg.alerts.max_codes_per_item == 5
+    assert cfg.legacy.shift_enabled is False
+    assert cfg.collection.interval_minutes == 60
+    assert cfg.shift.max_item_age_hours == 48
+    assert cfg.shift.max_pings_per_day == 3
+    assert cfg.shift.allow_test_command is False
+    assert cfg.shift.ping_trust == ["official", "press"]
+    assert cfg.shift.max_codes_per_item == 5
 
 
 def test_alerts_full_block_parses(tmp_path):
@@ -553,13 +573,15 @@ alerts:
   max_codes_per_item: 10
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.enabled is True
-    assert cfg.alerts.interval_minutes == 30
-    assert cfg.alerts.max_item_age_hours == 24
-    assert cfg.alerts.max_pings_per_day == 5
-    assert cfg.alerts.allow_test_command is True
-    assert cfg.alerts.ping_trust == ["official"]
-    assert cfg.alerts.max_codes_per_item == 10
+    assert cfg.legacy.shift_enabled is True
+    assert cfg.legacy.shift_channel_id == 5
+    assert cfg.collection.interval_minutes == 30
+    assert cfg.shift.max_item_age_hours == 24
+    assert cfg.shift.max_pings_per_day == 5
+    assert cfg.legacy.shift_ping == "everyone"  # a nonzero cap is the v2 "@everyone" behavior
+    assert cfg.shift.allow_test_command is True
+    assert cfg.shift.ping_trust == ["official"]
+    assert cfg.shift.max_codes_per_item == 10
 
 
 def test_alerts_max_codes_per_item_must_be_at_least_one(tmp_path):
@@ -653,9 +675,10 @@ alerts:
   max_pings_per_day: 0
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.interval_minutes == 15
-    assert cfg.alerts.max_item_age_hours == 1
-    assert cfg.alerts.max_pings_per_day == 0
+    assert cfg.collection.interval_minutes == 15
+    assert cfg.shift.max_item_age_hours == 1
+    assert cfg.shift.max_pings_per_day == 0
+    assert cfg.legacy.shift_ping == "none"  # a cap of 0 is "never ping", which is the ping choice
 
 
 def test_alerts_max_item_age_hours_upper_bound_is_inclusive_at_720(tmp_path):
@@ -669,7 +692,7 @@ alerts:
   max_item_age_hours: 720
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.max_item_age_hours == 720
+    assert cfg.shift.max_item_age_hours == 720
 
 
 def test_allow_test_command_true_with_enabled_false_is_a_config_error(tmp_path):
@@ -700,7 +723,7 @@ alerts:
   allow_test_command: true
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.allow_test_command is True
+    assert cfg.shift.allow_test_command is True
 
 
 def test_allow_test_command_false_with_enabled_false_is_fine(tmp_path):
@@ -715,7 +738,7 @@ alerts:
   allow_test_command: false
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.allow_test_command is False
+    assert cfg.shift.allow_test_command is False
 
 
 def test_alerts_allow_test_command_true_logs_a_warning(tmp_path, caplog):

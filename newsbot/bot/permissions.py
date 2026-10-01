@@ -1,16 +1,15 @@
-"""Startup permission check: does the bot actually have what it configured itself to need?
+"""Does the bot actually have what a server's settings say it needs?
 
-Config validation (`newsbot.config.load_config`) already checks that every
-channel id in `config.yaml` is a positive int and that the pieces fit
-together: it has no way to ask Discord whether the bot's role can
-actually post there, because that answer doesn't exist until the gateway
-connects and the guild's permission overwrites are in hand. This module is
-that second, later check: on the first `on_ready`, walk every channel the
-bot is configured to use and ask Discord directly. Anything wrong (a
-missing permission, a channel that's gone, a channel that belongs to some
-other guild entirely) becomes one line in one admin alert. The bot still
-starts either way; a permission problem on day one is annoying, but it's a
-lot less annoying than a bot that refuses to come up at all because
+Settings validation can tell that a channel id is a positive int and that the
+pieces fit together; it has no way to ask Discord whether the bot's role can
+post there, because that answer doesn't exist until the gateway connects and
+the guild's permission overwrites are in hand. This module is that second,
+later check. It walks the channels one server's database rows point at and asks
+Discord directly. Anything wrong (a missing permission, a channel that's gone,
+a channel that belongs to some other server entirely) becomes one line. Commands
+run it right after a setting changes, and the startup sweep runs it for every
+server. The bot starts either way; a permission problem on day one is annoying,
+but it's a lot less annoying than a bot that refuses to come up at all because
 `#palworld` forgot Embed Links.
 """
 
@@ -27,7 +26,6 @@ from pathlib import Path
 import discord
 
 from newsbot.bot.format import _truncate_utf16, esc
-from newsbot.config import AppConfig
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import GuildGame, GuildSettings, LoungeSettings, ShiftSettings
@@ -99,53 +97,6 @@ def _add_requirement(
     )
 
 
-def required_channels(cfg: AppConfig) -> list[ChannelRequirement]:
-    """Every channel the config points at, and the permission set each one needs.
-
-    design.md §13: game channels need View Channel, Send Messages, Embed
-    Links; the SHiFT channel (only when alerts are enabled) additionally
-    needs Mention @everyone; the admin channel needs View Channel and Send
-    Messages. The lounge channel (design.md §14; only when a lounge
-    feature is on and `channel_id` is set) needs View Channel and Send
-    Messages: a welcome or a quote is plain text, so no Embed Links.
-    "Topics sharing a channel" is an owner-approved shape (§5 of
-    the plan), so requirements are merged by channel id rather than
-    reported once per topic that names it: two topics pointed at the
-    same channel end up as one requirement with the union of what either
-    of them needs, not two separate alerts about the same channel.
-    """
-    by_channel: dict[int, ChannelRequirement] = {}
-
-    def _add(channel_id: int, purpose: str, needed: frozenset[str]) -> None:
-        _add_requirement(by_channel, channel_id, purpose, needed)
-
-    for topic in cfg.topics:
-        _add(
-            topic.channel_id,
-            topic.name,
-            frozenset({"view_channel", "send_messages", "embed_links"}),
-        )
-
-    if cfg.alerts.enabled and cfg.alerts.channel_id is not None:
-        needed = {"view_channel", "send_messages"}
-        # max_pings_per_day == 0 means pinging is off on purpose (sweep.py
-        # already suppresses the "cap reached" alert for the same reason):
-        # flagging a missing Mention @everyone permission that will
-        # never actually get used would just be noise.
-        if cfg.alerts.max_pings_per_day > 0:
-            needed.add("mention_everyone")
-        _add(cfg.alerts.channel_id, "SHiFT codes", frozenset(needed))
-
-    if cfg.admin_channel_id is not None:
-        _add(cfg.admin_channel_id, "admin", frozenset({"view_channel", "send_messages"}))
-
-    lounge = cfg.lounge
-    if (lounge.welcome.enabled or lounge.daily_quote.enabled) and lounge.channel_id is not None:
-        _add(lounge.channel_id, "lounge", frozenset({"view_channel", "send_messages"}))
-
-    return list(by_channel.values())
-
-
 def missing(perms: discord.Permissions, needed: frozenset[str]) -> list[str]:
     """Which of `needed`'s flags `perms` doesn't grant, in `_PERMISSION_ORDER`."""
     return [flag for flag in _PERMISSION_ORDER if flag in needed and not getattr(perms, flag)]
@@ -166,7 +117,7 @@ _EXCLUDED_CHANNEL_TYPES = (discord.VoiceChannel, discord.StageChannel)
 
 
 def _is_sendable_guild_channel(channel: object) -> bool:
-    """True for anything `_check_one` should treat as a normal text destination.
+    """True for anything `_inspect` should treat as a normal text destination.
 
     A thread isn't a `discord.abc.GuildChannel` (it's its own class), but
     it's exactly as sendable as the channel it lives in, and there's no
@@ -192,8 +143,7 @@ class ChannelProblem:
     `kind` is one of `not_found`, `wrong_guild`, `not_text`, `unknown_self`,
     `missing_permissions`, `no_role` or `check_failed`; `missing` holds the
     permission labels for the `missing_permissions` kind. `text` is the
-    one-line human version (the same line `check_channels` has always
-    produced).
+    one-line human version (one line, ready to put in a reply).
     """
 
     channel_id: int
@@ -242,61 +192,13 @@ async def _inspect(
     return problem("missing_permissions", f"missing {', '.join(names)}", names)
 
 
-async def _check_one(client: discord.Client, guild_id: int, req: ChannelRequirement) -> str | None:
-    """Return one problem line for `req`, or None if the channel checks out clean."""
-    found = await _inspect(client, guild_id, req)
-    return found.text if found is not None else None
-
-
-async def check_channels(client: discord.Client, cfg: AppConfig) -> list[str]:
-    """Check every configured channel; return one human-readable problem per broken one.
-
-    Never raises: a crash resolving one channel (a network blip mid-check,
-    an unexpected discord.py exception) becomes its own problem line rather
-    than aborting the rest of the walk: one bad channel shouldn't hide
-    problems in every other one. The caller (`NewsBot.on_ready`) wraps this
-    whole call in its own try/except anyway, on the theory that a startup
-    check should never be able to block startup, but there's no reason a
-    single channel's failure needs to reach that outer net when it can be
-    handled right here and the walk can just continue.
-    """
-    problems: list[str] = []
-    for req in required_channels(cfg):
-        try:
-            problem = await _check_one(client, cfg.guild_id, req)
-        except Exception as exc:  # noqa: BLE001 (one bad channel must not stop the rest)
-            logger.exception("permission check failed for channel %d", req.channel_id)
-            problem = (
-                f"{req.purpose} channel <#{req.channel_id}>: "
-                f"permission check failed ({esc(plain_line(str(exc), 100))})"
-            )
-        if problem is not None:
-            problems.append(problem)
-    return problems
-
-
-def render_permission_alert(problems: list[str]) -> str:
-    """One admin-alert message naming every problem `check_channels` found.
-
-    Capped at Discord's 2000-unit message content limit, same as every
-    other plain-text send in this codebase: an owner with enough
-    misconfigured channels to blow past that has bigger problems than a
-    truncated alert, but it should still truncate cleanly instead of
-    bouncing off Discord entirely.
-    """
-    if not problems:
-        return ""
-    lines = ["newsbot: startup permission check found problems:"]
-    lines.extend(f"- {p}" for p in problems)
-    return _truncate_utf16("\n".join(lines), _ALERT_LIMIT, suffix="…")
-
-
 # --- Per guild (design.md §15, plan task 8) ---
 #
-# The same checks, but the list of channels comes from one server's database
-# rows instead of config.yaml, and the answer is a structure instead of a
-# flat list of strings, so a command can reply "I can't post in <#id>:
-# missing Send Messages" the moment an admin changes a setting.
+# The list of channels comes from one server's database rows, and the answer
+# is a structure rather than a flat list of strings, so a command can reply
+# "I can't post in <#id>: missing Send Messages" the moment an admin changes
+# a setting. (v2 checked the one configured server from config.yaml; that went
+# away at the cutover.)
 
 
 def required_channels_for_guild(
@@ -341,7 +243,7 @@ def required_channels_for_guild(
             "admin",
             frozenset({"view_channel", "send_messages"}),
         )
-    # Like v2: a lounge with both features off needs no channel.
+    # A lounge with both features off needs no channel.
     if lounge is not None and (lounge.welcome_enabled or lounge.quote_enabled):
         _add_requirement(
             by_channel, lounge.channel_id, "lounge", frozenset({"view_channel", "send_messages"})
@@ -386,8 +288,9 @@ async def check_guild_channels(
 ) -> GuildCheck:
     """Check `requirements` against Discord for `guild_id`. Never raises.
 
-    Same policy as `check_channels`: one channel blowing up becomes its own
-    problem instead of hiding the rest. A channel that belongs to another
+    One channel blowing up becomes its own problem instead of hiding the rest
+    (a crash resolving one channel, a network blip mid-check, an unexpected
+    discord.py exception: the walk carries on). A channel that belongs to another
     server is reported as a problem and its permissions are never read, so
     one server can't learn anything about another's.
     """
@@ -537,14 +440,11 @@ __all__ = [
     "ChannelRequirement",
     "GuildCheck",
     "SweepResult",
-    "check_channels",
     "check_guild",
     "check_guild_channels",
     "missing",
     "render_guild_permission_notice",
-    "render_permission_alert",
     "render_sweep_counts",
-    "required_channels",
     "required_channels_for_guild",
     "requirements_from_db",
     "sweep_guild_permissions",

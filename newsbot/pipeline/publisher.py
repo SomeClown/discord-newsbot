@@ -20,7 +20,7 @@ from newsbot.bot.format import RenderedDigest, to_text
 
 
 class PublishError(Exception):
-    """A publish attempt failed. `run_daily` retries a few times before giving up on it.
+    """A publish attempt failed. The digest runner retries a few times before giving up on it.
 
     `posted_by_topic` carries whatever topic -> message id mapping the
     failed attempt already got back from Discord before it died: a

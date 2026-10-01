@@ -218,6 +218,30 @@ def test_is_code_false_for_garbage():
     assert is_code(f"{CODE}-EXTRA") is False
 
 
+# Ported from the retired `/newsbot test-alert` argument checks: the same shapes,
+# asked of `is_code` itself, which the alert renderer still leans on.
+
+
+def test_is_code_accepts_lowercase():
+    assert is_code("aaaa1-bbbbb-ccccc-ddddd-eeeee") is True
+
+
+def test_is_code_rejects_wrong_group_sizes_and_counts():
+    assert is_code("AAAA-BBBBB-CCCCC-DDDDD-EEEEE") is False
+    assert is_code("AAAAA-BBBBB-CCCCC-DDDDD") is False
+
+
+def test_is_code_rejects_fullwidth_lookalikes():
+    # Fullwidth Latin letters look right to a human eye but aren't in
+    # CODE_RE's ASCII-only character class: exactly what a copy-paste from a
+    # phone keyboard could produce.
+    assert is_code("ＡＡＡＡＡ-BBBBB-CCCCC-DDDDD-EEEEE") is False
+
+
+def test_is_code_rejects_spaces_instead_of_hyphens():
+    assert is_code("AAAAA BBBBB CCCCC DDDDD EEEEE") is False
+
+
 # --- golden key mentions ---
 
 

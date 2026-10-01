@@ -1,6 +1,6 @@
 """Adversarial tests for `digest.subject` (self-host plan task 2).
 
-`cfg.digest.subject` flows into `newsbot.pipeline.prompts.build_prompt`,
+`cfg.ai.subject` flows into `newsbot.pipeline.prompts.build_prompt`,
 which does `SYSTEM_PROMPT.format(subject=subject, games=...)`. The
 interesting adversarial question: `SYSTEM_PROMPT` is a `str.format`
 *template* that already contains the literal placeholders `{subject}` and
@@ -89,7 +89,7 @@ def test_digest_cfg_subject_defaults_to_video_games():
 
 def test_empty_subject_string_loads_without_error(tmp_path):
     cfg = _load_with(tmp_path, 'subject: ""')
-    assert cfg.digest.subject == ""
+    assert cfg.ai.subject == ""
 
 
 def test_empty_subject_flows_into_a_valid_but_odd_prompt():
@@ -101,8 +101,8 @@ def test_empty_subject_flows_into_a_valid_but_odd_prompt():
 def test_very_long_subject_string_loads_and_is_not_truncated(tmp_path):
     long_subject = "x" * 10_000
     cfg = _load_with(tmp_path, f'subject: "{long_subject}"')
-    assert cfg.digest.subject == long_subject
-    system, _ = build_prompt(_TOPIC, [], [], subject=cfg.digest.subject)
+    assert cfg.ai.subject == long_subject
+    system, _ = build_prompt(_TOPIC, [], [], subject=cfg.ai.subject)
     assert long_subject in system
 
 

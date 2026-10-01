@@ -52,8 +52,8 @@ topics:
 {VALID_SRC}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.topics[0].channel_id == 123456789
-    assert isinstance(cfg.topics[0].channel_id, int)
+    assert cfg.legacy.games[0][1] == 123456789
+    assert isinstance(cfg.legacy.games[0][1], int)
 
 
 def test_channel_id_as_whole_number_float_is_coerced_to_int(tmp_path):
@@ -69,7 +69,7 @@ topics:
 {VALID_SRC}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.topics[0].channel_id == 123
+    assert cfg.legacy.games[0][1] == 123
 
 
 def test_channel_id_as_fractional_float_is_rejected(tmp_path):
@@ -105,7 +105,7 @@ topics:
 {VALID_SRC}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.topics[0].channel_id == huge
+    assert cfg.legacy.games[0][1] == huge
 
 
 def test_channel_id_as_bool_is_rejected_not_silently_coerced_to_one(tmp_path):
@@ -157,7 +157,7 @@ sources:
     trust: official
 """
     cfg = _load_with(tmp_path, text)
-    assert [t.channel_id for t in cfg.topics] == [5, 5]
+    assert [channel for _key, channel in cfg.legacy.games] == [5, 5]
 
 
 def test_alerts_channel_id_equal_to_a_topic_channel_id_is_allowed(tmp_path):
@@ -179,7 +179,7 @@ alerts:
   channel_id: 5
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.channel_id == cfg.topics[0].channel_id == 5
+    assert cfg.legacy.shift_channel_id == cfg.legacy.games[0][1] == 5
 
 
 def test_leftover_digest_channel_id_does_not_excuse_a_missing_topic_channel_id(tmp_path):
@@ -243,4 +243,4 @@ topics: []
 sources: []
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.topics == []
+    assert cfg.legacy.games == [] and cfg.catalog == []

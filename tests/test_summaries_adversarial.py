@@ -241,8 +241,8 @@ async def test_the_friends_model_input_stays_v22s_however_the_inputs_are_arrange
             (timedelta(minutes=30), "This morning"),
         ]
 
-    everything = filter_items(raw, w.cfg.topics, 10**6)
-    capped = filter_items(raw, w.cfg.topics, w.cfg.digest.max_items_per_topic)
+    everything = filter_items(raw, w.v2.topics, 10**6)
+    capped = filter_items(raw, w.v2.topics, w.v2.digest.max_items_per_topic)
     tags: dict[str, tuple[RawItem, dict[str, bool]]] = {}
     for key, topic_items in everything.items():
         for ti in topic_items:
@@ -280,13 +280,13 @@ async def test_the_friends_model_input_stays_v22s_however_the_inputs_are_arrange
         if age <= timedelta(days=3)
     ]
     in_range.sort(key=lambda p: p.created_at, reverse=True)
-    topic = next(t for t in w.cfg.topics if t.key == "borderlands4")
+    topic = next(t for t in w.v2.topics if t.key == "borderlands4")
     expected = build_prompt(
         topic,
         capped["borderlands4"],
         in_range,
-        all_topics=w.cfg.topics,
-        subject=w.cfg.digest.subject,
+        all_topics=w.v2.topics,
+        subject=w.v2.digest.subject,
     )
 
     w.clock.t = end
@@ -294,7 +294,7 @@ async def test_the_friends_model_input_stays_v22s_however_the_inputs_are_arrange
 
     assert w.llm.calls == [expected]
     if case == "over_the_cap":
-        assert len(titles(w.llm.calls[0][1])) == w.cfg.digest.max_items_per_topic
+        assert len(titles(w.llm.calls[0][1])) == w.v2.digest.max_items_per_topic
     if case == "prior_across_day_boundaries":
         assert "Just out of range" not in w.llm.calls[0][1]
         assert "Exactly three days ago" in w.llm.calls[0][1]

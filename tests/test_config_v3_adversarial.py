@@ -309,9 +309,8 @@ def test_a_v2_topic_drops_blank_aliases_and_entities_with_a_warning(tmp_path, ca
     )
     with caplog.at_level(logging.WARNING, logger="newsbot.config"):
         cfg = load_config(_write(tmp_path, text))
-    assert cfg.topics[0].aliases == ["Rusty"] and cfg.topics[0].entities == []
     assert cfg.catalog[0].aliases == ["Rusty"] and cfg.catalog[0].entities == []
-    assert build_matchers(cfg.topics)["rust"].match("Hello, world") is None
+    assert build_matchers(cfg.catalog)["rust"].match("Hello, world") is None
     assert "dropping 1 blank aliases" in caplog.text
 
 
@@ -786,18 +785,19 @@ def test_hybrid_skips_the_v2_only_source_checks(tmp_path):
     assert load_config(_hybrid(tmp_path, extra)).catalog[0].key == "palworld"
 
 
-def test_configured_source_names_in_a_hybrid_still_lists_the_legacy_sources(tmp_path, monkeypatch):
-    # Pinned, and a cutover to-do: the v2 `sources` list feeds this function
-    # today, so a hybrid config reports health rows for sources that
-    # build_catalog_collectors will never run. Harmless until task 13 deletes
-    # `AppConfig.sources`; a phantom row in /newsbot status after that would
-    # be a bug worth a test.
+def test_configured_source_names_in_a_hybrid_does_not_list_the_legacy_sources(
+    tmp_path, monkeypatch
+):
+    # This used to be pinned the other way, as a cutover to-do: the v2 `sources` list fed
+    # `configured_source_names` and a hybrid config reported health rows for sources that
+    # `build_catalog_collectors` never runs. The v2 fields left `AppConfig` at the cutover, so
+    # a phantom row in /newsbot status can't happen, and this holds the line.
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     extra = (
         "topics: []\nsources:\n  - {type: steam_news, name: Legacy, app_id: 1, trust: official}\n"
     )
     cfg = load_config(_hybrid(tmp_path, extra))
-    assert "Legacy" in configured_source_names(cfg)
+    assert "Legacy" not in configured_source_names(cfg)
     assert "Legacy" not in {c.name for c in build_catalog_collectors(cfg, _secrets())}
 
 
@@ -956,7 +956,6 @@ def test_a_v2_topic_cannot_opt_out_of_its_name(tmp_path):
         "sources: []\n"
     )
     cfg = load_config(_write(tmp_path, text))
-    assert cfg.topics[0].match_name is True
     assert cfg.catalog[0].match_name is True
 
 

@@ -1347,6 +1347,38 @@ class DigestOutcome:
     reason: str = ""
 
 
+# What a failed digest's notes look like is whatever the exception said, so the
+# categories are a handful of substring checks, most specific first. Anything
+# unrecognized is "other", which is honest.
+_REASON_PATTERNS = (
+    ("missing permissions", ("403", "forbidden", "missing permissions", "50013")),
+    ("channel gone", ("404", "unknown channel", "not found", "10003")),
+    ("rate limited", ("429", "rate limit")),
+    ("timed out", ("timed out", "timeout")),
+    ("couldn't build", ("build failed",)),
+)
+
+
+def outcome_from_digest(status: str, notes: str | None) -> DigestOutcome:
+    """One digest row, as the owner's report counts it.
+
+    `ok` and `partial` posted (a `partial` posted with something degraded or
+    skipped, which is the server's business and its notices', not the owner's
+    one-liner). `pending` means a run was interrupted and never finished.
+    Everything else is a failure, filed under the first reason category the
+    notes match.
+    """
+    if status in ("ok", "partial"):
+        return DigestOutcome(True)
+    if status == "pending":
+        return DigestOutcome(False, "interrupted")
+    text = (notes or "").casefold()
+    for reason, needles in _REASON_PATTERNS:
+        if any(needle in text for needle in needles):
+            return DigestOutcome(False, reason)
+    return DigestOutcome(False, "other")
+
+
 # Five reasons of at most 40 characters each, plus counts and the lead-in,
 # comes to roughly 300 characters: still a one-liner.
 _MAX_SUMMARY_REASONS = 5
@@ -1511,6 +1543,7 @@ __all__ = [
     "RenderedDigest",
     "TopicMessage",
     "esc",
+    "outcome_from_digest",
     "render_code_alerts",
     "render_code_page",
     "render_digest",

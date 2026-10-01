@@ -38,7 +38,7 @@ def _secrets() -> Secrets:
 
 def _wire(monkeypatch, tmp_path, run) -> None:
     class StubBot:
-        def __init__(self, cfg, secrets, db_path) -> None:
+        def __init__(self, cfg, secrets, db_path, **kwargs) -> None:
             pass
 
         def run(self, token: str, **kwargs) -> None:

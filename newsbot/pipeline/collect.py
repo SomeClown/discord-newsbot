@@ -23,8 +23,8 @@ Tuesday. The owner hears about a source once, at twelve in a row, and the
 counter re-arms on the first success.
 
 This module doesn't touch Discord or the scheduler. SHiFT detection is an
-injected hook (a no-op until the per-guild fan-out exists) and nothing calls
-`run_collection` from the running bot yet; the cutover does that.
+injected hook (`shift/fanout.py` supplies the real one), and `NewsBot` runs
+`run_collection` on `collection_job_options`' schedule.
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ def estimate_pass_seconds(
 
 
 def collection_job_options(cfg: AppConfig) -> dict[str, object]:
-    """The scheduler settings the cutover should use for this job.
+    """The scheduler settings `NewsBot` uses for this job.
 
     `max_instances=1` and `coalesce` are the scheduler's half of "never
     stack passes"; `run_collection` skipping on a held lock is the other
@@ -198,10 +198,7 @@ def build_collection_collectors(cfg: AppConfig, secrets: Secrets) -> list[Collec
 
 
 def _to_stored_items(grouped: dict[str, list[TopicItem]]) -> list[StoredItem]:
-    """Collapse the per-game grouping into one row per item with its game tags.
-
-    (`run.py` has the same thing for v2; it goes away with `run_daily`.)
-    """
+    """Collapse the per-game grouping into one row per item with its game tags."""
     item_by_url: dict[str, RawItem] = {}
     topics_by_url: dict[str, dict[str, bool]] = {}
     for game_key, topic_items in grouped.items():

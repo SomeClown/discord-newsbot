@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 from pydantic import ValidationError
+from v3_fakes import legacy_lounge
 
 from newsbot.config import ConfigError, QuoteSourceCfg, _source_problem, load_config
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
@@ -215,7 +216,7 @@ def test_repeated_placeholders_scale_linearly():
 def test_load_config_accepts_exactly_2000_and_rejects_2001(tmp_path, template, ok):
     lounge = _welcome(template)
     if ok:
-        assert _load(tmp_path, lounge).lounge.welcome.message == template
+        assert legacy_lounge(_load(tmp_path, lounge)).welcome.message == template
     else:
         assert "Discord's limit is 2000" in _errors(tmp_path, lounge)
 
@@ -246,14 +247,14 @@ def test_doubled_braces_around_a_known_name_pass_validation(tmp_path):
     # `{<@id>}`. Nothing rejects it. An owner who wanted a literal `{member}`
     # can't have one; that seems fine for a welcome message.
     cfg = _load(tmp_path, _welcome("{{member}}"))
-    assert cfg.lounge.welcome.message == "{{member}}"
+    assert legacy_lounge(cfg).welcome.message == "{{member}}"
 
 
 def test_lone_and_lookalike_braces_pass_validation(tmp_path):
     # Documented: only a well-formed `{name}` is treated as a placeholder,
     # so `{`, `}{` and fullwidth braces sit in the message as literal text.
     for msg in ["{", "}{", "｛memebr｝"]:
-        assert _load(tmp_path, _welcome(msg)).lounge.welcome.message == msg
+        assert legacy_lounge(_load(tmp_path, _welcome(msg))).welcome.message == msg
 
 
 def test_several_unknown_placeholders_are_each_reported(tmp_path):
@@ -266,12 +267,12 @@ def test_whitespace_only_message_is_an_error_when_enabled(tmp_path):
 
 
 def test_whitespace_only_message_is_fine_while_disabled(tmp_path):
-    assert _load(tmp_path, _welcome("  ", enabled=False)).lounge.welcome.enabled is False
+    assert legacy_lounge(_load(tmp_path, _welcome("  ", enabled=False))).welcome.enabled is False
 
 
 def test_message_is_not_stripped_or_altered_by_load(tmp_path):
     msg = "  hi {member}\r\n  \n"
-    assert _load(tmp_path, _welcome(msg)).lounge.welcome.message == msg
+    assert legacy_lounge(_load(tmp_path, _welcome(msg))).welcome.message == msg
 
 
 @pytest.mark.parametrize("value", [None, 5, ["a"], True])
@@ -334,7 +335,7 @@ def test_values_are_stripped_at_parse_time(tmp_path):
     cfg = _load(
         tmp_path, _quote([{"wikiquote": "  Oscar Wilde \n"}, {"url": " https://x.example/a "}])
     )
-    assert [s.value for s in cfg.lounge.daily_quote.sources] == [
+    assert [s.value for s in legacy_lounge(cfg).daily_quote.sources] == [
         "Oscar Wilde",
         "https://x.example/a",
     ]
@@ -345,13 +346,16 @@ def test_values_are_stripped_at_parse_time(tmp_path):
 
 def test_omitted_sources_means_the_default_list(tmp_path):
     cfg = _load(tmp_path, {"daily_quote": {"enabled": False}})
-    got = [(s.kind, s.value) for s in cfg.lounge.daily_quote.sources]
+    got = [(s.kind, s.value) for s in legacy_lounge(cfg).daily_quote.sources]
     assert got == [("wikiquote", t) for t in DEFAULT_WIKIQUOTE_PAGES]
 
 
-def test_absent_lounge_block_also_gets_the_default_list(tmp_path):
+def test_absent_lounge_block_imports_no_lounge_and_so_needs_no_default_list(tmp_path):
+    # v2 resolved the built-in quote list even for a missing block, so it was ready when
+    # someone switched the quote on. Nothing is imported from a missing block now, so
+    # there is nothing to resolve a list for; a server that wants a quote sets one up.
     cfg = _load(tmp_path, ...)
-    assert len(cfg.lounge.daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
+    assert cfg.legacy is not None and cfg.legacy.lounge is None
 
 
 def test_empty_sources_list_is_an_error_even_while_disabled(tmp_path):
@@ -363,7 +367,7 @@ def test_null_sources_behaves_like_omitted(tmp_path):
     # takes None as "not given", so it silently means the built-in list. An
     # owner who blanked the list to mean "none" gets Oscar Wilde instead.
     cfg = _load(tmp_path, _quote(None))
-    assert len(cfg.lounge.daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
+    assert len(legacy_lounge(cfg).daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
 
 
 @pytest.mark.parametrize("value", ["Oscar Wilde", 5, {"wikiquote": "x"}, True])
@@ -454,7 +458,7 @@ def test_wikiquote_title_with_control_characters_is_accepted_today(tmp_path, tit
     # in a title (MediaWiki would). Leading and trailing ones are stripped;
     # interior ones stay. Worth a look before the fetcher builds a URL.
     cfg = _load(tmp_path, _quote([{"wikiquote": title}]))
-    assert cfg.lounge.daily_quote.sources[0].value == title.strip()
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == title.strip()
 
 
 def test_wikiquote_title_with_leading_colon_or_slash_is_accepted_today(tmp_path):
@@ -499,7 +503,7 @@ def test_url_forms_accepted_today(tmp_path, url):
     # ports all pass; the config file is the owner's own, so this is trust,
     # not a hole, but the fetcher (task 5+) is where SSRF-ish limits belong.
     cfg = _load(tmp_path, _quote([{"url": url}]))
-    assert cfg.lounge.daily_quote.sources[0].value == url
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == url
 
 
 @pytest.mark.parametrize(
@@ -532,13 +536,13 @@ def test_plain_http_gets_its_own_message(tmp_path, url):
 
 def test_url_with_trailing_space_is_stripped_and_accepted(tmp_path):
     cfg = _load(tmp_path, _quote([{"url": "https://example.com/x "}]))
-    assert cfg.lounge.daily_quote.sources[0].value == "https://example.com/x"
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == "https://example.com/x"
 
 
 def test_url_with_uppercase_scheme_is_kept_verbatim(tmp_path):
     # Documented: the value isn't lowercased, so it's stored as written.
     cfg = _load(tmp_path, _quote([{"url": "HTTPS://Example.com/x"}]))
-    assert cfg.lounge.daily_quote.sources[0].value == "HTTPS://Example.com/x"
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == "HTTPS://Example.com/x"
 
 
 def test_urls_differing_only_by_scheme_case_are_not_detected_as_duplicates(tmp_path):
@@ -546,7 +550,7 @@ def test_urls_differing_only_by_scheme_case_are_not_detected_as_duplicates(tmp_p
     # `HTTPS://x/` and `https://x/` (and host case, trailing slash) count as
     # two sources and would get two separate quote decks.
     cfg = _load(tmp_path, _quote([{"url": "HTTPS://x.example/a"}, {"url": "https://x.example/a"}]))
-    keys = {s.key for s in cfg.lounge.daily_quote.sources}
+    keys = {s.key for s in legacy_lounge(cfg).daily_quote.sources}
     assert len(keys) == 2
 
 
@@ -555,7 +559,7 @@ def test_url_with_control_characters_inside_is_accepted_today(tmp_path):
     # parses as https://example.com/x and passes; the stored value still
     # contains the raw characters.
     cfg = _load(tmp_path, _quote([{"url": "https://exam\nple.com/x"}]))
-    assert "\n" in cfg.lounge.daily_quote.sources[0].value
+    assert "\n" in legacy_lounge(cfg).daily_quote.sources[0].value
 
 
 # --- file sources ---
@@ -566,24 +570,26 @@ def test_relative_file_is_anchored_at_the_config_directory_not_cwd(tmp_path, mon
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     cfg = _load(tmp_path, _quote([{"file": "quotes.txt"}]))
-    assert cfg.lounge.daily_quote.sources[0].value == str(tmp_path / "quotes.txt")
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == str(tmp_path / "quotes.txt")
 
 
 def test_absolute_file_is_left_alone(tmp_path):
     cfg = _load(tmp_path, _quote([{"file": "/var/lib/quotes.txt"}]))
-    assert cfg.lounge.daily_quote.sources[0].value == "/var/lib/quotes.txt"
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == "/var/lib/quotes.txt"
 
 
 def test_tilde_is_not_expanded(tmp_path):
     # Documented: `~/quotes.txt` becomes `<config dir>/~/quotes.txt`, a
     # directory literally named `~`. Probably not what anyone typing it meant.
     cfg = _load(tmp_path, _quote([{"file": "~/quotes.txt"}]))
-    assert cfg.lounge.daily_quote.sources[0].value == str(tmp_path / "~" / "quotes.txt")
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == str(tmp_path / "~" / "quotes.txt")
 
 
 def test_dotdot_is_kept_verbatim_not_normalized(tmp_path):
     cfg = _load(tmp_path, _quote([{"file": "../shared/quotes.txt"}]))
-    assert cfg.lounge.daily_quote.sources[0].value == str(tmp_path / ".." / "shared" / "quotes.txt")
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == str(
+        tmp_path / ".." / "shared" / "quotes.txt"
+    )
 
 
 def test_file_that_does_not_exist_still_loads(tmp_path):
@@ -600,7 +606,7 @@ def test_file_path_is_not_resolved_through_symlinks(tmp_path):
     doc["lounge"] = _quote([{"file": "q.txt"}])
     cfg_path.write_text(yaml.safe_dump(doc))
     cfg = load_config(cfg_path)
-    assert cfg.lounge.daily_quote.sources[0].value == str(tmp_path / "link" / "q.txt")
+    assert legacy_lounge(cfg).daily_quote.sources[0].value == str(tmp_path / "link" / "q.txt")
 
 
 def test_same_file_spelled_with_dot_slash_or_absolute_is_caught_as_duplicate(tmp_path):
@@ -617,7 +623,7 @@ def test_same_file_reached_through_dotdot_is_not_caught_as_duplicate(tmp_path):
     # Documented gap: `..` isn't collapsed, so `a/../q.txt` and `q.txt` are
     # one file but two keys.
     cfg = _load(tmp_path, _quote([{"file": "q.txt"}, {"file": "a/../q.txt"}]))
-    assert len({s.key for s in cfg.lounge.daily_quote.sources}) == 2
+    assert len({s.key for s in legacy_lounge(cfg).daily_quote.sources}) == 2
 
 
 def test_same_relative_file_repeated_is_a_duplicate(tmp_path):
@@ -627,7 +633,7 @@ def test_same_relative_file_repeated_is_a_duplicate(tmp_path):
 
 def test_file_and_url_and_wikiquote_with_same_text_do_not_collide(tmp_path):
     cfg = _load(tmp_path, _quote([{"wikiquote": "x"}, {"file": "x"}, {"url": "https://x.example"}]))
-    assert len({s.key for s in cfg.lounge.daily_quote.sources}) == 3
+    assert len({s.key for s in legacy_lounge(cfg).daily_quote.sources}) == 3
 
 
 # --- duplicate detection and key stability ---
@@ -651,7 +657,7 @@ def test_wikiquote_variants_of_one_page_are_duplicates(tmp_path, variant):
 
 def test_only_the_first_letter_is_case_insensitive(tmp_path):
     cfg = _load(tmp_path, _quote([{"wikiquote": "Oscar Wilde"}, {"wikiquote": "Oscar wilde"}]))
-    assert len({s.key for s in cfg.lounge.daily_quote.sources}) == 2
+    assert len({s.key for s in legacy_lounge(cfg).daily_quote.sources}) == 2
 
 
 def test_three_way_duplicate_reports_both_repeats_against_the_first(tmp_path):
@@ -671,19 +677,19 @@ def test_key_ignores_surrounding_whitespace_for_url_and_file():
 
 def test_keys_survive_reordering_and_neighbor_edits(tmp_path):
     a = [{"wikiquote": "Oscar Wilde"}, {"file": "q.txt"}, {"url": "https://x.example/a"}]
-    before = {s.key for s in _load(tmp_path, _quote(a)).lounge.daily_quote.sources}
+    before = {s.key for s in legacy_lounge(_load(tmp_path, _quote(a))).daily_quote.sources}
     shuffled = [a[2], a[0], a[1], {"wikiquote": "Mark Twain"}]
-    after = _load(tmp_path, _quote(shuffled)).lounge.daily_quote.sources
+    after = legacy_lounge(_load(tmp_path, _quote(shuffled))).daily_quote.sources
     assert before <= {s.key for s in after}
 
 
 def test_keys_survive_unrelated_config_edits(tmp_path):
     lounge = _quote([{"wikiquote": "Oscar Wilde"}, {"file": "q.txt"}])
-    k1 = [s.key for s in _load(tmp_path, lounge).lounge.daily_quote.sources]
+    k1 = [s.key for s in legacy_lounge(_load(tmp_path, lounge)).daily_quote.sources]
     lounge["daily_quote"]["time"] = "21:30"
     lounge["daily_quote"]["enabled"] = False
     lounge["channel_id"] = 99
-    k2 = [s.key for s in _load(tmp_path, lounge).lounge.daily_quote.sources]
+    k2 = [s.key for s in legacy_lounge(_load(tmp_path, lounge)).daily_quote.sources]
     assert k1 == k2
 
 
@@ -693,8 +699,8 @@ def test_relative_file_key_follows_the_config_file_location(tmp_path):
     lounge = _quote([{"file": "q.txt"}])
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    ka = load_config(_write(tmp_path / "a", lounge)).lounge.daily_quote.sources[0].key
-    kb = load_config(_write(tmp_path / "b", lounge)).lounge.daily_quote.sources[0].key
+    ka = legacy_lounge(load_config(_write(tmp_path / "a", lounge))).daily_quote.sources[0].key
+    kb = legacy_lounge(load_config(_write(tmp_path / "b", lounge))).daily_quote.sources[0].key
     assert ka != kb
 
 
@@ -716,18 +722,18 @@ def test_bad_channel_ids_are_rejected(tmp_path, bad):
 def test_lax_channel_ids_are_coerced(tmp_path, raw, want):
     # Documented: quoted digits and whole floats are accepted, the same as
     # every other channel_id in the config.
-    assert _load(tmp_path, {"channel_id": raw}).lounge.channel_id == want
+    assert legacy_lounge(_load(tmp_path, {"channel_id": raw})).channel_id == want
 
 
 @pytest.mark.parametrize("big", [2**63 - 1, 2**64, 10**30])
 def test_huge_channel_ids_are_accepted_today(tmp_path, big):
     # Documented: no upper bound, so a value Discord could never issue loads
     # fine and only fails when the bot tries to fetch the channel.
-    assert _load(tmp_path, {"channel_id": big}).lounge.channel_id == big
+    assert legacy_lounge(_load(tmp_path, {"channel_id": big})).channel_id == big
 
 
 def test_channel_id_null_is_the_same_as_absent(tmp_path):
-    assert _load(tmp_path, {"channel_id": None}).lounge.channel_id is None
+    assert legacy_lounge(_load(tmp_path, {"channel_id": None})).channel_id is None
 
 
 @pytest.mark.parametrize("feature", ["welcome", "daily_quote"])
@@ -756,7 +762,7 @@ def test_time_with_trailing_newline_is_rejected(tmp_path):
 
 @pytest.mark.parametrize("t", ["00:00", "23:59", "08:00"])
 def test_good_times_are_accepted(tmp_path, t):
-    assert _load(tmp_path, {"daily_quote": {"time": t}}).lounge.daily_quote.time == t
+    assert legacy_lounge(_load(tmp_path, {"daily_quote": {"time": t}})).daily_quote.time == t
 
 
 def test_unquoted_yaml_time_is_a_shape_error_not_a_crash(tmp_path):
@@ -794,14 +800,14 @@ def test_lounge_block_of_the_wrong_type_is_a_shape_error(tmp_path, value):
 
 def test_empty_lounge_mapping_is_the_same_as_absent(tmp_path):
     cfg = _load(tmp_path, {})
-    assert cfg.lounge.channel_id is None and not cfg.lounge.welcome.enabled
+    assert legacy_lounge(cfg).channel_id is None and not legacy_lounge(cfg).welcome.enabled
 
 
 @pytest.mark.parametrize("name", ["config.example.yaml", "config.minimal.yaml"])
 def test_shipped_configs_load_with_default_lounge(name):
     cfg = load_config(ROOT / name)
-    assert cfg.lounge.channel_id is None
-    assert len(cfg.lounge.daily_quote.sources) == len(DEFAULT_WIKIQUOTE_PAGES)
+    assert legacy_lounge(cfg).channel_id is None
+    assert cfg.legacy is None or cfg.legacy.lounge is None  # nothing to import
 
 
 def test_every_fixture_config_without_a_lounge_block_still_loads():
@@ -905,6 +911,6 @@ def test_default_list_source_file_lists_modern_examples_only_as_comments():
 
 
 def test_defaults_are_distinct_objects_per_load(tmp_path):
-    a = _load(tmp_path, {}).lounge.daily_quote.sources
-    b = _load(tmp_path, {}).lounge.daily_quote.sources
+    a = legacy_lounge(_load(tmp_path, {})).daily_quote.sources
+    b = legacy_lounge(_load(tmp_path, {})).daily_quote.sources
     assert a == b and a is not b

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import closing
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -39,10 +39,9 @@ from newsbot.pipeline.collect import (
 )
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import _run_lock
-from newsbot.pipeline.run import _build_stored_items
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, Usage
+from newsbot.store.models import StoredItem
 
 V3 = Path(__file__).parent / "fixtures" / "config_v3.yaml"
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
@@ -642,13 +641,44 @@ def odd_items():
     ]
 
 
-def test_to_stored_items_matches_run_pys_builder_on_filtered_odd_items(cfg):
+def _expected_rows(grouped):
+    """What `_to_stored_items` should make of `grouped`, worked out the long way round.
+
+    One row per URL (the last item seen for it wins its content, as v2's own builder had it),
+    carrying every game that matched it and how confident each match was.
+    """
+    last: dict[str, RawItem] = {}
+    topics: dict[str, dict[str, bool]] = {}
+    for key, topic_items in grouped.items():
+        for ti in topic_items:
+            last[ti.item.url] = ti.item
+            topics.setdefault(ti.item.url, {})[key] = ti.uncertain
+    return [
+        StoredItem(
+            url=url,
+            title=it.title,
+            excerpt=it.excerpt,
+            source_name=it.source_name,
+            trust=it.trust,
+            published_at=it.published_at,
+            topics=topics[url],
+        )
+        for url, it in last.items()
+    ]
+
+
+# These three began as "`_to_stored_items` matches run.py's builder" (v2's `_build_stored_items`
+# was the same logic in the daily run). That builder retired with `run_daily`; the expected
+# rows are computed independently above instead, which is a stricter test than "two copies agree".
+
+
+def test_to_stored_items_on_filtered_odd_items(cfg):
     grouped = filter_items(odd_items(), cfg.catalog, 60)
     assert grouped  # the battery matched something
-    assert _to_stored_items(grouped) == _build_stored_items(grouped)
+    assert _to_stored_items(grouped) == _expected_rows(grouped)
 
 
-def test_to_stored_items_matches_run_pys_builder_on_handbuilt_groupings():
+def test_to_stored_items_on_handbuilt_groupings():
     a = item("https://ex.com/a", "t1", source="one")
     a_again = item("https://ex.com/a", "t2", source="two")  # same url, different object
     b = item("https://ex.com/b", "t3")
@@ -657,8 +687,13 @@ def test_to_stored_items_matches_run_pys_builder_on_handbuilt_groupings():
         "g2": [TopicItem(a_again, "g2", True)],
         "empty": [],
     }
-    assert _to_stored_items(grouped) == _build_stored_items(grouped)
-    assert _to_stored_items({}) == _build_stored_items({}) == []
+    rows = _to_stored_items(grouped)
+    assert rows == _expected_rows(grouped)
+    assert [(r.url, r.title, r.topics) for r in rows] == [
+        ("https://ex.com/a", "t2", {"g1": False, "g2": True}),  # two games, the later copy's text
+        ("https://ex.com/b", "t3", {"g1": True}),
+    ]
+    assert _to_stored_items({}) == []
 
 
 def dump(db_path):
@@ -674,30 +709,30 @@ def dump(db_path):
     return [tuple(r) for r in items], [tuple(r) for r in topics]
 
 
-def test_both_builders_produce_identical_rows_through_their_own_store_paths(cfg, tmp_path):
+def test_the_stored_rows_are_exactly_the_items_the_filter_kept(cfg, tmp_path):
     grouped = filter_items(odd_items(), cfg.catalog, 60)
-    via_store = str(tmp_path / "a.db")
-    via_save_run = str(tmp_path / "b.db")
-    for path in (via_store, via_save_run):
-        with closing(connect(path)) as conn:
-            migrate(conn)
-    with closing(connect(via_store)) as conn:
+    path = str(tmp_path / "a.db")
+    with closing(connect(path)) as conn:
+        migrate(conn)
         repo.store_items(conn, _to_stored_items(grouped), lambda: NOW)
-    with closing(connect(via_save_run)) as conn:
-        digest_id = repo.claim_digest(conn, date(2026, 10, 1), force=False, now=lambda: NOW)
-        repo.save_run(
-            conn,
-            digest_id,
-            _build_stored_items(grouped),
-            [],
-            "ok",
-            [],
-            None,
-            Usage(0, 0),
-            lambda: NOW,
+    items, topics = dump(path)
+    expected = _expected_rows(grouped)
+    assert items == sorted(
+        (
+            r.url,
+            r.title,
+            r.excerpt,
+            r.source_name,
+            r.trust,
+            r.published_at.isoformat() if r.published_at else None,
+            NOW.isoformat(),
         )
-    assert dump(via_store) == dump(via_save_run)
-    assert dump(via_store)[0]  # and it wasn't two empty databases agreeing
+        for r in expected
+    )
+    assert topics == sorted(
+        (r.url, key, int(unsure)) for r in expected for key, unsure in r.topics.items()
+    )
+    assert items  # and it wasn't two empty databases agreeing
 
 
 # --- store_items ---

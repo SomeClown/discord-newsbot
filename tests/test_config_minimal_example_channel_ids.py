@@ -20,16 +20,16 @@ MINIMAL = Path(__file__).parent.parent / "config.minimal.yaml"
 def test_minimal_config_topic_has_a_channel_id(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(MINIMAL)
-    assert len(cfg.topics) >= 1
-    for topic in cfg.topics:
-        assert isinstance(topic.channel_id, int)
-        assert topic.channel_id > 0
+    assert len(cfg.legacy.games) >= 1
+    for _key, channel_id in cfg.legacy.games:
+        assert isinstance(channel_id, int)
+        assert channel_id > 0
 
 
 def test_example_config_every_topic_has_a_channel_id(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(EXAMPLE)
-    assert len(cfg.topics) >= 1
-    for topic in cfg.topics:
-        assert isinstance(topic.channel_id, int)
-        assert topic.channel_id > 0
+    assert len(cfg.legacy.games) >= 1
+    for _key, channel_id in cfg.legacy.games:
+        assert isinstance(channel_id, int)
+        assert channel_id > 0

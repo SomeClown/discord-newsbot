@@ -1,20 +1,25 @@
 """The discord.py client: gateway connection, scheduler wiring, and the heartbeat file.
 
 Everything before this module could be tested without a bot token, a guild,
-or an event loop discord.py owns. This is where that ends: `NewsBot`
-holds the httpx client, the Anthropic client, the slash-command tree and
-the APScheduler instance that drives the daily job, and it has to bring
-all of them up in the right order relative to discord.py's own connection
-lifecycle.
+or an event loop discord.py owns. This is where that ends: `NewsBot` holds the
+httpx client, the Anthropic client, the slash-command tree and the
+APScheduler instance that drives every job, and it has to bring all of them up
+in the right order relative to discord.py's own connection lifecycle.
 
 The one rule that matters most here: **the scheduler has to start inside
 `setup_hook`**, not in `__main__` before `client.run()` and not lazily on
 first use. `setup_hook` runs after discord.py has created (but not yet
 started spinning) its event loop, which is the only point where "the loop
 APScheduler binds to" and "the loop discord.py's gateway actually runs on"
-are guaranteed to be the same loop. Get this wrong and the daily job fires
-into a loop nobody's listening on: a mistake that is, by design, invisible
-until 9 a.m. the first morning it matters.
+are guaranteed to be the same loop. Get this wrong and the jobs fire into a
+loop nobody's listening on: a mistake that is, by design, invisible until
+9 a.m. the first morning it matters.
+
+The second rule is newer: the every-minute digest job stays inert until the
+first `on_ready` has finished its startup work. The channel cache isn't
+trustworthy before then, and a digest due at the moment of a restart is
+better off waiting ninety seconds than posting into a cache that doesn't know
+what a channel is yet.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import closing
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -43,27 +48,46 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from discord import app_commands
 
-from newsbot.alerts import send_alert
-from newsbot.bot.format import RenderedAlert, RenderedDigest, esc
-from newsbot.bot.permissions import (
-    check_channels,
-    render_permission_alert,
-    requirements_from_db,
+from newsbot.bot.format import (
+    RenderedAlert,
+    RenderedDigest,
+    esc,
+    outcome_from_digest,
+    render_owner_report,
 )
-from newsbot.collectors.base import RateLimitState, build_collectors
+from newsbot.bot.permissions import (
+    render_sweep_counts,
+    requirements_from_db,
+    sweep_guild_permissions,
+)
+from newsbot.collectors.base import RateLimitState
 from newsbot.config import AppConfig, QuoteSourceCfg, Secrets
 from newsbot.guilds import lifecycle
+from newsbot.guilds.importer import ImportReport
+from newsbot.guilds.notify import Router, client_sender
 from newsbot.lounge.daily import QuoteDeps, QuoteOutcome, run_daily_quote
 from newsbot.lounge.sources import cache_dir_for
 from newsbot.lounge.welcome import RecentWelcomes, render_welcome, welcome_action
+from newsbot.pipeline.collect import (
+    CollectionDeps,
+    build_collection_collectors,
+    collection_job_options,
+    run_collection,
+)
+from newsbot.pipeline.guild_digest import GuildDigestDeps, run_due_guilds
 from newsbot.pipeline.publisher import PublishError
-from newsbot.pipeline.run import Deps, RunKind, RunMode, local_run_date, run_daily
+from newsbot.pipeline.run import local_run_date
+from newsbot.pipeline.summaries import SummaryDeps, prepare_summaries, retry_lookup, summary_lookup
 from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
-from newsbot.shift.sweep import CodeAlertPoster, SweepDeps, run_code_sweep
+from newsbot.shift.fanout import (
+    FanoutDeps,
+    deliver_queued_codes,
+    make_shift_hook,
+    recover_pending_guild_codes,
+)
 from newsbot.store import repo
 from newsbot.store.db import connect
-from newsbot.store.models import DigestRow, LoungeSettings
-from newsbot.store.repo import fail_pending_codes, get_digest, purge_older_than
+from newsbot.store.models import GuildSettings, LoungeSettings
 from newsbot.text import plain_line
 from newsbot.useragent import user_agent_headers, warn_if_contact_unset
 
@@ -127,42 +151,9 @@ def _should_alert_two_instances(
 HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not a real tempfile race)
 
 _RETENTION_DAYS = 90
+# `app_state` key guarding the daily owner report against a second send.
+_OWNER_REPORT_KEY = "owner_report_date"
 _HEARTBEAT_INTERVAL_S = 60
-_PENDING_STARTUP_ALERT = (
-    "newsbot: found a 'pending' digest row at startup. That usually means "
-    "the process crashed mid-run last time (it may or may not have "
-    "already posted). Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
-    "before posting again, since we can't tell whether today already went out."
-)
-_PARTIAL_FAILURE_STARTUP_ALERT = (
-    "newsbot: today's digest row is 'failed' but some messages already "
-    "posted before it died. Check the game channels and `/newsbot status`, then "
-    "`/newsbot run-now` if you want to retry: it'll ask you to confirm "
-    "before posting again, since part of today's digest is already out there."
-)
-
-
-def should_catch_up(now_local: datetime, digest_time: dt_time, existing: DigestRow | None) -> bool:
-    """Decide whether startup should run today's digest right now.
-
-    True iff local time is past `digest_time` and there's no digest row
-    for today, or today's row is `failed` with nothing posted (a clean
-    failure, collection or summarizing blew up before anything reached
-    Discord, so a retry is safe). False before the scheduled time, if a
-    row already exists as `ok`/`partial` (already posted), if it's
-    `pending` (ambiguous, see `_PENDING_STARTUP_ALERT`; the caller
-    alerts instead of guessing), or if it's `failed` but
-    `posted_message_ids` is non-empty (some of the digest made it to the
-    channel before publishing failed: an unattended retry here would
-    double-post the header or the parts that landed; the caller alerts
-    instead, same as `pending`).
-    """
-    if now_local.time() < digest_time:
-        return False
-    if existing is None:
-        return True
-    return existing.status == "failed" and not existing.posted_message_ids
 
 
 def _parse_digest_time(time_str: str) -> dt_time:
@@ -170,54 +161,15 @@ def _parse_digest_time(time_str: str) -> dt_time:
     return dt_time(hour, minute)
 
 
-def build_intents(cfg: AppConfig) -> discord.Intents:
-    """The gateway intents: the defaults, plus Server Members only if welcomes are on.
-
-    Server Members is a privileged intent, which means it also has to be
-    switched on in the Developer Portal or Discord closes the connection
-    (`__main__` turns that into a readable message). The daily quote needs
-    nothing privileged, so a bot with welcomes off never asks. Presences and
-    message content stay off; I have no use for either and Discord has
-    opinions about people who ask for things they don't use.
-
-    Member chunking stays at its default: `on_member_update` only fires for
-    members in the cache, and chunking is how they get there.
-    """
-    intents = discord.Intents.default()
-    intents.members = cfg.lounge.welcome.enabled
-    return intents
-
-
-def schedule_daily_quote(
-    scheduler: AsyncIOScheduler, cfg: AppConfig, callback: Callable[[], Awaitable[None]]
-) -> Job:
-    """Add the daily-quote cron job: `daily_quote.time` in `digest.timezone`.
-
-    A five-minute grace and no more. The job store is in memory, so a bot
-    that was down at quote time simply skips the day, and one that wakes up
-    an hour late doesn't post a "morning" quote at lunch. There's no catch-up
-    in `on_ready` either; missed means skipped, on purpose.
-    """
-    tz = ZoneInfo(cfg.digest.timezone)
-    quote_time = _parse_digest_time(cfg.lounge.daily_quote.time)
-    return scheduler.add_job(
-        callback,
-        CronTrigger(hour=quote_time.hour, minute=quote_time.minute, timezone=tz),
-        id="daily-quote",
-        misfire_grace_time=300,
-        coalesce=True,
-        max_instances=1,
-    )
-
-
 def build_intents_for_lounges(lounges: Iterable[LoungeSettings]) -> discord.Intents:
-    """The public app's gateway intents: Server Members iff any lounge row has welcomes on.
+    """The gateway intents: the defaults, plus Server Members iff any lounge row has welcomes on.
 
-    Same reasoning as `build_intents`, read from the database instead of the
-    config: the intent is privileged, the portal switch has to match, and a
-    bot whose lounges only post quotes never asks. Task 13 builds the intents
-    from `repo.list_lounges` after the import and the D5 re-sync, so the rows
-    this sees are the ones the bot will actually run with.
+    The intent is privileged, so the portal switch has to match it, and a bot
+    whose lounges only post quotes never asks. Presences and message content
+    stay off; I have no use for either and Discord has opinions about people
+    who ask for things they don't use. `__main__` builds this from
+    `repo.list_lounges` after the import and the D5 re-sync, so the rows it
+    sees are the ones the bot will actually run with.
     """
     intents = discord.Intents.default()
     intents.members = any(lounge.welcome_enabled for lounge in lounges)
@@ -359,14 +311,14 @@ class DiscordPublisher:
     """The `Publisher` the real bot uses: one message per topic, to that topic's own channel.
 
     Implements the same `Publisher` protocol `PrintPublisher` does, so
-    `run_daily`'s guard, save and retry logic runs identically whether the
-    digest is heading to a terminal or a set of channels: this class's
-    only job is turning a `RenderedDigest` into Discord API calls and
-    topic -> message id results.
+    the per-server digest's guard, save and retry logic runs identically
+    whether the digest is heading to a terminal or a set of channels: this
+    class's only job is turning a `RenderedDigest` into Discord API calls
+    and topic -> message id results.
 
-    One instance is built fresh per run (see `NewsBot.publisher_for_today`
-    and the `/newsbot run-now` handler) and then reused across every
-    attempt `run.py`'s `_publish_with_retry` makes at it: that's what
+    One instance is built fresh per run (see `NewsBot._publisher_for`) and
+    then reused across every attempt `run.py`'s `_publish_with_retry` makes
+    at it: that's what
     makes resumability possible. `self._posted` remembers which topics
     already got a message id back, so a retried `publish()` call skips
     straight past them instead of reposting a game's embed on every retry.
@@ -494,21 +446,6 @@ class DiscordPublisher:
         topics before it.
         """
         _classify_publish_error(exc, posted_by_topic=self._posted)
-
-
-class NullPublisher:
-    """A `Publisher` that posts nowhere and returns no ids.
-
-    `/newsbot preview` runs the real pipeline through `run_daily`, which
-    always calls `publisher.publish()`, but a preview is only supposed
-    to go to the admin who asked, as a set of ephemeral followups, not to
-    the game channels. This publisher lets `run_daily`'s machinery run
-    unchanged while the actual sending happens afterwards, from
-    `PipelineOutcome.rendered`, in the command handler.
-    """
-
-    async def publish(self, r: RenderedDigest) -> dict[str, int]:
-        return {}
 
 
 _MISSING_MENTION_PERMISSION_ALERT = (
@@ -670,14 +607,21 @@ _OWNER_LOOKUP_TIMEOUT_S = 10.0
 _LOUNGE_CHUNK_TIMEOUT_S = 60.0
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 class NewsBot(discord.Client):
     """The bot process: gateway client, command tree, scheduler and job callbacks in one place.
 
-    Command registration is layered in by `bot/commands.py`'s factories
-    (`make_news_group`, `make_admin_group`), called from `setup_hook` once
-    the httpx and Anthropic clients exist: both groups need `self` (for
-    `build_deps`, and for the admin group's access to the client for
-    `DiscordPublisher`).
+    Holds the wiring and nothing clever. One `Router` decides who hears about
+    what (`self.router`); one `GuildDigestDeps` (`guild_digest_deps()`) is
+    shared by the minute job and every command, because the per-server locks
+    that keep run-now, preview and the schedule from tripping over each other
+    live inside it; and the SHiFT hook, the summaries and the collection pass
+    all get their owner-alert and per-server-notice paths from that same router.
+    Command registration is `bot/registration.py`'s job, called from
+    `setup_hook`.
     """
 
     def __init__(
@@ -687,19 +631,20 @@ class NewsBot(discord.Client):
         db_path: str,
         *,
         lounges: list[LoungeSettings] | None = None,
+        intents: discord.Intents | None = None,
+        import_report: ImportReport | None = None,
     ) -> None:
-        # `lounges` is the public app's lounge path (design.md §15); left out,
-        # this is v2.2's single lounge from the config. Given, the intents
-        # follow the rows, and members are chunked per lounge guild in
-        # `chunk_lounge_guilds` instead of for every guild at connect time.
-        if lounges is None:
-            options: dict[str, object] = {"intents": build_intents(cfg)}
-        else:
-            options = {
-                "intents": build_intents_for_lounges(lounges),
-                "chunk_guilds_at_startup": False,
-            }
-        super().__init__(allowed_mentions=discord.AllowedMentions.none(), **options)
+        # `lounges` is `repo.list_lounges` as of startup (after the import and
+        # the D5 re-sync). The intents follow those rows, and members are
+        # chunked per lounge guild in `chunk_lounge_guilds` instead of for every
+        # guild at connect time. `__main__` builds the intents itself, as a
+        # visible step in the startup order; left out, they're built from the rows here.
+        lounge_rows = list(lounges or [])
+        super().__init__(
+            allowed_mentions=discord.AllowedMentions.none(),
+            intents=intents if intents is not None else build_intents_for_lounges(lounge_rows),
+            chunk_guilds_at_startup=False,
+        )
         self.cfg = cfg
         self.secrets = secrets
         self.db_path = db_path
@@ -710,44 +655,51 @@ class NewsBot(discord.Client):
         self.llm: LLMClient | None = None
         self.scheduler: AsyncIOScheduler | None = None
         self._ready_once = False
+        # The every-minute digest job does nothing until `on_ready` flips this.
+        self._digests_enabled = False
         self._last_two_instance_alert: datetime | None = None
 
-        # Shared with build_sweep_deps() the same way build_deps() shares
-        # it with the daily job, so Reddit's cross-call gap is honored
-        # across the daily 09:00 run and every hourly sweep alike, not
-        # reset fresh each time one or the other happens to run.
+        # Reddit's cross-call gap is honored across every collection pass,
+        # not reset fresh each time one happens to run.
         self._rate_limit_state = RateLimitState()
-        # Set below in setup_hook() when alerts.enabled; stays None
-        # otherwise, which is also build_deps()'s existing default: an
-        # alerts-off bot behaves exactly as it did before this feature.
-        self.code_alert_poster: CodeAlertPoster | None = None
-        # Codes fail_pending_codes() flips from 'pending' to 'failed' at
-        # startup (R4): a prior process claimed them and the ping
-        # budget, then died before confirming the send landed. Reported
-        # once on the first on_ready, then never referenced again.
+        # `ensure_imported`'s report, if this start did the import; the first
+        # `on_ready` tells the owner once and then forgets it.
+        self._import_report = import_report
+        # Legacy (pre-import) codes `fail_pending_codes()` flipped from
+        # 'pending' to 'failed' at startup: a v2.2 process claimed them and
+        # the ping budget, then died before confirming the send landed.
+        # Reported once on the first on_ready, then never referenced again.
         self._interrupted_codes: list[str] = []
-        # True once a sweep crash has alerted the admin channel; cleared
-        # by the next successful sweep, so a sweep that's failing on every
-        # interval pages once instead of once an hour.
-        self._sweep_crash_alerted = False
-        # In memory only, on purpose (design.md §14): who was welcomed in the
-        # last day. A restart forgets it.
-        self._recent_welcomes = RecentWelcomes()
-        # The scheduled quote and `/newsbot quote-now` take turns.
-        self._quote_lock = asyncio.Lock()
+        # True once a job's crash has alerted the owner; cleared by the next
+        # clean run, so a job that fails every interval pages once instead of
+        # once an interval.
+        self._crash_alerted: set[str] = set()
         # Filled on the first `is_owner` call; never guessed from config.
         self._owner_id: int | None = None
-        # The per-guild lounge path (design.md §15, plan 3.11). Nothing here
-        # is wired into setup_hook yet; that's the cutover. The welcome map is
-        # keyed (guild_id, user_id), the quote locks by guild, and
-        # `guild_notifier` is where a lounge problem goes (the task 8 router's
-        # `notify_guild`); unset, problems are logged with ids only.
+        # The one router: owner alerts, server notices and run reports all go
+        # through it. `client_sender` plus `home_guild_id` is what switches on
+        # the "this channel really belongs to that server" check at send time.
+        self.router = Router(
+            db_path, client_sender(self), cfg.admin_channel_id, home_guild_id=cfg.home_guild_id
+        )
+        # Join, remove and channel-delete handlers. A separate class so the
+        # events aren't dispatched by name to code that has no rows to write.
+        self.lifecycle = GuildLifecycle(db_path, cfg, self.router.alert_owner)
+        # The per-guild lounge path (design.md §15, plan 3.11). The welcome map
+        # is keyed (guild_id, user_id), the quote locks by guild, and
+        # `guild_notifier` is where a lounge problem goes (the router's
+        # `notify_guild`).
         self._lounges: dict[int, LoungeSettings] = {
-            lounge.guild_id: lounge for lounge in lounges or []
+            lounge.guild_id: lounge for lounge in lounge_rows
         }
         self._guild_welcomes = RecentWelcomes()
         self._guild_quote_locks: dict[int, asyncio.Lock] = {}
-        self.guild_notifier: Callable[[int, str], Awaitable[None]] | None = None
+        self.guild_notifier: Callable[[int, str], Awaitable[None]] | None = self.router.notify_guild
+        # Built in `setup_hook`, once the httpx and Anthropic clients exist.
+        self._fanout_deps: FanoutDeps | None = None
+        self._collection_deps: CollectionDeps | None = None
+        self._summary_deps: SummaryDeps | None = None
+        self._digest_deps: GuildDigestDeps | None = None
 
     async def is_owner(self, user: discord.abc.User) -> bool:
         """True iff `user` owns this application (the team's owner, for a team-owned one).
@@ -831,62 +783,83 @@ class NewsBot(discord.Client):
         gateway connection starts spinning, which is the only window where
         the scheduler started here binds to the same loop the gateway
         actually runs on (see this module's own docstring). Order within
-        this function matters too: command groups (including the
-        conditional `/shift codes` and, gated separately, `test-alert`)
-        are registered and synced before the scheduler exists, since
-        there's no reason to hold up the ones that don't need it;
-        `fail_pending_codes` runs before the code-sweep job is added, so a
-        code a prior process claimed and never confirmed posting for is
-        already flipped back to `'failed'` before anything else can touch
+        this function matters too: the clients and the shared deps come
+        first (everything below needs them); commands are registered and
+        synced next, since there's no reason to hold up the ones that don't
+        need the scheduler; the legacy `fail_pending_codes` runs before any
+        job exists, so a code a v2.2 process claimed and never confirmed is
+        already flipped to `'failed'` before anything else can touch
         `alerted_codes`; and `self.scheduler.start()` is the last line, so
         nothing fires before the rest of setup has actually finished.
+
+        The per-server pieces of startup (the import notice, pending-code
+        notices, reconciliation, the lounges, the permission sweep) need a
+        connected client, so they live in `on_ready`.
         """
-        # Imported here, not at module scope: commands.py imports NewsBot
-        # (for type hints on the factories' `bot` argument), and importing
-        # it back at module scope would make a circular import out of what
-        # is otherwise a plain layering.
-        from newsbot.bot.commands import make_admin_group, make_news_group, make_shift_group
+        # Imported here, not at module scope: registration.py imports NewsBot
+        # (for type hints on its factories' `bot` argument), and importing it
+        # back at module scope would make a circular import out of what is
+        # otherwise a plain layering.
+        from newsbot.bot import registration
 
         logger.info("newsbot starting", extra={"instance_id": _INSTANCE_ID, "hostname": _HOSTNAME})
         warn_if_contact_unset()
 
         self.http_client = httpx.AsyncClient(headers=user_agent_headers())
         self.llm = AnthropicLLM(self.secrets.anthropic_api_key.get_secret_value())
+        self._wire()
 
-        self.tree.add_command(make_news_group(self.cfg, self.db_path))
-        self.tree.add_command(make_admin_group(self.cfg, self))
-        if self.cfg.alerts.enabled:
-            # D4 (design.md §13): a codes list from a feature that's off
-            # would always be empty: no point registering a third
-            # top-level group for it.
-            self.tree.add_command(make_shift_group(self.cfg, self.db_path))
+        await registration.setup_commands(self)
 
-        guild = discord.Object(id=self.cfg.guild_id)
-        self.tree.copy_global_to(guild=guild)
-        synced = await self.tree.sync(guild=guild)
-        logger.info(
-            "synced %d commands to guild",
-            len(synced),
-            extra={"guild_id": self.cfg.guild_id},
-        )
+        # Pre-import rows only: a v2.2 process could have died mid-send. Per-server
+        # claims are recovered (and their servers told) in `on_ready`.
+        self._interrupted_codes = await asyncio.to_thread(self._fail_pending_codes_sync)
 
-        tz = ZoneInfo(self.cfg.digest.timezone)
-        digest_time = _parse_digest_time(self.cfg.digest.time)
+        tz = ZoneInfo(self.cfg.owner_report.timezone)
         self.scheduler = AsyncIOScheduler(timezone=tz)
+        # Hourly shared collection (SHiFT detection and fan-out ride along). The
+        # first pass is two minutes after startup, not immediately: setup_hook
+        # is still finishing, and a pass at t=0 would race it.
         self.scheduler.add_job(
-            self._daily_job,
-            CronTrigger(hour=digest_time.hour, minute=digest_time.minute, timezone=tz),
-            id="daily-digest",
-            misfire_grace_time=3600,
+            self._collection_job,
+            id="collection",
+            next_run_time=datetime.now(tz) + timedelta(minutes=2),
+            **collection_job_options(self.cfg),
+        )
+        # Every minute: whichever servers are due. Inert until `on_ready` is done.
+        self.scheduler.add_job(
+            self._digest_job,
+            IntervalTrigger(minutes=1),
+            id="guild-digests",
             coalesce=True,
             max_instances=1,
+            misfire_grace_time=30,
         )
-        # 3:30 a.m. local: late enough that it never overlaps a 9 a.m.
-        # digest, early enough nobody's awake to notice a slow purge.
+        # The comped servers' summaries, made ahead of time so a digest never
+        # waits on Claude.
+        self.scheduler.add_job(
+            self._summaries_job,
+            IntervalTrigger(minutes=5),
+            id="summaries",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=120,
+        )
+        # 3:30 a.m. in the owner's zone: late enough that nobody's awake to
+        # notice a slow purge.
         self.scheduler.add_job(
             self._retention_job,
             CronTrigger(hour=3, minute=30, timezone=tz),
             id="retention",
+            misfire_grace_time=3600,
+            coalesce=True,
+            max_instances=1,
+        )
+        report_at = _parse_digest_time(self.cfg.owner_report.time)
+        self.scheduler.add_job(
+            self._owner_report_job,
+            CronTrigger(hour=report_at.hour, minute=report_at.minute, timezone=tz),
+            id="owner-report",
             misfire_grace_time=3600,
             coalesce=True,
             max_instances=1,
@@ -898,217 +871,309 @@ class NewsBot(discord.Client):
             coalesce=True,
             max_instances=1,
         )
-
-        if self.cfg.alerts.enabled:
-            # cfg.alerts.channel_id is required (validated in load_config)
-            # whenever cfg.alerts.enabled is True, so it's never None here.
-            self.code_alert_poster = DiscordCodeAlertPoster(self, self.cfg.alerts.channel_id)
-            # A prior process may have died between claiming a code (and
-            # spending the ping budget on it) and confirming the Discord
-            # send landed (R4): flip those back to 'failed' before
-            # anything else can touch alerted_codes, and remember which
-            # ones so the first on_ready can tell an admin.
-            self._interrupted_codes = await asyncio.to_thread(self._fail_pending_codes_sync)
-            self.scheduler.add_job(
-                self._sweep_job,
-                IntervalTrigger(minutes=self.cfg.alerts.interval_minutes, timezone=tz),
-                id="code-sweep",
-                # The first sweep two minutes after startup, not
-                # immediately: setup_hook is still finishing (the gateway
-                # hasn't necessarily cached guild/channel state yet), and
-                # a sweep at t=0 would race that.
-                next_run_time=datetime.now(tz) + timedelta(minutes=2),
-                coalesce=True,
-                max_instances=1,
-                misfire_grace_time=300,
-            )
-
-        if self.cfg.lounge.daily_quote.enabled:
-            schedule_daily_quote(self.scheduler, self.cfg, self._quote_job)
-
         self.scheduler.start()
+
+    def _wire(self) -> None:
+        """Build the shared deps, once the httpx and Anthropic clients exist.
+
+        Everything that tells a human something goes through `self.router`:
+        the owner's alerts through `alert_owner`, a server's through
+        `notify_guild`, a server's run report through `send_report`.
+        """
+        if self.http_client is None or self.llm is None:
+            raise RuntimeError("_wire() called before the clients exist")
+        router = self.router
+        self._fanout_deps = FanoutDeps(
+            cfg=self.cfg,
+            db_path=self.db_path,
+            now=_utcnow,
+            poster_for=self._poster_for,
+            notify_guild=router.notify_guild,
+            alert_owner=router.alert_owner,
+        )
+        # `collectors` is filled fresh before every pass (see `_collection_job`).
+        self._collection_deps = CollectionDeps(
+            cfg=self.cfg,
+            db_path=self.db_path,
+            http=self.http_client,
+            collectors=[],
+            now=_utcnow,
+            alert=router.alert_owner,
+            rate_limit_state=self._rate_limit_state,
+            shift_hook=make_shift_hook(self._fanout_deps),
+        )
+        brave = self.secrets.brave_api_key
+        self._summary_deps = SummaryDeps(
+            cfg=self.cfg,
+            db_path=self.db_path,
+            llm=self.llm,
+            now=_utcnow,
+            alert=router.alert_owner,
+            collection=self._collection_deps,
+            brave_api_key=brave.get_secret_value() if brave is not None else None,
+        )
+        self._digest_deps = GuildDigestDeps(
+            cfg=self.cfg,
+            db_path=self.db_path,
+            now=_utcnow,
+            publisher_for=self._publisher_for,
+            notify_guild=router.notify_guild,
+            summary_for=summary_lookup(self._summary_deps),
+            retry_summary=retry_lookup(self._summary_deps),
+            send_report=router.send_report,
+        )
+
+    def guild_digest_deps(self) -> GuildDigestDeps:
+        """The one `GuildDigestDeps` the minute job and every command share.
+
+        The same object every call, on purpose: the per-server locks live in
+        it, and a fresh one per call would let run-now, preview and the
+        schedule all publish at once.
+        """
+        if self._digest_deps is None:
+            raise RuntimeError("guild_digest_deps() called before setup_hook() finished")
+        return self._digest_deps
+
+    def _publisher_for(
+        self,
+        guild: GuildSettings,
+        scope: str,
+        already: dict[str, int],
+        on_posted: Callable[[str, int], Awaitable[None]],
+    ) -> DiscordPublisher:
+        return DiscordPublisher(
+            self,
+            nonce_scope=scope,
+            on_posted=on_posted,
+            already_posted=already,
+            skip_permanent=True,
+        )
+
+    def _poster_for(
+        self, guild_id: int, channel_id: int, ping: str, notify: Callable[[str], Awaitable[None]]
+    ) -> DiscordCodeAlertPoster:
+        return DiscordCodeAlertPoster(self, channel_id, ping, notify)
 
     def _fail_pending_codes_sync(self) -> list[str]:
         with closing(connect(self.db_path)) as conn:
-            return fail_pending_codes(conn)
+            return repo.fail_pending_codes(conn)
 
     async def on_ready(self) -> None:
-        """First-connection-only startup work: interrupted-codes alert, permission check, catch-up.
+        """First-connection-only startup work, in the order that matters.
 
-        Guarded by `self._ready_once`: discord.py fires `on_ready` on
-        every reconnect, and none of this should repeat just because a
-        network blip forced a new gateway session. On the genuine first
-        connection, order matters the same way it does in `setup_hook`: an
-        admin hears about SHiFT codes a prior crash may have left stuck
-        before anything else runs (so it doesn't get buried under later
-        noise), then the channel permission check runs (so a permission
-        problem is on record before a run that might hit it), and only
-        then does the startup catch-up check decide whether to run today's
-        digest right now.
+        Guarded by `self._ready_once`: discord.py fires `on_ready` on every
+        reconnect, and none of this should repeat just because a network
+        blip forced a new gateway session. On the genuine first connection:
+
+        1. the import notice, if this start did the import;
+        2. SHiFT codes a crash left pending (the owner hears a count, each
+           server hears its own), then whatever is still queued is delivered;
+        3. reconciliation, so servers the bot left are dropped and servers it
+           joined while down get a row;
+        4. the lounges: reload, chunk members, schedule the quotes;
+        5. the permission sweep, with its counts to the owner;
+        6. only then, the minute digest job is switched on.
+
+        Each step is wrapped on its own and only logs when it blows up: a bug
+        in one of them must never be the thing that stops the bot from
+        starting, or leaves every server without a digest.
         """
         # discord.py fires on_ready on every reconnect, not just the first
         # connection: without this flag, a network blip a week into
-        # uptime would re-run the startup catch-up check.
+        # uptime would re-run all of this.
         if self._ready_once:
             return
         self._ready_once = True
+        await self._startup_step("import notice", self._send_import_notice)
+        await self._startup_step("pending codes", self._recover_codes)
+        await self._startup_step("reconcile", self._reconcile)
+        await self._startup_step("lounge reload", self.reload_lounges)
+        await self._startup_step("lounge chunking", self.chunk_lounge_guilds)
+        await self._startup_step("lounge quotes", self.schedule_lounge_quotes)
+        await self._startup_step("permission sweep", self._permission_sweep)
+        self._digests_enabled = True
+        logger.info("startup finished; per-server digests are on")
+
+    async def _startup_step(self, name: str, step: Callable[[], Awaitable[object]]) -> None:
+        try:
+            await step()
+        except Exception as exc:
+            logger.exception("startup step %r failed", name)
+            await self.alert(f"newsbot: startup step {name!r} failed: {_alert_reason(exc)}")
+
+    async def _send_import_notice(self) -> None:
+        report = self._import_report
+        if report is not None:
+            await self.alert(report.owner_notice())
+            self._import_report = None
+
+    async def _recover_codes(self) -> None:
+        """Tell people about codes a crash left pending, then deliver what's still queued."""
         if self._interrupted_codes:
-            # Reported once, before catch-up runs: an admin reading this
-            # should see "these may be stuck" before anything else happens
-            # that could distract from it, and it's a one-time read: this
-            # list isn't re-checked on a later reconnect.
+            # A one-time read: this list isn't re-checked on a later reconnect.
             await self.alert(
                 "newsbot: found SHiFT code(s) left 'pending' from a prior crash: "
                 + ", ".join(self._interrupted_codes)
                 + ". They were never confirmed posted; check the SHiFT codes channel."
             )
-        await self._check_permissions()
-        await self._catch_up()
+        if self._fanout_deps is None:
+            raise RuntimeError("_recover_codes() called before setup_hook() finished")
+        # Each server hears about its own; the owner hears how many, and nothing
+        # about whose.
+        recovered = await recover_pending_guild_codes(self.db_path, self.router.notify_guild)
+        if recovered:
+            await self.alert(
+                f"newsbot: {recovered} SHiFT code alert(s) were in flight when the bot last "
+                "stopped. They may or may not have posted; each server was told."
+            )
+        await deliver_queued_codes(self._fanout_deps, startup=True)
 
-    async def _check_permissions(self) -> None:
-        """One admin alert naming every channel permission problem, or none if clean.
+    async def _reconcile(self) -> None:
+        await self.lifecycle.reconcile(self)
 
-        design.md §13: this runs once, on the first `on_ready`, after the
-        interrupted-codes alert (an admin should hear about codes that may
-        already be stuck before anything else) and before catch-up (so a
-        permission problem is on record before a run that might hit it).
-        Wrapped in its own try/except that only logs: a bug in the check
-        itself must never be the thing that stops the bot from starting or
-        from running today's digest.
-        """
-        try:
-            problems = await check_channels(self, self.cfg)
-            if problems:
-                await self.alert(render_permission_alert(problems))
-        except Exception:
-            logger.exception("startup permission check crashed")
-
-    async def _catch_up(self) -> None:
-        now = datetime.now(UTC)
-        now_local = now.astimezone(ZoneInfo(self.cfg.digest.timezone))
-        digest_time = _parse_digest_time(self.cfg.digest.time)
-        run_date = local_run_date(now, self.cfg.digest.timezone)
-
-        existing = await asyncio.to_thread(self._get_digest_sync, run_date)
-        if should_catch_up(now_local, digest_time, existing):
-            logger.info("catch-up: running today's digest at startup")
-            await self._daily_job(RunKind.CATCH_UP)
-        elif existing is not None and existing.status == "pending":
-            await self.alert(_PENDING_STARTUP_ALERT)
-        elif existing is not None and existing.status == "failed" and existing.posted_message_ids:
-            await self.alert(_PARTIAL_FAILURE_STARTUP_ALERT)
-
-    def _get_digest_sync(self, run_date: date) -> DigestRow | None:
-        with closing(connect(self.db_path)) as conn:
-            return get_digest(conn, run_date)
-
-    def build_deps(self, run_kind: RunKind | None = None) -> Deps:
-        """Assemble a fresh `Deps` for one pipeline run.
-
-        Collectors are rebuilt each call rather than cached on `self`:
-        they're cheap to construct and stateless between runs, and
-        rebuilding sidesteps any question of whether a collector instance
-        is safe to reuse across concurrent-in-theory (but lock-serialized
-        in practice) runs.
-
-        `run_kind` is `None` for `/newsbot preview` (which never reports
-        regardless; see `_maybe_send_run_report`) and every caller that
-        predates the admin-channel run report (design.md §6); `_daily_job`
-        and `/newsbot run-now` pass their own so the report can say
-        `scheduled`/`catch-up`/`run-now` without saying who ran it.
-        """
-        if self.http_client is None or self.llm is None:
-            raise RuntimeError("build_deps() called before setup_hook() finished")
-        return Deps(
-            cfg=self.cfg,
-            db_path=self.db_path,
-            http=self.http_client,
-            llm=self.llm,
-            collectors=build_collectors(self.cfg, self.secrets),
-            now=lambda: datetime.now(UTC),
-            alert=self.alert,
-            rate_limit_state=self._rate_limit_state,
-            code_alert_poster=self.code_alert_poster,
-            run_kind=run_kind,
+    async def _permission_sweep(self) -> None:
+        """Check every set-up server's channels; each is told on change, the owner gets counts."""
+        names = {game.key: game.name for game in self.cfg.catalog}
+        result = await sweep_guild_permissions(
+            self, self.db_path, self.router.notify_guild, game_names=names
         )
-
-    def build_sweep_deps(self) -> SweepDeps:
-        """Assemble a fresh `SweepDeps` for one hourly code sweep.
-
-        Collectors are built fresh here too, same as `build_deps`, and for
-        an extra reason specific to Bluesky: its session JWT lasts about
-        two hours with no refresh, so a sweep every `interval_minutes`
-        rebuilding its own `BlueskyCollector` (and logging in again) is
-        what keeps that source working sweep after sweep instead of going
-        silently stale partway through the day.
-        """
-        if self.http_client is None or self.code_alert_poster is None:
-            raise RuntimeError("build_sweep_deps() called before alerts were set up")
-        return SweepDeps(
-            cfg=self.cfg,
-            db_path=self.db_path,
-            http=self.http_client,
-            collectors=build_collectors(self.cfg, self.secrets, include_web_search=False),
-            now=lambda: datetime.now(UTC),
-            alert=self.alert,
-            poster=self.code_alert_poster,
-            rate_limit_state=self._rate_limit_state,
-        )
+        line = render_sweep_counts(result)
+        if line:
+            await self.alert(line)
 
     async def alert(self, text: str) -> None:
-        await send_alert(self, self.cfg.admin_channel_id, text)
+        """Tell the owner something bot-wide (their channel in the home guild). Never raises."""
+        await self.router.alert_owner(text)
 
-    def publisher_for_today(self) -> DiscordPublisher:
-        return DiscordPublisher(self)
+    # --- The jobs ---
 
-    async def _daily_job(self, run_kind: RunKind = RunKind.SCHEDULED) -> None:
-        try:
-            deps = self.build_deps(run_kind)
-            outcome = await run_daily(deps, self.publisher_for_today(), mode=RunMode.POST)
-            logger.info(
-                "daily job finished",
-                extra={"status": outcome.status, "notes": outcome.notes},
-            )
-        except Exception as exc:  # the job boundary: nothing here may take the process down
-            logger.exception("daily job crashed at the job boundary")
-            await self.alert(f"newsbot: daily job crashed: {_alert_reason(exc)}")
+    async def _alert_once(self, key: str, text: str) -> None:
+        """Alert the owner about a job crash, once, until that job next runs clean."""
+        if key not in self._crash_alerted:
+            self._crash_alerted.add(key)
+            await self.alert(text)
 
-    async def _sweep_job(self) -> None:
-        """The job boundary for the hourly SHiFT alert sweep (design.md §12).
+    async def _collection_job(self) -> None:
+        """The hourly shared collection pass; nothing raised in here may take the process down.
 
-        Same shape as `_daily_job`: nothing raised in here may take the
-        process down. Unlike the two-instance alert, a crash here alerts
-        only the *first* time (`_sweep_crash_alerted`): a sweep that
-        fails every interval would otherwise page an admin channel once an
-        hour for the same underlying problem, which teaches everyone to
-        ignore the channel. The next *successful* sweep clears the flag,
-        so a fixed problem goes back to paging on its next failure.
+        The collectors are rebuilt every pass, and for an extra reason specific
+        to Bluesky: its session JWT lasts about two hours with no refresh, so a
+        pass that logs in again is what keeps that source working pass after pass.
+        A crash alerts the owner the first time only; the next clean pass re-arms it.
         """
+        deps = self._collection_deps
+        if deps is None:
+            raise RuntimeError("_collection_job() ran before setup_hook() finished")
         try:
-            outcome = await run_code_sweep(self.build_sweep_deps())
-            if outcome is None:
-                logger.info("code sweep skipped: run lock held")
+            deps.collectors = build_collection_collectors(self.cfg, self.secrets)
+            outcome = await run_collection(deps)
+            if outcome.skipped:
+                logger.info("collection pass skipped: run lock held")
             else:
-                self._sweep_crash_alerted = False
+                self._crash_alerted.discard("collection")
                 logger.info(
-                    "code sweep finished",
+                    "collection pass finished",
                     extra={
-                        "posted": outcome.posted,
-                        "silent": outcome.silent,
-                        "failed": outcome.failed,
-                        "ping": outcome.ping,
+                        "summary": outcome.summary,
+                        "duration_s": round(outcome.duration_s, 1),
                     },
                 )
-        except Exception as exc:
-            logger.exception("code sweep crashed at the job boundary")
-            if not self._sweep_crash_alerted:
-                self._sweep_crash_alerted = True
-                await self.alert(f"newsbot: SHiFT code sweep crashed: {_alert_reason(exc)}")
+        except Exception as exc:  # the job boundary
+            logger.exception("collection pass crashed at the job boundary")
+            await self._alert_once(
+                "collection", f"newsbot: collection pass crashed: {_alert_reason(exc)}"
+            )
+
+    async def _digest_job(self) -> None:
+        """The every-minute tick: run the digest of every server that's due.
+
+        A no-op until the first `on_ready` has finished its startup work (the
+        channel cache isn't ready before then). `run_due_guilds` already
+        isolates one server's failure from the next; this is the boundary for
+        whatever it can't (a locked database, say), and it alerts once, not once a minute.
+        """
+        if not self._digests_enabled:
+            return
+        try:
+            outcomes = await run_due_guilds(self.guild_digest_deps())
+            self._crash_alerted.discard("digests")
+            if outcomes:
+                logger.info(
+                    "digest tick finished",
+                    extra={
+                        "servers": len(outcomes),
+                        "failed": sum(1 for o in outcomes if o.status == "failed"),
+                    },
+                )
+        except Exception as exc:  # the job boundary
+            logger.exception("digest tick crashed at the job boundary")
+            await self._alert_once("digests", f"newsbot: digest tick crashed: {_alert_reason(exc)}")
+
+    async def _summaries_job(self) -> None:
+        """Every five minutes: make the summaries the next comped digests will need."""
+        if self._summary_deps is None:
+            raise RuntimeError("_summaries_job() ran before setup_hook() finished")
+        try:
+            done = await prepare_summaries(self._summary_deps)
+            self._crash_alerted.discard("summaries")
+            if done:
+                logger.info("summaries prepared", extra={"games": done})
+        except Exception as exc:  # the job boundary
+            logger.exception("summaries job crashed at the job boundary")
+            await self._alert_once(
+                "summaries", f"newsbot: summaries job crashed: {_alert_reason(exc)}"
+            )
+
+    def _owner_report_sync(self, now: datetime, today: str) -> str | None:
+        """The report text, or None if today's has already gone out.
+
+        The date is written *before* sending (and after the numbers are
+        gathered): a crash in between loses one report, which beats sending
+        two. The day's digests are the newest row per server touched in the
+        last 24 hours; `partial` counts as posted
+        (it did post, with something skipped or degraded), and `pending` and
+        `failed` are the failures, grouped by `outcome_from_digest`'s reasons.
+        """
+        with closing(connect(self.db_path)) as conn:
+            if repo.app_state_get(conn, _OWNER_REPORT_KEY) == today:
+                return None
+            rows = repo.recent_guild_digests(conn, now - timedelta(hours=24))
+            failing = repo.failing_sources(conn)
+            repo.app_state_set(conn, _OWNER_REPORT_KEY, today)
+        outcomes = [outcome_from_digest(status, notes) for status, notes in rows]
+        return render_owner_report(outcomes, failing)
+
+    async def _owner_report_job(self) -> None:
+        """Once a day, at `owner_report.time`: the all-servers summary, to the owner."""
+        try:
+            now = datetime.now(UTC)
+            today = now.astimezone(ZoneInfo(self.cfg.owner_report.timezone)).date().isoformat()
+            text = await asyncio.to_thread(self._owner_report_sync, now, today)
+            if text is not None:
+                await self.alert(text)
+        except Exception as exc:  # the job boundary
+            logger.exception("owner report crashed at the job boundary")
+            await self.alert(f"newsbot: daily report crashed: {_alert_reason(exc)}")
+
+    # --- Gateway events ---
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self.lifecycle.on_guild_join(guild)
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        await self.lifecycle.on_guild_remove(guild)
+        # Its lounge row went with the guild's; the quote job would notice at its
+        # next fire and remove itself, but there's no reason to wait.
+        self._lounges.pop(guild.id, None)
+        job_id = f"daily-quote-{guild.id}"
+        if self.scheduler is not None and self.scheduler.get_job(job_id) is not None:
+            self.scheduler.remove_job(job_id)
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        await self.lifecycle.on_guild_channel_delete(channel)
 
     async def on_member_join(self, member: discord.Member) -> None:
-        if not self.cfg.lounge.welcome.enabled:
-            return
-        await self._maybe_welcome(member, "join")
+        await self.handle_member_join(member)
 
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
         """Welcome a member who just got through rules screening (`pending` true to false).
@@ -1116,121 +1181,14 @@ class NewsBot(discord.Client):
         Nickname changes, role changes and everything else that fires this
         event are none of our business.
         """
-        if not self.cfg.lounge.welcome.enabled:
-            return
-        if before.pending and not after.pending:
-            await self._maybe_welcome(after, "accepted")
-
-    async def _maybe_welcome(self, member: discord.Member, event: str) -> None:
-        """Decide, record, render and post one welcome; problems go to the admin channel.
-
-        The log line carries the event, `pending`, `flags.value` and the
-        decision, and never the user ID or name: I want to see how Onboarding
-        behaves in the test guild without keeping a guest list in the logs.
-        The failure alert doesn't name the member either.
-        """
-        try:
-            action = welcome_action(
-                in_guild=member.guild.id == self.cfg.guild_id,
-                is_bot=member.bot,
-                pending=member.pending,
-            )
-            decision: str = action
-            # No await between the check and the record (they're one call), so
-            # two events for the same member can't both get through.
-            if action == "welcome" and not self._recent_welcomes.check_and_record(
-                member.id, datetime.now(UTC)
-            ):
-                decision = "recent"
-            logger.info(
-                "member event %s: pending=%s flags=%s decision=%s",
-                event,
-                member.pending,
-                member.flags.value,
-                decision,
-                extra={
-                    "welcome_event": event,
-                    "pending": member.pending,
-                    "flags": member.flags.value,
-                    "decision": decision,
-                },
-            )
-            if decision != "welcome":
-                return
-            text = render_welcome(
-                self.cfg.lounge.welcome.message,
-                member_mention=member.mention,
-                server_name=member.guild.name,
-            )
-            channel = await self._lounge_channel()
-            await channel.send(
-                text,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False, users=[member], roles=False, replied_user=False
-                ),
-            )
-        except Exception as exc:
-            # No traceback, on purpose: it ends with the exception's message,
-            # and the design promises nothing about members reaches the logs.
-            # The class name and (for Discord) the status and code are enough
-            # to tell what happened, and none of it can name a person.
-            logger.error("welcome failed: %s%s", type(exc).__name__, _http_detail(exc))
-            await self.alert(
-                f"newsbot: couldn't post a welcome in the lounge ({type(exc).__name__}). "
-                "The details are in the bot's log."
-            )
-
-    async def _lounge_channel(self) -> discord.abc.Messageable:
-        channel_id = self.cfg.lounge.channel_id
-        if channel_id is None:
-            raise RuntimeError("lounge.channel_id is not set")
-        channel = self.get_channel(channel_id)
-        if channel is None:
-            channel = await self.fetch_channel(channel_id)
-        return channel
-
-    def build_quote_deps(self) -> QuoteDeps:
-        """Assemble a fresh `QuoteDeps` for one quote run (the job or `quote-now`)."""
-        sources = self.cfg.lounge.daily_quote.sources
-        if self.http_client is None or sources is None:
-            raise RuntimeError("build_quote_deps() called before setup_hook() finished")
-
-        async def post(text: str) -> int:
-            channel = await self._lounge_channel()
-            sent = await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
-            return sent.id
-
-        return QuoteDeps(
-            sources=sources,
-            db_path=self.db_path,
-            http=self.http_client,
-            local_day=local_run_date(datetime.now(UTC), self.cfg.digest.timezone),
-            now=lambda: datetime.now(UTC),
-            post=post,
-            alert=self.alert,
-            rng=random.SystemRandom(),
-            cache_dir=cache_dir_for(self.db_path),
-        )
-
-    async def run_quote(self, force: bool) -> QuoteOutcome:
-        """Run the daily quote under the lock, so the job and `quote-now` can't overlap."""
-        async with self._quote_lock:
-            return await run_daily_quote(self.build_quote_deps(), force=force)
-
-    async def _quote_job(self) -> None:
-        try:
-            outcome = await self.run_quote(False)
-            logger.info("quote job finished", extra={"status": outcome.status})
-        except Exception as exc:  # the job boundary: nothing here may take the process down
-            logger.exception("daily quote job crashed at the job boundary")
-            await self.alert(f"newsbot: daily quote job crashed: {_alert_reason(exc)}")
+        await self.handle_member_update(before, after)
 
     # --- The per-guild lounge (design.md §15, plan 3.11) ---
     #
-    # Everything from here to `_retention_job` is the public app's lounge,
-    # sitting next to v2.2's until the cutover swaps them. Settings come from
-    # `guild_lounge` rows, never from `config.yaml`; a server with no row
-    # (or welcomes off) is simply not part of the conversation.
+    # Everything from here to `_retention_job` is the lounge. Settings come
+    # from `guild_lounge` rows (the `lounge:` block in config.yaml only feeds
+    # the imported server's row, at startup); a server with no row (or
+    # welcomes off) is simply not part of the conversation.
 
     def _list_lounges_sync(self) -> list[LoungeSettings]:
         with closing(connect(self.db_path)) as conn:
@@ -1283,7 +1241,7 @@ class NewsBot(discord.Client):
     async def notify_lounge_guild(self, guild_id: int, text: str) -> None:
         """Tell one server's admins about a lounge problem. Never raises.
 
-        No notifier wired (the v2 path) means the text is dropped and a line
+        No notifier wired means the text is dropped and a line
         with the guild id only is logged; it still never goes to the owner,
         because a stranger's broken welcome isn't the owner's page.
         """
@@ -1295,16 +1253,27 @@ class NewsBot(discord.Client):
         except Exception:
             logger.exception("couldn't send a lounge notice", extra={"guild_id": guild_id})
 
+    def _welcoming_lounge(self, member: discord.Member) -> LoungeSettings | None:
+        """The lounge that welcomes this member's server, if there is one.
+
+        A member with no server (discord.py never builds one, but I have been
+        wrong about "never" before) has nobody to tell and nowhere to welcome
+        them, so it's the same as a server with no lounge.
+        """
+        guild_id = getattr(getattr(member, "guild", None), "id", None)
+        lounge = self._lounges.get(guild_id) if guild_id is not None else None
+        return lounge if lounge is not None and lounge.welcome_enabled else None
+
     async def handle_member_join(self, member: discord.Member) -> None:
-        lounge = self._lounges.get(member.guild.id)
-        if lounge is None or not lounge.welcome_enabled:
+        lounge = self._welcoming_lounge(member)
+        if lounge is None:
             return
         await self._welcome_member(member, lounge, "join")
 
     async def handle_member_update(self, before: discord.Member, after: discord.Member) -> None:
         """Welcome a member who just got through rules screening, in a lounge guild only."""
-        lounge = self._lounges.get(after.guild.id)
-        if lounge is None or not lounge.welcome_enabled:
+        lounge = self._welcoming_lounge(after)
+        if lounge is None:
             return
         if before.pending and not after.pending:
             await self._welcome_member(after, lounge, "accepted")
@@ -1312,11 +1281,14 @@ class NewsBot(discord.Client):
     async def _welcome_member(
         self, member: discord.Member, lounge: LoungeSettings, event: str
     ) -> None:
-        """`_maybe_welcome` for a lounge row: same decision, same logging rules, per-guild state.
+        """Decide, record, render and post one welcome; problems go to that server's admins.
 
-        The 24-hour map is keyed `(guild_id, user_id)`, so a welcome in one
-        server doesn't use up the same person's welcome in another. The
-        failure notice goes to this server's admins and names nobody.
+        The log line carries the event, `pending`, `flags.value` and the
+        decision, and never the user ID or name: I want to see how Onboarding
+        behaves without keeping a guest list in the logs. The 24-hour map is
+        keyed `(guild_id, user_id)`, so a welcome in one server doesn't use up
+        the same person's welcome in another. The failure notice goes to this
+        server's admins and names nobody.
         """
         guild_id = member.guild.id
         try:
@@ -1356,8 +1328,8 @@ class NewsBot(discord.Client):
                 ),
             )
         except Exception as exc:
-            # Same rule as v2: no traceback (it ends with the exception's
-            # message), so nothing about a member reaches the logs.
+            # No traceback, on purpose: it ends with the exception's message,
+            # so nothing about a member reaches the logs.
             logger.error(
                 "welcome failed in guild %s: %s%s", guild_id, type(exc).__name__, _http_detail(exc)
             )
@@ -1504,18 +1476,26 @@ class NewsBot(discord.Client):
     async def _retention_job(self) -> None:
         try:
             cutoff = datetime.now(UTC) - timedelta(days=_RETENTION_DAYS)
-            items_deleted, stories_deleted = await asyncio.to_thread(self._purge_sync, cutoff)
+            deleted = await asyncio.to_thread(self._purge_sync, cutoff)
             logger.info(
                 "retention purge finished",
-                extra={"items_deleted": items_deleted, "stories_deleted": stories_deleted},
+                extra={
+                    "items_deleted": deleted[0],
+                    "stories_deleted": deleted[1],
+                    "summaries_deleted": deleted[2],
+                    "notices_deleted": deleted[3],
+                },
             )
         except Exception as exc:
             logger.exception("retention job crashed")
             await self.alert(f"newsbot: retention job crashed: {_alert_reason(exc)}")
 
-    def _purge_sync(self, cutoff: datetime) -> tuple[int, int]:
+    def _purge_sync(self, cutoff: datetime) -> tuple[int, int, int, int]:
+        """Items and stories, then (the public app's additions) summaries and server notices."""
         with closing(connect(self.db_path)) as conn:
-            return purge_older_than(conn, cutoff)
+            items, stories = repo.purge_older_than(conn, cutoff)
+            summaries, notices = repo.purge_guild_data_older_than(conn, cutoff)
+        return items, stories, summaries, notices
 
     async def _heartbeat_job(self) -> None:
         # Written iff the gateway is actually connected and the scheduler
@@ -1539,8 +1519,8 @@ class GuildLifecycle:
 
     These are deliberately not methods on `NewsBot`: discord.py dispatches
     `on_guild_join` and friends by name, so defining them there would switch
-    them on for the v2 bot, which has no `guilds` rows to write. Task 13
-    builds one of these and forwards the events to it.
+    them on for code that has no `guilds` rows to write. `NewsBot` builds one of
+    these and forwards the events to it.
 
     `alert_owner` is the owner alert path (`Router.alert_owner`). Logs carry
     guild ids only; a server's name is its own business.
@@ -1774,10 +1754,7 @@ __all__ = [
     "DiscordPublisher",
     "GuildLifecycle",
     "NewsBot",
-    "NullPublisher",
-    "build_intents",
     "build_intents_for_lounges",
-    "schedule_daily_quote",
+    "mentions_for",
     "schedule_guild_quote",
-    "should_catch_up",
 ]

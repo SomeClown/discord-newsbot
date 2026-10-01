@@ -88,7 +88,9 @@ def find_codes(text: str) -> list[str]:
 def is_code(value: str) -> bool:
     """Whether `value` is, on its own, exactly one standalone SHiFT code.
 
-    Used to validate a code typed into `/newsbot test-alert`: CODE_RE's
+    The alert renderer uses this to refuse anything that isn't code-shaped
+    before it goes into a message (it was also what validated
+    `/newsbot test-alert`'s argument, back when that existed). CODE_RE's
     boundary lookarounds trivially succeed at the start and end of a bare
     string (there's no character there to fail them), so this is just
     "does the whole string match the shape", case included, plus the same

@@ -1,8 +1,10 @@
 """`_publish_with_retry` x `DiscordPublisher` orchestration (design.md §13).
 
 `test_discord_publisher.py` pins `DiscordPublisher.publish()` itself in
-isolation; `test_run_daily_state_machine.py` pins the whole `run_daily`
-state machine. This file sits in between: it exercises the actual retry
+isolation; `test_guild_digest.py` pins the whole per-server digest state machine.
+(The v2 failure-alert wording tests that used to close this file moved to
+`test_guild_digest_ported.py`, which asks the same questions of the notice a
+server's admins get.) This file sits in between: it exercises the actual retry
 loop (`newsbot/pipeline/run.py::_publish_with_retry`) driving a real
 `DiscordPublisher` against hand-written channel/client fakes, across
 several topics and several attempts -- the shape of bug that only shows up
@@ -21,8 +23,7 @@ import discord
 
 from newsbot.bot.client import DiscordPublisher
 from newsbot.bot.format import RenderedDigest, TopicMessage
-from newsbot.pipeline.publisher import PublishError
-from newsbot.pipeline.run import _publish_with_retry, _render_publish_failure_alert
+from newsbot.pipeline.run import _publish_with_retry
 
 
 async def _no_sleep(_seconds: float) -> None:
@@ -208,42 +209,3 @@ async def test_permanent_failure_after_no_prior_success_reports_empty_posted_by_
     assert error is not None
     assert error.posted_by_topic == {}
     assert error.retryable is False
-
-
-# --- _render_publish_failure_alert (QA follow-up: partial-failure wording) ---
-
-
-def test_alert_names_posted_and_missing_topics_and_says_after_retries_when_retryable():
-    rendered = _rendered(
-        _topic_message("borderlands4", 1),
-        _topic_message("palworld", 2),
-        _topic_message("diablo4", 3),
-    )
-    error = PublishError("connection reset", posted_by_topic={"borderlands4": 100}, retryable=True)
-
-    message = _render_publish_failure_alert(rendered, {"borderlands4": 100}, error)
-
-    assert "publish failed after retries" in message
-    assert "posted: borderlands4" in message
-    assert "did not post: palworld, diablo4" in message
-
-
-def test_alert_omits_after_retries_wording_for_a_permanent_error():
-    rendered = _rendered(_topic_message("borderlands4", 1), _topic_message("palworld", 2))
-    error = PublishError("forbidden", posted_by_topic={"borderlands4": 100}, retryable=False)
-
-    message = _render_publish_failure_alert(rendered, {"borderlands4": 100}, error)
-
-    assert "after retries" not in message
-    assert "publish failed:" in message
-    assert "did not post: palworld" in message
-
-
-def test_alert_says_none_when_nothing_posted_at_all():
-    rendered = _rendered(_topic_message("borderlands4", 1))
-    error = PublishError("forbidden", posted_by_topic={}, retryable=False)
-
-    message = _render_publish_failure_alert(rendered, {}, error)
-
-    assert "posted: none" in message
-    assert "did not post: borderlands4" in message

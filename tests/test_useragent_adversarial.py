@@ -189,7 +189,7 @@ async def test_check_sources_cli_call_site_sends_the_user_agent_header(monkeypat
     # actually sent on the wire (not just the argument passed in) is what
     # gets asserted on.
     import newsbot.pipeline.run as run_module
-    from newsbot.config import RssSource
+    from newsbot.config import SharedRssSource
 
     transport, captured = _capturing_transport(httpx.Response(200, content=b"<rss></rss>"))
     real_async_client = httpx.AsyncClient
@@ -201,8 +201,17 @@ async def test_check_sources_cli_call_site_sends_the_user_agent_header(monkeypat
     monkeypatch.setattr(run_module.httpx, "AsyncClient", _patched_async_client)
 
     cfg = load_config(CONFIG_PATH)
-    source = RssSource(type="rss", name="Test Feed", url="https://example.com/feed", trust="press")
-    cfg = cfg.model_copy(update={"sources": [source]})
+    source = SharedRssSource(
+        type="rss", name="Test Feed", url="https://example.com/feed", trust="press"
+    )
+    # One source and nothing else, so the one request on the wire is this one.
+    cfg = cfg.model_copy(
+        update={
+            "catalog": [g.model_copy(update={"sources": []}) for g in cfg.catalog],
+            "shared_sources": [source],
+            "web_search": None,
+        }
+    )
     code = await run_module._run_check_sources_cli(cfg, str(CONFIG_PATH))
 
     assert code == 0
