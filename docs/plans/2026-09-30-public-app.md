@@ -86,6 +86,7 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 | D10 | Support contact for privacy and terms | The owner supplies it (email, or a support Discord invite). | T18 |
 | D11 | Approving the 12 new catalog entries | From task 17's report. | Rollout only |
 | D12 | Comp the friend's server by id too? | **Yes (owner, 2026-10-01).** Prod `config.yaml` sets `comped_guild_ids: [<the friend's guild_id>]`, the same id as the v2 `guild_id`. The import runs once, so without the list a kick and re-invite would bring the server back free. Never the home or test guild (D9; task 7's prompt rule). | Rollout only |
+| D13 | Does a SHiFT alert retried after a 429 keep its ping? | **Yes (owner, 2026-10-01).** A 429 means Discord refused the message, so nobody was pinged and the ping is still owed; any ambiguous failure (timeout, 5xx, connection error) strips it for every later attempt. | T14 |
 
 
 **Owner answers (2026-09-30):**
@@ -94,6 +95,7 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 - **D10:** the support contact is justsomeclown@gmail.com (owner, 2026-09-30), for the terms and privacy pages in task 18.
 - **D11:** approved 2026-09-30: all 12 researched games as proposed in `docs/plans/2026-09-30-public-app-catalog.yaml`, with the unverified FFXIV alias "Evercold" dropped.
 - **D12:** the friend's guild goes in prod `comped_guild_ids` (owner, 2026-10-01). Tests prove the import result, the tier and the AI prompt text are byte-identical with and without the listing, and that a listed guild that is removed and re-invited comes back `comped`, but as a fresh row (not set up, no games, SHiFT or lounge; it starts at `/newsbot setup`). Details in §9.
+- **D13:** a 429 retry keeps the `@everyone`/role ping (owner, 2026-10-01); once any ambiguous failure has happened, the ping is stripped for good. The invariant is at most one ping-bearing send that could have landed (`PublishError.rejected` marks a definite refusal).
 
 ---
 

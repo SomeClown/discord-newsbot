@@ -323,6 +323,7 @@ def _classify_send_error(exc: Exception, *, posted_ids: list[int] | None = None)
             f"discord send failed: {exc}",
             posted_ids=list(posted_ids or []),
             retry_after=_retry_after_s(exc) if rate_limited else None,
+            rejected=rate_limited,
         ) from exc
     if isinstance(exc, _TRANSIENT_ERRORS):
         raise PublishError(

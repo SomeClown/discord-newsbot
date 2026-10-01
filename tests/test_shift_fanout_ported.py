@@ -9,8 +9,9 @@ for this change, and the rest live here, in the same harness, with the same asse
 - who a batch pings (press counts, community alone doesn't, trusted codes lead the message);
 - the roundup rules (never pinged, never spends the budget, the 50 code cap, stale ones
   are recorded and never alerted, one code in two roundup items posts once);
-- a retry never risks a second live ping (the real `DiscordCodeAlertPoster`, a channel that
-  lands the message and raises anyway);
+- a retry never risks a second live ping that could have landed (the real
+  `DiscordCodeAlertPoster`, a channel that lands the message and raises anyway, and
+  one that refuses with a 429);
 - huge urls and source names never strand claimed rows.
 
 Nothing here talks to Discord; the clock only moves when a test moves it.
@@ -276,7 +277,7 @@ async def test_a_huge_url_and_source_name_never_strand_claimed_rows_pending(h):
     ]
 
 
-# --- a retry never risks a second live ping (v2: test_shift_sweep_ping_retry.py) ---
+# --- a retry never risks a second live ping that could have landed (v2: ping_retry tests) ---
 
 
 class _FakeMessage:
@@ -371,4 +372,94 @@ async def test_a_retry_never_sends_more_than_one_ping_even_when_every_attempt_fa
     assert set(post_status(h.db_path, 1).values()) == {"failed"}
     ping_bearing = [m for _c, m, _n in channel.sent if m.to_dict() == {"parse": ["everyone"]}]
     assert len(ping_bearing) <= 1
+    assert h.notices and "couldn't be posted" in h.notices[0][1]
+
+
+# The precise invariant (owner decision D13): at most one ping-bearing send that could have
+# landed. A 429 is Discord refusing the message, so nobody was pinged and a retry keeps the
+# ping; a run of 429s can therefore make several ping-bearing *attempts*. Any ambiguous
+# failure (timeout, 5xx, connection error) might have landed and pinged, so every attempt
+# after it goes out without one, even if a later failure is a 429.
+
+
+class _ScriptedChannel:
+    """`send()` follows `script`, one outcome per attempt: "429", "503", "timeout" or "ok".
+
+    Only "503" and "timeout" model a send that may have landed (the response got lost); a
+    "429" never lands. `maybe_landed` records the mentions of each send that could have
+    delivered, the thing the invariant is about.
+    """
+
+    def __init__(self, script: list[str]) -> None:
+        self.guild = type("G", (), {"me": object()})()
+        self.script = script
+        self.sent: list[tuple[str, discord.AllowedMentions, str | None]] = []
+        self.maybe_landed: list[discord.AllowedMentions] = []
+
+    def permissions_for(self, member: object) -> _FakePermissions:
+        return _FakePermissions()
+
+    async def send(self, content, *, allowed_mentions, nonce=None):
+        outcome = self.script[len(self.sent)] if len(self.sent) < len(self.script) else "ok"
+        self.sent.append((content, allowed_mentions, nonce))
+        if outcome == "429":
+            raise discord.HTTPException(_FakeResponse(429), "rate limited")
+        self.maybe_landed.append(allowed_mentions)
+        if outcome == "503":
+            raise discord.HTTPException(_FakeResponse(503), "unavailable")
+        if outcome == "timeout":
+            raise TimeoutError("no response")
+        return _FakeMessage(2000 + len(self.sent))
+
+
+def _pings(channel: _ScriptedChannel) -> list[bool]:
+    """Per attempt: did that send carry a live ping?"""
+    return [m.to_dict() == {"parse": ["everyone"]} for _c, m, _n in channel.sent]
+
+
+@pytest.mark.parametrize(
+    ("script", "attempt_pings"),
+    [
+        (["429", "ok"], [True, True]),
+        (["429", "429", "ok"], [True, True, True]),
+        (["timeout", "429", "ok"], [True, False, False]),
+        (["503", "429", "ok"], [True, False, False]),
+        (["429", "timeout", "ok"], [True, True, False]),
+        (["429", "503", "429", "ok"], [True, True, False, False]),
+    ],
+)
+async def test_a_429_keeps_the_ping_and_an_ambiguous_failure_ends_it(h, script, attempt_pings):
+    add_guild(h.db_path, 1, ping="everyone")
+    channel = _ScriptedChannel(script)
+    use_the_real_poster(h, channel)
+
+    await h.run([item(CODE_A)])
+
+    assert _pings(channel) == attempt_pings
+    # Same nonce on every attempt, and the ping budget claimed once however many retries ran.
+    nonces = {n for _c, _m, n in channel.sent}
+    assert len(nonces) == 1 and nonces.pop()
+    # The invariant: at most one ping-bearing send that could have landed.
+    landed_pings = [m.to_dict() == {"parse": ["everyone"]} for m in channel.maybe_landed]
+    assert sum(landed_pings) <= 1
+    # Content and mentions agree on every attempt: the "@everyone " prefix goes with the ping.
+    for (content, _m, _n), pinged in zip(channel.sent, attempt_pings, strict=True):
+        assert content.startswith("@everyone ") == pinged
+    assert set(post_status(h.db_path, 1).values()) == {"posted"}
+    assert shift_row(h.db_path, 1).ping_count == 1
+    assert rows(h.db_path, "SELECT DISTINCT pinged FROM guild_code_posts") == [(1,)]
+
+
+async def test_retries_exhausted_on_429s_fail_as_before_without_double_counting(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    channel = _ScriptedChannel(["429"] * 999)
+    use_the_real_poster(h, channel)
+
+    await h.run([item(CODE_A)])
+
+    assert len(channel.sent) == 4  # the first attempt plus the three backoff steps
+    assert _pings(channel) == [True] * 4  # all refused, so the ping was never lost or spent
+    assert channel.maybe_landed == []  # nothing landed, nobody was pinged
+    assert set(post_status(h.db_path, 1).values()) == {"failed"}
+    assert shift_row(h.db_path, 1).ping_count == 1  # claimed once, never again
     assert h.notices and "couldn't be posted" in h.notices[0][1]

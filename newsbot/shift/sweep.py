@@ -8,7 +8,7 @@ at the cutover. Two pieces survived because the fan-out still needs them
 and rewriting them would only have been an opportunity to break something that
 works: the `CodeAlertPoster` protocol (plus a print-to-the-terminal poster for
 the CLI), and `post_alert_with_retry`, which carries the one rule I'd never
-trade away. A retry never risks a second live ping.
+trade away. A retry never risks a second live ping that could have landed.
 """
 
 from __future__ import annotations
@@ -52,10 +52,10 @@ _PING_PREFIX = "@everyone "
 def _strip_ping(alert: RenderedAlert) -> RenderedAlert:
     """A copy of `alert` with the ping turned off: same nonce, same codes.
 
-    Used by `post_alert_with_retry` when a ping-bearing send raised
-    `PublishError`: our client gave up waiting for a response, but that's
-    not proof Discord never got the message (the deterministic `nonce`
-    handles that half). What it *doesn't* rule out is that Discord got it
+    Used by `post_alert_with_retry` once a ping-bearing send has failed
+    ambiguously (a timeout, a 5xx, a dropped connection): our client gave up
+    waiting for a response, but that's not proof Discord never got the message
+    (the deterministic `nonce` handles that half). What it *doesn't* rule out is that Discord got it
     and the ping already went out, so a retry must never risk a second
     live `@everyone` for the same batch. The content's "@everyone " prefix
     is stripped the same deterministic way `render_code_alerts` added it,
@@ -94,20 +94,32 @@ async def post_alert_with_retry(
     channel; it says nothing about a retried *ping*, which Discord's
     nonce dedup has no opinion on: a duplicate message with the ping
     stripped is still a duplicate message, but a duplicate `@everyone` is
-    the one failure mode worth refusing to risk even once. So a
-    ping-bearing alert that fails once retries with the ping already
-    turned off (`_strip_ping`): the first attempt is the only one that
-    ever could have pinged, whether or not it actually landed.
+    the one failure mode worth refusing to risk even once.
+
+    So the ping follows what we know about the failures so far (owner
+    decision D13). A 429 (`PublishError.rejected`) means Discord refused the
+    message: nothing landed, nobody was pinged, and the ping is still owed, so
+    the retry keeps it. Any ambiguous failure (a timeout, a 5xx, a connection
+    error, anything not marked `rejected`) might have landed and pinged, so
+    from then on every attempt goes out with the ping stripped (`_strip_ping`),
+    even if a later failure is a 429. The invariant: at most one ping-bearing
+    send that could have landed. Several ping-bearing *attempts* can happen
+    (a run of 429s), but each was refused, so only the last one can have
+    delivered a ping. The ping budget is claimed once, before any of this, and
+    isn't touched by retries.
     """
     current = alert
     last_error: Exception | None = None
+    ambiguous = False
     for attempt in range(len(_POST_BACKOFF_S) + 1):
         try:
             message_id = await poster.post(current)
             return message_id, None
         except PublishError as exc:
             last_error = exc
-            if current.ping:
+            if not exc.rejected:
+                ambiguous = True
+            if ambiguous and current.ping:
                 current = _strip_ping(current)
             if attempt < len(_POST_BACKOFF_S):
                 wait = _POST_BACKOFF_S[attempt]

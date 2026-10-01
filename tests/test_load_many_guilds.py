@@ -559,6 +559,14 @@ def test_a_429_on_a_code_alert_is_retried(tmp_path, cfg):
         run.discord.messages_in(channel_for(guild_id_for(i), SHIFT_SLOT)) for i in range(GUILDS)
     )
     assert landed == GUILDS  # every server got its code, the 429 included
+    # The 429 was Discord refusing the message, so the retry kept its ping (D13): one server
+    # was rejected once and still got its @everyone, and nobody got two.
+    assert run.discord.injected_429s == 1
+    pinged = [
+        sum(m.everyone for m in run.discord.landed[channel_for(guild_id_for(i), SHIFT_SLOT)])
+        for i in range(GUILDS)
+    ]
+    assert pinged == [1] * GUILDS
 
 
 # --- the real-time script's safety rail ---

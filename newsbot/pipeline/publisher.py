@@ -45,6 +45,12 @@ class PublishError(Exception):
 
     `retry_after` is how many seconds Discord said to wait, when the failure
     was a 429 that said so. Only the SHiFT code alert retry reads it.
+
+    `rejected` is `True` only when Discord definitely refused the message (a
+    429), so nothing landed and nobody was pinged. A timeout, a 5xx or a
+    dropped connection stay `False`: the message may have landed with the
+    response lost on the way back. The SHiFT retry keys its ping decision on
+    that difference.
     """
 
     def __init__(
@@ -55,6 +61,7 @@ class PublishError(Exception):
         posted_by_topic: Mapping[str, int] | None = None,
         retryable: bool = True,
         retry_after: float | None = None,
+        rejected: bool = False,
     ) -> None:
         super().__init__(message)
         self.posted_by_topic: dict[str, int] = dict(posted_by_topic or {})
@@ -63,6 +70,7 @@ class PublishError(Exception):
         )
         self.retryable = retryable
         self.retry_after = retry_after
+        self.rejected = rejected
 
 
 class Publisher(Protocol):
