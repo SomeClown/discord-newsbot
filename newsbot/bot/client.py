@@ -59,6 +59,7 @@ from newsbot.bot.format import (
 from newsbot.bot.permissions import (
     render_sweep_counts,
     requirements_from_db,
+    sendability_problem,
     sweep_guild_permissions,
 )
 from newsbot.collectors.base import RateLimitState
@@ -1229,7 +1230,9 @@ class NewsBot(discord.Client):
         (the router refuses to post it anywhere else). Get either wrong and the owner hears
         nothing, which looks exactly like a quiet day. So at startup: the log gets an ERROR
         and stderr gets the same line, each with a one-line fix. It never exits, because the
-        friend's digests are working fine and shouldn't pay for the owner's typo.
+        friend's digests are working fine and shouldn't pay for the owner's typo. Besides
+        "is the channel there and in the right server" it asks "can I send in it": a text-capable
+        channel, with View Channel and Send Messages for the bot.
         """
         cfg = self.cfg
         servers = await asyncio.to_thread(self._server_count_sync)
@@ -1252,14 +1255,22 @@ class NewsBot(discord.Client):
                     f"admin_channel_id {cfg.admin_channel_id} isn't a channel I can see. "
                     "Fix: set it to a channel in your home server that I can view."
                 )
-            elif cfg.home_guild_id is not None:
-                found = getattr(getattr(channel, "guild", None), "id", None)
-                if found != cfg.home_guild_id:
-                    problems.append(
-                        f"admin_channel_id {cfg.admin_channel_id} isn't in home_guild_id "
-                        f"{cfg.home_guild_id}. Fix: set admin_channel_id to a channel "
-                        "in your home server."
-                    )
+            elif (
+                cfg.home_guild_id is not None
+                and getattr(getattr(channel, "guild", None), "id", None) != cfg.home_guild_id
+            ):
+                problems.append(
+                    f"admin_channel_id {cfg.admin_channel_id} isn't in home_guild_id "
+                    f"{cfg.home_guild_id}. Fix: set admin_channel_id to a channel "
+                    "in your home server."
+                )
+            elif (unsendable := sendability_problem(channel)) is not None:
+                # Seeing a channel isn't the same as being able to talk in it.
+                problems.append(
+                    f"admin_channel_id {cfg.admin_channel_id} {unsendable}. "
+                    "Fix: point it at a text channel where I have View Channel and "
+                    "Send Messages."
+                )
         for problem in problems:
             message = f"newsbot: owner alerts won't arrive: {problem}"
             logger.error(message)

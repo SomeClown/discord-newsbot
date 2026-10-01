@@ -19,6 +19,13 @@ from types import SimpleNamespace
 
 import pytest
 from test_client_wiring_v3 import HOME, OWNER_CHANNEL, _secrets, _setup, _stopped
+from test_permissions_lounge_adversarial import (
+    FakeForum,
+    FakeGuild,
+    FakeTextChannel,
+    FakeVoice,
+    _perms,
+)
 
 from newsbot.bot.client import NewsBot
 from newsbot.store import repo
@@ -174,6 +181,102 @@ async def test_the_check_never_sends_anything_to_any_server_or_channel(bot, monk
     monkeypatch.setattr(bot, "alert", alert)
     await bot._check_owner_channel()
     assert sent == []  # it can only talk to the log and stderr: the channel is what's broken
+
+
+# --- can the bot actually talk there? ---
+
+
+def home_channel(kind, **perms):
+    return kind(FakeGuild(HOME), _perms(**perms))
+
+
+async def test_a_text_channel_the_bot_can_view_and_send_in_is_fine(bot, monkeypatch, caplog):
+    several_servers(bot)
+    configured(
+        bot, monkeypatch, home=HOME, channel_id=OWNER_CHANNEL, channel=home_channel(FakeTextChannel)
+    )
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    assert errors(caplog) == []
+
+
+@pytest.mark.parametrize(
+    ("perms", "named"),
+    [
+        ({"send": False}, "Send Messages"),
+        ({"view": False}, "View Channel"),
+        ({"view": False, "send": False}, "View Channel and Send Messages"),
+    ],
+)
+async def test_a_visible_channel_the_bot_cannot_send_in_is_reported_with_the_missing_permission(
+    bot, monkeypatch, caplog, perms, named
+):
+    several_servers(bot)
+    configured(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=OWNER_CHANNEL,
+        channel=home_channel(FakeTextChannel, **perms),
+    )
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    [line] = errors(caplog)
+    assert line.startswith("newsbot: owner alerts won't arrive") and named in line
+    assert "Fix:" in line
+
+
+@pytest.mark.parametrize("kind", [FakeVoice, FakeForum])
+async def test_a_channel_that_is_not_a_text_destination_is_reported(bot, monkeypatch, caplog, kind):
+    several_servers(bot)
+    configured(bot, monkeypatch, home=HOME, channel_id=OWNER_CHANNEL, channel=home_channel(kind))
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    [line] = errors(caplog)
+    assert "isn't a text channel" in line
+
+
+async def test_sendability_is_checked_with_no_home_setting_too(bot, monkeypatch, caplog):
+    several_servers(bot, 1)
+    configured(
+        bot,
+        monkeypatch,
+        home=None,
+        channel_id=OWNER_CHANNEL,
+        channel=home_channel(FakeTextChannel, send=False),
+    )
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    assert len(errors(caplog)) == 1
+
+
+async def test_an_unsendable_channel_in_the_wrong_server_is_one_line_about_the_server(
+    bot, monkeypatch, caplog
+):
+    several_servers(bot)
+    channel = FakeTextChannel(FakeGuild(HOME + 1), _perms(send=False))
+    configured(bot, monkeypatch, home=HOME, channel_id=OWNER_CHANNEL, channel=channel)
+    caplog.set_level(logging.ERROR)
+    await bot._check_owner_channel()
+    [line] = errors(caplog)
+    assert "isn't in home_guild_id" in line
+
+
+async def test_an_unsendable_channel_is_logged_once_however_many_times_the_gateway_reconnects(
+    bot, monkeypatch, caplog
+):
+    several_servers(bot)
+    configured(
+        bot,
+        monkeypatch,
+        home=HOME,
+        channel_id=OWNER_CHANNEL,
+        channel=home_channel(FakeTextChannel, send=False),
+    )
+    caplog.set_level(logging.ERROR)
+    for _ in range(3):
+        await bot.on_ready()
+    assert len([e for e in errors(caplog) if "owner alerts won't arrive" in e]) == 1
 
 
 # --- the collection job that on_ready starts ---

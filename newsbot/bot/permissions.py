@@ -136,6 +136,29 @@ def _is_sendable_guild_channel(channel: object) -> bool:
     )
 
 
+def sendability_problem(channel: object) -> str | None:
+    """Why this bot can't post in `channel` (one it can already see), or None if it can.
+
+    A real channel has to be a text destination (a category, a forum or a voice channel is
+    nowhere to send an alert) and the bot's own member needs View Channel and Send Messages
+    in it. Something that can't be asked at all (no `permissions_for`, or no member of the
+    bot's to ask about) passes: not being able to tell isn't a finding.
+    """
+    if not hasattr(channel, "permissions_for"):
+        return None
+    if not _is_sendable_guild_channel(channel):
+        return "isn't a text channel"
+    me = getattr(getattr(channel, "guild", None), "me", None)
+    if me is None:
+        return None
+    lacking = missing(channel.permissions_for(me), frozenset({"view_channel", "send_messages"}))
+    if lacking:
+        return "is a channel where I'm missing " + " and ".join(
+            _PERMISSION_LABELS[flag] for flag in lacking
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ChannelProblem:
     """One broken channel, in a shape a command reply can use.
@@ -447,5 +470,6 @@ __all__ = [
     "render_sweep_counts",
     "required_channels_for_guild",
     "requirements_from_db",
+    "sendability_problem",
     "sweep_guild_permissions",
 ]
