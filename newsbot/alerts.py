@@ -66,9 +66,9 @@ async def _post(
 async def send_to_channel(client: discord.Client, channel_id: int, text: str) -> bool:
     """Post `text` to `channel_id` with no mentions, capped at Discord's limit. Never raises.
 
-    The shared plumbing under `send_alert` (v2's owner path) and the owner
-    door of the router in `newsbot.guilds.notify`. True if the message went
-    out, False if anything went wrong (the failure is logged, not raised).
+    The owner door of the router in `newsbot.guilds.notify` goes through here.
+    True if the message went out, False if anything went wrong (the failure is
+    logged, not raised).
     The cap and `AllowedMentions.none()` live here so no caller can forget
     them. It doesn't ask whose channel it is; for a message that belongs to
     one server, use `send_to_guild_channel`.
@@ -96,24 +96,4 @@ async def send_to_guild_channel(
     return await _post(client, channel_id, text, guild_id, unverified_ok=unverified_ok)
 
 
-async def send_alert(client: discord.Client, admin_channel_id: int | None, text: str) -> None:
-    """Post `text` to the admin channel, if one is configured. Never raises.
-
-    A failure here (channel deleted, permissions revoked, gateway hiccup)
-    is logged and swallowed rather than propagated; the code calling
-    `send_alert` is usually already in an exception handler, and an alert
-    system that can knock over its own caller defeats the point of having
-    one.
-
-    Anything over Discord's 2,000-unit message limit is cut (ellipsis
-    included) before sending. Discord refuses an oversized message outright,
-    and refusing is the one thing an alert can't be allowed to have happen to
-    it: the crash alert with a huge exception in it is exactly the one
-    somebody needs to see.
-    """
-    if admin_channel_id is None:
-        return
-    await send_to_channel(client, admin_channel_id, text)
-
-
-__all__ = ["send_alert", "send_to_channel", "send_to_guild_channel"]
+__all__ = ["send_to_channel", "send_to_guild_channel"]

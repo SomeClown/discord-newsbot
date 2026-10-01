@@ -127,7 +127,7 @@ def _alert_reason(exc: BaseException) -> str:
 
     Exception messages are whatever the code that raised them felt like
     writing: multi-line, markdown, the occasional @everyone. Flatten it,
-    cap it, escape it. (`send_alert` also truncates the whole message, as
+    cap it, escape it. (`send_to_channel` also truncates the whole message, as
     the backstop; this keeps the alert readable before it gets that far.)
     """
     return esc(plain_line(str(exc), 250))

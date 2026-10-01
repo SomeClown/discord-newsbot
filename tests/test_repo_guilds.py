@@ -466,9 +466,8 @@ def test_adopt_orphan_digests_skips_a_day_the_guild_already_has(conn):
 
 
 def _store(conn, url, title, topics, collected_at, excerpt="An excerpt."):
-    repo.save_run(
+    repo.store_items(
         conn,
-        repo.claim_digest(conn, collected_at.date(), force=True, now=_clock(collected_at)),
         [
             StoredItem(
                 url=url,
@@ -480,11 +479,6 @@ def _store(conn, url, title, topics, collected_at, excerpt="An excerpt."):
                 topics=topics,
             )
         ],
-        [],
-        "ok",
-        [],
-        None,
-        repo.Usage(0, 0),
         now=_clock(collected_at),
     )
 

@@ -20,7 +20,6 @@ from newsbot.config import (
     ShiftCfg,
     SteamSource,
     Topic,
-    configured_source_names,
     load_config,
     load_secrets,
 )
@@ -53,13 +52,13 @@ def test_source_union_routes_each_type(monkeypatch):
     assert cfg.web_search is not None  # the fourth type, now its own block
 
 
-# --- configured_source_names ---
+# --- the collectors' names ---
 
 
-def test_configured_source_names_includes_every_source_type(monkeypatch):
+def test_collector_names_include_every_source_type(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
-    names = configured_source_names(cfg)
+    names = {c.name for c in build_catalog_collectors(cfg, _secrets(brave="brave-key"))}
     assert names == {
         "Blizzard News",  # rss, explicit name
         "Palworld Steam",  # steam_news, explicit name
@@ -68,23 +67,14 @@ def test_configured_source_names_includes_every_source_type(monkeypatch):
     }
 
 
-def test_configured_source_names_matches_what_collectors_actually_record(monkeypatch):
-    # The whole point of this helper is that it can't drift from what
-    # build_catalog_collectors wires up: every Collector sets `self.name =
-    # source.name`, so these two sets have to be exactly equal.
-    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
-    cfg = load_config(FIXTURE)
-    secrets = Secrets(
+def _secrets(brave: str | None = None) -> Secrets:
+    return Secrets(
         discord_token=None,
         anthropic_api_key="anthropic-key",
-        brave_api_key="brave-key",
+        brave_api_key=brave,
         bluesky_handle=None,
         bluesky_app_password=None,
     )
-
-    collectors = build_catalog_collectors(cfg, secrets)
-
-    assert configured_source_names(cfg) == {c.name for c in collectors}
 
 
 def _load_with(tmp_path: Path, text: str):
@@ -345,15 +335,7 @@ sources:
     cfg = _load_with(tmp_path, text)
     # Web search is quietly off when BRAVE_API_KEY isn't set: configured, but nothing records
     # health under its name and no collector is built for it.
-    assert "Brave Search" not in configured_source_names(cfg)
-    secrets = Secrets(
-        discord_token=None,
-        anthropic_api_key="anthropic-key",
-        brave_api_key=None,
-        bluesky_handle=None,
-        bluesky_app_password=None,
-    )
-    assert all(c.source_type != "web_search" for c in build_catalog_collectors(cfg, secrets))
+    assert all(c.source_type != "web_search" for c in build_catalog_collectors(cfg, _secrets()))
 
 
 def test_example_config_loads(monkeypatch):
@@ -382,7 +364,7 @@ def test_minimal_config_loads_without_brave_key_too(monkeypatch):
     # a config error.
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     cfg = load_config(MINIMAL)
-    assert "Brave Search" not in configured_source_names(cfg)
+    assert "Brave Search" not in {c.name for c in build_catalog_collectors(cfg, _secrets())}
 
 
 def test_example_config_alerts_block_is_commented_out_and_reads_as_default(monkeypatch):

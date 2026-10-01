@@ -11,10 +11,11 @@ from contextlib import closing
 from datetime import date
 
 import pytest
+from v2_seed import seed_run
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, Usage
+from newsbot.store.models import StoredItem
 
 CHUNK = repo._SQLITE_VARIABLE_CHUNK
 
@@ -27,7 +28,6 @@ def conn(tmp_path):
 
 
 def _seed_urls_at(conn, indices):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
     items = [
         StoredItem(
             url=f"https://e/{i}",
@@ -40,7 +40,7 @@ def _seed_urls_at(conn, indices):
         )
         for i in indices
     ]
-    repo.save_run(conn, digest_id, items, [], "ok", [], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), items, [])
 
 
 def test_empty_input_returns_empty_set_without_querying(conn):

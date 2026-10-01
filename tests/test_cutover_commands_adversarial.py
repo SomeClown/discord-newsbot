@@ -33,11 +33,16 @@ import discord
 import pytest
 from cutover_world import FRIEND, OWNER_GUILD, PRODLIKE
 
+import newsbot.alerts as alerts_module
 import newsbot.bot.client as client_module
 import newsbot.bot.commands as commands_module
+import newsbot.bot.format as format_module
 import newsbot.bot.permissions as permissions_module
+import newsbot.config as config_module
 import newsbot.pipeline.run as run_module
+import newsbot.shift.decide as decide_module
 import newsbot.shift.sweep as sweep_module
+import newsbot.store.repo as repo_module
 from newsbot.config import load_config
 
 T_NOON = datetime(2026, 10, 1, 19, 0, tzinfo=UTC)
@@ -188,6 +193,24 @@ REMOVED = {
     sweep_module: ["SweepDeps", "process_items", "run_code_sweep", "run_test_alert"],
     run_module: ["run_daily", "build_digest", "Deps", "PipelineOutcome", "RunMode", "_run_post"],
     client_module: ["should_catch_up", "build_intents", "schedule_daily_quote", "NullPublisher"],
+    # The v2 repo, render and decide functions nothing calls any more. v2.2's rollback
+    # tests use `fixtures/v22_repo_snapshot.txt` instead of these.
+    repo_module: [
+        "claim_codes",
+        "mark_codes_posted",
+        "mark_codes_failed",
+        "save_run",
+        "claim_digest",
+        "mark_digest_failed",
+        "get_digest",
+        "status_snapshot",
+        "alert_status",
+        "guild_posted_codes",
+    ],
+    decide_module: ["pings_used_today"],
+    format_module: ["render_digest", "render_run_report", "render_status"],
+    alerts_module: ["send_alert"],
+    config_module: ["configured_source_names"],
 }
 REMOVED_METHODS = [
     "_daily_job",

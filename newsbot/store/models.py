@@ -28,6 +28,12 @@ class PriorStory:
 
 @dataclass(frozen=True)
 class DigestRow:
+    """A v2 digest row (one per day, no server).
+
+    Nothing in the bot builds it any more. v2.2.0's `repo.py` (the rollback tests load it from
+    `tests/fixtures/v22_repo_snapshot.txt`) still imports it, so it stays.
+    """
+
     id: int
     run_date: date
     status: str
@@ -54,7 +60,7 @@ class StoredItem:
 
 @dataclass(frozen=True)
 class StoryToSave:
-    """A story the summarizer produced, ready for `repo.save_run`."""
+    """A story the summarizer produced, ready for `repo.save_game_summary`."""
 
     topic_key: str
     headline: str
@@ -109,8 +115,7 @@ class AlertState:
     feature on against feeds full of months-old codes doesn't flood the
     channel on the first run. `ping_count` only means anything alongside
     `ping_day`: a stale `ping_day` (not today, in `cfg.digest.timezone`)
-    means the count has already effectively reset; see `pings_used_today`
-    in `shift/decide.py`.
+    means the count has already effectively reset (readers treat it as zero).
     """
 
     seeded: bool
@@ -122,7 +127,11 @@ class AlertState:
 
 @dataclass(frozen=True)
 class AlertStatus:
-    """Everything `/newsbot status`'s SHiFT alerts field needs."""
+    """Everything `/newsbot status`'s SHiFT alerts field needed.
+
+    Nothing in the bot builds it any more. v2.2.0's `repo.py` (the rollback tests load it from
+    `tests/fixtures/v22_repo_snapshot.txt`) still imports it, so it stays.
+    """
 
     enabled: bool
     seeded: bool
@@ -173,7 +182,11 @@ class QuoteDeckState:
 
 @dataclass(frozen=True)
 class StatusSnapshot:
-    """Everything `/newsbot status` needs, gathered in one query pass."""
+    """Everything v2's `/newsbot status` needed, gathered in one query pass.
+
+    Nothing in the bot builds it any more. v2.2.0's `repo.py` (the rollback tests load it from
+    `tests/fixtures/v22_repo_snapshot.txt`) still imports it, so it stays.
+    """
 
     last_digest: DigestRow | None
     source_health: list[SourceHealthRow]

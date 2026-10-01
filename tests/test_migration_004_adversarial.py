@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from v2_seed import load_v22_repo
 
 from newsbot.store import db, repo
 from newsbot.store.db import connect, migrate
@@ -168,7 +169,7 @@ def test_v2_1_1_opening_a_v4_database_neither_fails_nor_touches_lounge_rows(tmp_
         assert migrate(conn) == 7  # returns the DB's version; it applies nothing
         # v2.1.1's normal day: claim a digest, purge, read status. None of it
         # may disturb the lounge tables.
-        repo.claim_digest(conn, datetime(2026, 9, 30, tzinfo=UTC).date(), force=False)
+        load_v22_repo().claim_digest(conn, datetime(2026, 9, 30, tzinfo=UTC).date(), force=False)
         repo.purge_older_than(conn, datetime(2100, 1, 1, tzinfo=UTC))
         assert [tuple(r) for r in conn.execute("SELECT * FROM lounge_quotes_used")] == before_rows
         assert [tuple(r) for r in conn.execute("SELECT * FROM lounge_state")] == before_state

@@ -1269,27 +1269,6 @@ def load_config(path: str | Path) -> AppConfig:
     return AppConfig(**{name: getattr(cfg, name) for name in AppConfig.model_fields})
 
 
-def configured_source_names(cfg: AppConfig) -> set[str]:
-    """The `source_name` every currently-configured source records health under.
-
-    This has to match the collectors exactly: every `Collector` sets
-    `self.name = source.name`, and the sources here already have Bluesky's
-    default name filled in by the time `load_config` returns them (see
-    above), so this is just "read `.name` off what's configured" with one
-    place to fix if a fifth source type ever shows up and someone forgets.
-    Covers the catalog's sources and the shared ones. Web
-    search counts only while `BRAVE_API_KEY` is set, same as it always has.
-    Used to filter `/newsbot status` down to sources that still exist,
-    instead of every source that ever recorded health (see the IGN
-    incident in CLAUDE.md).
-    """
-    names = {source.name for game in cfg.catalog for source in game.sources}
-    names |= {source.name for source in cfg.shared_sources}
-    if cfg.web_search is not None and os.environ.get("BRAVE_API_KEY"):
-        names.add(cfg.web_search.name)
-    return names
-
-
 def count_configured_web_search_sources(path: str | Path) -> int:
     """How many web searches `path` asks for, counted from the raw YAML.
 

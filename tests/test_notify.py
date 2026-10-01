@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from newsbot.alerts import send_alert, send_to_channel
+from newsbot.alerts import send_to_channel
 from newsbot.guilds.notify import Router
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
@@ -225,4 +225,3 @@ async def test_send_to_channel_returns_false_on_failure():
             raise RuntimeError("x")
 
     assert await send_to_channel(Bad(), 1, "hi") is False
-    await send_alert(Bad(), 1, "hi")  # still never raises

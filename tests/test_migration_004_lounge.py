@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from v2_seed import load_v22_repo
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
@@ -116,9 +117,10 @@ def test_v3_shaped_workflow_still_works_on_a_v4_database(db_path):
     with closing(connect(db_path)) as conn:
         migrate(conn)
         now = lambda: datetime(2026, 9, 29, 12, 0, tzinfo=UTC)  # noqa: E731
-        digest_id = repo.claim_digest(conn, date(2026, 9, 29), force=False, now=now)
+        v22 = load_v22_repo()
+        digest_id = v22.claim_digest(conn, date(2026, 9, 29), force=False, now=now)
         assert digest_id is not None
-        pinged = repo.claim_codes(
+        pinged = v22.claim_codes(
             conn,
             [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
             pinged=True,

@@ -18,12 +18,13 @@ from __future__ import annotations
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
+from newsbot.store.models import StoredItem
 
 WILDE = "wikiquote:Oscar Wilde"
 TWAIN = "wikiquote:Mark Twain"
@@ -208,19 +209,26 @@ def test_other_repo_calls_still_commit_on_the_same_connection_after_a_failed_cla
     conn.execute("DROP TRIGGER boom")
     conn.commit()
 
-    assert repo.claim_digest(conn, date(2026, 9, 29), force=False) is not None
-    # claim_codes returns whether the ping was actually spent.
-    assert repo.claim_codes(
+    item = StoredItem(
+        url="https://e/a",
+        title="A",
+        excerpt="a",
+        source_name="Src",
+        trust="official",
+        published_at=None,
+        topics={"palworld": False},
+    )
+    assert repo.store_items(conn, [item], now=_clock()) == 1
+    repo.record_silent_codes(
         conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day=DAY1,
+        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a", "seeded", False)],
         now=_clock(),
+        mark_seeded=False,
     )
     # If the isolation level had been left at None, these writes would sit
     # uncommitted; a second connection is the honest witness.
     with closing(connect(db_path)) as other:
-        assert other.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 1
+        assert other.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
         assert other.execute("SELECT COUNT(*) FROM alerted_codes").fetchone()[0] == 1
 
 

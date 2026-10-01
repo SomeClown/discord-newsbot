@@ -13,10 +13,11 @@ from contextlib import closing
 from datetime import UTC, date, datetime
 
 import pytest
+from v2_seed import seed_run
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, StoryToSave, Usage
+from newsbot.store.models import StoredItem, StoryToSave
 
 SINCE = datetime(2020, 1, 1, tzinfo=UTC)
 
@@ -29,7 +30,6 @@ def conn(tmp_path):
 
 
 def _seed_one_story(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
     item = StoredItem(
         url="https://e/1",
         title="Big Patch Notes",
@@ -47,7 +47,7 @@ def _seed_one_story(conn):
         item_urls=["https://e/1"],
         update_of_story_id=None,
     )
-    repo.save_run(conn, digest_id, [item], [story], "ok", [], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), [item], [story])
 
 
 # --- fts_escape: every token becomes a quoted phrase, operators included ---

@@ -87,8 +87,8 @@ class PrintPublisher:
     """Writes the digest to stdout instead of posting it anywhere.
 
     Message ids don't mean anything outside a real chat, so this always
-    returns an empty mapping; `save_run` is happy to store `[]` for
-    `posted_message_ids` just as it would for any other run.
+    returns an empty mapping, which is what a run with nothing posted looks like
+    to everything downstream.
     """
 
     async def publish(self, r: RenderedDigest) -> dict[str, int]:

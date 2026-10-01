@@ -19,7 +19,6 @@ and are plain tests now.
 from __future__ import annotations
 
 import inspect
-import itertools
 import sqlite3
 import threading
 from contextlib import closing
@@ -34,7 +33,6 @@ from newsbot.store.models import LoungeSettings, StoredItem
 T0 = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 SINCE = datetime(2026, 1, 1, tzinfo=UTC)
 G1, G2 = 1001, 2002
-_SERIAL = itertools.count()
 
 
 def _clock(moment=T0):
@@ -56,13 +54,8 @@ def conn(db_path):
 
 
 def _store(conn, url, title, topics, collected_at=T0, excerpt="body"):
-    repo.save_run(
+    repo.store_items(
         conn,
-        conn.execute(
-            "INSERT INTO digests (run_date, status, created_at, updated_at) "
-            "VALUES (?, 'ok', 'n', 'n')",
-            (f"{url}#{next(_SERIAL)}",),
-        ).lastrowid,
         [
             StoredItem(
                 url=url,
@@ -74,11 +67,6 @@ def _store(conn, url, title, topics, collected_at=T0, excerpt="body"):
                 topics=topics,
             )
         ],
-        [],
-        "ok",
-        [],
-        None,
-        repo.Usage(0, 0),
         now=_clock(collected_at),
     )
 
@@ -297,7 +285,6 @@ _OTHER_COVERAGE = {
     "adopt_orphan_digests_in_tx",
     "backfill_guild_code_posts",
     "backfill_lounge_quotes_guild",
-    "guild_posted_codes",  # see the test just below
     "queued_guild_codes",  # likewise, and it returns codes rather than guild ids
     "queued_guild_followups",  # likewise (test just below)
     # The per-guild digest reads: tests/test_repo_guild_digest.py pins that each
@@ -356,14 +343,6 @@ def test_queued_guild_followups_only_reports_that_guilds_queue(world):
         world.execute("DELETE FROM guild_code_followups WHERE guild_id = ?", (G2,))
     assert repo.queued_guild_followups(world, G1) == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
     assert repo.queued_guild_followups(world, G2) == []
-
-
-def test_guild_posted_codes_only_reports_that_guilds_posts(world):
-    code = "AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"
-    with world:
-        world.execute("DELETE FROM guild_code_posts WHERE guild_id = ?", (G2,))
-    assert repo.guild_posted_codes(world, G1, [code]) == {code}
-    assert repo.guild_posted_codes(world, G2, [code]) == set()
 
 
 def test_the_sweep_knows_about_every_repo_function_that_takes_a_guild_id():

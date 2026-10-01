@@ -12,10 +12,11 @@ from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from v2_seed import seed_run
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, StoryToSave, Usage
+from newsbot.store.models import StoredItem, StoryToSave
 
 
 @pytest.fixture
@@ -26,7 +27,6 @@ def conn(tmp_path):
 
 
 def _save_stamped(conn, run_date: date, url: str, stamp: datetime) -> None:
-    digest_id = repo.claim_digest(conn, run_date, force=False)
     item = StoredItem(
         url=url,
         title="x",
@@ -44,7 +44,7 @@ def _save_stamped(conn, run_date: date, url: str, stamp: datetime) -> None:
         item_urls=[url],
         update_of_story_id=None,
     )
-    repo.save_run(conn, digest_id, [item], [story], "ok", [], None, Usage(0, 0))
+    digest_id = seed_run(conn, run_date, [item], [story])
     stamp_iso = stamp.isoformat()
     with conn:
         conn.execute("UPDATE items SET collected_at = ? WHERE url = ?", (stamp_iso, url))
@@ -107,7 +107,6 @@ def test_purge_independent_item_and_story_cutoffs(conn):
     """items.collected_at and stories.created_at are compared
     independently: one can survive without the other."""
     cutoff = datetime(2026, 9, 1, tzinfo=UTC)
-    digest_id = repo.claim_digest(conn, date(2026, 8, 31), force=False)
     item = StoredItem(
         url="https://e/mixed",
         title="x",
@@ -125,7 +124,7 @@ def test_purge_independent_item_and_story_cutoffs(conn):
         item_urls=["https://e/mixed"],
         update_of_story_id=None,
     )
-    repo.save_run(conn, digest_id, [item], [story], "ok", [], None, Usage(0, 0))
+    digest_id = seed_run(conn, date(2026, 8, 31), [item], [story])
     # Item is old (should purge); story is recent (should survive) even
     # though it points at an item that's about to disappear.
     with conn:

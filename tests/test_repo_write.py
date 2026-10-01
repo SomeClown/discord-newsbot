@@ -1,14 +1,14 @@
-"""Tests for the write path and guards in newsbot.store.repo."""
+"""Tests for the write path in newsbot.store.repo: source health, purging, urls, headlines."""
 
-import sqlite3
 from contextlib import closing
 from datetime import UTC, date, datetime
 
 import pytest
+from v2_seed import seed_run
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, StoryToSave, Usage
+from newsbot.store.models import StoredItem, StoryToSave
 
 
 @pytest.fixture
@@ -43,141 +43,6 @@ def _story(item_urls=None, **overrides):
     return StoryToSave(**fields)
 
 
-# --- claim_digest guard ---
-
-
-def test_claim_digest_fresh_day_claims(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    assert digest_id is not None
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.status == "pending"
-
-
-def test_claim_digest_blocked_by_ok(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [], [], "ok", [1], None, Usage(0, 0))
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
-
-
-def test_claim_digest_blocked_by_partial(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [], [], "partial", [1], "fallback", Usage(0, 0))
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
-
-
-def test_claim_digest_pending_is_reclaimed_with_force(conn):
-    # Behavior change (QA step 20, group 4): force now overrides pending
-    # too, not just ok/partial: see test_repo_guard_edge_cases.py for
-    # the reasoning (the in-process _run_lock already rules out a live
-    # concurrent run, so a pending row here is always a crash artifact).
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=True) == digest_id
-
-
-def test_claim_digest_pending_still_blocks_without_force(conn):
-    repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    assert repo.claim_digest(conn, date(2026, 9, 23), force=False) is None
-
-
-def test_claim_digest_failed_allows_reclaim_without_force(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.mark_digest_failed(conn, digest_id, "publish failed", [])
-    reclaimed = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    assert reclaimed == digest_id
-
-
-def test_claim_digest_force_replaces_ok_in_place(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [], [], "ok", [1], None, Usage(0, 0))
-    reclaimed = repo.claim_digest(conn, date(2026, 9, 23), force=True)
-    assert reclaimed == digest_id
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.status == "pending"
-
-
-# --- save_run ---
-
-
-def test_save_run_persists_items_and_stories(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [_item()], [_story()], "ok", [111], None, Usage(10, 20))
-
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.status == "ok"
-    assert row.posted_message_ids == [111]
-
-    count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-    assert count == 1
-    story_count = conn.execute("SELECT COUNT(*) FROM stories").fetchone()[0]
-    assert story_count == 1
-    link_count = conn.execute("SELECT COUNT(*) FROM story_items").fetchone()[0]
-    assert link_count == 1
-
-
-def test_save_run_is_atomic_on_failure(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    with pytest.raises(sqlite3.IntegrityError):
-        repo.save_run(
-            conn, digest_id, [_item()], [_story()], "not-a-real-status", [1], None, Usage(0, 0)
-        )
-    assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM stories").fetchone()[0] == 0
-
-
-def test_save_run_sums_token_usage_across_calls(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [_item()], [_story()], "ok", [1], None, Usage(10, 20))
-    row = conn.execute(
-        "SELECT input_tokens, output_tokens FROM digests WHERE id=?", (digest_id,)
-    ).fetchone()
-    assert (row["input_tokens"], row["output_tokens"]) == (10, 20)
-
-
-# --- mark_digest_failed ---
-
-
-def test_mark_digest_failed(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.mark_digest_failed(conn, digest_id, "boom", [])
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.status == "failed"
-    assert row.error_notes == "boom"
-
-
-def test_mark_digest_failed_unions_with_ids_already_recorded(conn):
-    # A forced run-now that fails again after an earlier failure already
-    # recorded some ids must not overwrite them: an unattended restart's
-    # catch-up check relies on posted_message_ids to know those messages
-    # exist and skip reposting them.
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.mark_digest_failed(conn, digest_id, "first failure", [100, 200])
-
-    repo.mark_digest_failed(conn, digest_id, "second failure", [300])
-
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.posted_message_ids == [100, 200, 300]
-    assert row.error_notes == "second failure"
-
-
-def test_mark_digest_failed_does_not_duplicate_ids(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.mark_digest_failed(conn, digest_id, "first failure", [100, 200])
-
-    # Second attempt's own posted_by_topic includes 100 again (borderlands4
-    # never got recorded as skipped) plus a genuinely new id.
-    repo.mark_digest_failed(conn, digest_id, "second failure", [100, 300])
-
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.posted_message_ids == [100, 200, 300]
-
-
-def test_mark_digest_failed_with_no_prior_ids_behaves_as_before(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.mark_digest_failed(conn, digest_id, "boom", [100, 200])
-    row = repo.get_digest(conn, date(2026, 9, 23))
-    assert row.posted_message_ids == [100, 200]
-
-
 # --- record_source_result ---
 
 
@@ -193,8 +58,7 @@ def test_record_source_result_increments_and_resets(conn):
 
 
 def test_purge_older_than_cascades(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [_item()], [_story()], "ok", [1], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), [_item()], [_story()], message_ids=[1])
 
     items_deleted, stories_deleted = repo.purge_older_than(conn, datetime(2027, 1, 1, tzinfo=UTC))
     assert items_deleted == 1
@@ -205,29 +69,14 @@ def test_purge_older_than_cascades(conn):
 
 
 def test_purge_older_than_nulls_is_update_of(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 22), force=False)
-    repo.save_run(
-        conn,
-        digest_id,
-        [_item(url="https://example.com/a")],
-        [_story()],
-        "ok",
-        [1],
-        None,
-        Usage(0, 0),
-    )
+    seed_run(conn, date(2026, 9, 22), [_item(url="https://example.com/a")], [_story()])
     original_id = conn.execute("SELECT id FROM stories").fetchone()[0]
 
-    digest_id2 = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(
+    seed_run(
         conn,
-        digest_id2,
+        date(2026, 9, 23),
         [_item(url="https://example.com/b")],
         [_story(item_urls=["https://example.com/b"], update_of_story_id=original_id)],
-        "ok",
-        [2],
-        None,
-        Usage(0, 0),
     )
 
     # Purge only the old story, not the update.
@@ -241,8 +90,7 @@ def test_purge_older_than_nulls_is_update_of(conn):
 
 
 def test_existing_urls_finds_known(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [_item()], [], "ok", [], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), [_item()], [])
 
     found = repo.existing_urls(conn, ["https://example.com/a", "https://example.com/missing"])
     assert found == {"https://example.com/a"}
@@ -260,8 +108,7 @@ def test_existing_urls_chunks_over_sqlite_variable_limit(conn):
 
 
 def test_recent_headlines_filters_by_topic_and_time(conn):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
-    repo.save_run(conn, digest_id, [_item()], [_story()], "ok", [], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), [_item()], [_story()])
 
     headlines = repo.recent_headlines(conn, "palworld", datetime(2026, 9, 1, tzinfo=UTC))
     assert len(headlines) == 1

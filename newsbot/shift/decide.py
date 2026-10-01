@@ -24,7 +24,6 @@ from newsbot.collectors.base import CollectorResult, RawItem, Trust
 from newsbot.config import Topic
 from newsbot.pipeline.filter import filter_items
 from newsbot.shift.match import find_codes, mentions_golden_key
-from newsbot.store.models import AlertState
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
@@ -268,17 +267,6 @@ def seeding_healthy(results: list[CollectorResult]) -> bool:
     return successes >= 1 and successes * 2 >= len(non_skipped)
 
 
-def pings_used_today(state: AlertState, today: str) -> int:
-    """How many pings the day named `today` (in `cfg.digest.timezone`) has already spent.
-
-    `state.ping_count` only means anything alongside a matching
-    `state.ping_day`: a `ping_day` from a prior local day has already
-    effectively reset to zero, it just hasn't been written back yet
-    (`claim_codes` does that lazily, the next time it's asked to spend).
-    """
-    return state.ping_count if state.ping_day == today else 0
-
-
 def group_roundups(candidates: list[CodeCandidate]) -> list[list[CodeCandidate]]:
     """Group roundup candidates by the item they came from (`source_name`, `item_url`).
 
@@ -395,7 +383,6 @@ __all__ = [
     "CodeSighting",
     "aggregate",
     "group_roundups",
-    "pings_used_today",
     "plan_alerts",
     "seeding_healthy",
     "sightings_from_items",

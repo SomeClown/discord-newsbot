@@ -61,7 +61,7 @@ class RawItem:
     patch-notes post never shows up in a 500-character excerpt. It's
     memory-only: `compare=False` and `repr=False` keep it out of
     equality checks and log lines, and `StoredItem` (what actually reaches
-    `save_run`) has no field for it at all, so there's no code path that
+    the database) has no field for it at all, so there's no code path that
     could persist it or hand it to the LLM even by accident.
     """
 

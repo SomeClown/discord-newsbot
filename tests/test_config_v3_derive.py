@@ -12,12 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from newsbot.collectors.base import build_catalog_collectors
 from newsbot.config import (
     AlertsCfg,
     ConfigError,
     LoungeCfg,
+    Secrets,
     SharedRssSource,
-    configured_source_names,
     load_config,
 )
 
@@ -146,7 +147,15 @@ def test_derive_without_a_brave_key_still_derives_web_search_but_drops_the_sourc
     with caplog.at_level(logging.WARNING, logger="newsbot.config"):
         cfg = load_config(PRODLIKE)
     assert cfg.web_search is not None
-    assert "Brave Search" not in configured_source_names(cfg)  # derived, but nothing runs it
+    secrets = Secrets(
+        discord_token=None,
+        anthropic_api_key="x",
+        brave_api_key=None,
+        bluesky_handle=None,
+        bluesky_app_password=None,
+    )
+    names = {c.name for c in build_catalog_collectors(cfg, secrets)}
+    assert "Brave Search" not in names  # derived, but nothing runs it
     assert sum("BRAVE_API_KEY is not set" in r.message for r in caplog.records) == 1
 
 

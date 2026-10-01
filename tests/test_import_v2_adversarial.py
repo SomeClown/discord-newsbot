@@ -187,27 +187,27 @@ def _set_today(db: Path, state: str) -> None:
     [("before", False), ("pending", True), ("ok", True), ("partial", True), ("failed", False)],
 )
 def test_upgrade_at_every_point_of_the_day_leaves_exactly_one_digest_for_the_guild(
-    v22_db, cfg, state, claim_blocked
+    v22, v22_db, cfg, state, claim_blocked
 ):
     """Whatever state v2.2 left today in, v3 sees one row, the guild's, and never a second."""
     _set_today(v22_db, state)
     ensure_imported(v22_db, cfg, _clock)
 
     with closing(connect(v22_db)) as conn:
-        seen = repo.get_digest(conn, TODAY)
+        seen = v22.get_digest(conn, TODAY)
         if state == "before":
             assert seen is None
         else:
             assert (seen.id, seen.status) == (12, "pending" if state == "pending" else state)
 
-        # The v2-era claim is the only per-day claim that exists until task 6;
-        # it's what a same-day restart of the old code path would ask.
-        claimed = repo.claim_digest(conn, TODAY, force=False, now=_clock)
+        # The v2-era claim is what a same-day restart of the old code path would ask
+        # (v2.2's own, from the snapshot; the live module no longer has it).
+        claimed = v22.claim_digest(conn, TODAY, force=False, now=_clock)
         assert (claimed is None) is claim_blocked
         if state == "failed":
             assert claimed == 12  # reclaimed in place: that day never posted
 
-        # Anything claim_digest inserted is an orphan (v2's insert names no guild);
+        # Anything v2's claim_digest inserted is an orphan (v2's insert names no guild);
         # the startup adopt step makes it the guild's.
         repo.adopt_orphan_digests(conn, GUILD)
         today = conn.execute(
@@ -317,7 +317,7 @@ def test_a_roundup_v22_posted_is_copied_and_a_silent_roundup_is_not(v22_db, cfg,
     assert v22_codes["roundup"] not in copied  # silent overflow: v2.2 never posted it
 
 
-def test_no_v2_code_can_be_released_or_claimed_again(v22_db, cfg, v22_codes):
+def test_no_v2_code_can_be_released_or_claimed_again(v22, v22_db, cfg, v22_codes):
     """Every code v2.2 knew stays known: global detection is what stops a re-alert.
 
     The per-guild table only holds what v2.2 posted or failed; 'pending',
@@ -343,7 +343,7 @@ def test_no_v2_code_can_be_released_or_claimed_again(v22_db, cfg, v22_codes):
         spent = repo.get_alert_state(conn).ping_count
         for code in all_codes:
             with pytest.raises(sqlite3.IntegrityError):
-                repo.claim_codes(
+                v22.claim_codes(
                     conn, [(code, "Feed", "u")], pinged=True, local_day="2026-09-30", now=_clock
                 )
         assert repo.get_alert_state(conn).ping_count == spent  # no budget burned by the refusals

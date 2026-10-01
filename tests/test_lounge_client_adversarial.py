@@ -530,7 +530,7 @@ async def test_cancelled_fetch_propagates_without_an_alert(db_path):
 
 
 async def test_a_broken_admin_channel_does_not_raise_out_of_the_handler(db_path):
-    # The real `alert` is `send_alert`, which swallows its own failures, so a
+    # The real `alert` goes through the router, which swallows its own failures, so a
     # dead admin channel can't take the handler down.
     cfg = _cfg()
     lounge, admin = FakeChannel(), FakeChannel()

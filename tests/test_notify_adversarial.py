@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from newsbot.alerts import send_alert, send_to_channel
+from newsbot.alerts import send_to_channel
 from newsbot.bot.format import _truncate_utf16, discord_len
 from newsbot.guilds import notify
 from newsbot.guilds.notify import Router, client_sender
@@ -341,7 +341,6 @@ async def test_send_to_channel_survives_every_exception_type_from_send(make):
             return Bad()
 
     assert await send_to_channel(C(), 1, "hi") is False
-    await send_alert(C(), 1, "hi")
 
 
 @pytest.mark.parametrize("make", EXCEPTIONS)
@@ -459,7 +458,7 @@ async def test_pruning_one_guild_leaves_the_others_notices_alone(db_path):
     assert len(_notices(db_path, 1)) == 20
 
 
-# --- v2's send_alert, unchanged ---
+# --- the capped text and the cache fallback, as v2 sent them ---
 
 
 class _Recorder:
@@ -487,27 +486,19 @@ class _RecClient:
     ["short", "x" * 2000, "x" * 2001, "\U0001f600" * 1500, "\u00e9" * 5000],
     ids=["short", "exact", "over", "astral", "accents"],
 )
-async def test_send_alert_sends_exactly_the_v2_capped_text_with_no_mentions(text):
+async def test_send_to_channel_sends_exactly_the_v2_capped_text_with_no_mentions(text):
     chan = _Recorder()
-    await send_alert(_RecClient(chan), 5, text)
+    await send_to_channel(_RecClient(chan), 5, text)
     ((sent, kwargs),) = chan.calls
     assert sent == _truncate_utf16(text, 2000, suffix="…")
     assert set(kwargs) == {"allowed_mentions"}
     assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
 
 
-async def test_send_alert_with_no_channel_never_touches_the_client():
-    class Boom:
-        def get_channel(self, cid):
-            raise AssertionError("must not be called")
-
-    await send_alert(Boom(), None, "x")
-
-
-async def test_send_alert_falls_back_to_fetch_when_the_cache_misses():
+async def test_send_to_channel_falls_back_to_fetch_when_the_cache_misses():
     chan = _Recorder()
     client = _RecClient(chan, cached=False)
-    await send_alert(client, 5, "hi")
+    await send_to_channel(client, 5, "hi")
     assert client.fetched and [c[0] for c in chan.calls] == ["hi"]
 
 

@@ -33,7 +33,6 @@ from newsbot.config import (
     WebSearchSource,
     _RawConfig,
     _with_default_name,
-    configured_source_names,
     load_config,
 )
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
@@ -219,12 +218,6 @@ def test_web_search_sees_the_same_games_with_the_same_queries(v2_path, brave):
 def test_derived_collector_names_are_unique(v2_path, brave):
     names = [c.name for c in build_catalog_collectors(load_config(v2_path), _secrets(brave))]
     assert len(names) == len(set(names))
-
-
-def test_collector_names_equal_configured_source_names(v2_path, brave):
-    cfg = load_config(v2_path)
-    names = {c.name for c in build_catalog_collectors(cfg, _secrets(brave))}
-    assert names == configured_source_names(cfg)
 
 
 # --- match behavior ---

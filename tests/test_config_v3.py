@@ -17,7 +17,6 @@ from newsbot.config import (
     GameCfg,
     Secrets,
     SharedRssSource,
-    configured_source_names,
     load_config,
 )
 from newsbot.pipeline.filter import build_matchers
@@ -313,9 +312,9 @@ def test_catalog_collectors_add_web_search_only_with_a_key():
     assert len(off) == len(without)
 
 
-def test_configured_source_names_covers_catalog_and_shared(monkeypatch):
+def test_collector_names_cover_catalog_and_shared(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "k")
-    names = configured_source_names(load_config(V3))
+    names = {c.name for c in build_catalog_collectors(load_config(V3), _secrets("k"))}
     assert names == {
         "Borderlands 4 Steam",
         "Bluesky: Borderlands 4",
@@ -326,9 +325,10 @@ def test_configured_source_names_covers_catalog_and_shared(monkeypatch):
     }
 
 
-def test_configured_source_names_leaves_out_brave_without_a_key(monkeypatch):
+def test_collector_names_leave_out_brave_without_a_key(monkeypatch):
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
-    assert "Brave Search" not in configured_source_names(load_config(V3))
+    names = {c.name for c in build_catalog_collectors(load_config(V3), _secrets())}
+    assert "Brave Search" not in names
 
 
 def test_missing_brave_key_warns_once_for_a_v3_web_search_block(monkeypatch, caplog):

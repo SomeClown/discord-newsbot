@@ -5,14 +5,12 @@ Keeping the SQL in one file is a rule, not a preference: it means a
 grep, and it means the parameterization discipline (nothing ever gets
 string-formatted into a query) only has to be checked in one place.
 
-The write path centers on a claim-then-publish-then-save guard
-(SPEC-DEV 2): `claim_digest` reserves today's slot with a `pending` row
-*before* anything slow happens (summarizing, posting to Discord), and
-`save_run` writes items, stories and the final status together in one
-transaction, after publishing succeeds. If posting fails, nothing gets
-saved; a retry just recollects, which beats the alternative of a digest
-that's half-posted and half-recorded (I've seen that movie, and it's not
-a good one).
+The digest write path centers on a claim-then-publish-then-save guard
+(SPEC-DEV 2): `claim_guild_digest` reserves a server's slot for the day with a
+`pending` row *before* anything slow happens (summarizing, posting to Discord),
+and the save after publishing records what actually posted. A digest that's
+half-posted and half-recorded is the alternative (I've seen that movie, and it's
+not a good one).
 """
 
 from __future__ import annotations
@@ -31,11 +29,9 @@ from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, re
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
     AlertState,
-    AlertStatus,
     CodeView,
     CompedFollow,
     Coverage,
-    DigestRow,
     DueCandidate,
     GameSummaryRow,
     GuildClaim,
@@ -53,7 +49,6 @@ from newsbot.store.models import (
     QuoteDeckState,
     ShiftSettings,
     SourceHealthRow,
-    StatusSnapshot,
     StoredItem,
     StoryToSave,
     StoryView,
@@ -66,8 +61,6 @@ from newsbot.store.models import (
 # have to think about the limit or hit it in production with a big batch
 # of collected URLs.
 _SQLITE_VARIABLE_CHUNK = 900
-
-_ONE_DAY = timedelta(hours=24)
 
 
 def _resolve_now(now: Callable[[], datetime] | None) -> str:
@@ -162,73 +155,6 @@ def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) 
     ]
 
 
-def get_digest(conn: sqlite3.Connection, run_date: date) -> DigestRow | None:
-    row = conn.execute(
-        "SELECT id, run_date, status, posted_message_ids, error_notes "
-        "FROM digests WHERE run_date = ?",
-        (run_date.isoformat(),),
-    ).fetchone()
-    if row is None:
-        return None
-    return DigestRow(
-        id=row["id"],
-        run_date=date.fromisoformat(row["run_date"]),
-        status=row["status"],
-        posted_message_ids=json.loads(row["posted_message_ids"]),
-        error_notes=row["error_notes"],
-    )
-
-
-def claim_digest(
-    conn: sqlite3.Connection,
-    run_date: date,
-    *,
-    force: bool,
-    now: Callable[[], datetime] | None = None,
-) -> int | None:
-    """Reserve `run_date` for a run, or say no.
-
-    Returns the digest id (status set to `pending`) if the claim succeeds,
-    or `None` if it's blocked:
-      - a `pending` row already exists and `force` wasn't passed
-        (something else is running, or crashed mid-run; either way, we
-        don't want to overlap it without being asked to)
-      - an `ok`/`partial` row exists and `force` wasn't passed
-    A `failed` row always allows a reclaim (that day never actually posted).
-    `force=True` against `pending`/`ok`/`partial` updates the existing row
-    in place, keeping its id, rather than inserting a second row for the
-    same date.
-
-    `force` overriding `pending` (added for QA step 20, group 4) relies on
-    `pipeline/run.py`'s in-process `_run_lock`, held for the whole guard
-    dance, to already rule out two runs racing to claim the same date --
-    the only way this layer ever sees a `pending` row at all is a crash
-    that happened before `save_run`/`mark_digest_failed` got to run, which
-    means it's always safe to force past.
-    """
-    now_iso = _resolve_now(now)
-    with conn:
-        row = conn.execute(
-            "SELECT id, status FROM digests WHERE run_date = ?", (run_date.isoformat(),)
-        ).fetchone()
-        if row is None:
-            cur = conn.execute(
-                "INSERT INTO digests (run_date, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                (run_date.isoformat(), "pending", now_iso, now_iso),
-            )
-            return cur.lastrowid
-
-        digest_id, status = row["id"], row["status"]
-        if status in ("pending", "ok", "partial") and not force:
-            return None
-        conn.execute(
-            "UPDATE digests SET status = 'pending', updated_at = ? WHERE id = ?",
-            (now_iso, digest_id),
-        )
-        return digest_id
-
-
 def _insert_items(
     conn: sqlite3.Connection, items: list[StoredItem], now_iso: str
 ) -> tuple[dict[str, int], int]:
@@ -238,8 +164,8 @@ def _insert_items(
     0 if the url was already there), so it can't include anything another
     connection wrote in the meantime.
 
-    No transaction of its own: `save_run` and `store_items` each wrap it in
-    theirs, and a nested commit would quietly break `save_run`'s atomicity.
+    No transaction of its own: `store_items` wraps it in one, and a nested
+    commit would quietly break that atomicity.
     """
     url_to_id: dict[str, int] = {}
     inserted = 0
@@ -285,107 +211,6 @@ def store_items(
     with conn:
         _, inserted = _insert_items(conn, items, now_iso)
     return inserted
-
-
-def save_run(
-    conn: sqlite3.Connection,
-    digest_id: int,
-    items: list[StoredItem],
-    stories: list[StoryToSave],
-    status: str,
-    message_ids: list[int],
-    notes: str | None,
-    usage: Usage,
-    now: Callable[[], datetime] | None = None,
-) -> None:
-    """Save one run's items, stories and final digest status, atomically.
-
-    Everything happens inside a single transaction. If any statement fails
-    (a bad status value, a constraint violation, whatever), the whole thing
-    rolls back, so a half-saved run never sits in the database looking like
-    a real one.
-    """
-    now_iso = _resolve_now(now)
-    with conn:
-        url_to_id, _ = _insert_items(conn, items, now_iso)
-
-        for story in stories:
-            item_ids = [url_to_id[u] for u in story.item_urls if u in url_to_id]
-            if not item_ids:
-                # Shouldn't happen: postprocess() in pipeline/summarize.py
-                # already drops stories with no valid URLs. If it does
-                # happen, better to skip the story than write an orphan.
-                continue
-            cur = conn.execute(
-                "INSERT INTO stories "
-                "(topic_key, headline, summary, label, is_update_of, digest_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    story.topic_key,
-                    story.headline,
-                    story.summary,
-                    story.label,
-                    story.update_of_story_id,
-                    digest_id,
-                    now_iso,
-                ),
-            )
-            story_id = cur.lastrowid
-            for item_id in item_ids:
-                conn.execute(
-                    "INSERT INTO story_items (story_id, item_id) VALUES (?, ?)", (story_id, item_id)
-                )
-
-        conn.execute(
-            "UPDATE digests SET status = ?, posted_message_ids = ?, error_notes = ?, "
-            "input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, updated_at = ? "
-            "WHERE id = ?",
-            (
-                status,
-                json.dumps(message_ids),
-                notes,
-                usage.input_tokens,
-                usage.output_tokens,
-                now_iso,
-                digest_id,
-            ),
-        )
-
-
-def mark_digest_failed(
-    conn: sqlite3.Connection,
-    digest_id: int,
-    notes: str,
-    message_ids: list[int],
-    now: Callable[[], datetime] | None = None,
-) -> None:
-    """Record that a run's publish step failed.
-
-    Items and stories aren't touched here: `save_run` never ran for this
-    attempt, so there's nothing to undo. A retry just recollects.
-
-    `message_ids` is unioned with whatever `posted_message_ids` this row
-    already had, not written over it (a pre-existing bug): a forced
-    run-now that fails again after a first failure already recorded some
-    ids would otherwise overwrite them with this attempt's shorter list
-    (or an empty one, if this attempt didn't post anything before
-    failing), and an unattended restart's catch-up check would then have
-    no way to know those earlier messages exist and repost them. Order is
-    preserved: whatever was already there, then any new id this attempt
-    got that wasn't already in the list.
-    """
-    now_iso = _resolve_now(now)
-    with conn:
-        row = conn.execute(
-            "SELECT posted_message_ids FROM digests WHERE id = ?", (digest_id,)
-        ).fetchone()
-        existing_ids: list[int] = json.loads(row["posted_message_ids"]) if row else []
-        merged_ids = existing_ids + [i for i in message_ids if i not in existing_ids]
-        conn.execute(
-            "UPDATE digests SET status = 'failed', error_notes = ?, posted_message_ids = ?, "
-            "updated_at = ? WHERE id = ?",
-            (notes, json.dumps(merged_ids), now_iso, digest_id),
-        )
 
 
 def record_source_result(
@@ -574,120 +399,6 @@ def record_silent_codes(
             )
 
 
-def claim_codes(
-    conn: sqlite3.Connection,
-    codes: list[tuple[str, str, str]],
-    *,
-    pinged: bool,
-    local_day: str,
-    now: Callable[[], datetime] | None = None,
-    max_pings: int | None = None,
-    from_roundup: bool = False,
-) -> bool:
-    """Claim `codes` as `pending` and spend today's ping budget, in one transaction.
-
-    `from_roundup` (migration 003) is stamped onto every row in this
-    claim: one call always claims one kind of batch, never a mix, so
-    a single bool per call (not per code) is enough. Defaults to False:
-    every caller before v2.0 (design.md §13) claims a normal, non-roundup
-    batch, and step 5's roundup posting is the first to pass True.
-
-    `codes` is `(code, source_name, item_url)`. This is a plain `INSERT`,
-    not `ON CONFLICT DO NOTHING`: record-then-post (plan §1) depends on
-    a code that's somehow already claimed aborting the *whole* claim,
-    ping spend included, rather than silently claiming its siblings and
-    leaving the budget half-spent for a code that never got recorded.
-    `local_day` resets `ping_count` to 0 first if it doesn't match the
-    stored `ping_day` (a new day in `cfg.digest.timezone`, not UTC
-    midnight, see A8), then spends one more if `pinged`.
-
-    Runs inside an explicit `BEGIN IMMEDIATE`, not sqlite3's default
-    deferred transaction: it grabs SQLite's write lock before reading
-    `alert_state`, so a second caller doing the same thing at the same
-    moment (a sweep and a `/newsbot test-alert` both landing in the same
-    second, step 7) blocks on `busy_timeout` and sees this call's
-    committed count, instead of both readers computing "count < max_pings"
-    from the same stale row and over-spending the budget between them.
-
-    `max_pings`, when given, re-checks the cap against that up-to-date
-    count: if `pinged` was asked for but the cap was already reached by
-    the time this claim actually got the write lock, the claim still
-    goes through, just without a ping (`actual_pinged` in the code below,
-    also this function's return value): a caller uses that to decide
-    whether to still render the message as pinging. `max_pings=None` (the
-    default) skips the re-check and spends exactly what `pinged` asked
-    for, unchanged from how this function worked before the cap re-check
-    existed; every caller from before that keeps its exact prior
-    behavior.
-
-    An empty `codes` is a no-op: nothing to claim means nothing to spend
-    a ping on either, and a caller that got this far with `pinged=True`
-    but no codes (shouldn't happen, but "shouldn't" isn't "can't") would
-    otherwise burn a slot of today's budget for an alert that never posts.
-    """
-    if not codes:
-        return False
-    now_iso = _resolve_now(now)
-    # sqlite3's own "begin a transaction on first DML" behavior only ever
-    # issues a deferred BEGIN; to get an immediate write lock instead, the
-    # module's automatic handling has to be turned off (isolation_level =
-    # None, autocommit) so this can issue "BEGIN IMMEDIATE" itself.
-    old_isolation = conn.isolation_level
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        state = get_alert_state(conn)
-        count = state.ping_count if state.ping_day == local_day else 0
-        actual_pinged = pinged
-        if max_pings is not None and pinged and count >= max_pings:
-            actual_pinged = False
-        if actual_pinged:
-            count += 1
-        _set_alert_state(conn, "ping_day", local_day)
-        _set_alert_state(conn, "ping_count", str(count))
-        for code, source_name, item_url in codes:
-            conn.execute(
-                "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, pinged, from_roundup, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-                (code, now_iso, source_name, item_url, int(actual_pinged), int(from_roundup)),
-            )
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.isolation_level = old_isolation
-    return actual_pinged
-
-
-def mark_codes_posted(
-    conn: sqlite3.Connection, codes: list[str], *, message_id: int | None
-) -> None:
-    """Flip `codes` (already `pending`) to `posted`, all sharing one `message_id`.
-
-    One call per Discord message: a batch that split across several
-    messages (`format.py`'s overflow handling) calls this once per
-    message with that message's own id and its own slice of codes.
-    """
-    with conn:
-        for code in codes:
-            conn.execute(
-                "UPDATE alerted_codes SET status = 'posted', message_id = ? WHERE code = ?",
-                (message_id, code),
-            )
-
-
-def mark_codes_failed(conn: sqlite3.Connection, codes: list[str]) -> None:
-    """Flip `codes` (already `pending`) to `failed` after a send that never landed."""
-    with conn:
-        for code in codes:
-            conn.execute(
-                "UPDATE alerted_codes SET status = 'failed' WHERE code = ?",
-                (code,),
-            )
-
-
 def fail_pending_codes(conn: sqlite3.Connection) -> list[str]:
     """Flip every still-`pending` code to `failed`; return which ones changed.
 
@@ -714,41 +425,6 @@ def record_sweep(
     with conn:
         _set_alert_state(conn, "last_sweep_at", now_iso)
         _set_alert_state(conn, "last_sweep_summary", summary)
-
-
-def alert_status(
-    conn: sqlite3.Connection,
-    today: str,
-    *,
-    enabled: bool,
-    max_pings: int,
-    test_command_enabled: bool = False,
-) -> AlertStatus:
-    """Everything `/newsbot status`'s SHiFT alerts field shows, in one place.
-
-    `today` is the caller's `local_run_date` string (`cfg.digest.timezone`,
-    A8): `pings_today` only counts `ping_count` when it was spent on
-    that same local day; a stale `ping_day` from yesterday reads as 0
-    without needing its own reset write. `test_command_enabled` is just
-    `cfg.alerts.allow_test_command` passed through: it's config, not
-    anything stored, but it lives on this dataclass because it's the one
-    place `render_status` already reads the rest of this from.
-    """
-    state = get_alert_state(conn)
-    codes_alerted = conn.execute(
-        "SELECT COUNT(*) FROM alerted_codes WHERE status = 'posted'"
-    ).fetchone()[0]
-    pings_today = state.ping_count if state.ping_day == today else 0
-    return AlertStatus(
-        enabled=enabled,
-        seeded=state.seeded,
-        last_sweep_at=state.last_sweep_at,
-        last_sweep_summary=state.last_sweep_summary,
-        codes_alerted=codes_alerted,
-        pings_today=pings_today,
-        max_pings=max_pings,
-        test_command_enabled=test_command_enabled,
-    )
 
 
 def query_codes(
@@ -855,7 +531,7 @@ def claim_quote(
 ) -> bool:
     """Record today's quote as used, or say no. True means the caller won and should post.
 
-    Record-then-post, same shape as `claim_codes`: this runs before the
+    Record-then-post, same shape as `claim_guild_codes`: this runs before the
     Discord call, so a post that fails leaves the quote used and the day
     done (one admin alert, no retry).
 
@@ -881,7 +557,7 @@ def claim_quote(
     with no lounge row (it was removed while the quote was loading) gets
     False and nothing is written.
 
-    Runs inside `BEGIN IMMEDIATE` for the reason `claim_codes` does: the
+    Runs inside `BEGIN IMMEDIATE` for the reason `claim_guild_codes` does: the
     scheduled job and `quote-now` can land in the same second, and the
     loser has to wait for the winner's committed date instead of both
     reading the same stale one and both posting.
@@ -1115,99 +791,6 @@ def search_stories(
         return [], 0
 
     return _rows_to_story_views(conn, rows), total
-
-
-def status_snapshot(
-    conn: sqlite3.Connection, now: datetime, month_start: datetime, configured_names: Iterable[str]
-) -> StatusSnapshot:
-    """Everything `/newsbot status` shows, gathered in one place.
-
-    `configured_names` (from `config.configured_source_names`) is the
-    source_health filter: a source dropped from config.yaml still has a
-    row in this table forever (this function only reads; see the module
-    docstring on why pruning isn't its job), but nobody wants it showing
-    up in `/newsbot status` claiming to be unhealthy years later. A
-    configured source with no row yet (just added, never run) still gets
-    a place in the list, marked `never_run`, rather than silently missing
-    from the count.
-    """
-    digest_row = conn.execute(
-        "SELECT id, run_date, status, posted_message_ids, error_notes "
-        "FROM digests ORDER BY run_date DESC LIMIT 1"
-    ).fetchone()
-    last_digest = None
-    if digest_row is not None:
-        last_digest = DigestRow(
-            id=digest_row["id"],
-            run_date=date.fromisoformat(digest_row["run_date"]),
-            status=digest_row["status"],
-            posted_message_ids=json.loads(digest_row["posted_message_ids"]),
-            error_notes=digest_row["error_notes"],
-        )
-
-    names = list(configured_names)
-    health_rows: list[sqlite3.Row] = []
-    if names:
-        placeholders = ",".join("?" for _ in names)
-        # placeholders is a string of literal "?"s sized to the configured
-        # source list, never interpolated user data; the actual names are
-        # bound below.
-        select = "SELECT source_name, last_success_at, last_error_at, last_error, "
-        select += "consecutive_failures FROM source_health "
-        where = f"WHERE source_name IN ({placeholders})"  # noqa: S608
-        health_rows = conn.execute(select + where, names).fetchall()
-
-    source_health = [
-        SourceHealthRow(
-            source_name=row["source_name"],
-            last_success_at=(
-                datetime.fromisoformat(row["last_success_at"]) if row["last_success_at"] else None
-            ),
-            last_error_at=(
-                datetime.fromisoformat(row["last_error_at"]) if row["last_error_at"] else None
-            ),
-            last_error=row["last_error"],
-            consecutive_failures=row["consecutive_failures"],
-        )
-        for row in health_rows
-    ]
-    seen_names = {row["source_name"] for row in health_rows}
-    source_health.extend(
-        SourceHealthRow(
-            source_name=name,
-            last_success_at=None,
-            last_error_at=None,
-            last_error=None,
-            consecutive_failures=0,
-            never_run=True,
-        )
-        for name in names
-        if name not in seen_names
-    )
-    source_health.sort(key=lambda s: s.source_name)
-
-    since_24h = (now - _ONE_DAY).isoformat()
-    items_last_24h = conn.execute(
-        "SELECT COUNT(*) FROM items WHERE collected_at >= ?", (since_24h,)
-    ).fetchone()[0]
-    stories_last_24h = conn.execute(
-        "SELECT COUNT(*) FROM stories WHERE created_at >= ?", (since_24h,)
-    ).fetchone()[0]
-
-    month_row = conn.execute(
-        "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-        "FROM digests WHERE created_at >= ? AND created_at <= ?",
-        (month_start.isoformat(), now.isoformat()),
-    ).fetchone()
-
-    return StatusSnapshot(
-        last_digest=last_digest,
-        source_health=source_health,
-        items_last_24h=items_last_24h,
-        stories_last_24h=stories_last_24h,
-        month_input_tokens=month_row[0],
-        month_output_tokens=month_row[1],
-    )
 
 
 # --- Guilds (design.md §15) ---
@@ -2058,21 +1641,6 @@ def skip_queued_guild_codes(conn: sqlite3.Connection, guild_id: int, codes: list
             )
 
 
-def guild_posted_codes(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> set[str]:
-    """The subset of `codes` this guild already has a `guild_code_posts` row for, any status."""
-    found: set[str] = set()
-    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
-        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
-        placeholders = ",".join("?" for _ in chunk)
-        # Literal "?"s sized to the chunk; the values are bound below.
-        query = (
-            "SELECT code FROM guild_code_posts "  # noqa: S608
-            f"WHERE guild_id = ? AND code IN ({placeholders})"
-        )
-        found.update(row["code"] for row in conn.execute(query, [guild_id, *chunk]))
-    return found
-
-
 class ClaimedCodes(NamedTuple):
     """What `claim_guild_codes` got: the codes now `pending`, and whether the ping was spent."""
 
@@ -2093,10 +1661,10 @@ def claim_guild_codes(
     ping_codes: Collection[str] | None = None,
     followup_ok: bool = False,
 ) -> ClaimedCodes:
-    """`claim_codes`, for one server: move its `queued` `codes` to `pending`, spending its ping.
+    """Move one server's `queued` `codes` to `pending`, spending its ping.
 
-    Same record-then-post shape and the same `BEGIN IMMEDIATE` reasoning as
-    `claim_codes`, but the budget is the server's own (`guild_shift.ping_day` and
+    Record-then-post, under `BEGIN IMMEDIATE` so two claimers can't both spend the
+    last ping. The budget is the server's own (`guild_shift.ping_day` and
     `ping_count`), and `local_day` is that server's local date.
 
     Takes whichever of `codes` are still `queued` under the write lock and
@@ -2860,10 +2428,10 @@ def claim_guild_digest(
     resume: bool = False,
     now: Callable[[], datetime] | None = None,
 ) -> GuildClaim | None:
-    """`claim_digest`, for one server: reserve `(guild_id, run_date)` or say no.
+    """Reserve `(guild_id, run_date)` for a digest, or say no.
 
     Runs under `BEGIN IMMEDIATE`, so two claimers can't both see "no row".
-    Same meanings as v2:
+    The meanings (they date from v2's one-server claim):
     - no row: insert `pending` with `window`;
     - `ok`, `partial`, or `pending` without `force`: refused (`None`), except that
       a `pending` row with a stored window *resumes* when `resume` is true (D7: the
@@ -3156,7 +2724,7 @@ def mark_guild_digest_failed(
 
     `posted_by_game` is merged into what the row already has (write-through may
     already have recorded most of it); nothing is ever removed, for the reason
-    `mark_digest_failed` gives: forgetting a posted game is how it gets posted twice.
+    `mark_guild_digest_failed` gives: forgetting a posted game is how it gets posted twice.
     """
     with _immediate(conn):
         row = conn.execute(

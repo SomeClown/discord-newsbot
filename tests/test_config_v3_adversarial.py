@@ -29,7 +29,6 @@ from newsbot.config import (
     GameCfg,
     Secrets,
     Topic,
-    configured_source_names,
     load_config,
 )
 from newsbot.pipeline.filter import build_matchers, filter_items
@@ -786,19 +785,16 @@ def test_hybrid_skips_the_v2_only_source_checks(tmp_path):
     assert load_config(_hybrid(tmp_path, extra)).catalog[0].key == "palworld"
 
 
-def test_configured_source_names_in_a_hybrid_does_not_list_the_legacy_sources(
-    tmp_path, monkeypatch
-):
-    # This used to be pinned the other way, as a cutover to-do: the v2 `sources` list fed
-    # `configured_source_names` and a hybrid config reported health rows for sources that
+def test_collector_names_in_a_hybrid_do_not_list_the_legacy_sources(tmp_path, monkeypatch):
+    # This used to be pinned the other way, as a cutover to-do: the v2 `sources` list fed the
+    # status page's source names, and a hybrid config reported health rows for sources that
     # `build_catalog_collectors` never runs. The v2 fields left `AppConfig` at the cutover, so
-    # a phantom row in /newsbot status can't happen, and this holds the line.
+    # a phantom row can't happen, and this holds the line.
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     extra = (
         "topics: []\nsources:\n  - {type: steam_news, name: Legacy, app_id: 1, trust: official}\n"
     )
     cfg = load_config(_hybrid(tmp_path, extra))
-    assert "Legacy" not in configured_source_names(cfg)
     assert "Legacy" not in {c.name for c in build_catalog_collectors(cfg, _secrets())}
 
 
@@ -1052,11 +1048,6 @@ def test_a_match_name_false_game_without_search_queries_searches_its_bare_name(v
 def test_collector_names_are_unique_for_a_valid_v3_config(v3_cfg):
     names = [c.name for c in build_catalog_collectors(v3_cfg, _secrets("k"))]
     assert len(names) == len(set(names))
-
-
-def test_collector_names_match_configured_source_names(v3_cfg):
-    names = {c.name for c in build_catalog_collectors(v3_cfg, _secrets("k"))}
-    assert names == configured_source_names(v3_cfg)
 
 
 def test_building_collectors_leaves_the_config_untouched(v3_cfg):

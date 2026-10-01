@@ -14,10 +14,11 @@ from contextlib import closing
 from datetime import UTC, date, datetime
 
 import pytest
+from v2_seed import seed_run
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.models import StoredItem, StoryToSave, Usage
+from newsbot.store.models import StoredItem, StoryToSave
 
 SINCE = datetime(2020, 1, 1, tzinfo=UTC)
 
@@ -39,7 +40,6 @@ def conn(tmp_path):
 
 def _seed_two_stories(conn):
     for i, (topic_key, headline) in enumerate([("palworld", "P story"), ("diablo4", "D story")]):
-        digest_id = repo.claim_digest(conn, date(2026, 9, 20 + i), force=False)
         item = StoredItem(
             url=f"https://e/{i}",
             title=headline,
@@ -57,7 +57,7 @@ def _seed_two_stories(conn):
             item_urls=[f"https://e/{i}"],
             update_of_story_id=None,
         )
-        repo.save_run(conn, digest_id, [item], [story], "ok", [], None, Usage(0, 0))
+        seed_run(conn, date(2026, 9, 20 + i), [item], [story])
 
 
 @pytest.mark.parametrize("payload", INJECTION_PAYLOADS)
@@ -83,7 +83,6 @@ def test_query_stories_label_is_bound_not_interpolated(conn, payload):
 
 @pytest.mark.parametrize("payload", INJECTION_PAYLOADS)
 def test_existing_urls_values_are_bound_not_interpolated(conn, payload):
-    digest_id = repo.claim_digest(conn, date(2026, 9, 23), force=False)
     item = StoredItem(
         url="https://e/real",
         title="x",
@@ -93,7 +92,7 @@ def test_existing_urls_values_are_bound_not_interpolated(conn, payload):
         published_at=None,
         topics={"palworld": False},
     )
-    repo.save_run(conn, digest_id, [item], [], "ok", [], None, Usage(0, 0))
+    seed_run(conn, date(2026, 9, 23), [item], [])
 
     found = repo.existing_urls(conn, [payload, "https://e/real"])
     assert found == {"https://e/real"}
