@@ -19,6 +19,10 @@ import pytest
 from newsbot.store import db
 from newsbot.store.db import connect, migrate
 
+# The cutover tests' fixtures (a whole v2.2 morning, rebuilt in a temp directory) live in
+# their own module; this is how pytest finds them without every file importing a fixture.
+pytest_plugins = ("cutover_world",)
+
 MIGRATIONS_DIR = Path(__file__).parent.parent / "newsbot" / "store" / "migrations"
 
 # Real-looking SHiFT codes (29 characters: five groups of five and four dashes).
