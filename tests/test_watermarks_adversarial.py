@@ -9,7 +9,7 @@ rows that have never heard of marks at all. This file asks the questions that ke
 1. Does every item land in exactly one digest per server, however the claims, retries,
    run-nows and slow collection passes interleave? (A seeded random timeline, thirty of them.)
 2. What do purges and id restarts do to a mark?
-3. What does a newly followed game see? (Pinned, not judged: see the comments.)
+3. What does a newly followed, refollowed or missed game see? (Coverage is per game.)
 4. Do free and comped servers on one window cover the same ids, each its own way?
 5. What happens around an abandoned digest, and a rolled-back v2.2 digest with no marks?
 
@@ -210,33 +210,56 @@ async def test_ids_that_restart_after_a_full_purge_still_show_a_burst_smaller_th
     assert times_shown(world, "item-6") == 1
 
 
-# --- 3. a game that wasn't followed yesterday ---
+# --- 3. a game that wasn't followed yesterday (coverage is per game) ---
+#
+# Each game has its own mark. A game the server wasn't told about in its previous digest (just
+# followed, or unfollowed and followed again) starts with the first-digest floor, a day; it
+# doesn't inherit the server's mark, which would hide anything stored before it. A game a
+# failed digest never reached keeps its older mark, so the next digest carries it over.
 
 
-async def test_a_newly_followed_game_starts_at_the_servers_mark_not_at_48_hours_back(world):
-    """Pinned by design (the owner may want it otherwise): following Palworld on day 2 shows
-    Palworld items stored after day 1's digest, not the 26 hours of Palworld news before it."""
+async def test_a_newly_followed_game_gets_the_first_digest_floor_not_the_servers_mark(world):
     world.add_guild(G1, games=(BL4,))
     world.add_item(BL4, "item-1", DUE - timedelta(hours=3))
-    world.add_item(PAL, "item-2", DUE - timedelta(hours=2))  # stored while unfollowed
+    world.add_item(PAL, "item-2", DUE - timedelta(hours=2))  # 26 hours old by the next digest
+    world.add_item(PAL, "item-3", DUE + timedelta(hours=2))  # stored before the mark below
+    world.add_item(BL4, "item-4", DUE - timedelta(hours=1))  # so the server's mark is 4
     world.clock = at_due(0)
     await run_due_guilds(world.deps())
     with world.conn() as conn:
         repo.follow_game(conn, G1, PAL, ch(G1, 2))
-    world.add_item(PAL, "item-3", DUE + timedelta(hours=6))
+    world.add_item(PAL, "item-5", DUE + timedelta(hours=6))
     world.clock = at_due(1)
     await run_due_guilds(world.deps())
-    assert shown(world, game_index=2) == ["item-3"]  # item-2 is 26 hours old and never appears
+    # item-3 is under the server's mark but within Palworld's own day; item-2 is past the floor.
+    assert shown(world, game_index=2) == ["item-5", "item-3"]
+    assert times_shown(world, "item-4") == 1  # and Borderlands still isn't shown twice
 
 
-async def test_a_game_unfollowed_and_refollowed_does_not_replay_what_it_missed_either(world):
+async def test_a_newly_followed_game_is_not_shown_twice_on_the_day_after(world):
+    world.add_guild(G1, games=(BL4,))
+    world.add_item(BL4, "item-1", DUE - timedelta(hours=3))
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    with world.conn() as conn:
+        repo.follow_game(conn, G1, PAL, ch(G1, 2))
+    world.add_item(PAL, "item-2", DUE + timedelta(hours=6))
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    world.add_item(PAL, "item-3", DUE + timedelta(days=1, hours=6))
+    world.clock = at_due(2)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-2", "item-3"]
+
+
+async def test_a_game_unfollowed_and_refollowed_gets_the_floor_for_the_gap(world):
     world.add_guild(G1, games=(BL4, PAL))
     world.add_item(PAL, "item-1", DUE - timedelta(hours=3))
     world.clock = at_due(0)
     await run_due_guilds(world.deps())
     with world.conn() as conn:
         repo.set_guild_games(conn, G1, [(BL4, ch(G1, 1))])  # drops Palworld
-    world.add_item(PAL, "item-2", DUE + timedelta(hours=3))  # news while unfollowed
+    world.add_item(PAL, "item-2", DUE + timedelta(hours=3))  # news while unfollowed, a day old
     world.clock = at_due(1)
     await run_due_guilds(world.deps())
     with world.conn() as conn:
@@ -244,7 +267,118 @@ async def test_a_game_unfollowed_and_refollowed_does_not_replay_what_it_missed_e
     world.add_item(PAL, "item-3", at_due(1) + timedelta(hours=2))
     world.clock = at_due(2)
     await run_due_guilds(world.deps())
-    assert shown(world, game_index=2) == ["item-1", "item-3"]  # item-2 fell in the gap
+    # item-2 is past the refollow's day and so is gone; item-1 was shown before, once.
+    assert shown(world, game_index=2) == ["item-1", "item-3"]
+
+
+async def test_a_refollowed_game_shows_what_the_last_day_held_even_below_the_servers_mark(world):
+    world.add_guild(G1, games=(BL4, PAL))
+    world.add_item(PAL, "item-1", DUE - timedelta(hours=3))
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    with world.conn() as conn:
+        repo.set_guild_games(conn, G1, [(BL4, ch(G1, 1))])
+    world.add_item(PAL, "item-2", at_due(1) + timedelta(hours=1))  # stored while unfollowed...
+    world.add_item(BL4, "item-3", at_due(1) - timedelta(hours=2))  # ...below this digest's mark
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    with world.conn() as conn:
+        repo.set_guild_games(conn, G1, [(BL4, ch(G1, 1)), (PAL, ch(G1, 2))])
+    world.clock = at_due(2)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-1", "item-2"]
+
+
+async def test_a_game_a_failed_digest_never_reached_is_carried_to_the_next_one(world):
+    """Palworld's channel is down on day 1; Borderlands posts. Day 2 gets day 1's Palworld news."""
+    world.add_guild(G1, games=(BL4, PAL))
+    world.add_item(BL4, "item-1", DUE - timedelta(hours=3))
+    world.add_item(PAL, "item-2", DUE - timedelta(hours=2))
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    world.add_item(BL4, "item-3", DUE + timedelta(hours=5))
+    world.add_item(PAL, "item-4", DUE + timedelta(hours=6))
+    world.channels[ch(G1, 2)].always_fail = a_500()
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    assert world.digest(G1, DAY + timedelta(days=1)).status == "failed"
+    world.channels[ch(G1, 2)].always_fail = None
+    world.add_item(PAL, "item-5", DUE + timedelta(days=1, hours=5))
+    world.clock = at_due(2)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-2", "item-5", "item-4"]  # item-4 was not lost
+    assert shown(world, game_index=1) == ["item-1", "item-3"]  # and nothing repeats
+
+
+async def test_a_game_whose_channel_was_gone_is_carried_to_the_next_digest(world):
+    world.add_guild(G1, games=(BL4, PAL))
+    world.add_item(PAL, "item-1", DUE - timedelta(hours=2))
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    world.add_item(PAL, "item-2", DUE + timedelta(hours=5))
+    world.gone.add(ch(G1, 2))  # Palworld is skipped on day 1; the digest is partial
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    assert world.digest(G1, DAY + timedelta(days=1)).status == "partial"
+    world.gone.discard(ch(G1, 2))
+    world.clock = at_due(2)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-1", "item-2"]
+
+
+async def test_a_first_digest_that_never_reached_a_game_still_owes_it(world):
+    world.add_guild(G1, games=(BL4, PAL))
+    world.add_item(BL4, "item-1", DUE - timedelta(hours=3))
+    world.add_item(PAL, "item-2", DUE - timedelta(hours=2))
+    world.channels[ch(G1, 2)].always_fail = a_500()
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    world.channels[ch(G1, 2)].always_fail = None
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-2"]
+
+
+async def test_a_quiet_game_counts_as_covered_and_is_not_replayed(world):
+    world.add_guild(G1, games=(BL4, PAL))
+    world.add_item(BL4, "item-1", DUE - timedelta(hours=3))  # Palworld has nothing on day 0
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps())
+    world.add_item(PAL, "item-2", DUE + timedelta(hours=5))
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps())
+    world.clock = at_due(2)
+    await run_due_guilds(world.deps())
+    assert shown(world, game_index=2) == ["item-2"]
+
+
+def test_last_coverage_is_per_game_and_stops_at_a_digest_that_was_not_following_the_game(world):
+    world.add_guild(G1, games=(BL4,))
+    day = DAY
+    with world.conn() as conn:
+        for offset, status, posted, marks in (
+            (0, "ok", {BL4: 1, PAL: 2}, {BL4: 5, PAL: 5}),
+            (1, "partial", {BL4: 3}, {BL4: 9}),  # no Palworld at all: it was unfollowed
+            (2, "ok", {BL4: 4}, {BL4: 12, PAL: None}),  # followed again, channel refused it
+        ):
+            claim = repo.claim_guild_digest(
+                conn,
+                G1,
+                day + timedelta(days=offset),
+                force=False,
+                window=(DUE, DUE + timedelta(days=offset)),
+                now=lambda: NOW,
+            )
+            repo.record_game_coverage(conn, claim.digest_id, marks)
+            repo.save_guild_digest(
+                conn, claim.digest_id, status, posted, None, (claim.window_start, claim.window_end)
+            )
+        coverage = repo.last_coverage(conn, G1, exclude_run_date=day + timedelta(days=3))
+    assert coverage.mark(BL4) is not None and coverage.mark(BL4) <= 12
+    # Palworld: day 2 followed and missed it, day 1 wasn't following it: nothing owed but
+    # the id-0 carry-over the floor trims, and certainly not day 0's mark.
+    assert coverage.mark(PAL) == 0
+    assert coverage.mark("rust") is None
 
 
 async def test_a_server_that_follows_a_game_for_the_first_time_gets_the_floor_not_everything(
@@ -298,6 +432,27 @@ async def test_free_and_comped_servers_on_one_window_each_resume_from_their_own_
     await run_due_guilds(world.deps(summary_for=lookup))
     assert asked[-1].item_id == 2  # the comped server's summary has to start at its own mark
     assert times_shown(world, "item-3", G1) == 1 and times_shown(world, "item-4", G1) == 1
+
+
+async def test_a_comped_summary_for_a_newly_followed_game_starts_fresh_not_at_the_servers_mark(
+    world,
+):
+    world.add_guild(G2, tier="comped", games=(BL4,))
+    world.add_item(BL4, "item-1", DUE - timedelta(hours=3))
+    asked: dict[str, object] = {}
+
+    async def lookup(game_key, due_at, after=None):
+        asked[game_key] = after
+        return GameSummary("ok", [story("s")], [], None, 1)
+
+    world.clock = at_due(0)
+    await run_due_guilds(world.deps(summary_for=lookup))
+    with world.conn() as conn:
+        repo.follow_game(conn, G2, PAL, ch(G2, 2))
+    world.clock = at_due(1)
+    await run_due_guilds(world.deps(summary_for=lookup))
+    assert asked[PAL] is None  # no mark: a first digest's summary, floor and all
+    assert asked[BL4].item_id == 1  # the game it already covered keeps its own
 
 
 async def test_a_fallback_game_in_a_comped_digest_chains_from_the_digests_mark_not_a_summarys(

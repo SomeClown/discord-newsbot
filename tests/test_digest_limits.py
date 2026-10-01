@@ -84,8 +84,9 @@ async def test_what_posted_before_the_cutoff_stays_recorded_and_the_next_day_sta
     world.clock = DUE + timedelta(days=1, seconds=20)
     await run_due_guilds(deps)
     assert world.digest(G1, DAY + timedelta(days=1)).status == "ok"
-    # It chains from the abandoned digest (BL4 went out; its window counts as delivered).
-    assert world.titles(ch(G1, 2)) == ["item-3"]
+    # Coverage is per game: BL4 went out, so it chains from the abandoned digest, but Palworld
+    # never did, so its news (item-2) is still owed and arrives with the new day's.
+    assert world.titles(ch(G1, 2)) == ["item-3", "item-2"]
 
 
 def test_the_claim_refuses_a_stale_pending_row_that_used_its_attempts(world):

@@ -2365,21 +2365,61 @@ def latest_item_id(conn: sqlite3.Connection, *, collected_by: datetime | None = 
     return (row["newest"] or 0) if row else 0
 
 
-def last_coverage(
-    conn: sqlite3.Connection, guild_id: int, *, exclude_run_date: date
-) -> Coverage | None:
-    """Where the server's previous digest left off: its window end and the item ids it covered.
+def _mark_map(raw: str | None) -> dict[str, int | None]:
+    """A digest's `game_items_upto` as `{game: id, or None for "intended, not covered"}`."""
+    try:
+        loaded = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        k: v
+        for k, v in loaded.items()
+        if v is None or (isinstance(v, int) and not isinstance(v, bool))
+    }
 
-    The same row `last_window_end` picks (the posted digest with the latest window end,
-    never `exclude_run_date`'s own). A digest written by v3 carries its own ids. One v2.2
-    wrote, and one adopted at the import, has only a window end: its ids are derived
-    from it as "everything stored at or before that instant", which is what v2.2 had
-    used. The same derivation covers a store whose ids went backwards. Migration 008
-    (AUTOINCREMENT) means a purge can't do that anymore, so this is the belt to its
-    braces, for a database restored without its sequence.
+
+def _posted_keys(raw: str | None) -> set[str]:
+    try:
+        loaded = json.loads(raw or "{}")
+    except ValueError:
+        return set()
+    return set(loaded) if isinstance(loaded, dict) else set()
+
+
+def last_coverage(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    *,
+    exclude_run_date: date,
+    games: Collection[str] | None = None,
+) -> Coverage | None:
+    """Where the server's previous digests left off, per game: marks, not one shared number.
+
+    The row that sets `Coverage.end` and `item_id` is the one `last_window_end` picks (the
+    posted digest with the latest window end, never `exclude_run_date`'s own). Each game's
+    mark comes from the newest of the recent digests that *covered* that game:
+    - a digest covered a game if it posted it, or finished (`ok`, `partial`) with a mark
+      recorded for it, which includes a game that was quiet that day;
+    - a digest that was following the game but didn't reach it (it failed first, or the
+      channel refused it: `record_game_coverage` writes `null` for those) is skipped, and
+      the next older digest decides, so the game picks up from where it last got through
+      (a game no digest ever got through starts from id 0, which the 48 hour floor trims);
+    - a digest that wasn't following the game at all ends the search: the game has no mark
+      and starts fresh (a game followed today, or unfollowed and followed again, gets the
+      first-digest floor for itself and not a stale mark from before the gap).
+    `games` limits the lookup (default: every game the recent digests mention).
+
+    A digest written by v3 carries its own ids. One v2.2 wrote, and one adopted at the
+    import, has no per-game record at all, and only a window end: its ids are derived from
+    it as "everything stored at or before that instant", which is what v2.2 had used, and
+    every game counts as covered by it. The same derivation covers an id that's higher than
+    anything stored. Migration 008 (AUTOINCREMENT) means ids can't go backwards by a purge
+    anymore, so that's the belt to its braces, for a database restored without its sequence.
     """
     rows = conn.execute(
-        "SELECT window_end, items_upto, game_items_upto FROM digests "
+        "SELECT status, window_end, items_upto, game_items_upto, posted_by_game FROM digests "
         "WHERE guild_id = ? AND run_date != ? AND window_end IS NOT NULL "
         "AND (status IN ('ok', 'partial') OR posted_by_game != '{}') "
         "ORDER BY run_date DESC LIMIT 5",
@@ -2387,21 +2427,51 @@ def last_coverage(
     ).fetchall()
     if not rows:
         return None
-    best = max(rows, key=lambda row: datetime.fromisoformat(row["window_end"]))
-    end = datetime.fromisoformat(best["window_end"])
-    upto, newest = best["items_upto"], latest_item_id(conn)
-    if upto is None or upto > newest:
-        return Coverage(end, latest_item_id(conn, collected_by=end))
-    try:
-        loaded = json.loads(best["game_items_upto"] or "{}")
-    except ValueError:
-        loaded = {}
-    by_game = (
-        {k: v for k, v in loaded.items() if isinstance(v, int) and v <= newest}
-        if isinstance(loaded, dict)
-        else {}
-    )
-    return Coverage(end, upto, by_game)
+    rows = sorted(rows, key=lambda row: datetime.fromisoformat(row["window_end"]), reverse=True)
+    newest = latest_item_id(conn)
+
+    def row_end(row: sqlite3.Row) -> datetime:
+        return datetime.fromisoformat(row["window_end"])
+
+    def row_upto(row: sqlite3.Row) -> int:
+        upto = row["items_upto"]
+        if upto is None or upto > newest:
+            return latest_item_id(conn, collected_by=row_end(row))
+        return upto
+
+    infos = []
+    for row in rows:
+        posted, marks = _posted_keys(row["posted_by_game"]), _mark_map(row["game_items_upto"])
+        infos.append((row, posted, marks, not posted and not marks))
+
+    def resolve(game_key: str) -> tuple[int, datetime] | None:
+        wanted_since: datetime | None = None  # the oldest digest that followed it and missed it
+        for row, posted, marks, legacy in infos:
+            if legacy:
+                return row_upto(row), row_end(row)
+            mark = marks.get(game_key)
+            finished = row["status"] in ("ok", "partial") and mark is not None
+            if game_key in posted or finished:
+                if mark is None or mark > newest:
+                    mark = row_upto(row)
+                return mark, row_end(row)
+            if game_key in marks:
+                wanted_since = row_end(row)  # it was following the game and never got to it
+                continue
+            break
+        # Never covered, but a digest wanted to cover it: that digest's news is still owed, so
+        # the game starts from the beginning of what the floor allows, not from its first mark.
+        return (0, wanted_since) if wanted_since is not None else None
+
+    wanted = set(games) if games is not None else {k for _, p, m, _ in infos for k in (*p, *m)}
+    by_game: dict[str, int] = {}
+    ends: dict[str, datetime] = {}
+    for key in sorted(wanted):
+        found = resolve(key)
+        if found is not None:
+            by_game[key], ends[key] = found
+    best = infos[0]
+    return Coverage(row_end(best[0]), row_upto(best[0]), by_game, ends, best[3])
 
 
 def item_range(
@@ -2679,18 +2749,19 @@ def abandon_guild_digest(
 def record_game_coverage(
     conn: sqlite3.Connection,
     digest_id: int,
-    coverage: Mapping[str, int],
+    coverage: Mapping[str, int | None],
     *,
     keep: Collection[str] = (),
 ) -> None:
-    """Note, per game, the newest item id a comped digest took from a shared summary.
+    """Note, per game, the newest item id this digest covers for it (`last_coverage` reads it).
 
-    A summary was made before the digest was claimed, so what it covers ends earlier
-    than the digest's own `items_upto`; the next summary for this server has to start
-    where *it* ended or the items in between are lost. Games for which this digest has
-    no summary (headlines, free servers) aren't listed: they use `items_upto`.
-    `keep` names games already posted by an earlier try of this digest, whose recorded
-    coverage stands (what a resume rebuilds may not be what it posted).
+    Every game the digest follows gets an entry, written before anything posts: the id
+    its news will have reached (a shared summary ends before the digest was claimed, so for a
+    comped game that's the summary's own `items_upto`; any other game reaches the digest's).
+    An entry of `None` says "followed, but not reached" (the channel refused it), so the
+    next digest picks the game up from its older mark instead of treating it as newly
+    followed. `keep` names games already posted by an earlier try of this digest, whose
+    recorded coverage stands (what a resume rebuilds may not be what it posted).
     """
     with _immediate(conn):
         row = conn.execute(
@@ -2698,12 +2769,7 @@ def record_game_coverage(
         ).fetchone()
         if row is None:
             raise StoreError(f"digest {digest_id} doesn't exist")
-        try:
-            stored = json.loads(row["game_items_upto"] or "{}")
-        except ValueError:
-            stored = {}
-        if not isinstance(stored, dict):
-            stored = {}
+        stored = _mark_map(row["game_items_upto"])
         merged = {k: v for k, v in coverage.items() if k not in keep or k not in stored}
         merged.update({k: v for k, v in stored.items() if k in keep})
         conn.execute(
@@ -2753,24 +2819,28 @@ def items_for_window(
     *,
     after_id: int | None = None,
     upto_id: int | None = None,
-    after_by_game: Mapping[str, int] | None = None,
+    after_by_game: Mapping[str, int | None] | None = None,
+    fresh_floor: datetime | None = None,
 ) -> dict[str, list[HeadlineItem]]:
     """Stored items for a digest, per game `guild_id` follows, newest first.
 
     By default the window is time: items collected in `(start, end]`. With `upto_id` it's
     the digest's item range instead (`item_range`): ids in `(after_id, upto_id]`, and
-    `start` is only the floor on `collected_at` (`end` is unused). `after_by_game` moves
-    one game's lower bound, for a comped game whose coverage ended where its summary did.
+    `start` is only the floor on `collected_at` (`end` is unused). `after_by_game` gives each
+    game its own lower bound (`Coverage.mark`): an id, or `None` for a game the server
+    hasn't been told yet, which takes everything newer than `fresh_floor` (the first-digest
+    floor) and no id bound. A game missing from it uses `after_id`.
 
     Only games the guild follows come back, so another server's games can't
     leak into its digest. An item matching two followed games appears under both.
     """
+    marks = after_by_game or {}
     if upto_id is None:
         window_sql = "AND items.collected_at > ? AND items.collected_at <= ? "
         params: tuple[object, ...] = (guild_id, _utc_iso(start), _utc_iso(end))
     else:
         window_sql = "AND items.collected_at > ? AND items.id > ? AND items.id <= ? "
-        lowest = min([after_id or 0, *(after_by_game or {}).values()])
+        lowest = min([after_id or 0, *(mark or 0 for mark in marks.values())])
         params = (guild_id, _utc_iso(start), lowest, upto_id)
     rows = conn.execute(
         "SELECT item_topics.topic_key, item_topics.uncertain, items.id AS item_id, items.url, "  # noqa: S608
@@ -2781,12 +2851,17 @@ def items_for_window(
         + "ORDER BY items.collected_at DESC, items.id DESC",
         params,
     ).fetchall()
+    fresh = _utc_iso(fresh_floor) if fresh_floor is not None else None
     by_game: dict[str, list[HeadlineItem]] = {}
     for row in rows:
-        if upto_id is not None and row["item_id"] <= (after_by_game or {}).get(
-            row["topic_key"], after_id or 0
-        ):
-            continue
+        if upto_id is not None:
+            key = row["topic_key"]
+            mark = marks.get(key, after_id or 0)
+            if mark is None:
+                if fresh is not None and row["collected_at"] <= fresh:
+                    continue
+            elif row["item_id"] <= mark:
+                continue
         by_game.setdefault(row["topic_key"], []).append(
             HeadlineItem(
                 url=row["url"],

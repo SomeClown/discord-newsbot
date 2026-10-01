@@ -615,7 +615,7 @@ def _needs_summary_sync(
 ) -> tuple[bool, Coverage | None]:
     """Whether this server's digest has no summary it may reuse, and where its coverage left off."""
     with closing(connect(db_path)) as conn:
-        coverage = repo.last_coverage(conn, guild_id, exclude_run_date=day)
+        coverage = repo.last_coverage(conn, guild_id, exclude_run_date=day, games=[game_key])
         after = coverage.for_game(game_key) if coverage else None
         return repo.get_game_summary(conn, game_key, due_at, after) is None, after
 

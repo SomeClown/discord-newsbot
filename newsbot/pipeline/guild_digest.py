@@ -44,7 +44,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -335,7 +335,7 @@ class _Built:
     channels: dict[str, int]
     notes: list[str]
     degraded: bool
-    # Per game, the newest item id a shared summary covered (see `repo.record_game_coverage`).
+    # Per game, the newest item id this digest covers for it (see `repo.record_game_coverage`).
     game_upto: dict[str, int] = field(default_factory=dict)
 
 
@@ -396,12 +396,13 @@ async def _build(
 
     def _items_sync():
         with closing(connect(deps.db_path)) as conn:
-            # Where this server's last digest left off, which a summary has to start at
-            # to be neither a gap nor a repeat for it.
-            coverage = repo.last_coverage(conn, guild.guild_id, exclude_run_date=run_date)
-            after_by_game = (
-                {key: coverage.for_game(key).item_id for key in channels} if coverage else {}
+            # Where this server's last digests left off, game by game: a summary has to
+            # start at its game's mark to be neither a gap nor a repeat. A game the server
+            # wasn't told about last time has no mark and gets the first-digest floor.
+            coverage = repo.last_coverage(
+                conn, guild.guild_id, exclude_run_date=run_date, games=list(channels)
             )
+            marks = {key: coverage.mark(key) if coverage else None for key in channels}
             items = repo.items_for_window(
                 conn,
                 guild.guild_id,
@@ -409,11 +410,12 @@ async def _build(
                 window[1],
                 after_id=rng.after,
                 upto_id=rng.upto,
-                after_by_game=after_by_game,
+                after_by_game=marks,
+                fresh_floor=item_floor(window[1], False),
             )
-            return items, coverage
+            return items, coverage, marks
 
-    items_by_game, coverage_before = await asyncio.to_thread(_items_sync)
+    items_by_game, coverage_before, marks = await asyncio.to_thread(_items_sync)
 
     stories_by_game: dict[str, list[StoryDraft]] = {}
     notes_by_game: dict[str, str | None] = {}
@@ -467,6 +469,11 @@ async def _build(
                 degraded = True
     if coverage:
         degraded = True
+    # Every game this digest follows records how far it got, a summary game by its summary's
+    # end and the rest by the digest's own; never below where the game already was.
+    for game in games:
+        reached = game_upto.get(game.key, rng.upto)
+        game_upto[game.key] = max(reached, marks.get(game.key) or 0)
 
     rendered = render_guild_digest(
         run_date,
@@ -622,7 +629,9 @@ def _mark_failed_sync(
         repo.mark_guild_digest_failed(conn, digest_id, notes, posted, now=now)
 
 
-def _coverage_sync(db_path: str, digest_id: int, game_upto: dict[str, int], keep: set[str]) -> None:
+def _coverage_sync(
+    db_path: str, digest_id: int, game_upto: Mapping[str, int | None], keep: set[str]
+) -> None:
     with closing(connect(db_path)) as conn:
         repo.record_game_coverage(conn, digest_id, game_upto, keep=keep)
 
@@ -875,6 +884,13 @@ async def _publish_claimed(
         notes.append(f"{key}: skipped ({plain_line(reason, 200)})")
     partial = built.degraded or bool(skipped_games)
     status: Literal["ok", "partial"] = "partial" if partial else "ok"
+    # A game the digest followed and rendered but couldn't post (its channel refused it) is
+    # not covered: marked `None`, the next digest picks it up from its older mark.
+    unreached = {m.topic_key: None for m in built.rendered.messages if m.topic_key not in posted}
+    if unreached:
+        await asyncio.to_thread(
+            _coverage_sync, deps.db_path, claim.digest_id, unreached, set(posted)
+        )
     await asyncio.to_thread(
         _save_sync,
         deps.db_path,

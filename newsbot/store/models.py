@@ -302,20 +302,38 @@ class GameSummaryRow:
 
 @dataclass(frozen=True)
 class Coverage:
-    """How far a server has already been told the news: where its last digest left off.
+    """How far a server has already been told the news, game by game.
 
-    `end` is that digest's window end (a time, for display and the freshness rule) and
-    `item_id` the newest stored item it covered. `by_game` overrides `item_id` for games a
-    comped digest took from a shared summary, which ends where the summary did.
+    `end` is the window end of the server's last digest (a time, for display and the
+    freshness rule) and `item_id` the newest stored item that digest covered. Coverage is
+    kept per (server, game), though: `by_game` maps each game the server has been told about
+    to the item id its news left off at, and `ends` to the window end of the digest that
+    last told it. A game that isn't in `by_game` was not covered by the digest before this
+    one (never followed, unfollowed since, or followed this very minute), so it starts
+    fresh with the first-digest floor instead of at some other game's mark. A game a failed
+    digest never reached is the opposite case: it keeps its own older mark and the next
+    digest picks up from there. `every_game` is for a row with no per-game record (v2.2's, or
+    an adopted one): every game counts as covered at `item_id`.
     """
 
     end: datetime
     item_id: int
     by_game: dict[str, int] = field(default_factory=dict, hash=False)
+    ends: dict[str, datetime] = field(default_factory=dict, hash=False)
+    every_game: bool = False
 
-    def for_game(self, game_key: str) -> Coverage:
-        """This coverage as one game's: `item_id` is where that game's news left off."""
-        return Coverage(self.end, self.by_game.get(game_key, self.item_id))
+    def mark(self, game_key: str) -> int | None:
+        """Where this game's news left off, or `None` if the server hasn't been told it."""
+        if game_key in self.by_game:
+            return self.by_game[game_key]
+        return self.item_id if self.every_game else None
+
+    def for_game(self, game_key: str) -> Coverage | None:
+        """This coverage as one game's (`item_id` is its mark), or `None` for a game with none."""
+        mark = self.mark(game_key)
+        if mark is None:
+            return None
+        return Coverage(self.ends.get(game_key, self.end), mark)
 
 
 @dataclass(frozen=True)
