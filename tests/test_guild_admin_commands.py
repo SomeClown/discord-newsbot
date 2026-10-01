@@ -42,7 +42,7 @@ from newsbot.bot.permissions import ChannelProblem, GuildCheck
 from newsbot.pipeline.guild_digest import GuildDigestDeps
 from newsbot.store import repo
 from newsbot.store.db import connect
-from newsbot.store.models import GuildDigestRow
+from newsbot.store.models import GuildDigestRow, LoungeSettings
 
 CT = discord.ChannelType
 
@@ -1165,3 +1165,76 @@ async def test_lounge_quote_now_outside_a_server(lounge):
     interaction = FakeInteraction(guild_id=None)
     await lounge.call(interaction)
     assert "inside a server" in interaction.text
+
+
+# --- status: the lounge section ---
+
+
+def _lounge(**overrides):
+    row = {
+        "guild_id": GUILD_A,
+        "channel_id": 77,
+        "welcome_enabled": True,
+        "welcome_message": "hi {member}",
+        "quote_enabled": True,
+        "quote_time": "08:00",
+        "quote_sources": [{"kind": "wikiquote", "value": "Mark Twain"}] * 3,
+        "last_quote_date": "2026-09-30",
+    }
+    return LoungeSettings(**{**row, **overrides})
+
+
+async def _status_fields(admin) -> dict[str, str]:
+    interaction = FakeInteraction()
+    await admin.callback("status")(interaction)
+    return {f.name: f.value for f in interaction.sent[-1]["embed"].fields}
+
+
+async def test_status_has_no_lounge_section_without_a_lounge_row(admin, v3_db):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+
+    assert "Lounge" not in await _status_fields(admin)
+
+
+async def test_status_shows_the_lounge(admin, v3_db):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    with closing(connect(v3_db)) as conn:
+        repo.upsert_lounge(conn, _lounge())
+
+    text = (await _status_fields(admin))["Lounge"]
+
+    assert "Channel: <#77>" in text
+    assert "Welcome: on" in text
+    assert "Daily quote: on at 08:00 UTC" in text
+    assert "Quote sources: 3" in text
+    assert "Last quote: 2026-09-30" in text
+
+
+async def test_status_shows_a_quiet_lounge_as_off_with_no_quote_yet(admin, v3_db):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    with closing(connect(v3_db)) as conn:
+        repo.upsert_lounge(
+            conn,
+            _lounge(
+                welcome_enabled=False, quote_enabled=False, quote_sources=[], last_quote_date=None
+            ),
+        )
+
+    text = (await _status_fields(admin))["Lounge"]
+
+    assert "Welcome: off" in text and "Daily quote: off" in text
+    assert "Quote sources: 0" in text and "Last quote: none yet" in text
+
+
+async def test_status_lounge_is_this_servers_own_and_defuses_mentions(admin, v3_db):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    make_guild(v3_db, GUILD_B, games=[("rust", 7)])
+    with closing(connect(v3_db)) as conn:
+        repo.upsert_lounge(conn, _lounge(guild_id=GUILD_B, channel_id=88))
+        repo.upsert_lounge(conn, _lounge(last_quote_date="@everyone"))
+        repo.update_guild_settings(conn, GUILD_A, timezone="@everyone/<#99>")
+
+    fields = await _status_fields(admin)
+
+    assert "<#88>" not in fields["Lounge"] and "<#77>" in fields["Lounge"]
+    assert "@everyone" not in fields["Lounge"].replace("@​everyone", "")

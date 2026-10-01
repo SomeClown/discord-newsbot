@@ -69,6 +69,7 @@ from newsbot.store.models import (
     GuildGame,
     GuildSettings,
     ItemView,
+    LoungeSettings,
     StoryView,
     Tier,
 )
@@ -728,6 +729,22 @@ def _next_due_line(guild: GuildSettings, now: datetime) -> str:
     )
 
 
+def _lounge_lines(lounge: LoungeSettings, timezone: str) -> list[str]:
+    """The "Lounge" section of `/newsbot status`: channel, welcome, quote, sources, last quote."""
+    if lounge.quote_enabled:
+        quote = f"on at {esc(lounge.quote_time)} {esc(timezone)}"
+    else:
+        quote = "off"
+    count = len(lounge.quote_sources)
+    return [
+        f"Channel: <#{lounge.channel_id}>",
+        f"Welcome: {'on' if lounge.welcome_enabled else 'off'}",
+        f"Daily quote: {quote}",
+        f"Quote sources: {count}",
+        f"Last quote: {esc(lounge.last_quote_date) if lounge.last_quote_date else 'none yet'}",
+    ]
+
+
 def _status_embed_sync(
     cfg: AppConfig, db_path: str, guild_id: int, now: datetime
 ) -> discord.Embed | None:
@@ -740,6 +757,7 @@ def _status_embed_sync(
         shift = repo.get_shift(conn, guild_id)
         last = repo.latest_guild_digest(conn, guild_id)
         notices = repo.recent_notices(conn, guild_id, 5)
+        lounge = repo.get_lounge(conn, guild_id)
         failing = {row.source_name for row in repo.failing_sources(conn)}
     names = {game.key: game.name for game in cfg.catalog}
 
@@ -781,6 +799,7 @@ def _status_embed_sync(
             f"Pings today: {used} of {cfg.shift.max_pings_per_day}."
         )
     return render_guild_overview(
+        lounge_lines=None if lounge is None else _lounge_lines(lounge, guild.timezone),
         tier=guild.tier,
         schedule_line=schedule,
         digest_lines=digest_lines,

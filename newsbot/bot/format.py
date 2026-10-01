@@ -1221,8 +1221,11 @@ def render_guild_overview(
     game_lines: Sequence[str],
     shift_line: str,
     notices: Sequence[Notice],
+    lounge_lines: Sequence[str] | None = None,
 ) -> discord.Embed:
     """`/newsbot status` for one server: its own settings, last digest, games and notices.
+
+    `lounge_lines` is None for a server with no lounge, and then the section isn't shown.
 
     Callers pass lines that are already safe (their own `esc()`ed names, `<#id>` channel
     mentions, jump links); every field is cut to Discord's field limit regardless. There's
@@ -1240,6 +1243,8 @@ def render_guild_overview(
     field("Last digest", digest_lines)
     field("Games", game_lines)
     field("SHiFT codes", [shift_line])
+    if lounge_lines is not None:
+        field("Lounge", lounge_lines)
     field("Recent notices", [render_guild_status(notices)])
     return embed
 
