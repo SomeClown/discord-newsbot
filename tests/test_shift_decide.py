@@ -724,3 +724,10 @@ def test_plan_alerts_seeded_preserves_first_seen_order():
         [a, b], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
     )
     assert plan.to_post == [a, b]
+
+
+def test_two_community_sightings_whose_source_names_differ_only_in_case_are_one_source():
+    same_feed = [_sighting(source_name="r/Borderlands4"), _sighting(source_name="r/borderlands4")]
+    assert not aggregate(same_feed, now=NOW, max_age=MAX_AGE)[0].trusted
+    other = [_sighting(source_name="r/Borderlands4"), _sighting(source_name="Bluesky search")]
+    assert aggregate(other, now=NOW, max_age=MAX_AGE)[0].trusted

@@ -236,7 +236,7 @@ def aggregate(
         fresh = any(_is_fresh(s, now, max_age) for s in effective)
         golden = any(s.golden for s in effective)
         trusted = any(s.trust in ping_trust for s in effective) or (
-            len({s.source_name for s in effective}) >= 2
+            len({s.source_name.casefold() for s in effective}) >= 2
         )
         best = min(effective, key=_sighting_key)
         candidates.append(

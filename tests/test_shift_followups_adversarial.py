@@ -166,12 +166,14 @@ async def test_a_sighting_whose_clock_ran_far_ahead_is_outside_the_window(h):
     assert followup_rows(h.db_path) == [] and h.sent(1) == []
 
 
-async def test_source_names_that_differ_only_in_case_count_as_two_sources(h):
-    """Pinned: independence is by exact name. 'r/borderlands4' and 'r/Borderlands4' would be
-    the same feed spelled twice, so a typo in a feed name is worth a ping. (Config's problem.)"""
+async def test_source_names_that_differ_only_in_case_are_one_source(h):
+    """Independence is by name without regard to case: 'r/borderlands4' and 'r/Borderlands4'
+    are the same feed spelled twice, so they are not a second opinion."""
     add_guild(h.db_path, 1, ping="everyone")
     await first_sighting(h, source="r/Borderlands4")
     await later(h, timedelta(hours=2), source="r/borderlands4")
+    assert followup_rows(h.db_path) == [] and h.sent(1) == []
+    await later(h, timedelta(hours=3), source=BLUESKY)  # a genuinely different source confirms
     assert followup_rows(h.db_path) == [(1, CODE, "posted", 1)]
 
 

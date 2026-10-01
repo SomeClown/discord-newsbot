@@ -1882,7 +1882,8 @@ def queue_confirmed_followups(
 
     A code is confirmed when its non-roundup sightings, counting only those
     first seen within `window` of the code's own `first_seen_at`, include a
-    trusted source or two different source names. Each confirmed code is
+    trusted source or two different source names (compared without regard to
+    case: "r/Borderlands4" spelled twice is one feed, not a second opinion). Each confirmed code is
     queued for every server whose original post of it is `posted` and stamped
     `followup_ok`. A (server, code) that already has a follow-up row, in any
     state, is left alone, so calling this every pass is safe (and is how a
@@ -1909,7 +1910,7 @@ def queue_confirmed_followups(
             ]
             if not (
                 any(row["trusted"] for row in sightings)
-                or len({row["source_name"] for row in sightings}) >= 2
+                or len({row["source_name"].casefold() for row in sightings}) >= 2
             ):
                 continue
             cur = conn.execute(
