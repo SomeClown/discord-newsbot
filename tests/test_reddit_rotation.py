@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from v3_fakes import make_guild
 
 from newsbot.collectors.base import MAX_BACKOFF_S, RateLimited, RateLimitState, run_collectors
 from newsbot.config import GameCfg, Secrets, load_config
@@ -31,7 +32,6 @@ from newsbot.pipeline.collect import (
 )
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from tests.v3_fakes import make_guild
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 FIXTURE = Path(__file__).parent / "fixtures" / "config_v3.yaml"
