@@ -378,6 +378,10 @@ class CollectionCfg(BaseModel, extra="forbid"):
     interval_minutes: int = Field(60, ge=15, le=1440)
     lookback_hours: int = Field(24, ge=1)
     max_items_per_game: int = Field(60, ge=1)
+    # How often a non-priority subreddit is fetched, in hours (1 means every
+    # one, every pass). Priority ones (SHiFT games, comped servers' games)
+    # always go every pass; see pipeline/collect.py.
+    reddit_rotation_hours: int = Field(3, ge=1, le=24)
 
 
 class AiCfg(BaseModel, extra="forbid"):

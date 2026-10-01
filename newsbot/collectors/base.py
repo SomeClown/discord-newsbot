@@ -48,6 +48,30 @@ class QuotaExceeded(Exception):
     """
 
 
+# What a rate-limited and a backed-off result say in `CollectorResult.skipped`.
+SKIP_RATE_LIMITED = "rate limited"
+SKIP_BACKED_OFF = "backed off"
+
+# Retry-After is the other party's say-so, and "come back in a week" shouldn't
+# park a source for a week. Six hours is four missed passes at the default
+# interval, which is plenty of manners for one subreddit.
+MAX_BACKOFF_S = 6 * 3600.0
+
+
+class RateLimited(QuotaExceeded):
+    """Raised when a rate-limited host says 429 and we're done asking for now.
+
+    It's a skip, not a failure: nothing is wrong with the source, we were
+    just too eager. `run_collectors` also takes it as the cue to stop sending
+    anything else to the same `rate_limit_key` for the rest of the call.
+    `retry_after_s` is the host's `Retry-After`, when it gave one.
+    """
+
+    def __init__(self, retry_after_s: float | None = None) -> None:
+        super().__init__(SKIP_RATE_LIMITED)
+        self.retry_after_s = retry_after_s
+
+
 @dataclass(frozen=True, slots=True)
 class RawItem:
     """One collected item, before normalization, dedupe or topic matching.
@@ -84,6 +108,8 @@ class CollectorResult:
     items: list[RawItem]
     error: str | None = None  # a real failure -> counts against source_health
     skipped: str | None = None  # e.g. "quota", "auth" -> a coverage note, not a failure
+    # Set with `skipped == SKIP_RATE_LIMITED` when the host sent a usable Retry-After.
+    retry_after_s: float | None = None
 
 
 class Collector(Protocol):
@@ -103,6 +129,14 @@ async def _run_one(
         async with asyncio.timeout(timeout_s):
             items = await collector.collect(http)
         return CollectorResult(collector.name, collector.source_type, items)
+    except RateLimited as exc:
+        return CollectorResult(
+            collector.name,
+            collector.source_type,
+            [],
+            skipped=SKIP_RATE_LIMITED,
+            retry_after_s=exc.retry_after_s,
+        )
     except QuotaExceeded as exc:
         return CollectorResult(
             collector.name, collector.source_type, [], skipped=str(exc) or "quota"
@@ -132,6 +166,11 @@ class RateLimitState:
     """
 
     last_fetch: dict[str, float] = field(default_factory=dict)
+    # key -> the `clock()` reading before which that key gets no requests,
+    # set when a host's 429 came with a Retry-After. Lives as long as the
+    # process, like `last_fetch`: a restart forgets it, and the cost of that
+    # is one more polite 429.
+    backoff_until: dict[str, float] = field(default_factory=dict)
 
 
 async def run_collectors(
@@ -174,7 +213,19 @@ async def run_collectors(
 
     async def run_keyed_group(key: str, members: list[Collector]) -> list[CollectorResult]:
         results = []
+        halted = False
         for i, collector in enumerate(members):
+            if halted or (
+                rate_limit_state is not None
+                and clock() < rate_limit_state.backoff_until.get(key, float("-inf"))
+            ):
+                # Backed off: not a failure, and it never touched the host.
+                results.append(
+                    CollectorResult(
+                        collector.name, collector.source_type, [], skipped=SKIP_BACKED_OFF
+                    )
+                )
+                continue
             if rate_limit_state is not None:
                 last = rate_limit_state.last_fetch.get(key)
                 if last is not None:
@@ -183,9 +234,17 @@ async def run_collectors(
                         await sleep(wait)
             elif i:
                 await sleep(rate_limit_gap_s)
-            results.append(await _run_one(collector, http, timeout_s))
+            result = await _run_one(collector, http, timeout_s)
+            results.append(result)
             if rate_limit_state is not None:
                 rate_limit_state.last_fetch[key] = clock()
+            if result.skipped == SKIP_RATE_LIMITED:
+                # One 429 and the whole key sits down; hammering on is how
+                # a polite 429 turns into a long one.
+                halted = True
+                if rate_limit_state is not None and result.retry_after_s:
+                    wait_s = min(result.retry_after_s, MAX_BACKOFF_S)
+                    rate_limit_state.backoff_until[key] = clock() + wait_s
         return results
 
     async def run_solo(collector: Collector) -> list[CollectorResult]:
