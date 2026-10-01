@@ -254,7 +254,7 @@ def test_any_lounge_feature_yields_the_same_single_requirement(welcome, quote):
     ]
 
 
-async def test_shared_topic_lounge_missing_embed_links_is_one_line_naming_both():
+async def test_shared_topic_lounge_missing_embed_links_names_only_the_topic():
     base = _cfg(quote=True)
     topic = base.topics[0]
     cfg = _cfg(quote=True, channel_id=topic.channel_id)
@@ -264,7 +264,8 @@ async def test_shared_topic_lounge_missing_embed_links_is_one_line_naming_both()
     problems = await check_channels(FakeClient(channels), cfg)
 
     assert len(problems) == 1
-    assert "lounge" in problems[0] and topic.name in problems[0]
+    # The lounge only needs View and Send, so it isn't blamed for the missing Embed Links.
+    assert topic.name in problems[0] and "lounge" not in problems[0]
     assert problems[0].endswith("missing Embed Links")
 
 
@@ -342,7 +343,7 @@ async def test_lounge_missing_view_or_send_is_named_exactly(perms, named):
 
     problems = await check_channels(FakeClient(channels), cfg)
 
-    assert problems == [f"lounge channel <#{LOUNGE_ID}>: {named}"]
+    assert problems == [f"lounge in <#{LOUNGE_ID}>: {named}"]
 
 
 async def test_lounge_needs_no_embed_links_or_mention_everyone():

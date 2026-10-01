@@ -193,7 +193,7 @@ async def test_a_role_overwrite_that_denies_send_messages_is_named():
     )
     (problem,) = result.problems
     assert (problem.kind, problem.missing) == ("missing_permissions", ("Send Messages",))
-    assert problem.text == "x channel <#10>: missing Send Messages"
+    assert problem.text == "x in <#10>: missing Send Messages"
 
 
 async def test_no_permissions_at_all_lists_every_one_in_the_fixed_order():
@@ -648,7 +648,7 @@ async def test_check_lines_are_unchanged():
     )
     result = await check_guild_channels(client, GUILD, _fixture_reqs())
     assert result.lines() == [
-        "Borderlands 4 channel <#123456789012345690>: missing Embed Links",
+        "Borderlands 4 in <#123456789012345690>: missing Embed Links",
         "Palworld channel <#123456789012345691>: not a text channel",
         "Diablo IV channel <#123456789012345692>: not in the configured guild",
         f"admin channel <#{_ADMIN}>: not found or not visible to the bot",

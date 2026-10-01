@@ -57,6 +57,15 @@ _PERMISSION_LABELS = {
 
 
 @dataclass(frozen=True)
+class FeatureNeed:
+    """One feature's own needs in a channel, so a problem can name only who it hurts."""
+
+    purpose: str
+    needed: frozenset[str]
+    ping_role_id: int | None = None
+
+
+@dataclass(frozen=True)
 class ChannelRequirement:
     """What one channel needs to do its job, and why."""
 
@@ -67,6 +76,13 @@ class ChannelRequirement:
     # Mention @everyone depends on `role.mentionable`, which only the live
     # guild can answer, so the pure requirement just carries the id.
     ping_role_id: int | None = None
+    # The merged requirement above, split back into who needs what. Empty for
+    # a requirement built by hand with one purpose; `feature_needs` covers that.
+    features: tuple[FeatureNeed, ...] = ()
+
+    def feature_needs(self) -> tuple[FeatureNeed, ...]:
+        """The per-feature needs, or the whole requirement as one feature if none were recorded."""
+        return self.features or (FeatureNeed(self.purpose, self.needed, self.ping_role_id),)
 
 
 def _add_requirement(
@@ -81,9 +97,12 @@ def _add_requirement(
     Two features pointed at one channel end up as one requirement with the
     union of what either needs, not two alerts about the same channel.
     """
+    feature = FeatureNeed(purpose, needed, ping_role_id)
     existing = by_channel.get(channel_id)
     if existing is None:
-        by_channel[channel_id] = ChannelRequirement(channel_id, purpose, needed, ping_role_id)
+        by_channel[channel_id] = ChannelRequirement(
+            channel_id, purpose, needed, ping_role_id, (feature,)
+        )
         return
     # Exact match on the split parts, not `in`: "Path of Exile" is a substring
     # of "Path of Exile 2", and the second feature shouldn't vanish over it.
@@ -94,6 +113,7 @@ def _add_requirement(
         merged_purpose,
         existing.needed | needed,
         existing.ping_role_id if existing.ping_role_id is not None else ping_role_id,
+        (*existing.feature_needs(), feature),
     )
 
 
@@ -182,8 +202,12 @@ async def _inspect(
     """Return what's wrong with `req`'s channel, or None if it checks out clean."""
     cid, purpose = req.channel_id, req.purpose
 
-    def problem(kind: str, text: str, names: tuple[str, ...] = ()) -> ChannelProblem:
-        return ChannelProblem(cid, purpose, kind, names, f"{purpose} channel <#{cid}>: {text}")
+    def problem(
+        kind: str, text: str, names: tuple[str, ...] = (), who: str | None = None
+    ) -> ChannelProblem:
+        return ChannelProblem(
+            cid, purpose, kind, names, f"{who or purpose} channel <#{cid}>: {text}"
+        )
 
     try:
         channel = await _resolve_channel(client, cid)
@@ -201,18 +225,38 @@ async def _inspect(
         return problem("unknown_self", "can't tell this bot's own permissions there")
 
     perms = channel.permissions_for(me)
-    needed = req.needed
-    if req.ping_role_id is not None:
-        role = guild.get_role(req.ping_role_id)
-        if role is None:
-            return problem("no_role", f"the role to ping (<@&{req.ping_role_id}>) no longer exists")
-        if not role.mentionable:
-            needed = needed | {"mention_everyone"}
-    missing_flags = missing(perms, needed)
-    if not missing_flags:
+    # Each feature is judged on its own needs, so a shared channel's complaint
+    # names only the features that are actually short of something: eight games
+    # shouldn't be blamed for SHiFT wanting to ping @everyone.
+    blamed: list[tuple[str, list[str]]] = []
+    for feature in req.feature_needs():
+        needed = feature.needed
+        if feature.ping_role_id is not None:
+            role = guild.get_role(feature.ping_role_id)
+            if role is None:
+                return problem(
+                    "no_role",
+                    f"the role to ping (<@&{feature.ping_role_id}>) no longer exists",
+                    who=feature.purpose,
+                )
+            if not role.mentionable:
+                needed = needed | {"mention_everyone"}
+        lacking = missing(perms, needed)
+        if lacking:
+            blamed.append((feature.purpose, lacking))
+    if not blamed:
         return None
-    names = tuple(_PERMISSION_LABELS[flag] for flag in missing_flags)
-    return problem("missing_permissions", f"missing {', '.join(names)}", names)
+    # Features short of the same things share a clause: "Rust / Fortnite in <#1>: missing X".
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for feature_purpose, lacking in blamed:
+        labels = tuple(_PERMISSION_LABELS[flag] for flag in lacking)
+        groups.setdefault(labels, []).append(feature_purpose)
+    clauses = [
+        f"{' / '.join(who)} in <#{cid}>: missing {', '.join(labels)}"
+        for labels, who in groups.items()
+    ]
+    names = tuple(dict.fromkeys(label for labels in groups for label in labels))
+    return ChannelProblem(cid, purpose, "missing_permissions", names, "; ".join(clauses))
 
 
 # --- Per guild (design.md §15, plan task 8) ---
@@ -461,6 +505,7 @@ async def sweep_guild_permissions(
 __all__ = [
     "ChannelProblem",
     "ChannelRequirement",
+    "FeatureNeed",
     "GuildCheck",
     "SweepResult",
     "check_guild",

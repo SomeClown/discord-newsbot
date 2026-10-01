@@ -261,7 +261,7 @@ async def test_missing_permission_is_named_for_a_command_reply():
     (problem,) = result.problems
     assert problem.kind == "missing_permissions"
     assert problem.missing == ("Send Messages",)
-    assert problem.text == "palworld-news channel <#1>: missing Send Messages"
+    assert problem.text == "palworld-news in <#1>: missing Send Messages"
 
 
 async def test_unknown_self_is_a_problem():
@@ -422,3 +422,66 @@ def test_notice_text_has_no_mentions_and_is_capped():
     assert len(text) <= 2000
     assert "@everyone" not in text
     assert render_guild_permission_notice([]) == ""
+
+
+# --- who gets blamed in a shared channel ---
+
+
+async def test_shared_channel_names_only_the_feature_that_needs_the_missing_permission():
+    class Role:
+        mentionable = False
+
+    perms = discord.Permissions.all()
+    perms.mention_everyone = False
+    guild = FakeGuild(GUILD, roles={5: Role()})
+    games = [GuildGame(GUILD, "rust", 10), GuildGame(GUILD, "fortnite", 10)]
+    reqs = required_channels_for_guild(
+        _guild(),
+        games,
+        _shift(ping="5", channel=10),
+        None,
+        game_names={"rust": "Rust", "fortnite": "Fortnite"},
+    )
+    result = await check_guild_channels(FakeClient({10: _text(guild, perms)}), GUILD, reqs)
+    (problem,) = result.problems
+    assert problem.text == "SHiFT codes in <#10>: missing Mention @everyone"
+    assert problem.missing == ("Mention @everyone",)
+
+
+async def test_shared_channel_blames_every_game_but_not_shift_for_missing_embed_links():
+    perms = discord.Permissions.all()
+    perms.embed_links = False
+    games = [GuildGame(GUILD, "rust", 10), GuildGame(GUILD, "fortnite", 10)]
+    reqs = required_channels_for_guild(
+        _guild(),
+        games,
+        _shift(channel=10),
+        None,
+        game_names={"rust": "Rust", "fortnite": "Fortnite"},
+    )
+    result = await check_guild_channels(
+        FakeClient({10: _text(FakeGuild(GUILD), perms)}), GUILD, reqs
+    )
+    (problem,) = result.problems
+    assert problem.text == "Rust / Fortnite in <#10>: missing Embed Links"
+
+
+async def test_shared_channel_with_two_different_shortfalls_gets_one_clause_each():
+    perms = discord.Permissions.all()
+    perms.embed_links = False
+    perms.mention_everyone = False
+    reqs = required_channels_for_guild(
+        _guild(),
+        [GuildGame(GUILD, "rust", 10)],
+        _shift(ping="everyone", channel=10),
+        None,
+        game_names={"rust": "Rust"},
+    )
+    result = await check_guild_channels(
+        FakeClient({10: _text(FakeGuild(GUILD), perms)}), GUILD, reqs
+    )
+    (problem,) = result.problems
+    assert problem.text == (
+        "Rust in <#10>: missing Embed Links; SHiFT codes in <#10>: missing Mention @everyone"
+    )
+    assert problem.missing == ("Embed Links", "Mention @everyone")
