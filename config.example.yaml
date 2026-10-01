@@ -31,7 +31,14 @@ home_guild_id: 123456789012345678     # placeholder: your server's ID
 # The channel for those alerts. It has to be a channel in home_guild_id: the
 # bot refuses to post it anywhere else, and says so at startup if it can't.
 # Zero or leaving it out means no owner alerts at all.
-admin_channel_id: 000000000000000000  # placeholder: a channel in your home server
+#
+# `admin_channel_id` is the older name for this key and still works as a
+# fallback: when owner_channel_id is unset, the owner alerts go to it. A v3
+# file has no use for it. A server's own admin channel (where its run reports
+# and notices land) is set per server from Discord with /newsbot settings, and
+# the one place this file still carries an `admin_channel_id` is the v2 import
+# block at the bottom, where it names the imported server's own channel.
+owner_channel_id: 000000000000000000  # placeholder: a channel in your home server
 
 # The Discord permission an admin needs to run /newsbot. Also what Discord's
 # own menu uses to decide who sees the command.
@@ -58,7 +65,7 @@ command_guild_ids: []
 # owner-reviewed /newsbot preview before it ships.
 comped_guild_ids: []
 
-# The daily one-message summary sent to admin_channel_id ("digests posted to
+# The daily one-message summary sent to owner_channel_id ("digests posted to
 # 37 of 38 servers; 1 failed (missing permissions)"), plus the collection
 # report. The time zone also decides when the bot's own housekeeping runs
 # (the 03:30 retention purge).
@@ -477,6 +484,7 @@ catalog:
 # - writes that server into the database as a comped server with its games and
 #   channels, digest time and zone, SHiFT settings and lounge;
 # - logs what it wrote, and the keys that can now be deleted: guild_id,
+#   admin_channel_id (once owner_channel_id is set),
 #   digest.time, digest.timezone, topics[].channel_id, alerts.enabled,
 #   alerts.channel_id, and lounge (plus topics and sources once catalog: is in
 #   place);
@@ -492,6 +500,7 @@ catalog:
 # topics fails the import and writes nothing.
 #
 # guild_id: 123456789012345678            # placeholder: the server being imported
+# admin_channel_id: 111111111111111113    # placeholder: that server's own admin channel
 # digest:
 #   time: "09:00"
 #   timezone: "America/Los_Angeles"

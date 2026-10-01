@@ -585,6 +585,11 @@ class AppConfig(BaseModel):
 
     # Global settings (v3).
     home_guild_id: int | None = Field(None, gt=0)
+    # Bot-wide owner alerts go to `owner_channel_id`; when it's unset they fall back to
+    # `admin_channel_id`, which is what a single-server self-host and every v2-shaped file
+    # has. In a v2 file `admin_channel_id` is also the one server's own admin channel, and
+    # only the one-time import reads it as that (through `legacy`).
+    owner_channel_id: int | None = None
     admin_channel_id: int | None = None
     admin_permission: str = "manage_guild"
     command_guild_ids: list[int] = []
@@ -604,14 +609,26 @@ class AppConfig(BaseModel):
     def _validate_guild_id_not_bool(cls, v: object) -> object:
         return _reject_bool_guild_id(v)
 
-    @field_validator("admin_channel_id")
+    @field_validator("owner_channel_id", "admin_channel_id")
     @classmethod
-    def _placeholder_admin_channel_is_none(cls, v: int | None) -> int | None:
-        # config.example.yaml's "fill me in" is `admin_channel_id: 000000000000000000`, and
+    def _placeholder_channel_is_none(cls, v: int | None) -> int | None:
+        # config.example.yaml's "fill me in" is `owner_channel_id: 000000000000000000`, and
         # nothing positive can be a channel id's placeholder. Zero (or a typo'd negative)
-        # means "no owner channel" here, at the one place every consumer reads it from, so
-        # the Router doesn't go asking Discord for channel 0 on every alert.
+        # means "no channel" here, at the one place every consumer reads it from, so the
+        # Router doesn't go asking Discord for channel 0 on every alert.
         return v if v is not None and v > 0 else None
+
+    @property
+    def owner_channel_key(self) -> str:
+        """Which key the owner's alert channel is coming from: the new one, else the old one."""
+        return "owner_channel_id" if self.owner_channel_id is not None else "admin_channel_id"
+
+    @property
+    def effective_owner_channel_id(self) -> int | None:
+        """Where bot-wide owner alerts go: `owner_channel_id`, else `admin_channel_id`."""
+        if self.owner_channel_id is not None:
+            return self.owner_channel_id
+        return self.admin_channel_id
 
     @field_validator("command_guild_ids", "comped_guild_ids", mode="before")
     @classmethod

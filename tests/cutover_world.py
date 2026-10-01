@@ -301,8 +301,10 @@ async def make_world(v22_db, tmp_path, monkeypatch):
     ) -> World:
         cfg = cfg if cfg is not None else load_config(config_path)
         if owner_channel:
+            # The friend keeps their own `admin_channel_id` (the import has already copied it
+            # into their row); the owner's alerts get their own key, in the home server.
             cfg = cfg.model_copy(
-                update={"admin_channel_id": OWNER_CH, "home_guild_id": OWNER_GUILD}
+                update={"owner_channel_id": OWNER_CH, "home_guild_id": OWNER_GUILD}
             )
         db_path = str(v22_db)
         clock = {"now": now}

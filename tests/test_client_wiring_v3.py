@@ -378,7 +378,7 @@ async def test_no_admin_channel_with_several_servers_is_an_error(bot, monkeypatc
         caplog=caplog,
         capsys=capsys,
     )
-    assert len(errors) == 1 and "admin_channel_id isn't set" in errors[0]
+    assert len(errors) == 1 and "owner_channel_id isn't set" in errors[0]
 
 
 async def test_a_self_hosted_one_server_bot_without_either_setting_is_left_alone(
@@ -481,7 +481,7 @@ async def test_one_router_is_shared_by_every_consumer(bot):
     assert isinstance(router, Router)
     assert isinstance(router._send, ClientSender)  # the guild-ownership check is on...
     assert router._home_guild_id == bot.cfg.home_guild_id  # ...and knows the home guild
-    assert router._owner_channel_id == bot.cfg.admin_channel_id
+    assert router._owner_channel_id == bot.cfg.effective_owner_channel_id
     assert bot.guild_notifier == router.notify_guild
     assert bot.lifecycle._alert_owner == router.alert_owner
     fan = bot._fanout_deps

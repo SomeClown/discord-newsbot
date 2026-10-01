@@ -795,7 +795,10 @@ class NewsBot(discord.Client):
         # through it. `client_sender` plus `home_guild_id` is what switches on
         # the "this channel really belongs to that server" check at send time.
         self.router = Router(
-            db_path, client_sender(self), cfg.admin_channel_id, home_guild_id=cfg.home_guild_id
+            db_path,
+            client_sender(self),
+            cfg.effective_owner_channel_id,
+            home_guild_id=cfg.home_guild_id,
         )
         # Join, remove and channel-delete handlers. A separate class so the
         # events aren't dispatched by name to code that has no rows to write.
@@ -1226,15 +1229,18 @@ class NewsBot(discord.Client):
     async def _check_owner_channel(self) -> None:
         """Say so, loudly, if the owner's alert channel or home server is misconfigured.
 
-        Every bot-wide alert goes to `admin_channel_id`, which has to be in `home_guild_id`
-        (the router refuses to post it anywhere else). Get either wrong and the owner hears
-        nothing, which looks exactly like a quiet day. So at startup: the log gets an ERROR
-        and stderr gets the same line, each with a one-line fix. It never exits, because the
-        friend's digests are working fine and shouldn't pay for the owner's typo. Besides
-        "is the channel there and in the right server" it asks "can I send in it": a text-capable
-        channel, with View Channel and Send Messages for the bot.
+        Every bot-wide alert goes to `owner_channel_id` (or `admin_channel_id`, when that's
+        the only one set), which has to be in `home_guild_id` (the router refuses to post
+        it anywhere else). Get either wrong and the owner hears nothing, which looks
+        exactly like a quiet day. So at startup: the log gets an ERROR and stderr gets the
+        same line, each with a one-line fix. It never exits, because the friend's digests
+        are working fine and shouldn't pay for the owner's typo. Besides "is the channel
+        there and in the right server" it asks "can I send in it": a text-capable channel,
+        with View Channel and Send Messages for the bot.
         """
         cfg = self.cfg
+        key = cfg.owner_channel_key
+        channel_id = cfg.effective_owner_channel_id
         servers = await asyncio.to_thread(self._server_count_sync)
         problems: list[str] = []
         if cfg.home_guild_id is None and servers > 1:
@@ -1242,33 +1248,33 @@ class NewsBot(discord.Client):
                 f"home_guild_id isn't set and I'm in {servers} servers, so nothing can tell "
                 "which one is yours. Fix: set home_guild_id in config.yaml to your own server's id."
             )
-        if cfg.admin_channel_id is None:
+        if channel_id is None:
             if servers > 1:
                 problems.append(
-                    "admin_channel_id isn't set, so bot-wide alerts go nowhere. "
-                    "Fix: set admin_channel_id in config.yaml to a channel in your home server."
+                    "owner_channel_id isn't set, so bot-wide alerts go nowhere. "
+                    "Fix: set owner_channel_id in config.yaml to a channel in your home server."
                 )
         else:
-            channel = self.get_channel(cfg.admin_channel_id)
+            channel = self.get_channel(channel_id)
             if channel is None:
                 problems.append(
-                    f"admin_channel_id {cfg.admin_channel_id} isn't a channel I can see. "
-                    "Fix: set it to a channel in your home server that I can view."
+                    f"{key} {channel_id} isn't a channel I can see. "
+                    "Fix: set owner_channel_id to a channel in your home server that I can view."
                 )
             elif (
                 cfg.home_guild_id is not None
                 and getattr(getattr(channel, "guild", None), "id", None) != cfg.home_guild_id
             ):
                 problems.append(
-                    f"admin_channel_id {cfg.admin_channel_id} isn't in home_guild_id "
-                    f"{cfg.home_guild_id}. Fix: set admin_channel_id to a channel "
+                    f"{key} {channel_id} isn't in home_guild_id "
+                    f"{cfg.home_guild_id}. Fix: set owner_channel_id to a channel "
                     "in your home server."
                 )
             elif (unsendable := sendability_problem(channel)) is not None:
                 # Seeing a channel isn't the same as being able to talk in it.
                 problems.append(
-                    f"admin_channel_id {cfg.admin_channel_id} {unsendable}. "
-                    "Fix: point it at a text channel where I have View Channel and "
+                    f"{key} {channel_id} {unsendable}. "
+                    "Fix: point owner_channel_id at a text channel where I have View Channel and "
                     "Send Messages."
                 )
         for problem in problems:

@@ -1,10 +1,13 @@
 """Admin-channel notifications.
 
-When something in the daily job goes sideways (a source dies three days
-running, a publish fails after every retry, the process finds a stale
-`pending` row at startup), somebody should hear about it without needing
-to tail container logs at 6 a.m. That somebody is `admin_channel_id`, if
-the owner configured one.
+When something goes sideways (a source that's been dead for a while, a
+publish that fails after every retry, a stale `pending` row found at
+startup), somebody should hear about it without needing to tail container
+logs at 6 a.m. In v3 there are two somebodies: the owner, whose channel is
+`owner_channel_id` (or `admin_channel_id`, if that's the only one set), and
+each server's own admin channel, which lives in the database. The router in
+`newsbot.guilds.notify` decides which; this module is just the part that
+posts.
 
 This module is deliberately the dumbest possible pager: one function, no
 queue, no rate limiting, no retry of its own. An alert that fails to send

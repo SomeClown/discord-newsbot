@@ -9,8 +9,9 @@
 # to, the digest time, the time zone, SHiFT alerts) is set from Discord with
 # /newsbot setup once the bot is running, and kept in the database. So the
 # placeholders to replace are fewer than they used to be:
-#   - `home_guild_id` and `admin_channel_id`: your server and a channel in it,
-#     for the bot's own health alerts.
+#   - `home_guild_id` and `owner_channel_id`: your server and a channel in it,
+#     for the bot's own health alerts. (`admin_channel_id`, the older name for
+#     the second one, still works as a fallback; a v3 file doesn't need it.)
 #   - The Steam source's `app_id` (1234567 is fake and returns a 403).
 #   - The RSS source's `url` (example.com isn't a feed and returns a 404).
 # Run `python -m newsbot.pipeline.run --config config.yaml --check-sources`
@@ -22,7 +23,7 @@
 # start (see the "v2 keys" block at the end of config.example.yaml).
 
 home_guild_id: 123456789012345678     # placeholder: your server's ID
-admin_channel_id: 123456789012345679  # placeholder: a channel in that server for health alerts; optional
+owner_channel_id: 123456789012345679  # placeholder: a channel in that server for health alerts; optional
 admin_permission: manage_guild
 
 # Which servers the slash commands are copied into. Left empty, they're
