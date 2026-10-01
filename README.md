@@ -400,7 +400,7 @@ belongs near a live database. The full list of modes is in
    token; they'll race each other and the loser logs `Unknown interaction
    (10062)`).
 2. Copy `config.example.yaml` to `config.dev.yaml` and set `home_guild_id` and
-   `admin_channel_id` to your private test guild, and `command_guild_ids` to
+   `owner_channel_id` to your private test guild, and `command_guild_ids` to
    the test guild (so commands show up instantly instead of taking up to an
    hour). Add `comped_guild_ids` to try AI summaries. Everything else is set
    from Discord with `/newsbot setup`.
@@ -454,7 +454,7 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
 - **`shift`**, **`collection`**, **`ai`**, **`owner_report`**: SHiFT
   detection, the hourly pass, the summarizer's subject, and the owner's daily
   report. All have working defaults.
-- **`home_guild_id`**, **`admin_channel_id`**: the owner's server and the
+- **`home_guild_id`**, **`owner_channel_id`**: the owner's server and the
   channel in it for bot-wide alerts. **`comped_guild_ids`**: servers that get AI
   summaries. **`command_guild_ids`**: copy the commands into just these
   servers (instant, for dev and self-hosting) instead of registering them

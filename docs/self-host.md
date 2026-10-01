@@ -117,10 +117,12 @@ different things: `home_guild_id` (your server, where the owner-only
 `/owner servers` command lives and where the bot's own alerts go),
 `command_guild_ids` (so the slash commands appear instantly), and
 `comped_guild_ids` (so your server gets AI summaries; §4 explains each).
-`admin_channel_id`, if you set one, is the bot's *own* alert channel, in your
+`owner_channel_id`, if you set one, is the bot's *own* alert channel, in your
 home server: a source that has failed for half a day, a crashed job, a
 daily summary of how the bot is doing. It has to be a channel in
-`home_guild_id`. Your server's own problems and run reports (the
+`home_guild_id`. (`admin_channel_id` is the older name for the same key and
+still works when `owner_channel_id` is unset, so an existing copy needs no
+edit.) Your server's own problems and run reports (the
 one-message summary after each digest, a channel the bot can't post in) go to
 a different, per-server setting, `/newsbot settings admin_channel:`. They can
 be the same channel on a one-server copy. Make it private, since it's meant
@@ -180,7 +182,7 @@ finding sources for your own game once you're past the placeholder ones.
 
 The file has three jobs:
 
-- **Who you are:** `home_guild_id` (your server), `admin_channel_id` (a channel
+- **Who you are:** `home_guild_id` (your server), `owner_channel_id` (a channel
   in it for the bot's own alerts), and `admin_permission`.
 - **How the commands and tiers are wired:** `command_guild_ids` and
   `comped_guild_ids`. For a copy serving one server, put your server's ID in
@@ -804,7 +806,9 @@ they're registered globally, and v2's per-server copies are cleared at the
 first start, so for up to an hour (Discord's delay for global commands) you
 may be short a command or two. And if you want the bot's own alerts somewhere
 specific, set `home_guild_id` to your server (it defaults to your old
-`guild_id`) with `admin_channel_id` in it.
+`guild_id`) with `owner_channel_id` in it. (Your old `admin_channel_id` keeps working as
+that channel if you'd rather not add the key, and the import also copies it in
+as your server's own admin channel.)
 
 ### Starting a fresh copy
 

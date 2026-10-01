@@ -93,7 +93,7 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 
 **Owner answers (2026-09-30):**
 - D1 to D8 accepted as recommended.
-- **D9:** the home guild is the **test server** (1552824311608512532), not the friend's server. The prod bot must be invited to the test server before cutover, and a dedicated prod-admin channel there is suggested so prod and dev alerts don't mix. The friend's server keeps its current admin channel as its own per-guild admin channel through the import.
+- **D9:** the home guild is the **test server** (1552824311608512532), not the friend's server. The prod bot must be invited to the test server before cutover, and a dedicated prod-admin channel there is suggested so prod and dev alerts don't mix. The friend's server keeps its current admin channel as its own per-guild admin channel through the import. *Amended after the first cutover review: one `admin_channel_id` key could not be both that channel and the owner's channel in the test server, so the owner's is now its own key, `owner_channel_id` (unset falls back to `admin_channel_id`). Prod keeps `admin_channel_id` as the friend's and adds `home_guild_id` and `owner_channel_id`.*
 - **D10:** the support contact is justsomeclown@gmail.com (owner, 2026-09-30), for the terms and privacy pages in task 18.
 - **D11:** approved 2026-09-30: all 12 researched games as proposed in `docs/plans/2026-09-30-public-app-catalog.yaml`, with the unverified FFXIV alias "Evercold" dropped.
 - **D12:** the friend's guild goes in prod `comped_guild_ids` (owner, 2026-10-01). Tests prove the import result, the tier and the AI prompt text are byte-identical with and without the listing, and that a listed guild that is removed and re-invited comes back `comped`, but as a fresh row (not set up, no games, SHiFT or lounge; it starts at `/newsbot setup`). Details in §9.
@@ -110,7 +110,7 @@ None of these blocks task 1 except D1 and D6. Each names the task it blocks.
 
 ```yaml
 home_guild_id: 123...            # optional; defaults to the legacy guild_id; owner-only commands live here
-admin_channel_id: 123...         # the owner's channel: bot-wide health only
+owner_channel_id: 123...         # the owner's channel: bot-wide health only (falls back to the v2 admin_channel_id when unset)
 admin_permission: manage_guild   # unchanged meaning; also the commands' default_member_permissions
 command_guild_ids: []            # empty = global registration (prod); ids = guild-scoped (dev, self-host)
 comped_guild_ids: []             # D6
@@ -1208,7 +1208,7 @@ Estimated 1 to 2 agent days.
    - share the install link.
 
 **Deploy notes** (from the task 13 adversarial round):
-- **Prod `config.yaml` must set `home_guild_id` and `admin_channel_id` to the owner's own server.** Without them, `home_guild_id` defaults to the friend's `guild_id`, so the owner channel (the daily owner report, bot-wide alerts, the import notice) and `/owner` land in the friend's server, in front of the friend.
+- **Prod `config.yaml` must add `home_guild_id` and `owner_channel_id`, both in the owner's own server, and leave `admin_channel_id` as the friend's own admin channel.** Without them, `home_guild_id` defaults to the friend's `guild_id`, so the owner channel (the daily owner report, bot-wide alerts, the import notice) and `/owner` land in the friend's server, in front of the friend.
 - **Never run `--collect`, `--fixtures` or `--post-to-stdout` against the live prod database.** They write: a collection pass stores items and marks SHiFT codes posted for every server (the CLI prints them instead of posting, so the real bot never announces them), and `--post-to-stdout` claims the day's digest. Only `--dry-run` (the default) and `--check-sources` are read-only; a dry run works on a throwaway copy of the file, so even the one-time import stays out of it. Rehearse on a copy of the database.
 - **At cutover the first digest window starts after v2.2's last digest.** The import (and the startup adoption of later v2.2 rows) stamps each posted v2.2 digest with a window ending at its `updated_at`, so the first v3 summary and headlines don't hand the server yesterday's items again.
 - **Prod `config.yaml` also sets `comped_guild_ids: [<the friend's guild_id>]`** (D12, owner, 2026-10-01). It changes nothing today: the import already comps that server, and the model input is byte-identical (no `/newsbot preview` gate). It only matters if the friend ever removes the bot and invites it back: the new row is comped instead of free. What the friend then sees is a **fresh server, not their old setup**: the one-time hello, `set_up=0`, no games, SHiFT or lounge (removal deleted them, and the import never reruns), and no digest until an admin runs `/newsbot setup` (default 09:00 UTC until they pick a zone). Keep the home or test guild out of this list: a second comped guild following other games changes `all_topics` and so the friend's prompt. Also note that once the re-joined friend follows a different game set, the prompt follows it.

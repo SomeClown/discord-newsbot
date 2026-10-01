@@ -230,7 +230,7 @@ cp config.example.yaml /opt/newsbot/config.yaml
 ```
 
 Edit `config.yaml`: replace the placeholder IDs (`home_guild_id`, your own
-server, and `admin_channel_id`, a channel in it for the bot's health alerts)
+server, and `owner_channel_id`, a channel in it for the bot's health alerts)
 with real ones. The v3 example holds only global settings and the game
 catalog; each server's channels, digest time and SHiFT settings are set from
 Discord with `/newsbot setup` afterwards, so there's nothing per-server to put
@@ -1228,17 +1228,19 @@ Two things to know before the first step.
    to your own test server (`1552824311608512532`, decision D9) and make a
    channel there just for prod alerts (a separate one from dev's, so the two
    don't mix). Give the bot's role View Channels and Send Messages in it, and
-   copy the channel's id. Why it matters: your channel is where bot-wide news
-   lands (the import notice, a source that's been dead for half a day, a
+   copy the channel's id. Why it matters: your channel (the config key
+   `owner_channel_id`) is where bot-wide news lands (the import notice, a source that's been dead for half a day, a
    crashed job, the daily owner report), and `/owner servers` lives in your
    home server. Without `home_guild_id` set, it defaults to the old `guild_id`,
    which is the friend's server, so all of that would show up in front of the
-   friend.
+   friend. The friend's own admin channel is a separate thing and stays where
+   it is: it keeps the `admin_channel_id` key it has today, and the import
+   copies that into the friend's server's row.
 
 3. **Write down three values from the current `config.yaml`:** `guild_id` (the
    friend's server), `admin_channel_id` (the friend's admin channel), and the
-   `TAG` in `.env` (`2.2.0`). You need all three if you roll back, and the
-   second one again in step 15.
+   `TAG` in `.env` (`2.2.0`). You need all three if you roll back. The config
+   keeps the first two as they are.
 
 4. **Make a copy of the config and edit the copy.** The live `config.yaml`
    stays v2.2-valid until step 10, for the same reason §17 gives:
@@ -1250,17 +1252,21 @@ Two things to know before the first step.
    cp config.yaml config.v3.yaml
    ```
 
-   In `config.v3.yaml`, add three keys and change nothing else:
+   In `config.v3.yaml`, add three keys and change nothing else. Leave
+   `admin_channel_id` exactly as it is: it stays the friend's admin channel,
+   and the import copies it into the friend's server's row.
 
    ```yaml
    home_guild_id: 1552824311608512532     # your test server (D9)
-   admin_channel_id: <the prod-alerts channel from step 2>   # replaces the old value
+   owner_channel_id: <the prod-alerts channel from step 2>
    comped_guild_ids: [<the old guild_id, the friend's server>]
    ```
 
-   - `home_guild_id` and `admin_channel_id` are described in step 2. The
-     admin channel has to be in the home server; the bot refuses to post
-     owner alerts anywhere else and says so at startup if it can't.
+   - `home_guild_id` and `owner_channel_id` are described in step 2. The
+     owner channel has to be in the home server; the bot refuses to post
+     owner alerts anywhere else and says so at startup if it can't. The
+     friend's `admin_channel_id` is a different key for a different
+     server, so the two never fight over one value.
    - `comped_guild_ids` holds **the friend's server only, never the home
      server** (decision D12). The import already comps that server, so this
      changes nothing today. It matters if the friend ever removes the bot and
@@ -1271,7 +1277,7 @@ Two things to know before the first step.
      `/newsbot preview` before it ships.
    - Don't add a `catalog:` yet. Leave the old `topics:` and `sources:` as
      they are: v3 derives its catalog from them, so the upgrade changes
-     nothing about what gets collected. The 15-game catalog comes in step 19.
+     nothing about what gets collected. The 15-game catalog comes in step 16.
 
 5. **Check the catalog order.** The comped summarizer's prompt lists the games
    in catalog order, and the derived catalog follows `topics:` order, so it has
@@ -1282,7 +1288,7 @@ Two things to know before the first step.
    grep -n '^  - key:' config.v3.yaml
    ```
 
-   Expect `borderlands4`, `palworld`, `diablo4` in that order. (When step 19
+   Expect `borderlands4`, `palworld`, `diablo4` in that order. (When step 16
    adds a `catalog:`, that grep will print two lists, the old `topics:` and
    the new catalog. Check the order in both.)
 
@@ -1327,8 +1333,7 @@ Two things to know before the first step.
 
    (`config.v3.yaml` is the new one; `config.yaml` is still the live v2.2 file
    at this point. `config.v2.yaml` is the same as `config.yaml` and the thing
-   to restore on a rollback, since step 4 changes where `admin_channel_id`
-   points.)
+   to restore on a rollback, though step 4 leaves the existing keys alone.)
 
 ### Deploy
 
@@ -1384,7 +1389,7 @@ Two things to know before the first step.
       `17/19 sources ok, 214 new items, 0 new codes`, and then one every hour
 
     You do **not** want `owner alerts won't arrive` (an ERROR, also printed to
-    stderr): it means `home_guild_id` or `admin_channel_id` is wrong or
+    stderr): it means `home_guild_id` or `owner_channel_id` is wrong or
     the channel isn't one the bot can send in. It names the fix. The bot keeps
     running, because the friend's digests are fine, but you're deaf until you
     correct it.
@@ -1428,22 +1433,7 @@ Two things to know before the first step.
     server un-set-up (the bot sits there and says nothing) until the friend's
     server has been through a couple of days on v3.
 
-15. **Point the friend's admin channel back.** One config key, `admin_channel_id`,
-    used to be both the friend's admin channel and your own alert channel,
-    and step 4 made it the latter. The import copies it into the friend's
-    server's row as that server's own admin channel, so that row now names a
-    channel in the wrong server. The bot won't post there (it refuses
-    channels that aren't in the server being told), notes the problem in the
-    friend's `/newsbot status`, and the friend's run reports go nowhere.
-    Fix it from the friend's server, as an admin there:
-
-    ```
-    /newsbot settings admin_channel:<the friend's admin channel from step 3>
-    ```
-
-    The reply names anything the bot still can't do in that channel.
-
-16. **Watch two digest days and one SHiFT alert.** The next morning: the
+15. **Watch two digest days and one SHiFT alert.** The next morning: the
     lounge quote at 08:00 (it's scheduled per server now, from the database
     row), the digest at 09:00 with AI summaries in each game's own channel, and
     the run report in the friend's admin channel. SHiFT works as before: the
@@ -1457,10 +1447,10 @@ Two things to know before the first step.
 
 ### Going public
 
-Only after step 16 looks clean. The order is deliberate: the catalog and the
+Only after step 15 looks clean. The order is deliberate: the catalog and the
 pages first, the switch last.
 
-17. **Add the 15-game catalog to prod's config.** Copy the whole `catalog:` and
+16. **Add the 15-game catalog to prod's config.** Copy the whole `catalog:` and
     `shared_sources:` blocks, and the `web_search:` block, from
     `config.example.yaml` into a copy of the live `config.yaml` (leave the old
     keys where they are: with a `catalog:` present they're read only by the
@@ -1479,7 +1469,7 @@ pages first, the switch last.
     pass: how long it took (15 subreddits at the 35 second Reddit spacing add
     up to about 9 minutes), and that source alerts don't flood your channel.
 
-18. **Publish the privacy policy and terms.** They live in `site/` and GitHub
+17. **Publish the privacy policy and terms.** They live in `site/` and GitHub
     Pages publishes them from `main` after the merge. Confirm the live pages
     at `https://someclown.github.io/discord-newsbot/privacy.html` and
     `/terms.html`, check the "Effective" date says what you want it to, and
@@ -1487,7 +1477,7 @@ pages first, the switch last.
     Developer Portal's privacy and terms URL fields, if you've filled them in,
     point at these.
 
-19. **Take a dated backup, and keep it.** Right before the switch, outside the
+18. **Take a dated backup, and keep it.** Right before the switch, outside the
     7-day rotation (the rotation only touches `data/backups/newsbot-*.db`, so a
     file next to the database is safe from it):
 
@@ -1500,7 +1490,7 @@ pages first, the switch last.
     (Put today's date in for `YYYYMMDD`.) Don't delete it while the app is
     young; it's the one thing that lets you undo going public.
 
-20. **Flip the switch.** In the Discord Developer Portal, prod app:
+19. **Flip the switch.** In the Discord Developer Portal, prod app:
     Installation: guild install only; scopes `bot` and `applications.commands`;
     default permissions View Channels, Send Messages and Embed Links
     (Mention @everyone stays off the default; an admin who picks an
@@ -1512,13 +1502,13 @@ pages first, the switch last.
 
 ### Rollback
 
-**Before step 20 (still only the friend's server):** a rollback is a `TAG`
+**Before step 19 (still only the friend's server):** a rollback is a `TAG`
 change plus the old config. No database restore is needed.
 
 1. In `.env`, set `TAG=2.2.0`.
 2. Put the old config back: `cp config.v2.yaml config.yaml`. (v2.2 would
-   ignore the new keys, but its run reports and alerts go wherever
-   `admin_channel_id` points, and step 4 moved that to your server.)
+   ignore the new keys, and `admin_channel_id` never changed, so its run
+   reports and alerts go where they always did.)
 3. `./scripts/deploy.sh` (outside both windows, as always).
 
 What to expect:
@@ -1549,7 +1539,7 @@ What to expect:
   and any digest v2.2 posted in the meantime is adopted by the friend's
   server on startup, which closes the double-post.
 
-**After step 20 (other servers have joined):** don't roll back to v2.2 if you
+**After step 19 (other servers have joined):** don't roll back to v2.2 if you
 can fix forward. Two reasons:
 
 - **Never force `run-now` on v2.2 once the bot is public.** v2.2 can't tell the
