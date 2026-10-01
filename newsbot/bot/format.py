@@ -980,7 +980,8 @@ def render_guild_run_report(
             return None
         names = {g.key: g.name for g in games}
         parts = [
-            f"{esc(names.get(key, key))}" + (f" ({esc(reason)})" if with_reasons else "")
+            f"{esc(names.get(key, key))}"
+            + (f" ({esc(friendly_skip_reason(reason))})" if with_reasons else "")
             for key, reason in skipped.items()
         ]
         return "Skipped: " + "; ".join(parts)
@@ -1064,6 +1065,27 @@ _REASON_PATTERNS = (
     ("timed out", re.compile(r"timed out|timeout")),
     ("couldn't build", re.compile(r"build failed")),
 )
+
+
+# What a skipped game's reason says in a server's run report, by the same categories as
+# above. The raw error stays in the logs and in the stored notes; a server's admin gets
+# a sentence, not "404 Not Found (error code: 10003)". Anything else is trimmed raw text.
+_SKIP_REASON_TEXT = {
+    "missing permissions": "I'm missing permissions there",
+    "channel gone": "its channel was deleted",
+    "rate limited": "Discord rate limited me",
+    "timed out": "Discord took too long to answer",
+}
+_SKIP_OTHER_MAX = 60
+
+
+def friendly_skip_reason(raw: str) -> str:
+    """A plain-English reason for a skipped game, from its raw error. Not escaped."""
+    text = raw.casefold()
+    for reason, pattern in _REASON_PATTERNS:
+        if pattern.search(text) and reason in _SKIP_REASON_TEXT:
+            return _SKIP_REASON_TEXT[reason]
+    return plain_line(raw, _SKIP_OTHER_MAX) or "unknown error"
 
 
 def outcome_from_digest(status: str, notes: str | None) -> DigestOutcome:
@@ -1262,6 +1284,7 @@ __all__ = [
     "render_digest_summary_line",
     "render_followup_alert",
     "render_guild_digest",
+    "friendly_skip_reason",
     "render_guild_run_report",
     "render_guild_overview",
     "render_guild_status",

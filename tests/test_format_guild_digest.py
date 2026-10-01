@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from newsbot.bot.format import (
     discord_len,
+    friendly_skip_reason,
     render_guild_digest,
     render_guild_run_report,
     render_headlines_embed,
@@ -232,16 +235,40 @@ def test_run_report_has_counts_jump_links_and_duration_but_no_spend_or_sources()
     assert "Claude" not in text and "Sources" not in text and "$" not in text
 
 
-def test_run_report_names_skipped_games_and_partial_notes():
+def test_run_report_names_skipped_games_once_and_in_plain_words():
+    raw = "discord send failed: 404 Not Found (error code: 10003): Unknown Channel"
     text = report(
         status="partial",
         run_kind="run-now",
-        skipped={"palworld": "channel deleted"},
-        notes=["palworld: skipped (channel deleted)"],
+        skipped={"palworld": raw},
+        notes=["Reddit was slow"],
     )
     assert "⚠️ **Digest posted with gaps**" in text and "(run-now)" in text
-    assert "Skipped: Palworld (channel deleted)" in text
-    assert "Notes: palworld: skipped (channel deleted)" in text
+    assert "Skipped: Palworld (its channel was deleted)" in text
+    assert "Notes: Reddit was slow" in text
+    assert "404" not in text and "10003" not in text and "palworld:" not in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "friendly"),
+    [
+        (
+            "discord send failed: 404 Not Found (error code: 10003): Unknown Channel",
+            "its channel was deleted",
+        ),
+        (
+            "discord send failed: 403 Forbidden (error code: 50013): Missing Permissions",
+            "I'm missing permissions there",
+        ),
+        ("discord send failed: 429 Too Many Requests", "Discord rate limited me"),
+        ("discord send failed: rate limited", "Discord rate limited me"),
+        ("send timed out", "Discord took too long to answer"),
+        ("kaboom: " + "x" * 200, "kaboom: " + "x" * 51 + "…"),
+        ("", "unknown error"),
+    ],
+)
+def test_friendly_skip_reason_uses_the_digest_outcome_categories(raw, friendly):
+    assert friendly_skip_reason(raw) == friendly
 
 
 def test_run_report_sheds_detail_to_stay_under_the_message_limit():

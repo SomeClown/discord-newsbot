@@ -753,6 +753,11 @@ async def test_a_partial_digest_reports_the_skipped_game(world):
     await run_guild_digest(world.deps(), G1, kind=RunKind.SCHEDULED)
     [(_, _, text)] = world.reports
     assert "Digest posted with gaps" in text and "Skipped: Borderlands 4" in text
+    # Said once, in words: no raw error, no repeat in a Notes line, no game key. The raw
+    # text stays in the stored notes.
+    assert text.count("Borderlands 4") == 2  # the item count and the skip line
+    assert "Notes:" not in text and "borderlands4" not in text
+    assert "borderlands4: skipped" in world.digest(G1).error_notes
 
 
 # --- the tick: pacing, isolation, time zones ---

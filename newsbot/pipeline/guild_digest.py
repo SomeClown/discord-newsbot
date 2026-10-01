@@ -944,7 +944,8 @@ async def _publish_claimed(
         kind,
         posted,
         skipped_games,
-        notes,
+        # Not `notes`: its skip lines say what the report's "Skipped:" line already says.
+        list(built.notes),
         finished_at - started,
     )
     return GuildDigestOutcome(
