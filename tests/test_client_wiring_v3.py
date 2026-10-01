@@ -895,7 +895,9 @@ def _write_day_fixtures(directory: Path) -> Path:
 
 async def test_a_whole_day_for_the_friends_server(v22_db, tmp_path, monkeypatch):
     cfg = load_config(PRODLIKE)
-    assert not set(cfg.comped_guild_ids)  # the prod-like config comps nobody by id
+    # The fixture is the v2.2 config, which has no such key. Prod gets the friend's own id in
+    # `comped_guild_ids` (D12); the home or test guild must never be in it.
+    assert not set(cfg.comped_guild_ids)
     clock = {"now": T_IMPORT}
     monkeypatch.setattr(client_module, "_utcnow", lambda: clock["now"])
     day = _write_day_fixtures(tmp_path / "day")

@@ -12,8 +12,10 @@ everyone leaving, and a join that lands in the middle of startup must say hello 
 twice, because two joins racing to be first is how a bot ends up introducing itself twice.
 
 Removal and re-invite are here too. The import happens once, ever, so a friend who kicks the
-bot and invites it back gets a perfectly ordinary free server. That is correct by the
-rules and might not be what the owner has in mind for the one server that's comped.
+bot and invites it back gets a fresh, unconfigured server. Whether that server is comped
+depends on `comped_guild_ids`: left out, it comes back free (pinned below); listed, which is
+what the owner decided on 2026-10-01 for prod, it comes back comped. Either way the old
+games, SHiFT settings and lounge are gone and it starts at `/newsbot setup`.
 """
 
 from __future__ import annotations
@@ -197,6 +199,43 @@ async def test_inviting_the_bot_back_makes_an_ordinary_free_server_and_says_hell
 
     assert guild_rows(world) == [(FRIEND, "free", 0)]
     assert len(hellos(again)) == 1
+
+
+async def test_a_listed_friend_who_kicks_and_reinvites_comes_back_comped_but_unconfigured(
+    make_world, monkeypatch
+):
+    # Owner decision 2026-10-01: prod lists the friend's guild in comped_guild_ids.
+    from cutover_world import PRODLIKE
+
+    from newsbot.config import load_config
+
+    cfg = load_config(PRODLIKE).model_copy(update={"comped_guild_ids": [FRIEND]})
+    world = await make_world(now=T_NOON, cfg=cfg)
+    await world.ready()
+    assert guild_rows(world) == [(FRIEND, "comped", 1)]
+    await world.bot.on_guild_remove(SimpleNamespace(id=FRIEND))
+    assert guild_rows(world) == []
+    again = friend_stub()
+
+    await world.bot.on_guild_join(again)
+    await world.bot.on_guild_join(again)  # Discord sometimes says it twice
+
+    # Comped, but a brand new row: not set up, so no digest until /newsbot setup.
+    assert guild_rows(world) == [(FRIEND, "comped", 0)]
+    assert len(hellos(again)) == 1
+    assert hellos(again)[0].content == lifecycle.FIRST_CONTACT_TEXT
+    assert world.rows("SELECT imported_at FROM guilds WHERE guild_id = ?", FRIEND) == [(None,)]
+    for table in ("guild_games", "guild_shift", "guild_lounge"):
+        assert world.rows(f"SELECT COUNT(*) FROM {table}") == [(0,)], table  # noqa: S608
+
+    # A restart doesn't bring the old setup back: no second import, no lounge re-sync.
+    again_world = await make_world(now=T_NOON, cfg=cfg, channels=world.channels)
+    assert again_world.report is None
+    fake_gateway(again_world.bot, monkeypatch, [again])
+    await again_world.ready()
+    assert guild_rows(again_world) == [(FRIEND, "comped", 0)]
+    for table in ("guild_games", "guild_shift", "guild_lounge"):
+        assert again_world.rows(f"SELECT COUNT(*) FROM {table}") == [(0,)], table  # noqa: S608
 
 
 # --- joins that land mid-startup ---

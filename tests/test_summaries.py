@@ -543,6 +543,53 @@ async def test_the_model_input_for_the_friends_server_is_byte_identical_to_v22s(
     assert "video games Borderlands 4, Palworld and Diablo IV." in expected[0]
 
 
+async def test_comping_the_friends_guild_by_id_changes_nothing_about_import_tier_or_prompt(
+    tmp_path, monkeypatch
+):
+    # Owner decision (2026-10-01): prod's comped_guild_ids lists the friend's guild so a
+    # kick and re-invite comes back comped. The import already comps that guild, so the
+    # list must be a no-op for everything else. Two worlds, same items, same clock; the
+    # only difference is the list.
+    def run(name: str, comped: list[int]):
+        (tmp_path / name).mkdir()
+        w = World(tmp_path / name, monkeypatch, "config_v2_prodlike.yaml", now=PACIFIC_DUE)
+        w.cfg = w.cfg.model_copy(update={"comped_guild_ids": comped})
+        report = ensure_imported(w.db_path, w.cfg, lambda: PACIFIC_DUE - timedelta(days=2))
+        for game in ("borderlands4", "palworld", "diablo4"):
+            w.item(game, f"{game} news", PACIFIC_DUE - timedelta(hours=4), trust="official")
+        w.clock.t = PACIFIC_DUE - timedelta(minutes=29)
+        return w, report
+
+    plain, plain_report = run("plain", [])
+    friend = plain_report.guild_id
+    listed, listed_report = run("listed", [friend])
+    assert listed.cfg.comped_guild_ids == [friend]
+
+    assert await prepare_summaries(plain.deps()) == ["borderlands4", "palworld", "diablo4"]
+    assert await prepare_summaries(listed.deps()) == ["borderlands4", "palworld", "diablo4"]
+
+    assert listed_report == plain_report
+
+    def table(w, sql):
+        return [tuple(r) for r in w.rows(sql)]
+
+    guilds = "SELECT guild_id, tier, set_up, digest_time, timezone, admin_channel_id FROM guilds"
+    assert (
+        table(listed, guilds)
+        == table(plain, guilds)
+        == [(friend, "comped", 1, "09:00", LA, 100000000000000002)]
+    )
+    games = "SELECT guild_id, game_key, channel_id FROM guild_games ORDER BY game_key"
+    assert table(listed, games) == table(plain, games)
+    # The model input: every call's system and user text, byte for byte.
+    assert listed.llm.calls == plain.llm.calls
+    assert len(plain.llm.calls) == 3
+    assert all(
+        "video games Borderlands 4, Palworld and Diablo IV." in system
+        for system, _ in listed.llm.calls
+    )
+
+
 async def test_the_friends_guild_after_the_import_gets_summaries_for_its_three_games(
     tmp_path, monkeypatch
 ):
