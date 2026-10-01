@@ -148,12 +148,12 @@ sources:
 
 ## v3 catalog (2026-10)
 
-Plan task 17: sources, aliases and search queries for the 12 games joining the public app's catalog. Verified 2026-09-30 from the same residential macOS connection as the first round. The proposed entries are in `docs/plans/2026-09-30-public-app-catalog.yaml`, pending owner approval (D11).
+Plan task 17: sources, aliases and search queries for the 12 games joining the public app's catalog. Verified 2026-09-30 from the same residential macOS connection as the first round. The proposed entries are in `docs/plans/2026-09-30-public-app-catalog.yaml`; the owner approved them on 2026-09-30 (D11), and they're in `config.example.yaml`'s catalog.
 
 ### How this was checked
 
 - Discovery: web search for each game's official channels, a look for RSS autodiscovery links on each official news page (one request per page), and DNS lookups of `_atproto.<domain>` to find domain-verified Bluesky accounts without calling the Bluesky API at all.
-- Verification: every candidate went through the project's own collectors (the same `build_collectors` and RSS and Steam code the bot runs), driven by a small scratch script that ran them one at a time, 2 seconds apart, and 35 seconds apart for Reddit. The User-Agent was the bot's own, with `NEWSBOT_CONTACT` set to the repo URL. I used a script instead of `--check-sources` because the CLI runs non-Reddit sources concurrently and I wanted each feed fetched once and saved, so the alias noise could be checked offline afterwards without fetching anything twice.
+- Verification: every candidate went through the project's own collectors (the same RSS and Steam collector code the bot runs), driven by a small scratch script that ran them one at a time, 2 seconds apart, and 35 seconds apart for Reddit. The User-Agent was the bot's own, with `NEWSBOT_CONTACT` set to the repo URL. I used a script instead of `--check-sources` because the CLI runs non-Reddit sources concurrently and I wanted each feed fetched once and saved, so the alias noise could be checked offline afterwards without fetching anything twice.
 - Each source was fetched once. Reddit's 429 came back for 3 of the 12 subreddits (r/VALORANT, r/Warframe, r/WarDogs) even at 35 seconds apart; each retry 60 seconds later worked.
 - "Items" below is what the source returned. "24h" and "7d" count how many of those were published in the last day and week. Steam and Bluesky return their newest 20 to 30 posts however old they are, so a quiet game still shows 20 items.
 
@@ -261,6 +261,8 @@ Plan task 17: sources, aliases and search queries for the 12 games joining the p
 - The Modern Warfare 4 Steam app after launch.
 
 ### Owner decisions (D11)
+
+Approved 2026-09-30 as proposed (all 12 games, with `Evercold` dropped); the questions are kept here as the record.
 
 1. Approve the 12 entries as proposed, including Aniimo and WARDOGS (both met the bar: official Steam posts, no match noise).
 2. Accept Fortnite and VALORANT going out with only a subreddit as their dedicated source.
