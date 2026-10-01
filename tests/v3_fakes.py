@@ -117,6 +117,26 @@ def make_guild(db_path, guild_id=GUILD_A, *, set_up=True, tier="free", games=(),
             repo.follow_game(conn, guild_id, key, channel_id)
 
 
+def fake_bot(db_path, *, owner: bool = False, **extra):
+    """A bot the admin commands can run against: in every server, with `.owner` saying who asks.
+
+    `in_servers` (a set of ids) narrows which servers it is in; by default it's in all of them.
+    Flip `bot.owner` mid-test to make the next caller the bot owner.
+    """
+    in_servers = extra.pop("in_servers", None)
+
+    async def is_owner(user) -> bool:
+        return bot.owner
+
+    def get_guild(guild_id):
+        return object() if in_servers is None or guild_id in in_servers else None
+
+    bot = SimpleNamespace(
+        db_path=db_path, get_guild=get_guild, is_owner=is_owner, owner=owner, **extra
+    )
+    return bot
+
+
 def command(group, name):
     return next(c for c in group.commands if c.name == name)
 

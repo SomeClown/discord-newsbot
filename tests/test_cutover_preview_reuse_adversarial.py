@@ -87,7 +87,9 @@ async def test_without_a_preview_the_same_morning_makes_the_same_calls(make_worl
     assert len(world.llm.calls) == len(GAMES)
 
 
-async def test_every_preview_costs_a_call_because_none_of_them_saves_anything(make_world):
+async def test_a_repeat_preview_inside_the_window_costs_nothing(make_world):
+    # Nothing is saved, but the lookup remembers what it made for half an hour: a second
+    # `/newsbot preview` of the same coverage is free.
     world = await morning(make_world)
     await preview(world, DUE - timedelta(minutes=30))
     calls = len(world.llm.calls)
@@ -95,7 +97,27 @@ async def test_every_preview_costs_a_call_because_none_of_them_saves_anything(ma
     await preview(world, DUE - timedelta(minutes=20))
     await preview(world, DUE - timedelta(minutes=10))
 
-    assert len(world.llm.calls) == calls + 2 * len(GAMES)
+    assert len(world.llm.calls) == calls
+
+
+async def test_a_preview_after_the_window_makes_the_summary_again(make_world):
+    world = await morning(make_world)
+    await preview(world, DUE - timedelta(hours=1))
+    calls = len(world.llm.calls)
+
+    await preview(world, DUE - timedelta(minutes=29))  # 31 minutes later
+
+    assert len(world.llm.calls) == calls + len(GAMES)
+
+
+async def test_the_preview_memory_is_not_the_database(make_world):
+    world = await morning(make_world)
+    before = dump(world)
+
+    await preview(world, DUE - timedelta(minutes=30))
+    await preview(world, DUE - timedelta(minutes=20))
+
+    assert dump(world) == before
 
 
 async def test_a_preview_hours_early_leaves_nothing_for_the_digest_to_reuse(make_world):
@@ -209,3 +231,63 @@ async def test_a_preview_that_hit_a_failing_model_does_not_decide_the_mornings_s
     assert digest_status(world) == "ok"
     embed = world.sent(PAL_CH)[0].embed
     assert "Summary unavailable" not in (embed.description or "")
+
+
+# --- the preview memory, on its own ---
+
+
+def _lookup_with_a_counting_model(monkeypatch, *, fallback=False):
+    """`dry_run_lookup` over a fake model; `clock` is the time it sees, `calls` what it ran."""
+    clock = SimpleNamespace(now=DUE)
+    calls: list[str] = []
+
+    async def no_stored(db_path, game_key, due_at, after):
+        return None
+
+    async def made(deps, game, retrying, after=None):
+        calls.append(game.key)
+        summary = SimpleNamespace(stories=[], fallback=fallback, note=None)
+        return SimpleNamespace(summary=summary, items_upto=7)
+
+    monkeypatch.setattr(summaries_module, "_stored_summary", no_stored)
+    monkeypatch.setattr(summaries_module, "_summarize", made)
+    deps = SimpleNamespace(
+        db_path="unused",
+        now=lambda: clock.now,
+        cfg=SimpleNamespace(catalog=[SimpleNamespace(key="palworld"), SimpleNamespace(key="d4")]),
+    )
+    return summaries_module.dry_run_lookup(deps), clock, calls
+
+
+async def test_the_memory_is_per_game_and_per_coverage(monkeypatch):
+    from newsbot.store.models import Coverage
+
+    lookup, _clock, calls = _lookup_with_a_counting_model(monkeypatch)
+    here = Coverage(DUE, 5)
+
+    await lookup("palworld", DUE, here)
+    await lookup("palworld", DUE, Coverage(DUE, 5))  # equal coverage: a hit
+    assert calls == ["palworld"]
+    await lookup("d4", DUE, here)
+    await lookup("palworld", DUE, Coverage(DUE, 6))
+    await lookup("palworld", DUE, None)
+    assert calls == ["palworld", "d4", "palworld", "palworld"]
+
+
+async def test_the_memory_runs_out_after_thirty_minutes(monkeypatch):
+    lookup, clock, calls = _lookup_with_a_counting_model(monkeypatch)
+    await lookup("palworld", DUE, None)
+    clock.now = DUE + summaries_module.PREVIEW_SUMMARY_TTL - timedelta(seconds=1)
+    await lookup("palworld", DUE, None)
+    assert calls == ["palworld"]
+    clock.now = DUE + summaries_module.PREVIEW_SUMMARY_TTL
+    await lookup("palworld", DUE, None)
+    assert calls == ["palworld", "palworld"]
+
+
+async def test_a_fallback_is_not_remembered(monkeypatch):
+    lookup, _clock, calls = _lookup_with_a_counting_model(monkeypatch, fallback=True)
+    first = await lookup("palworld", DUE, None)
+    await lookup("palworld", DUE, None)
+    assert first.status == "fallback"
+    assert calls == ["palworld", "palworld"]

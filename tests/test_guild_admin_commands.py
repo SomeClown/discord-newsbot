@@ -8,8 +8,9 @@ Server, anything but a plain text channel of its own server, and bad input.
 
 from __future__ import annotations
 
+import logging
 from contextlib import closing
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import discord
@@ -22,6 +23,7 @@ from v3_fakes import (
     FakeInteraction,
     channel,
     command,
+    fake_bot,
     make_guild,
     role,
     thin_channel,
@@ -78,7 +80,7 @@ def deps_for(cfg, db_path):
 def admin(v3_cfg, v3_db, problems):
     """`admin("follow")` is that command's callback; `admin.deps` is the shared digest deps."""
     deps = deps_for(v3_cfg, v3_db)
-    bot = SimpleNamespace(db_path=v3_db)
+    bot = fake_bot(v3_db)
     group = make_guild_admin_group(v3_cfg, bot, digest_deps=lambda: deps)
 
     def get(name):
@@ -86,6 +88,7 @@ def admin(v3_cfg, v3_db, problems):
 
     get.group = group
     get.deps = deps
+    get.bot = bot
     get.callback = lambda name: command(group, name).callback
     return get
 
@@ -125,7 +128,7 @@ def test_the_group_shape(admin, v3_cfg):
 
 def test_default_permissions_follow_the_configured_admin_permission(v3_cfg, v3_db):
     cfg = v3_cfg.model_copy(update={"admin_permission": "kick_members"})
-    group = make_guild_admin_group(cfg, SimpleNamespace(db_path=v3_db))
+    group = make_guild_admin_group(cfg, fake_bot(v3_db))
     assert group.default_permissions.kick_members is True
 
 
@@ -266,7 +269,7 @@ async def test_follow_reports_permission_problems_in_the_reply(admin, problems):
 
 async def test_follow_creates_a_missing_row_with_the_configured_tier(v3_cfg, v3_db, problems):
     cfg = v3_cfg.model_copy(update={"comped_guild_ids": [GUILD_A]})
-    group = make_guild_admin_group(cfg, SimpleNamespace(db_path=v3_db))
+    group = make_guild_admin_group(cfg, fake_bot(v3_db))
     interaction = FakeInteraction()
     await command(group, "follow").callback(interaction, game="rust", channel=channel(5))
     guild = snapshot(v3_db, GUILD_A)[0]
@@ -826,7 +829,7 @@ async def test_another_servers_busy_lock_does_not_block_this_one(admin, v3_db, d
 
 async def test_digest_commands_without_wired_deps(v3_cfg, v3_db, problems):
     make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
-    group = make_guild_admin_group(v3_cfg, SimpleNamespace(db_path=v3_db))
+    group = make_guild_admin_group(v3_cfg, fake_bot(v3_db))
     for name in ("run-now", "preview"):
         interaction = FakeInteraction()
         await command(group, name).callback(interaction)
@@ -880,6 +883,175 @@ async def test_a_broken_time_zone_during_the_run_itself(admin, v3_db, monkeypatc
     assert "time zone setting is invalid" in interaction.text
 
 
+# --- cooldowns ---
+
+NOON = datetime(2026, 9, 30, 17, 0, tzinfo=UTC)
+
+
+def _clock(admin, at):
+    admin.deps.now = lambda: at
+
+
+def _a_preview_to_show(digest_calls):
+    embed = discord.Embed(title="Palworld")
+    digest_calls.preview = SimpleNamespace(
+        rendered=SimpleNamespace(messages=[SimpleNamespace(channel_id=5, embed=embed)]), notes=[]
+    )
+
+
+async def test_a_second_preview_inside_ten_minutes_is_turned_away_with_the_time(
+    admin, v3_db, digest_calls
+):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    _a_preview_to_show(digest_calls)
+    await admin.callback("preview")(FakeInteraction())
+    _clock(admin, NOON + timedelta(minutes=4))
+    second = FakeInteraction()
+    await admin.callback("preview")(second)
+    again = int((NOON + commands_module._PREVIEW_COOLDOWN).timestamp())
+    assert f"<t:{again}:R>" in second.text
+    assert second.sent[-1]["ephemeral"] is True
+    assert "embed" not in second.sent[-1]
+
+
+async def test_a_preview_after_the_cooldown_works_again(admin, v3_db, digest_calls):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    _a_preview_to_show(digest_calls)
+    await admin.callback("preview")(FakeInteraction())
+    _clock(admin, NOON + commands_module._PREVIEW_COOLDOWN)
+    later = FakeInteraction()
+    await admin.callback("preview")(later)
+    assert later.sent[-1]["content"] == "Would post in <#5>:"
+
+
+async def test_the_preview_cooldown_is_per_server(admin, v3_db, digest_calls):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    make_guild(v3_db, GUILD_B, games=[("palworld", 6)])
+    _a_preview_to_show(digest_calls)
+    await admin.callback("preview")(FakeInteraction())
+    other = FakeInteraction(guild_id=GUILD_B)
+    await admin.callback("preview")(other)
+    assert other.sent[-1]["content"] == "Would post in <#5>:"
+
+
+async def test_the_owner_skips_the_preview_cooldown_without_resetting_it(
+    admin, v3_db, digest_calls
+):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    _a_preview_to_show(digest_calls)
+    await admin.callback("preview")(FakeInteraction())
+    admin.bot.owner = True
+    _clock(admin, NOON + timedelta(minutes=1))
+    owner = FakeInteraction()
+    await admin.callback("preview")(owner)
+    assert owner.sent[-1]["content"] == "Would post in <#5>:"
+    admin.bot.owner = False
+    _clock(admin, NOON + timedelta(minutes=2))
+    admin_again = FakeInteraction()
+    await admin.callback("preview")(admin_again)
+    assert "try again" in admin_again.text
+
+
+async def test_a_preview_that_never_got_going_does_not_start_the_cooldown(
+    admin, v3_db, digest_calls
+):
+    interaction = FakeInteraction()
+    await admin.callback("preview")(interaction)
+    assert "hasn't set up newsbot yet" in interaction.text
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    _a_preview_to_show(digest_calls)
+    worked = FakeInteraction()
+    await admin.callback("preview")(worked)
+    assert worked.sent[-1]["content"] == "Would post in <#5>:"
+
+
+async def test_a_second_confirmed_run_now_inside_ten_minutes_is_turned_away(
+    admin, v3_db, digest_calls
+):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.today = _row("ok", posted={"palworld": 1})
+    await admin.callback("run-now")(FakeInteraction())
+    _clock(admin, NOON + timedelta(minutes=3))
+    second = FakeInteraction()
+    await admin.callback("run-now")(second)
+    again = int((NOON + commands_module._RUN_NOW_COOLDOWN).timestamp())
+    assert len(digest_calls.runs) == 1
+    assert f"<t:{again}:R>" in second.original_edits[-1]["content"]
+    assert second.original_edits[-1]["view"] is None
+
+
+async def test_a_confirmed_run_now_works_again_after_the_cooldown(admin, v3_db, digest_calls):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.today = _row("ok", posted={"palworld": 1})
+    await admin.callback("run-now")(FakeInteraction())
+    _clock(admin, NOON + commands_module._RUN_NOW_COOLDOWN)
+    await admin.callback("run-now")(FakeInteraction())
+    assert len(digest_calls.runs) == 2
+
+
+async def test_the_owner_skips_the_run_now_cooldown(admin, v3_db, digest_calls):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.today = _row("ok", posted={"palworld": 1})
+    await admin.callback("run-now")(FakeInteraction())
+    admin.bot.owner = True
+    await admin.callback("run-now")(FakeInteraction())
+    assert len(digest_calls.runs) == 2
+
+
+async def test_run_now_that_needs_no_confirmation_is_not_cooled_down(admin, v3_db, digest_calls):
+    # Only a confirmed, forced re-run counts: a first run of the day is the normal use.
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    await admin.callback("run-now")(FakeInteraction())
+    await admin.callback("run-now")(FakeInteraction())
+    assert len(digest_calls.runs) == 2
+
+
+async def test_a_cancelled_run_now_does_not_start_the_cooldown(admin, v3_db, digest_calls):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.today = _row("ok", posted={"palworld": 1})
+    digest_calls.answer = False
+    await admin.callback("run-now")(FakeInteraction())
+    digest_calls.answer = True
+    await admin.callback("run-now")(FakeInteraction())
+    assert len(digest_calls.runs) == 1
+
+
+# --- a server the bot isn't in ---
+
+
+@pytest.mark.parametrize("name", sorted(CALLS))
+async def test_a_server_without_the_bot_user_gets_no_row_and_a_plain_reply(v3_cfg, v3_db, name):
+    bot = fake_bot(v3_db, in_servers=set())
+    group = make_guild_admin_group(v3_cfg, bot)
+    interaction = FakeInteraction()
+    await command(group, name).callback(interaction, **CALLS[name])
+    assert "not in it" in interaction.text and "bot user" in interaction.text
+    assert interaction.sent[0]["ephemeral"] is True
+    assert snapshot(v3_db, GUILD_A) == (None, [], None, [])
+
+
+async def test_a_denied_non_admin_is_told_about_permissions_not_the_missing_bot(v3_cfg, v3_db):
+    group = make_guild_admin_group(v3_cfg, fake_bot(v3_db, in_servers=set()))
+    interaction = FakeInteraction(permissions=MEMBER)
+    await command(group, "status").callback(interaction)
+    assert interaction.text == "You don't have permission to run this."
+
+
+# --- what a denial logs ---
+
+
+async def test_a_denial_logs_the_server_and_command_but_not_who_asked(admin, caplog):
+    caplog.set_level(logging.DEBUG)
+    interaction = FakeInteraction(permissions=MEMBER, user_id=123456789)
+    interaction.command = SimpleNamespace(qualified_name="newsbot status")
+    await admin.callback("status")(interaction)
+    denied = [r for r in caplog.records if r.getMessage() == "admin command denied"]
+    assert len(denied) == 1
+    assert denied[0].guild_id == GUILD_A and denied[0].command == "newsbot status"
+    assert not hasattr(denied[0], "user_id")
+    assert "123456789" not in caplog.text
+
+
 # --- cross-guild isolation ---
 
 
@@ -931,7 +1103,7 @@ def lounge(v3_cfg, v3_db):
         calls.append((guild_id, force))
         return SimpleNamespace(status="already_posted", message_id=None)
 
-    bot = SimpleNamespace(db_path=v3_db, run_guild_quote=run_guild_quote)
+    bot = fake_bot(v3_db, run_guild_quote=run_guild_quote)
     group = make_lounge_group(cfg, bot)
     return SimpleNamespace(call=command(group, "quote-now").callback, calls=calls, group=group)
 

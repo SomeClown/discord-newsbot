@@ -38,6 +38,7 @@ from v3_fakes import (
     FakeInteraction,
     channel,
     command,
+    fake_bot,
     make_guild,
     role,
     thin_channel,
@@ -107,7 +108,7 @@ def _deps(cfg, db_path):
 @pytest.fixture
 def admin(v3_cfg, v3_db, problems):
     deps = _deps(v3_cfg, v3_db)
-    bot = SimpleNamespace(db_path=v3_db)
+    bot = fake_bot(v3_db)
     group = make_guild_admin_group(v3_cfg, bot, digest_deps=lambda: deps)
 
     def get(name):
@@ -245,7 +246,7 @@ async def test_the_lounge_command_denies_non_admins_before_reading_the_database(
     async def run_quote(guild_id, force):
         calls.append(force)
 
-    group = make_lounge_group(v3_cfg, SimpleNamespace(db_path=v3_db, run_guild_quote=run_quote))
+    group = make_lounge_group(v3_cfg, fake_bot(v3_db, run_guild_quote=run_quote))
     before = every_table(v3_db)
     interaction = FakeInteraction(permissions=MEMBER, guild_id=GUILD_A)
     await command(group, "quote-now").callback(interaction)
@@ -626,6 +627,9 @@ def _fake_world(guild_id, channel_id, *, roles, perms):
 
     class Client:
         db_path = None
+
+        def get_guild(self, gid):
+            return guild if gid == guild_id else None
 
         def get_channel(self, cid):
             return chan if cid == channel_id else None
@@ -1022,7 +1026,7 @@ async def test_games_reply_fits_even_with_the_whole_catalog_listed(v3_cfg, v3_db
         game.model_copy(update={"key": f"g{i}", "name": f"Game {i} " + "n" * 60}) for i in range(25)
     ]
     cfg = v3_cfg.model_copy(update={"catalog": big})
-    group = make_guild_admin_group(cfg, SimpleNamespace(db_path=v3_db))
+    group = make_guild_admin_group(cfg, fake_bot(v3_db))
     make_guild(v3_db, GUILD_A)
     interaction = FakeInteraction()
     await command(group, "games").callback(interaction)
@@ -1039,7 +1043,7 @@ async def test_digest_commands_without_deps_say_not_available_and_touch_nothing(
 ):
     make_guild(v3_db, GUILD_A, set_up=True, games=[("palworld", 4)])
     before = every_table(v3_db)
-    group = make_guild_admin_group(v3_cfg, SimpleNamespace(db_path=v3_db))
+    group = make_guild_admin_group(v3_cfg, fake_bot(v3_db))
     interaction = FakeInteraction()
     await command(group, name).callback(interaction)
     assert "isn't available yet" in interaction.text
@@ -1058,7 +1062,7 @@ async def test_the_wiring_hook_on_the_bot_is_used_when_no_deps_are_passed(v3_cfg
         calls.append(1)
         return deps
 
-    bot = SimpleNamespace(db_path=v3_db, guild_digest_deps=factory)
+    bot = fake_bot(v3_db, guild_digest_deps=factory)
     group = make_guild_admin_group(v3_cfg, bot)
     for _ in range(2):
         await command(group, "preview").callback(FakeInteraction())
@@ -1101,7 +1105,7 @@ def lounge(v3_cfg, v3_db):
         calls.append((guild_id, force))
         return SimpleNamespace(status="posted", message_id=123)
 
-    bot = SimpleNamespace(db_path=v3_db, run_guild_quote=run_quote)
+    bot = fake_bot(v3_db, run_guild_quote=run_quote)
     group = make_lounge_group(cfg, bot)
     return SimpleNamespace(call=command(group, "quote-now").callback, calls=calls, cfg=cfg)
 

@@ -110,6 +110,9 @@ _HEARTBEAT_S = repo.SUMMARY_CLAIM_LEASE.total_seconds() / 5
 _POLL_S = 2.0
 _MAX_POLLS = int(repo.SUMMARY_CLAIM_LEASE.total_seconds() / _POLL_S)
 _WEB_SEARCH_SKIPPED = "web search skipped"
+# How long a preview's in-memory summary is handed to the next preview of the same game and
+# coverage. Previews save nothing, so without this every `/newsbot preview` is a model call.
+PREVIEW_SUMMARY_TTL = timedelta(minutes=30)
 # How many times `ensure_summary` may find its claim taken out from under it and start
 # over before it stops and lets the digest fall back to headlines. The takeover only
 # happens if a heartbeat dies, so one retry is generous and three is a leash.
@@ -556,15 +559,21 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     return lookup
 
 
-def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
+def dry_run_lookup(
+    deps: SummaryDeps, *, cache_ttl: timedelta = PREVIEW_SUMMARY_TTL
+) -> SummaryLookup:
     """The CLI's `--dry-run` lookup: a reusable stored summary, else one made in memory.
 
     Never saves anything. A dry run is a rehearsal, and a rehearsal that
     quietly writes a summary row for the real digest to reuse is a rehearsal
     with side effects, which is the one thing it's not allowed to have. If
     nothing stored qualifies this does call the model (the stub, offline), and
-    the result lives exactly as long as the preview does.
+    the result lives as long as the preview does. The one exception is this lookup's own memory:
+    a summary it made is kept for `cache_ttl` (in this process only, keyed by game and
+    coverage) so a second preview inside the window costs nothing. A `fallback` isn't kept; a
+    model that just failed deserves a fresh try next time.
     """
+    made_lately: dict[tuple[str, Coverage | None], tuple[datetime, GameSummary]] = {}
 
     async def lookup(
         game_key: str, due_at: datetime, after: Coverage | None = None
@@ -572,18 +581,28 @@ def dry_run_lookup(deps: SummaryDeps) -> SummaryLookup:
         stored = await _stored_summary(deps.db_path, game_key, due_at, after)
         if stored is not None:
             return stored
+        now = deps.now()
+        key = (game_key, after)
+        kept = made_lately.get(key)
+        if kept is not None and now - kept[0] < cache_ttl:
+            return kept[1]
+        for stale in [k for k, (at, _) in made_lately.items() if now - at >= cache_ttl]:
+            del made_lately[stale]
         game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
         if game is None:
             return None
         made = await _summarize(deps, game, None, after)
         summary = made.summary
-        return GameSummary(
+        result = GameSummary(
             "fallback" if summary.fallback else "ok",
             list(summary.stories),
             [],
             summary.note,
             made.items_upto,
         )
+        if not summary.fallback:
+            made_lately[key] = (now, result)
+        return result
 
     return lookup
 

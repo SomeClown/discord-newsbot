@@ -196,6 +196,32 @@ async def _first_page_and_view(
     return embed, view
 
 
+async def _cooldown_message(
+    bot: NewsBot,
+    interaction: discord.Interaction,
+    last: dict[int, datetime],
+    guild_id: int,
+    window: timedelta,
+    now: datetime,
+    what: str,
+) -> str | None:
+    """Why this server can't `what` yet (with when it can), or None if it may go now.
+
+    The bot owner is never held back and doesn't start a server's clock either. A server that
+    may go has its clock started here, so the caller only has to act on a returned message.
+    """
+    started = last.get(guild_id)
+    if started is not None and started + window > now:
+        if await bot.is_owner(interaction.user):
+            return None
+        again = int((started + window).timestamp())
+        return f"This server already ran {what} recently. You can try again <t:{again}:R>."
+    last[guild_id] = now
+    for other in [g for g, at in last.items() if at + window <= now]:
+        del last[other]
+    return None
+
+
 def _admin_denial_message() -> str:
     return "You don't have permission to run this."
 
@@ -207,7 +233,7 @@ async def _check_admin(interaction: discord.Interaction, admin_permission: str) 
     logger.warning(
         "admin command denied",
         extra={
-            "user_id": interaction.user.id,
+            "guild_id": interaction.guild_id,
             "command": interaction.command.qualified_name if interaction.command else None,
         },
     )
@@ -240,6 +266,15 @@ _DIGEST_TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 _AUTOCOMPLETE_MAX = 25
 _MAX_REPLY = 2000
 _PING_CHOICES = ("none", "everyone", "role")
+# `/newsbot preview` and a confirmed `run-now` each get one go per server per window. A preview
+# of a comped server is a model call; a forced re-run is a whole digest. Kept in memory, so a
+# restart forgives everyone, which is the right amount of grudge for a cooldown.
+_PREVIEW_COOLDOWN = timedelta(minutes=10)
+_RUN_NOW_COOLDOWN = timedelta(minutes=10)
+_NOT_IN_SERVER = (
+    "I can't manage this server because I'm not in it: only my commands are. "
+    "Have someone with Manage Server add me again with the bot user included, then try again."
+)
 
 
 def _none_mentions() -> discord.AllowedMentions:
@@ -837,6 +872,8 @@ def make_guild_admin_group(
     `run-now` say they're not available. `/newsbot setup` hands off to the wizard in `setup_views`.
     """
     db_path = bot.db_path
+    last_preview: dict[int, datetime] = {}
+    last_forced_run: dict[int, datetime] = {}
     names = {game.key: game.name for game in cfg.catalog}
     eligible_shift = set(cfg.shift.games) or set(names)
     group = app_commands.Group(
@@ -852,11 +889,17 @@ def make_guild_admin_group(
         return factory() if factory is not None else None
 
     async def gate(interaction: discord.Interaction) -> int | None:
-        """The invoking server's id if this is a server and the caller is an admin."""
+        """The invoking server's id if this is a server the bot is in and the caller is an admin."""
         if interaction.guild_id is None:
             await interaction.response.send_message(_SERVER_ONLY, ephemeral=True)
             return None
         if not await _check_admin(interaction, cfg.admin_permission):
+            return None
+        # A server can install the commands without the bot user (an invite with only the
+        # applications.commands scope). Without this, its admins would get rows for a server
+        # the bot can't see, let alone post in.
+        if bot.get_guild(interaction.guild_id) is None:
+            await interaction.response.send_message(_NOT_IN_SERVER, ephemeral=True)
             return None
         return interaction.guild_id
 
@@ -1173,6 +1216,12 @@ def make_guild_admin_group(
         deps = await ready_to_run(interaction, guild_id)
         if deps is None:
             return
+        wait = await _cooldown_message(
+            bot, interaction, last_preview, guild_id, _PREVIEW_COOLDOWN, deps.now(), "a preview"
+        )
+        if wait is not None:
+            await _say(interaction, wait)
+            return
         try:
             result = await preview_guild_digest(deps, guild_id)
         except GuildTimeZoneError:
@@ -1217,6 +1266,18 @@ def make_guild_admin_group(
             await view.wait()
             if not view.value:
                 await interaction.edit_original_response(content="Cancelled.", view=None)
+                return
+            wait = await _cooldown_message(
+                bot,
+                interaction,
+                last_forced_run,
+                guild_id,
+                _RUN_NOW_COOLDOWN,
+                deps.now(),
+                "a forced run",
+            )
+            if wait is not None:
+                await interaction.edit_original_response(content=wait, view=None)
                 return
             force = True
             await interaction.edit_original_response(content="Running...", view=None)

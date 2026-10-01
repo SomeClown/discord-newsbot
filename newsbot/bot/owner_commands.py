@@ -112,7 +112,10 @@ def make_owner_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
         if not in_home or not await bot.is_owner(interaction.user):
             logger.warning(
                 "owner command denied",
-                extra={"user_id": interaction.user.id, "guild_id": interaction.guild_id},
+                extra={
+                    "guild_id": interaction.guild_id,
+                    "command": interaction.command.qualified_name if interaction.command else None,
+                },
             )
             await interaction.response.send_message(_DENIAL, ephemeral=True)
             return

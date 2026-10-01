@@ -178,6 +178,21 @@ async def test_a_denied_owner_command_changes_nothing(v3_cfg, v3_db):
         assert conn.execute("SELECT COUNT(*), SUM(set_up) FROM guilds").fetchone()[:] == before
 
 
+async def test_a_denied_owner_command_logs_the_server_and_command_but_not_who_asked(
+    v3_cfg, v3_db, caplog
+):
+    bot = make_bot(v3_cfg, v3_db, owned_by())
+    interaction = FakeInteraction(guild_id=HOME, user_id=987654321)
+    interaction.command = SimpleNamespace(qualified_name="owner servers")
+    with caplog.at_level(logging.WARNING):
+        await servers_callback(v3_cfg, bot)(interaction)
+    denied = [r for r in caplog.records if r.getMessage() == "owner command denied"]
+    assert len(denied) == 1
+    assert denied[0].guild_id == HOME and denied[0].command == "owner servers"
+    assert not hasattr(denied[0], "user_id")
+    assert "987654321" not in caplog.text
+
+
 # --- is_owner: failure modes ---
 
 
