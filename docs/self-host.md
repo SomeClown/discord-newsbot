@@ -84,7 +84,7 @@ find out.
 3. Turn on **Developer Mode** in your own Discord client (User Settings →
    Advanced) so you can right-click a server or a channel and copy its ID
    later: right-click the server's icon in the sidebar for "Copy Server
-   ID" (`guild_id`), or a channel's name for "Copy Channel ID".
+   ID" (your server's ID), or a channel's name for "Copy Channel ID".
 4. Generate an invite URL (OAuth2 → URL Generator):
    - Scopes: `bot`, `applications.commands`
    - Bot permissions: **View Channels, Send Messages, Embed Links** at
