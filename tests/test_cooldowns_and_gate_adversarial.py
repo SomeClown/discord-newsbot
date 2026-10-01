@@ -127,15 +127,6 @@ def two_servers(v3_db):
 # --- the owner and the clock ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "`_cooldown_message` says the owner 'doesn't start a server's clock either', but it only "
-        "returns early when a clock is already running. On a server with no clock the owner falls "
-        "through to `last[guild_id] = now`, so an owner preview locks the server's own admins "
-        "out for ten minutes."
-    ),
-)
 async def test_an_owner_preview_does_not_start_the_servers_clock(admin, v3_db, clock):
     two_servers(v3_db)
     admin.bot.owner = True
@@ -147,10 +138,6 @@ async def test_an_owner_preview_does_not_start_the_servers_clock(admin, v3_db, c
     assert "try again" not in admins.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="The same leak on the forced run-now clock: the owner's first forced run starts it.",
-)
 async def test_an_owner_forced_run_now_does_not_start_the_servers_clock(
     admin, v3_db, clock, digest_calls
 ):
@@ -188,14 +175,6 @@ async def test_the_owner_is_never_turned_away_and_never_extends_a_running_clock(
 # --- a failed run and the clock ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The clock starts when the cooldown check passes, before the preview runs. A preview "
-        "that raises (a broken time zone setting) has still used the server's go: the admin who "
-        "fixes the zone and tries again is told to wait ten minutes for something that never ran."
-    ),
-)
 async def test_a_preview_that_fails_does_not_start_the_cooldown(admin, v3_db, clock, digest_calls):
     make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
     digest_calls.preview_raises = GuildTimeZoneError("bad zone")
@@ -209,10 +188,6 @@ async def test_a_preview_that_fails_does_not_start_the_cooldown(admin, v3_db, cl
     assert "try again" not in retry.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Same as the preview: a confirmed run-now that raises has used the server's go.",
-)
 async def test_a_forced_run_that_fails_does_not_start_the_cooldown(
     admin, v3_db, clock, digest_calls
 ):
@@ -225,6 +200,69 @@ async def test_a_forced_run_that_fails_does_not_start_the_cooldown(
     retry = FakeInteraction()
     await admin("run-now")(retry)
     assert len(digest_calls.runs) == 2  # the second one really ran
+
+
+async def test_a_preview_that_crashes_gives_the_slot_back_and_the_error_still_propagates(
+    admin, v3_db, clock, digest_calls
+):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.preview_raises = RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        await admin("preview")(FakeInteraction())
+    digest_calls.preview_raises = None
+    retry = FakeInteraction()
+    await admin("preview")(retry)
+    assert "try again" not in retry.text and len(digest_calls.previews) == 2
+
+
+async def test_two_previews_pressed_together_get_one_go_and_a_failure_frees_the_slot(
+    admin, v3_db, clock, digest_calls, monkeypatch
+):
+    import asyncio
+
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def slow(deps, guild_id):
+        digest_calls.previews.append(guild_id)
+        entered.set()
+        await gate.wait()
+        raise GuildTimeZoneError("bad zone")
+
+    monkeypatch.setattr(commands_module, "preview_guild_digest", slow)
+    first = asyncio.create_task(admin("preview")(FakeInteraction()))
+    await entered.wait()
+    second = FakeInteraction()
+    await admin("preview")(second)  # while the first is still working
+    assert "try again" in second.text and len(digest_calls.previews) == 1
+    gate.set()
+    await first
+    monkeypatch.undo()
+    third = FakeInteraction()
+    await admin("preview")(third)  # the first one failed, so its reservation is gone
+    assert "try again" not in third.text
+
+
+async def test_a_refused_forced_run_gives_the_slot_back_but_a_failed_one_keeps_it(
+    admin, v3_db, clock, digest_calls, monkeypatch
+):
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5)])
+    digest_calls.today = an_ok_row()
+    statuses = iter(["skipped", "failed", "ok"])
+    runs = []
+
+    async def run(deps, guild_id, *, kind, force=False, due=None):
+        runs.append(force)
+        return SimpleNamespace(status=next(statuses), notes=[])
+
+    monkeypatch.setattr(commands_module, "run_guild_digest", run)
+    await admin("run-now")(FakeInteraction())  # refused: the day was claimed meanwhile
+    clock.t = NOON + timedelta(minutes=1)
+    await admin("run-now")(FakeInteraction())  # attempted and failed: it counts
+    clock.t = NOON + timedelta(minutes=2)
+    await admin("run-now")(FakeInteraction())  # held back: the failed attempt started the clock
+    assert runs == [True, True]
 
 
 async def test_a_preview_with_nothing_to_show_still_counts_as_a_go(

@@ -204,22 +204,34 @@ async def _cooldown_message(
     window: timedelta,
     now: datetime,
     what: str,
-) -> str | None:
-    """Why this server can't `what` yet (with when it can), or None if it may go now.
+) -> tuple[str | None, bool]:
+    """Why this server can't `what` yet (with when it can), and whether it reserved the slot.
 
-    The bot owner is never held back and doesn't start a server's clock either. A server that
-    may go has its clock started here, so the caller only has to act on a returned message.
+    Returns `(message, reserved)`. A message means "not yet" and nothing was reserved. No
+    message means go: if `reserved` is true the server's clock is now running, held for this
+    caller, so two admins pressing the button together can't both get through. The caller
+    gives the slot back with `_release_cooldown` if the work turns out not to have run (a
+    refusal, a bad time zone), so a go that never happened doesn't cost the server ten minutes.
+    The bot owner is never held back and never starts, extends or reserves a server's clock:
+    the owner is a guest in somebody else's cooldown.
     """
+    if await bot.is_owner(interaction.user):
+        return None, False
+    # No awaits from here to the reservation, which is what makes it one.
     started = last.get(guild_id)
     if started is not None and started + window > now:
-        if await bot.is_owner(interaction.user):
-            return None
         again = int((started + window).timestamp())
-        return f"This server already ran {what} recently. You can try again <t:{again}:R>."
+        return f"This server already ran {what} recently. You can try again <t:{again}:R>.", False
     last[guild_id] = now
-    for other in [g for g, at in last.items() if at + window <= now]:
+    for other in [g for g, at in last.items() if at + window <= now and g != guild_id]:
         del last[other]
-    return None
+    return None, True
+
+
+def _release_cooldown(last: dict[int, datetime], guild_id: int, now: datetime) -> None:
+    """Give back the slot `_cooldown_message` reserved at `now`, if it's still ours."""
+    if last.get(guild_id) == now:
+        del last[guild_id]
 
 
 def _admin_denial_message() -> str:
@@ -1216,17 +1228,26 @@ def make_guild_admin_group(
         deps = await ready_to_run(interaction, guild_id)
         if deps is None:
             return
-        wait = await _cooldown_message(
-            bot, interaction, last_preview, guild_id, _PREVIEW_COOLDOWN, deps.now(), "a preview"
+        started = deps.now()
+        wait, reserved = await _cooldown_message(
+            bot, interaction, last_preview, guild_id, _PREVIEW_COOLDOWN, started, "a preview"
         )
         if wait is not None:
             await _say(interaction, wait)
             return
+        # The clock runs from here only if a preview is actually shown: an error of any kind
+        # gives the slot back, so the admin who fixes the problem isn't told to wait for it.
         try:
             result = await preview_guild_digest(deps, guild_id)
         except GuildTimeZoneError:
+            if reserved:
+                _release_cooldown(last_preview, guild_id, started)
             await _say(interaction, _ZONE_INVALID)
             return
+        except BaseException:
+            if reserved:
+                _release_cooldown(last_preview, guild_id, started)
+            raise
         if result is None or not result.rendered.messages:
             await _say(interaction, "Nothing would post right now: no followed game has news.")
             return
@@ -1253,6 +1274,8 @@ def make_guild_admin_group(
             return
 
         force = False
+        reserved = False
+        forced_at = deps.now()
         if guild_needs_confirmation(existing):
             view = ConfirmView(interaction.user.id)
             if existing is not None and existing.status in ("pending", "failed"):
@@ -1267,13 +1290,14 @@ def make_guild_admin_group(
             if not view.value:
                 await interaction.edit_original_response(content="Cancelled.", view=None)
                 return
-            wait = await _cooldown_message(
+            forced_at = deps.now()  # after the answer, which can take a while
+            wait, reserved = await _cooldown_message(
                 bot,
                 interaction,
                 last_forced_run,
                 guild_id,
                 _RUN_NOW_COOLDOWN,
-                deps.now(),
+                forced_at,
                 "a forced run",
             )
             if wait is not None:
@@ -1284,11 +1308,17 @@ def make_guild_admin_group(
         else:
             await interaction.response.defer(ephemeral=True)
 
+        # A forced run's clock runs only if the run claimed the day and posted or tried to.
+        # A zone error or a refusal (`skipped`) never got that far, so it gives the slot back.
         try:
             outcome = await run_guild_digest(deps, guild_id, kind=RunKind.RUN_NOW, force=force)
         except GuildTimeZoneError:
+            if force and reserved:
+                _release_cooldown(last_forced_run, guild_id, forced_at)
             await _say(interaction, _ZONE_INVALID)
             return
+        if force and reserved and outcome.status == "skipped":
+            _release_cooldown(last_forced_run, guild_id, forced_at)
         reply = f"Run finished: {outcome.status}"
         notes = [esc(plain_line(note, 200)) for note in outcome.notes[:3]]
         if notes:
