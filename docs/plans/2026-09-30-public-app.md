@@ -525,7 +525,7 @@ A game with no items posts nothing. Games post in catalog order.
   No spend.
 - **`preview`:** the next digest for this guild, as ephemeral "Would post in <#id>:" messages, with window `(last window_end, now]`. It writes nothing; comped guilds use a reusable summary or compute one in memory.
 - **`run-now`:** v2's confirmation logic, now per guild (`needs_confirmation` on the guild's row).
-- **`test-alert`:** kept, gated on `shift.allow_test_command`, fanning out to the invoking guild only.
+- **`test-alert`:** dropped (owner decision 2026-10-01); see the wiring note under task 13. A `shift.allow_test_command` in a config still loads (so a rollback to 2.2.0 keeps working) and does nothing.
 
 **Owner:** `/owner servers` (home guild only) shows counts only:
 - servers, set up, free/comped;
@@ -964,7 +964,7 @@ If D2 is A, also `items_fts` and `search_items`/`query_items`.
   - `make_guild_admin_group` takes `digest_deps`, or falls back to `bot.guild_digest_deps()`. Add that method to `NewsBot` and make it return **one shared `GuildDigestDeps`** every call (the per-guild locks live in it; a fresh one per call would let run-now, preview and the minute job run at once). Until then `preview` and `run-now` reply "That command isn't available yet."
   - `NewsBot.is_owner` (added in task 9) is what `/owner servers` asks: the application's owner, or the team's owner. Needs no config.
   - `/lounge quote-now` delegates to `bot.run_quote` and only for the v2 lounge guild (`cfg.guild_id`); task 12 re-keys it and should drop that guard.
-  - `/newsbot test-alert` is not in the v3 group: there's no per-guild test-alert path in `shift/fanout.py` to call. If the owner still wants it, it's a small new function in `fanout.py` plus a gated command.
+  - `/newsbot test-alert` is not in the v3 group: there's no per-guild test-alert path in `shift/fanout.py` to call. **Owner decision 2026-10-01: dropped.** There is no v3 version of it. The v2 command, its helpers (`run_test_alert`, `summarize_test_alert` and friends) and its tests are deleted; `allow_test_command` stays in the config models only so a v2.2 file still loads, with a startup warning that it's ignored.
   - Prod still has v2's per-guild `/newsbot` set in the friend's guild (v2 synced per guild). After the cutover the global `/newsbot` and that guild copy both show; clear the guild copy once (`tree.clear_commands(guild=...)` plus `sync(guild=...)`, same owner step as the plan's coexistence note).
 - From task 11: build one `GuildLifecycle` and forward `on_guild_join`, `on_guild_remove` and `on_guild_channel_delete` to it from `NewsBot`. It's a separate class so v2 doesn't pick those events up by name. Call `lifecycle.reconcile(client)` in `on_ready`, after the import and the orphan-digest adoption. Guilds found with no row get a free row and the first-contact message (plan §3.8). At cutover, that includes the home/test server, which is harmless.
 - From task 12: construct `NewsBot(..., lounges=repo.list_lounges(...))` after the import and D5 re-sync, so intents follow the rows. Swap the v2 member-event bodies for `handle_member_join`/`handle_member_update`. Call `reload_lounges()`, `chunk_lounge_guilds()` and `schedule_lounge_quotes()`. Set `bot.guild_notifier = router.notify_guild`. On guild removal, remove that guild's `daily-quote-{gid}` job (it also removes itself at its next fire). The new names `build_intents_for_lounges`/`schedule_guild_quote` can replace v2's at cutover.
@@ -1160,7 +1160,7 @@ Estimated 1 to 2 agent days.
 5. The 10-game limit through `follow`; `unfollow` autocomplete; `settings timezone:` autocomplete; setting a time already passed posts within a minute.
 6. **SHiFT:**
    - enable it in guild 2 with `ping: role` (a non-mentionable role, bot without Mention @everyone): a missing-permission notice goes to guild 2 only;
-   - `test-alert` with the test command on in dev: guild 1 pings everyone, guild 2 pings the role, and each has its own cap.
+   - a real or fixture-fed code in dev (`python -m newsbot.pipeline.run --collect --fixtures ...` prints instead of posting, so the live check is a real code or an edited item): guild 1 pings everyone, guild 2 pings the role, and each has its own cap. (`/newsbot test-alert` was dropped, 2026-10-01.)
 7. Delete guild 2's game channel: the next digest skips that game and posts the rest, with a notice in guild 2 and nothing in the owner channel.
 8. Remove the bot from guild 2: its rows are gone (the `/owner servers` count drops). Re-invite: the first-contact message again.
 9. Stop the bot, remove it from guild 2 while stopped, start again: reconciliation deletes the rows.
@@ -1182,7 +1182,7 @@ Estimated 1 to 2 agent days.
 3. **Owner:** leave prod `config.yaml` unchanged; v3 derives the catalog from it. Set `TAG=3.0.0` and run `./scripts/deploy.sh`. The deploy window stays: never 09:00 to 09:15 America/Los_Angeles, and avoid about 07:55 to 08:05.
    - The friend's server is upgraded: the import runs and nothing visible changes.
    - Check the import log lines, `/newsbot status`, no permission notices, the next morning's digest and quote, and one hourly SHiFT pass (`status` shows the last collection).
-4. Observe at least two digest days and one SHiFT alert (or a dev test-alert).
+4. Observe at least two digest days and one SHiFT alert.
 5. **Owner:** approve task 17's catalog (D11). Add the `catalog:` block with all 15 games to prod `config.yaml`, validated locally with `load_config` on a scratch copy (never `docker compose ... config`). Deploy outside the windows. Watch one collection pass: pass duration, and no flood of source alerts.
 6. **Owner:** merge the privacy and terms update (D10 contact). GitHub Pages publishes it; confirm the live pages.
 7. **Owner:** take and keep a dated database backup from right before the switch: `cp data/newsbot.db data/newsbot.pre-public-YYYYMMDD.db`, kept outside the 7-day rotation.

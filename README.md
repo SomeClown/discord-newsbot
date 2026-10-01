@@ -69,11 +69,6 @@ shared message for it to live in.
 - **`/newsbot preview`** (admin): runs the pipeline and shows the digest only to
   the admin who ran it. Nothing is saved or posted, so a preview never
   changes what the next real run sees.
-- **`/newsbot test-alert code:<XXXXX-XXXXX-XXXXX-XXXXX-XXXXX> golden:<bool, default false>`**
-  (admin, **dev only**): posts a fake SHiFT code alert to exercise the
-  sweep end to end, without waiting for a real code to show up. Only
-  registered when `alerts.allow_test_command: true`; see
-  [SHiFT code alerts](#shift-code-alerts) below.
 - **`/shift codes days:<1-90, default 14> public:<bool, default false>`**:
   lists every SHiFT code the bot has ever seen and posted (or would have
   posted) within the window, newest first, each with a copyable code block,
@@ -196,11 +191,8 @@ take back:
 codes have ever posted, and today's ping spend against the cap (plus
 `(seeding)` while the marker's still unset). `/shift codes` (see
 [Commands](#commands) above) lists every code the bot knows about,
-including roundup ones, marked as such. `/newsbot test-alert` (dev
-only, gated behind `alerts.allow_test_command`) posts one fake code
-through the exact same claim/post/cap machinery a real one would use,
-which is how the private test guild verifies the whole path (including the
-Discord permission below) without waiting for Gearbox to hand out a code.
+including roundup ones, marked as such. (v2's dev-only `/newsbot test-alert` was
+removed in v3; a real code, or fixture items, is how to exercise the path.)
 
 **Discord permission required:** the bot's role needs **View Channel**,
 **Send Messages**, and **Mention @everyone, @here, and All Roles** in the
@@ -243,7 +235,7 @@ newsbot/
     repo.py         all queries (no SQL anywhere else)
   bot/
     client.py       discord client, scheduler wiring, heartbeat, code alert poster
-    commands.py     /news, /news search, /newsbot status|run-now|preview|test-alert, /shift codes
+    commands.py     /news, /news search, /newsbot status|run-now|preview, /shift codes
     format.py       digest + result embeds + code alerts, paging, UTF-16-aware limits
     permissions.py  startup check: does the bot have what it needs in every configured channel
   alerts.py         admin-channel notifications

@@ -275,11 +275,9 @@ sources:
 #   # megathread, not a genuine single-code announcement; its codes are
 #   # recorded silently ('roundup') and never alert (QA item 7).
 #   max_codes_per_item: 5
-#   # WARNING: this registers /newsbot test-alert, which lets any admin
-#   # post a fake code alert (with a real @everyone ping, cap and
-#   # once-per-code guard included) on demand. Meant for the private test
-#   # guild only; leave this false (or the whole alerts: block out) in
-#   # a production config. config.py logs a startup warning if it's true.
+#   # Ignored since v3: /newsbot test-alert (the dev-only fake code alert this
+#   # used to switch on) was removed. The key still loads so a config written
+#   # for v2.2 keeps working, and config.py logs a startup warning if it's true.
 #   allow_test_command: false
 
 # Lounge welcomes and a daily quote (design.md §14, v2.2). Two optional
