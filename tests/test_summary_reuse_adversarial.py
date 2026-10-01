@@ -301,15 +301,17 @@ async def test_a_preview_at_exactly_the_ttl_makes_a_fresh_summary(world):
     assert len(world.llm.calls) == before + 2
 
 
-async def test_a_preview_summary_is_stale_for_items_that_arrive_inside_the_ttl(world):
-    """Pinned: the cache key is game and coverage, not what's stored, so a preview a few minutes
-    later doesn't show an item that arrived in between (the owner may want the cache keyed on the
-    newest stored id too: it would still hit when nothing arrived, and miss when something did)."""
+async def test_a_preview_after_new_items_arrive_inside_the_ttl_recomputes(world):
+    """The cache key includes the newest stored item id: a preview with nothing new still hits,
+    and one after an item arrived makes the summary again and so can show it."""
     due, servers = a_preview_world(world)
     await servers.run_day(FIRST_DAY)
     world.clock.t = due + timedelta(days=1) - timedelta(hours=6)
     servers.digest_deps.preview_summary_for = dry_run_lookup(world.deps())
-    first = await preview_guild_digest(servers.digest_deps, A)
+    await preview_guild_digest(servers.digest_deps, A)
+    calls = len(world.llm.calls)
+    await preview_guild_digest(servers.digest_deps, A)
+    assert len(world.llm.calls) == calls  # nothing new: the memory answers
     with world.conn() as conn:
         repo.store_items(
             conn,
@@ -328,8 +330,8 @@ async def test_a_preview_summary_is_stale_for_items_that_arrive_inside_the_ttl(w
         )
     world.clock.t += timedelta(minutes=5)
     second = await preview_guild_digest(servers.digest_deps, A)
-    assert "brand-new" not in json.dumps([m.embed.to_dict() for m in first.rendered.messages])
-    assert "brand-new" not in json.dumps([m.embed.to_dict() for m in second.rendered.messages])
+    assert len(world.llm.calls) > calls  # an item arrived: a fresh summary
+    assert "brand-new" in json.dumps([m.embed.to_dict() for m in second.rendered.messages])
 
 
 async def test_a_new_digest_changes_the_coverage_and_so_misses_the_preview_cache(world):

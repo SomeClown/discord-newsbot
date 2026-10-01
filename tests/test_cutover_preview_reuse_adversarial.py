@@ -238,7 +238,7 @@ async def test_a_preview_that_hit_a_failing_model_does_not_decide_the_mornings_s
 
 def _lookup_with_a_counting_model(monkeypatch, *, fallback=False):
     """`dry_run_lookup` over a fake model; `clock` is the time it sees, `calls` what it ran."""
-    clock = SimpleNamespace(now=DUE)
+    clock = SimpleNamespace(now=DUE, newest=9)  # `newest`: the newest stored item id
     calls: list[str] = []
 
     async def no_stored(db_path, game_key, due_at, after):
@@ -249,7 +249,11 @@ def _lookup_with_a_counting_model(monkeypatch, *, fallback=False):
         summary = SimpleNamespace(stories=[], fallback=fallback, note=None)
         return SimpleNamespace(summary=summary, items_upto=7)
 
+    async def newest(db_path):
+        return clock.newest
+
     monkeypatch.setattr(summaries_module, "_stored_summary", no_stored)
+    monkeypatch.setattr(summaries_module, "_newest_item_id", newest)
     monkeypatch.setattr(summaries_module, "_summarize", made)
     deps = SimpleNamespace(
         db_path="unused",
@@ -272,6 +276,17 @@ async def test_the_memory_is_per_game_and_per_coverage(monkeypatch):
     await lookup("palworld", DUE, Coverage(DUE, 6))
     await lookup("palworld", DUE, None)
     assert calls == ["palworld", "d4", "palworld", "palworld"]
+
+
+async def test_the_memory_is_per_newest_stored_item(monkeypatch):
+    lookup, clock, calls = _lookup_with_a_counting_model(monkeypatch)
+    await lookup("palworld", DUE, None)
+    await lookup("palworld", DUE, None)  # nothing new arrived: a hit
+    assert calls == ["palworld"]
+    clock.newest = 10  # an item arrived
+    await lookup("palworld", DUE, None)
+    await lookup("palworld", DUE, None)
+    assert calls == ["palworld", "palworld"]
 
 
 async def test_the_memory_runs_out_after_thirty_minutes(monkeypatch):

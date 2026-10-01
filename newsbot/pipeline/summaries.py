@@ -559,6 +559,16 @@ def retry_lookup(deps: SummaryDeps) -> SummaryLookup:
     return lookup
 
 
+async def _newest_item_id(db_path: str) -> int:
+    """The newest stored item id (0 if none): what a cached preview summary has to still match."""
+
+    def _sync() -> int:
+        with closing(connect(db_path)) as conn:
+            return repo.latest_item_id(conn)
+
+    return await asyncio.to_thread(_sync)
+
+
 def dry_run_lookup(
     deps: SummaryDeps, *, cache_ttl: timedelta = PREVIEW_SUMMARY_TTL
 ) -> SummaryLookup:
@@ -569,11 +579,12 @@ def dry_run_lookup(
     with side effects, which is the one thing it's not allowed to have. If
     nothing stored qualifies this does call the model (the stub, offline), and
     the result lives as long as the preview does. The one exception is this lookup's own memory:
-    a summary it made is kept for `cache_ttl` (in this process only, keyed by game and
-    coverage) so a second preview inside the window costs nothing. A `fallback` isn't kept; a
-    model that just failed deserves a fresh try next time.
+    a summary it made is kept for `cache_ttl` (in this process only, keyed by game, coverage and
+    the newest stored item id) so a second preview inside the window costs nothing, as long as
+    nothing new has arrived; an item stored since is a different summary and a fresh call. A
+    `fallback` isn't kept; a model that just failed deserves a fresh try next time.
     """
-    made_lately: dict[tuple[str, Coverage | None], tuple[datetime, GameSummary]] = {}
+    made_lately: dict[tuple[str, Coverage | None, int], tuple[datetime, GameSummary]] = {}
 
     async def lookup(
         game_key: str, due_at: datetime, after: Coverage | None = None
@@ -582,7 +593,7 @@ def dry_run_lookup(
         if stored is not None:
             return stored
         now = deps.now()
-        key = (game_key, after)
+        key = (game_key, after, await _newest_item_id(deps.db_path))
         kept = made_lately.get(key)
         if kept is not None and now - kept[0] < cache_ttl:
             return kept[1]
