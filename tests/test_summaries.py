@@ -236,12 +236,32 @@ async def test_two_comped_guilds_racing_for_one_game_make_one_call(world):
     world.guild(FREE + 1, "comped", BERLIN, ["palworld"], time="09:05")
     world.item("palworld", "raid boss patch", ago(3))
     world.clock.t = BERLIN_DUE
-    world.llm = FakeLLM(yields=5)  # stay in flight long enough for the other one to show up
-    deps = world.deps()
+    # The winner's model call is held until the loser has found the claim busy and
+    # gone to sleep on it. This used to be `FakeLLM(yields=5)`, a guess at "long
+    # enough", and on a loaded machine the claims run in threads: the winner could
+    # claim, summarize and save before the loser's claim thread ever ran, so the
+    # loser just reused the row without waiting. Still one call (the code was
+    # fine), but `world.sleeps` came back empty and the test flaked on the clock.
+    loser_waiting = asyncio.Event()
+
+    class HeldLLM(FakeLLM):
+        async def emit_stories(self, system: str, user: str) -> LLMResult:
+            await loser_waiting.wait()
+            return await super().emit_stories(system, user)
+
+    async def sleep(seconds: float) -> None:
+        loser_waiting.set()
+        await world.sleep(seconds)
+
+    world.llm = HeldLLM()
+    deps = world.deps(sleep=sleep)
     lookup = summary_lookup(deps)
 
-    berlin, pacific = await asyncio.gather(
-        lookup("palworld", BERLIN_DUE), lookup("palworld", BERLIN_DUE + timedelta(minutes=5))
+    berlin, pacific = await asyncio.wait_for(
+        asyncio.gather(
+            lookup("palworld", BERLIN_DUE), lookup("palworld", BERLIN_DUE + timedelta(minutes=5))
+        ),
+        timeout=10,
     )
 
     assert world.llm.games() == ["palworld"]
