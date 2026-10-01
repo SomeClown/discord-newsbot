@@ -34,7 +34,9 @@ INTEGRATION = FIXTURES / "integration"
 LLM = INTEGRATION / "llm.json"
 PRODLIKE = FIXTURES / "config_v2_prodlike.yaml"
 V3 = FIXTURES / "config_v3.yaml"
-EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
+# The pre-v3 single-server example, kept verbatim: the offline dry-run in the README and
+# docs/self-host.md points at it, because v3's config.example.yaml has no server in it.
+EXAMPLE = FIXTURES / "config_v2_example.yaml"
 SHIFT = FIXTURES / "shift"
 NOW_ISO = "2026-09-23T17:00:00Z"  # 10:00 Pacific: the friend's 09:00 digest is due
 BL4_CHANNEL = 1452017235274240221

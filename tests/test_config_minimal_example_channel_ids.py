@@ -13,8 +13,11 @@ from pathlib import Path
 
 from newsbot.config import load_config
 
-EXAMPLE = Path(__file__).parent.parent / "config.example.yaml"
-MINIMAL = Path(__file__).parent.parent / "config.minimal.yaml"
+# The v2-shaped examples (kept as fixtures; v3's own have no channels in them): what the
+# import reads is a channel per topic.
+FIXTURES = Path(__file__).parent / "fixtures"
+EXAMPLE = FIXTURES / "config_v2_example.yaml"
+MINIMAL = FIXTURES / "config_v2_minimal.yaml"
 
 
 def test_minimal_config_topic_has_a_channel_id(monkeypatch):

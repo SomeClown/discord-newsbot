@@ -1,90 +1,100 @@
-# The smallest config.yaml that actually does something: one game, three
-# sources, no SHiFT alerts. config.example.yaml is the full, three-game,
-# fifteen-source config this bot actually runs in production, which is a
-# great reference and a slightly overwhelming place to start. This is the
-# other end: copy it to config.yaml and start replacing placeholders.
+# The smallest config.yaml that actually does something: one game, a couple
+# of sources, no SHiFT alerts. config.example.yaml is the full, fifteen-game
+# catalog this bot actually runs in production, which is a great reference
+# and a slightly overwhelming place to start. This is the other end: copy it
+# to config.yaml and start replacing placeholders.
 #
-# Three separate kinds of placeholder below all need real values before
-# this actually works, not just before it starts up:
-#   - Every Discord ID (`guild_id`, `admin_channel_id`, each topic's
-#     `channel_id`): the bot will happily start up pointed at a channel
-#     that doesn't exist and then fail confusingly later, which is a worse
-#     failure mode than a config error at startup.
+# Since v3 this file holds only the bot's global settings and its catalog of
+# games. Everything that belongs to one server (which channel each game posts
+# to, the digest time, the time zone, SHiFT alerts) is set from Discord with
+# /newsbot setup once the bot is running, and kept in the database. So the
+# placeholders to replace are fewer than they used to be:
+#   - `home_guild_id` and `admin_channel_id`: your server and a channel in it,
+#     for the bot's own health alerts.
 #   - The Steam source's `app_id` (1234567 is fake and returns a 403).
 #   - The RSS source's `url` (example.com isn't a feed and returns a 404).
 # Run `python -m newsbot.pipeline.run --config config.yaml --check-sources`
-# once you've replaced them, before spending a Discord post or a Claude
-# call on finding out the hard way; see docs/self-host.md step 6.
+# once you've replaced the last two, before spending a Discord post or a
+# Claude call on finding out the hard way; see docs/self-host.md step 6.
+#
+# Upgrading a v2 copy? Don't start over. Your old config.yaml still works as
+# it is: v3 carries its server setup into the database once, on the first
+# start (see the "v2 keys" block at the end of config.example.yaml).
 
-guild_id: 123456789012345678          # placeholder: your server's ID
-admin_channel_id: 123456789012345679  # placeholder: optional; alerts go here
+home_guild_id: 123456789012345678     # placeholder: your server's ID
+admin_channel_id: 123456789012345679  # placeholder: a channel in that server for health alerts; optional
 admin_permission: manage_guild
 
-digest:
-  time: "09:00"
-  timezone: "America/Los_Angeles"     # set this to your own timezone; any IANA zone, see /usr/share/zoneinfo or `timedatectl list-timezones`
-  lookback_hours: 24
-  max_items_per_topic: 60
+# Which servers the slash commands are copied into. Left empty, they're
+# registered globally, which is right for a public bot and wrong for yours:
+# Discord can take up to an hour to show a global change. Self-hosting for one
+# server? List it here and the commands appear instantly (and never globally).
+command_guild_ids: []
+# command_guild_ids: [123456789012345678]
 
-topics:
-  # One game to start. `key` has to be lowercase letters/digits/underscore
-  # and is what shows up in the database and slash-command choices;
-  # `name` is what actually gets posted and said to the model. Copy this
-  # block for a second game once you're happy with the first: each one
-  # needs its own channel_id (v2.0: there's no shared digest channel
-  # anymore, every game posts to its own).
+# The server (or servers) that get AI summaries from your Anthropic key. Any
+# server not listed gets the free tier: a plain headline list with no AI in it.
+# For a copy that serves only your own server, list your own server here, or
+# you'll be reading the headline version of your own bot.
+comped_guild_ids: []
+# comped_guild_ids: [123456789012345678]
+
+# Everything else (collection:, ai:, shift:, owner_report:, web_search: and
+# the rest) has a working default; config.example.yaml shows each one.
+
+catalog:
+  # One game to start. `key` has to be lowercase letters, digits and
+  # underscore and is what shows up in the database and slash-command
+  # choices; `name` is what actually gets posted and said to the model. Copy
+  # this block for a second game once you're happy with the first. There's
+  # no channel here: each server picks its own with /newsbot setup or
+  # /newsbot follow.
   - key: yourgame
     name: "Your Game"
-    channel_id: 111111111111111111  # placeholder: this game's own channel
     aliases: []          # alternate names/abbreviations worth matching, if the name alone is ambiguous
-    entities: []          # a studio/publisher name worth a looser (marked "uncertain") match
-    search_queries:       # literal Brave News queries for this topic; see docs/finding-sources.md
+    entities: []         # a studio/publisher name worth a looser (marked "uncertain") match
+    search_queries:      # literal Brave News queries for this game; see docs/finding-sources.md
       - "Your Game news"
       - "Your Game update OR patch OR DLC"
+    sources:
+      # A dedicated source: it's listed under the game, so every item it
+      # returns counts as a confident match for that game even if the text
+      # never says the game's name (design.md §4). Steam announcements are the
+      # easiest of these to find; see docs/finding-sources.md for how to get
+      # the app_id.
+      - type: steam_news
+        name: "Your Game Steam"
+        app_id: 1234567  # placeholder: steamdb.info or the store URL has this
+        trust: official
 
-sources:
-  # A dedicated source: it names exactly one topic, so every item it
-  # returns counts as a confident match for that topic even if the text
-  # never says the game's name (design.md §4). Steam announcements are the
-  # easiest of these to find; see docs/finding-sources.md for how to get
-  # the app_id.
-  - type: steam_news
-    name: "Your Game Steam"
-    app_id: 1234567  # placeholder: steamdb.info or the store URL has this
-    topics: [yourgame]
-    trust: official
-
+shared_sources:
   # A general games-press RSS feed (a developer blog, a subreddit's
-  # /top/.rss?t=day, a site's own /feed): no `topics` here, on purpose.
-  # A source naming exactly one topic is a *dedicated source* (see
-  # config.example.yaml and docs/finding-sources.md's "dedicated-source
-  # rule"): every item it returns counts as a confident match for that
-  # topic even if the game's name never comes up, which is right for an
-  # official blog but wrong for a wide-coverage feed that covers other
-  # games too. Leaving `topics` off here means the keyword matcher (this
-  # topic's `name`/`aliases`) decides what actually belongs.
+  # /top/.rss?t=day, a site's own /feed): shared, on purpose. A shared source
+  # is fetched once and keyword-matched against every game in the catalog
+  # (the game's `name` and `aliases`), which is right for a wide-coverage feed
+  # that covers other games too. A dedicated source (one listed under a game)
+  # would count every item as that game's, which is wrong here.
   - type: rss
     name: "Your Game News"
     url: "https://example.com/feed.xml"  # placeholder: a real feed URL
     trust: press
 
-  # Brave News search, catching outlets not already covered by name
-  # above. Needs BRAVE_API_KEY in .env to actually run; without it,
-  # load_config disables this source with a startup warning instead of
-  # failing, and --check-sources will say the same thing plainly.
-  - type: web_search
-    queries_per_topic: 2
-    trust: press
+# Brave News search, catching outlets not already covered by name above. Needs
+# BRAVE_API_KEY in .env to actually run; without it, load_config disables it
+# with a startup warning instead of failing, and --check-sources will say the
+# same thing plainly. It only runs for servers in comped_guild_ids.
+web_search:
+  queries_per_game: 2
+  trust: press
 
-# SHiFT code alerts (design.md §12) are Borderlands-family only and stay
-# off by default (AlertsCfg.enabled defaults to False even with this
-# whole block absent, same as here); there's nothing to uncomment for a
-# minimal single-topic start. See config.example.yaml's own alerts: block
-# and README.md's "SHiFT code alerts" section if your game actually has
-# redeem codes and you want the hourly sweep.
+# SHiFT code alerts (design.md §12) are Borderlands-family only, and each
+# server turns them on itself with /newsbot shift. The `shift:` block defaults
+# to watching borderlands4; with no such game in the catalog, as here, it
+# simply never matches anything, which is the right amount of activity.
+# See config.example.yaml's own shift: block and README.md's "SHiFT code
+# alerts" section if your game actually has redeem codes.
 
-# Lounge welcomes and a daily quote (design.md §14) are optional and off
-# unless a `lounge:` block is present. A welcome needs the Server Members
-# Intent switched on in the Developer Portal first. The whole thing, every
-# option explained, is the commented-out `lounge:` block at the end of
-# config.example.yaml, and docs/self-host.md walks through it.
+# Lounge welcomes and a daily quote (design.md §14) work only through the v2
+# import, and only for one server: they have no command of their own. The whole
+# thing, every option explained, is the commented-out `lounge:` block at the
+# end of config.example.yaml, and docs/self-host.md walks through it.

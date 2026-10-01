@@ -41,8 +41,10 @@ from newsbot.pipeline.filter import build_matchers, filter_items
 ROOT = Path(__file__).parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
 PRODLIKE = FIXTURES / "config_v2_prodlike.yaml"
-EXAMPLE = ROOT / "config.example.yaml"
-MINIMAL = ROOT / "config.minimal.yaml"
+# v3's own examples are catalog-shaped, so these tests use the pre-v3 shipped examples,
+# kept verbatim as fixtures: they are what an untouched v2 config looks like to the loader.
+EXAMPLE = FIXTURES / "config_v2_example.yaml"
+MINIMAL = FIXTURES / "config_v2_minimal.yaml"
 VALID = FIXTURES / "config_valid.yaml"
 
 _HEAD = """

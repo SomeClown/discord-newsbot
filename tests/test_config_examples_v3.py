@@ -1,0 +1,84 @@
+"""The shipped example configs, held to what their own comments promise.
+
+`config.example.yaml` and `config.minimal.yaml` are the first things a stranger
+copies, and a doc that doesn't load is a doc that lies. `test_config.py` pins
+that both load; this pins the parts the comments make claims about: the catalog
+order the comped prompt depends on, the commented "v2 keys" block really being
+the shape the one-time import reads, and the commented lounge block really being
+a lounge that loads. The commented blocks are uncommented in memory and run
+through `load_config`, so a comment can't drift from the loader without a test
+noticing.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from newsbot.config import load_config
+
+ROOT = Path(__file__).parent.parent
+EXAMPLE = ROOT / "config.example.yaml"
+MINIMAL = ROOT / "config.minimal.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _brave_key(monkeypatch):
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+
+
+def _uncomment(block: str) -> str:
+    return "\n".join(
+        line[2:] if line.startswith("# ") else ("" if line == "#" else line)
+        for line in block.splitlines()
+    )
+
+
+def _commented_block(text: str, start: str, end: str) -> str:
+    return _uncomment(text[text.index(start) : text.index(end)])
+
+
+@pytest.mark.parametrize("path", [EXAMPLE, MINIMAL], ids=["example", "minimal"])
+def test_shipped_example_loads_as_a_v3_config(path):
+    cfg = load_config(path)
+    assert cfg.catalog
+    assert cfg.legacy is None  # no server in it: servers are set up with /newsbot setup
+
+
+def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order():
+    # The comped summarizer's prompt lists games in catalog order, so reordering the first
+    # three would change the friend's prompt (and need an owner-reviewed /newsbot preview).
+    cfg = load_config(EXAMPLE)
+    assert [g.key for g in cfg.catalog][:3] == ["borderlands4", "palworld", "diablo4"]
+    assert len(cfg.catalog) == 15
+
+
+def test_the_example_shift_games_exist_in_the_catalog():
+    cfg = load_config(EXAMPLE)
+    assert set(cfg.shift.games) <= {g.key for g in cfg.catalog}
+
+
+def test_the_commented_v2_keys_are_the_shape_the_import_reads(tmp_path):
+    text = EXAMPLE.read_text()
+    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge (a welcome")
+    path = tmp_path / "config.yaml"
+    path.write_text(text + "\n" + v2)
+    cfg = load_config(path)
+    assert cfg.legacy is not None
+    assert [key for key, _channel in cfg.legacy.games] == ["borderlands4", "palworld"]
+    assert cfg.legacy.shift_enabled is True
+    assert cfg.legacy.lounge is None
+
+
+def test_the_commented_lounge_block_loads_as_the_lounge_the_import_reads(tmp_path):
+    text = EXAMPLE.read_text()
+    v2 = _commented_block(text, "# guild_id:", "#\n# The lounge (a welcome")
+    lounge = _commented_block(text, "# lounge:\n", "#\n# To try it without")
+    path = tmp_path / "config.yaml"
+    path.write_text(text + "\n" + v2 + "\n" + lounge)
+    cfg = load_config(path)
+    assert cfg.legacy is not None
+    assert cfg.legacy.lounge is not None
+    assert cfg.legacy.lounge.welcome.enabled
+    assert cfg.legacy.lounge.daily_quote.enabled
