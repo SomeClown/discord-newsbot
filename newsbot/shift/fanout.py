@@ -122,6 +122,11 @@ _WALK_FLOOR_S = 5.0
 # hook's own timeout is 120 s). Startup doesn't need the wait: nothing is in flight.
 _PENDING_STALE_S = 600.0
 
+# A database too busy to list the queue is busy for every pass until it isn't, and the
+# owner doesn't need to hear it every pass. At most one alert an hour, from memory (a
+# restart forgives it, which is the right amount of grudge).
+_BUSY_ALERT_EVERY = timedelta(hours=1)
+
 
 @dataclass
 class FanoutDeps:
@@ -142,6 +147,8 @@ class FanoutDeps:
     # Release and print only: never claim, mark or spend a ping (and no
     # follow-ups, D14). The CLI's mode.
     preview: bool = False
+    # When the owner was last told the database was too busy to walk the queue.
+    busy_alerted_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +175,34 @@ def _mention_for(ping: str) -> str:
     return "@everyone" if ping == "everyone" else f"<@&{ping}>"
 
 
+# How long to wait before each retry of a write that has to land after a message did (SQLite's
+# own busy timeout has already waited five seconds by the time it gives up, so these are short).
+_MARK_RETRY_DELAYS_S = (0.2, 0.5, 1.0)
+
+
+class MarkLostError(Exception):
+    """A message went out but the database stayed busy through every retry of recording it."""
+
+
+async def _record(deps: FanoutDeps, write: Callable[..., None], *args: object) -> None:
+    """Run a sync database write that follows a send, riding out a busy database.
+
+    The send already happened (or failed for good), so the write is the only thing left to
+    do, and giving up is expensive: the row stays `pending`, where nothing ever sends it
+    again, and an admin is later told it "may or may not have posted". So a few short retries
+    first. If they all fail this raises `MarkLostError`.
+    """
+    for delay in (*_MARK_RETRY_DELAYS_S, None):
+        try:
+            await asyncio.to_thread(write, *args)
+            return
+        except sqlite3.OperationalError as exc:
+            if delay is None:
+                raise MarkLostError(str(exc)) from exc
+            logger.warning("SHiFT bookkeeping hit a busy database; retrying in %.1f s", delay)
+            await deps.sleep(delay)
+
+
 async def _post_batch(
     deps: FanoutDeps,
     guild_id: int,
@@ -181,6 +216,14 @@ async def _post_batch(
     Once a message fails for good, everything after it is marked failed
     without being sent: a batch reads in order ("(continued)" is literal), and
     message 3 without message 2 would confuse more than it helps.
+
+    Each message's mark (posted or failed) is retried through a busy database. If one
+    still can't be written, `MarkLostError` ends the batch on the spot: that message's
+    codes and every later alert's stay `pending`, which is the safe side, because a
+    `pending` row is never sent again (nothing is double-sent; the later alerts are
+    simply not sent). Recovery fails them once they're stale and tells the server they
+    "may or may not have posted", which is true of the one that did and a gentle fib
+    about the rest.
     """
     posted = 0
     failed_codes: list[str] = []
@@ -206,11 +249,11 @@ async def _post_batch(
                 )
         if failed_from_here:
             failed_codes.extend(alert.codes)
-            await asyncio.to_thread(_mark_failed_sync, deps.db_path, guild_id, list(alert.codes))
+            await _record(deps, _mark_failed_sync, deps.db_path, guild_id, list(alert.codes))
             continue
         posted += len(alert.codes)
-        await asyncio.to_thread(
-            _mark_posted_sync, deps.db_path, guild_id, list(alert.codes), message_id
+        await _record(
+            deps, _mark_posted_sync, deps.db_path, guild_id, list(alert.codes), message_id
         )
     if failed_codes:
         await _safe_notify(
@@ -515,9 +558,9 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
             "guild SHiFT follow-up post failed",
             extra={"guild_id": guild_id, "codes": claimed, "error": str(error)},
         )
-        await asyncio.to_thread(_followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
+        await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
         return GuildOutcome(guild_id)
-    await asyncio.to_thread(_followup_mark_sync, deps.db_path, guild_id, claimed, message_id, True)
+    await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, message_id, True)
     return GuildOutcome(guild_id, followups_posted=len(claimed))
 
 
@@ -608,6 +651,16 @@ async def deliver_queued_codes(
                 if not deps.preview:
                     followup = await _deliver_followups(deps, guild_id)
                     outcome = replace(outcome, followups_posted=followup.followups_posted)
+            except MarkLostError:
+                # The message went out and the database never let us say so. What was
+                # claimed stays `pending` (never re-sent); recovery fails it once it's stale.
+                logger.error(
+                    "SHiFT message sent but the database stayed busy; its codes stay pending "
+                    "(not re-sent) and the rest of this server's batch is not sent",
+                    extra={"guild_id": guild_id},
+                )
+                outcomes.append(GuildOutcome(guild_id, error="database busy while recording"))
+                continue
             except sqlite3.OperationalError:
                 # A busy database is the next pass's problem, not this server's.
                 logger.warning(
@@ -674,6 +727,18 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
         )
     except TimeoutError:
         logger.warning("SHiFT delivery timed out; unsent codes stay queued or fail on recovery")
+    except sqlite3.OperationalError:
+        logger.warning("SHiFT delivery hit a busy database; the queue waits for the next pass")
+        now = deps.now()
+        if deps.alert_owner is not None and (
+            deps.busy_alerted_at is None or now - deps.busy_alerted_at >= _BUSY_ALERT_EVERY
+        ):
+            deps.busy_alerted_at = now
+            await _safe_notify(
+                deps.alert_owner,
+                "newsbot: the database was too busy to deliver SHiFT codes during collection; "
+                "they stay queued (I'll say this at most once an hour)",
+            )
     except Exception:
         logger.exception("SHiFT delivery failed")
         if deps.alert_owner is not None:

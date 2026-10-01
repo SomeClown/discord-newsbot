@@ -26,6 +26,7 @@ import pytest
 from test_shift_fanout_adversarial import (
     CODE_A,
     CODE_B,
+    CODE_C,
     NOW,
     V3,
     Harness,
@@ -39,6 +40,7 @@ from test_shift_fanout_adversarial import (
     shift_row,
 )
 
+from newsbot.bot.format import render_code_alerts
 from newsbot.config import load_config
 from newsbot.shift import fanout
 from newsbot.shift.fanout import (
@@ -324,30 +326,67 @@ async def test_a_busy_database_when_listing_the_queue_leaves_it_alone_and_does_n
     assert released == 1 and len(calls) == 1  # asked once, not in a loop
     assert post_status(h.db_path, 1) == {CODE_A: "queued"}
     assert h.sent(1) == []
-    # Pinned: the owner hears about it (the walk itself failed), once, not per retry.
-    assert h.owner_alerts == ["newsbot: SHiFT delivery failed during collection"]
+    assert len(h.owner_alerts) == 1 and "too busy" in h.owner_alerts[0]  # the owner hears once
 
     monkeypatch.undo()
     await h.deliver()
     assert post_status(h.db_path, 1) == {CODE_A: "posted"}
 
 
-async def test_a_busy_database_while_marking_a_sent_code_never_sends_it_again(h, monkeypatch):
-    """Pinned: the send happened and the 'posted' mark didn't. The row stays `pending` (so it's
-    never re-sent) and is owned up to as 'may or may not have posted' once it is clearly stale."""
+async def test_the_busy_database_alert_to_the_owner_is_once_an_hour_not_every_pass(h, monkeypatch):
+    add_guild(h.db_path, 1, ping="none")
+
+    def locked(_conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fanout, "queued_guild_ids", locked)
+    deps = h.deps()  # one set of deps for the process, as the bot has
+    for minutes in (0, 20, 40, 59):
+        h.clock = NOW + timedelta(minutes=minutes)
+        await detect_and_fan_out(deps, [], seeding_ok=True)
+    assert len(h.owner_alerts) == 1
+    h.clock = NOW + timedelta(hours=1)
+    await detect_and_fan_out(deps, [], seeding_ok=True)
+    assert len(h.owner_alerts) == 2  # an hour on, the owner is told it's still going on
+    h.clock = NOW + timedelta(hours=1, minutes=30)
+    await detect_and_fan_out(deps, [], seeding_ok=True)
+    assert len(h.owner_alerts) == 2
+
+
+async def test_a_busy_database_while_marking_a_sent_code_is_retried_and_lands(h, monkeypatch):
     add_guild(h.db_path, 1, ping="none")
     real = fanout.mark_guild_codes_posted
-    state = {"fail": True}
+    failures = {"left": 2}
 
     def flaky(*args, **kwargs):
-        if state["fail"]:
-            state["fail"] = False
+        if failures["left"]:
+            failures["left"] -= 1
             raise sqlite3.OperationalError("database is locked")
         return real(*args, **kwargs)
 
     monkeypatch.setattr(fanout, "mark_guild_codes_posted", flaky)
     await h.run([item(CODE_A)])
+    assert len(h.sent(1)) == 1 and post_status(h.db_path, 1) == {CODE_A: "posted"}
+    assert h.owner_alerts == [] and h.notices == []
+
+
+async def test_a_database_that_stays_busy_while_marking_never_sends_anything_again(h, monkeypatch):
+    """The send happened and the 'posted' mark never could. The row stays `pending` (so it's
+    never re-sent), the rest of that server's batch isn't sent (it stays `pending` too), and
+    once it's stale it's owned up to as 'may or may not have posted'."""
+    add_guild(h.db_path, 1, ping="none")
+    add_guild(h.db_path, 2, ping="none")
+    real = fanout.mark_guild_codes_posted
+
+    def busy_for_one(conn, guild_id, *args, **kwargs):
+        if guild_id == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn, guild_id, *args, **kwargs)
+
+    monkeypatch.setattr(fanout, "mark_guild_codes_posted", busy_for_one)
+    await h.run([item(CODE_A)])
     assert len(h.sent(1)) == 1 and post_status(h.db_path, 1) == {CODE_A: "pending"}
+    assert post_status(h.db_path, 2) == {CODE_A: "posted"}  # the next server isn't held up
 
     h.posters.clear()
     await h.deliver()
@@ -356,7 +395,32 @@ async def test_a_busy_database_while_marking_a_sent_code_never_sends_it_again(h,
     h.clock = NOW + timedelta(seconds=_PENDING_STALE_S + 1)
     await h.deliver()
     assert post_status(h.db_path, 1) == {CODE_A: "failed"}
-    assert h.sent(1) == [] and len(h.notices) == 1
+    assert h.sent(1) == [] and len(h.notices) == 1 and "may or may not" in h.notices[0][1]
+
+
+async def test_a_mark_that_cannot_land_mid_batch_leaves_the_rest_of_the_batch_unsent(
+    h, monkeypatch
+):
+    add_guild(h.db_path, 1, ping="none")
+    many = [item(code) for code in (CODE_A, CODE_B, CODE_C)]
+    real = fanout.mark_guild_codes_posted
+
+    def busy(conn, guild_id, codes, **kwargs):
+        if CODE_A in codes:
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn, guild_id, codes, **kwargs)
+
+    monkeypatch.setattr(fanout, "mark_guild_codes_posted", busy)
+    monkeypatch.setattr(fanout, "render_code_alerts", _one_code_per_message)
+    await h.run(many)
+    sent_codes = [code for alert in h.sent(1) for code in alert.codes]
+    assert sent_codes == [CODE_A]  # nothing after the unrecorded one went out
+    assert set(post_status(h.db_path, 1).values()) == {"pending"}
+
+
+def _one_code_per_message(candidates, **kwargs):
+    """The real renderer, but a message per code, so a short batch spans several messages."""
+    return [alert for c in candidates for alert in render_code_alerts([c], **kwargs)]
 
 
 async def test_a_busy_claim_for_one_server_does_not_hold_up_the_next(h, monkeypatch):
