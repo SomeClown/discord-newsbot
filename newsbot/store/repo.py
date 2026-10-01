@@ -2049,6 +2049,7 @@ def claim_guild_codes(
     max_pings: int | None = None,
     from_roundup: bool = False,
     ping_codes: Collection[str] | None = None,
+    followup_ok: bool = False,
 ) -> ClaimedCodes:
     """`claim_codes`, for one server: move its `queued` `codes` to `pending`, spending its ping.
 
@@ -2063,6 +2064,11 @@ def claim_guild_codes(
     nothing spends nothing. The ping is spent only if some claimed code
     deserves one (`ping_codes`, when given, names the codes that do) and the
     cap, re-checked here under the lock, still has room.
+
+    `followup_ok` (migration 006) stamps the claimed rows as eligible for a
+    "confirmed by a second source" follow-up, but only when this claim really
+    went out unpinged: a batch that carried the ping already said everything
+    a follow-up would.
     """
     if not codes:
         return ClaimedCodes([], False)
@@ -2096,8 +2102,16 @@ def claim_guild_codes(
         for code in claimed:
             conn.execute(
                 "UPDATE guild_code_posts SET status = 'pending', pinged = ?, from_roundup = ?, "
-                "claimed_at = ? WHERE guild_id = ? AND code = ? AND status = 'queued'",
-                (int(actual_pinged), int(from_roundup), now_iso, guild_id, code),
+                "followup_ok = ?, claimed_at = ? "
+                "WHERE guild_id = ? AND code = ? AND status = 'queued'",
+                (
+                    int(actual_pinged),
+                    int(from_roundup),
+                    int(followup_ok and not actual_pinged and not from_roundup),
+                    now_iso,
+                    guild_id,
+                    code,
+                ),
             )
         conn.execute("COMMIT")
     except BaseException:
@@ -2204,6 +2218,264 @@ def fail_pending_guild_codes(
                 (row["guild_id"], row["code"]),
             )
     return by_guild
+
+
+# --- SHiFT follow-ups: "confirmed by a second source" (migration 006, plan D14) ---
+#
+# A community-only code posts unpinged. If a second, independent source name
+# (any trust) or any trusted source sees it within `FOLLOWUP_WINDOW` of the
+# code's first sighting, every server whose original post went out unpinged
+# *because the batch was untrusted* gets one follow-up that carries its ping.
+# Cap-reached, roundup, ping-off and failed originals never qualify: the
+# `followup_ok` stamp (`claim_guild_codes`) is how that gets decided once, at
+# the original post, instead of reconstructed from circumstantial evidence.
+# `guild_code_followups` has the same life cycle as `guild_code_posts`, and its
+# primary key is the "at most one, ever" guarantee.
+
+FOLLOWUP_WINDOW = timedelta(hours=24)
+
+
+def record_code_sightings(
+    conn: sqlite3.Connection,
+    rows: Iterable[tuple[str, str, bool, bool]],
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """Remember who has seen which code: `(code, source_name, trusted, roundup)`.
+
+    One row per (code, source name); `seen_at` is the first time that source
+    showed it to us and never moves, because the 24 hour window is measured
+    from it. A later sighting from the same source can only make the row more
+    trusted or less of a roundup, never the reverse (a source that once posted
+    the code in a normal item has posted it in a normal item).
+    """
+    now_iso = _resolve_now(now)
+    with conn:
+        for code, source_name, trusted, roundup in rows:
+            conn.execute(
+                "INSERT INTO code_sightings (code, source_name, trusted, roundup, seen_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(code, source_name) DO UPDATE SET "
+                "trusted = MAX(trusted, excluded.trusted), "
+                "roundup = MIN(roundup, excluded.roundup)",
+                (code, source_name, int(trusted), int(roundup), now_iso),
+            )
+
+
+def queue_confirmed_followups(
+    conn: sqlite3.Connection,
+    codes: Iterable[str],
+    *,
+    now: Callable[[], datetime] | None = None,
+    window: timedelta = FOLLOWUP_WINDOW,
+) -> int:
+    """Queue a follow-up for every confirmed code in `codes`; return how many rows were queued.
+
+    A code is confirmed when its non-roundup sightings, counting only those
+    first seen within `window` of the code's own `first_seen_at`, include a
+    trusted source or two different source names. Each confirmed code is
+    queued for every server whose original post of it is `posted` and stamped
+    `followup_ok`. A (server, code) that already has a follow-up row, in any
+    state, is left alone, so calling this every pass is safe (and is how a
+    second pass that races the first sends nothing extra).
+    """
+    now_iso = _resolve_now(now)
+    queued = 0
+    with conn:
+        for code in dict.fromkeys(codes):
+            first = conn.execute(
+                "SELECT first_seen_at FROM alerted_codes WHERE code = ?", (code,)
+            ).fetchone()
+            if first is None:
+                continue
+            deadline = datetime.fromisoformat(first["first_seen_at"]) + window
+            sightings = [
+                row
+                for row in conn.execute(
+                    "SELECT source_name, trusted, seen_at FROM code_sightings "
+                    "WHERE code = ? AND roundup = 0",
+                    (code,),
+                )
+                if datetime.fromisoformat(row["seen_at"]) <= deadline
+            ]
+            if not (
+                any(row["trusted"] for row in sightings)
+                or len({row["source_name"] for row in sightings}) >= 2
+            ):
+                continue
+            cur = conn.execute(
+                "INSERT INTO guild_code_followups (guild_id, code, status, pinged, queued_at) "
+                "SELECT guild_id, code, 'queued', 0, ? FROM guild_code_posts "
+                "WHERE code = ? AND status = 'posted' AND followup_ok = 1 "
+                "ON CONFLICT DO NOTHING",
+                (now_iso, code),
+            )
+            queued += cur.rowcount
+    return queued
+
+
+def queued_followup_guild_ids(conn: sqlite3.Connection) -> list[int]:
+    """Servers with at least one `queued` follow-up, in guild id order."""
+    return [
+        row["guild_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT guild_id FROM guild_code_followups WHERE status = 'queued' "
+            "ORDER BY guild_id"
+        )
+    ]
+
+
+def queued_guild_followups(
+    conn: sqlite3.Connection, guild_id: int, limit: int | None = None
+) -> list[str]:
+    """This server's `queued` follow-up codes in queue order (at most `limit`)."""
+    rows = conn.execute(
+        "SELECT code FROM guild_code_followups WHERE guild_id = ? AND status = 'queued' "
+        "ORDER BY rowid LIMIT ?",
+        (guild_id, -1 if limit is None else limit),
+    ).fetchall()
+    return [row["code"] for row in rows]
+
+
+def _set_followup_status(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    codes: Iterable[str],
+    *,
+    status: str,
+    only_from: str,
+    message_id: int | None = None,
+) -> None:
+    with conn:
+        for code in codes:
+            conn.execute(
+                "UPDATE guild_code_followups SET status = ?, message_id = COALESCE(?, message_id) "
+                "WHERE guild_id = ? AND code = ? AND status = ?",
+                (status, message_id, guild_id, code, only_from),
+            )
+
+
+def skip_queued_guild_followups(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
+    """Flip this server's still-`queued` follow-ups to `skipped`: it stopped wanting them."""
+    _set_followup_status(conn, guild_id, codes, status="skipped", only_from="queued")
+
+
+def mark_guild_followups_posted(
+    conn: sqlite3.Connection, guild_id: int, codes: list[str], *, message_id: int | None
+) -> None:
+    """Flip this server's `pending` follow-ups to `posted` (only `pending` ones move)."""
+    _set_followup_status(
+        conn, guild_id, codes, status="posted", only_from="pending", message_id=message_id
+    )
+
+
+def mark_guild_followups_failed(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
+    """Flip this server's `pending` follow-ups to `failed` after a send that never landed."""
+    _set_followup_status(conn, guild_id, codes, status="failed", only_from="pending")
+
+
+def fail_queued_guild_followups(conn: sqlite3.Connection, guild_id: int) -> None:
+    """Flip this server's `queued` follow-ups to `failed` (a turn blew up before claiming)."""
+    with conn:
+        conn.execute(
+            "UPDATE guild_code_followups SET status = 'failed' "
+            "WHERE guild_id = ? AND status = 'queued'",
+            (guild_id,),
+        )
+
+
+def fail_pending_guild_followups(
+    conn: sqlite3.Connection, *, claimed_before: datetime | None = None
+) -> int:
+    """Flip `pending` follow-ups to `failed`, like `fail_pending_guild_codes`; return how many."""
+    failed = 0
+    with conn:
+        for row in conn.execute(
+            "SELECT guild_id, code, claimed_at FROM guild_code_followups WHERE status = 'pending'"
+        ).fetchall():
+            if (
+                claimed_before is not None
+                and row["claimed_at"] is not None
+                and datetime.fromisoformat(row["claimed_at"]) >= claimed_before
+            ):
+                continue
+            failed += conn.execute(
+                "UPDATE guild_code_followups SET status = 'failed' "
+                "WHERE guild_id = ? AND code = ? AND status = 'pending'",
+                (row["guild_id"], row["code"]),
+            ).rowcount
+    return failed
+
+
+def claim_guild_followups(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    codes: list[str],
+    *,
+    local_day: str,
+    max_pings: int,
+    now: Callable[[], datetime] | None = None,
+) -> list[str]:
+    """Claim this server's `queued` follow-ups for `codes`, spending one unit of its ping budget.
+
+    The same `BEGIN IMMEDIATE` shape as `claim_guild_codes`: the budget is
+    re-read under the write lock, and only codes still `queued` are taken, so
+    two passes racing for the same follow-up produce one claim. One message
+    carries every claimed code, so one unit is spent however many there are.
+    If the day's budget is already gone, the follow-ups become `skipped` (never
+    an unpinged repost: the whole point of one is the ping) and nothing is
+    returned; the cap is left exactly as it was.
+    """
+    if not codes:
+        return []
+    now_iso = _resolve_now(now)
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT ping_day, ping_count FROM guild_shift WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        if row is None:
+            raise StoreError(f"guild {guild_id} has no SHiFT settings to claim against")
+        placeholders = ",".join("?" for _ in codes)
+        # Literal "?"s sized to the list; the values are bound below.
+        query = (
+            "SELECT code FROM guild_code_followups "  # noqa: S608
+            f"WHERE guild_id = ? AND status = 'queued' AND code IN ({placeholders})"
+        )
+        still_queued = {r["code"] for r in conn.execute(query, [guild_id, *codes])}
+        claimed = [code for code in codes if code in still_queued]
+        if not claimed:
+            conn.execute("COMMIT")
+            return []
+        count = row["ping_count"] if row["ping_day"] == local_day else 0
+        if count >= max_pings:
+            for code in claimed:
+                conn.execute(
+                    "UPDATE guild_code_followups SET status = 'skipped' "
+                    "WHERE guild_id = ? AND code = ? AND status = 'queued'",
+                    (guild_id, code),
+                )
+            conn.execute("COMMIT")
+            return []
+        conn.execute(
+            "UPDATE guild_shift SET ping_day = ?, ping_count = ? WHERE guild_id = ?",
+            (local_day, count + 1, guild_id),
+        )
+        for code in claimed:
+            conn.execute(
+                "UPDATE guild_code_followups SET status = 'pending', pinged = 1, claimed_at = ? "
+                "WHERE guild_id = ? AND code = ? AND status = 'queued'",
+                (now_iso, guild_id, code),
+            )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_isolation
+    return claimed
 
 
 # --- Free servers' /news: item headlines (design.md §15, owner decision D2) ---

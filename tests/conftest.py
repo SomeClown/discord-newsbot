@@ -217,9 +217,9 @@ def v4_db(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 def v22_db(v4_db) -> Path:
-    """The populated v4 database after migration 005 (what prod looks like after upgrade day)."""
+    """The populated v4 database after migrations 005 and 006 (prod once v3 is live)."""
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 5
+        assert migrate(conn) == 6
     return v4_db
 
 

@@ -150,6 +150,11 @@ def world(conn):
                 "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA2', 'queued', ?)",
                 (gid, "2026-09-30T00:00:00+00:00"),
             )
+            conn.execute(  # a queued "confirmed by a second source" follow-up (migration 006)
+                "INSERT INTO guild_code_followups (guild_id, code, status, queued_at) "
+                "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA1', 'queued', 'n')",
+                (gid,),
+            )
             conn.execute(
                 "INSERT INTO lounge_quotes_used (source_key, quote_hash, used_at, guild_id) "
                 "VALUES (?, ?, 'n', ?)",
@@ -167,6 +172,7 @@ _PER_GUILD_TABLES = [
     "guild_games",
     "guild_shift",
     "guild_code_posts",
+    "guild_code_followups",
     "guild_lounge",
     "guild_notices",
     "digests",
@@ -242,6 +248,19 @@ _MUTATIONS = {
         c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"]
     ),
     "fail_queued_guild_codes": lambda c, g: repo.fail_queued_guild_codes(c, g),
+    "claim_guild_followups": lambda c, g: repo.claim_guild_followups(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"], local_day="2026-09-30", max_pings=3
+    ),
+    "mark_guild_followups_posted": lambda c, g: repo.mark_guild_followups_posted(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"], message_id=7
+    ),
+    "mark_guild_followups_failed": lambda c, g: repo.mark_guild_followups_failed(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
+    ),
+    "skip_queued_guild_followups": lambda c, g: repo.skip_queued_guild_followups(
+        c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
+    ),
+    "fail_queued_guild_followups": lambda c, g: repo.fail_queued_guild_followups(c, g),
     "claim_guild_digest": lambda c, g: [
         repo.claim_guild_digest(
             c, g, date(2026, 9, 30), force=True, window=(SINCE, SINCE + timedelta(days=1))
@@ -276,6 +295,7 @@ _OTHER_COVERAGE = {
     "backfill_lounge_quotes_guild",
     "guild_posted_codes",  # see the test just below
     "queued_guild_codes",  # likewise, and it returns codes rather than guild ids
+    "queued_guild_followups",  # likewise (test just below)
     # The per-guild digest reads: tests/test_repo_guild_digest.py pins that each
     # only sees its own guild's rows (items_for_window through guild_games,
     # last_window_end and get_guild_digest through the digests guild_id).
@@ -320,6 +340,13 @@ def test_queued_guild_codes_only_reports_that_guilds_queue(world):
         )
     assert [q.code for q in repo.queued_guild_codes(world, G1)] == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA2"]
     assert repo.queued_guild_codes(world, G2) == []
+
+
+def test_queued_guild_followups_only_reports_that_guilds_queue(world):
+    with world:
+        world.execute("DELETE FROM guild_code_followups WHERE guild_id = ?", (G2,))
+    assert repo.queued_guild_followups(world, G1) == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
+    assert repo.queued_guild_followups(world, G2) == []
 
 
 def test_guild_posted_codes_only_reports_that_guilds_posts(world):

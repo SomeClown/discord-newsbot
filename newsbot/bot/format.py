@@ -935,6 +935,45 @@ def render_roundup_alerts(
     return rendered
 
 
+# One follow-up message names at most this many codes; the rest wait for the
+# next pass. A confirmation burst that big has never happened, and 20 keeps
+# the whole message a short line instead of a wall.
+FOLLOWUP_MAX_CODES = 20
+
+
+def render_followup_alert(
+    codes: list[str], *, ping_mention: str, nonce_scope: str = ""
+) -> RenderedAlert:
+    """The "confirmed by a second source" follow-up (plan D14): one short, pinged message.
+
+    A community code that already posted unpinged just got a second,
+    independent source. This is the nudge: the ping first, then the codes in
+    backticks (the original alert already has the copy-able block; this one
+    only needs to say which). `ping_mention` is the text a server's ping choice
+    turns into (`@everyone` or a role mention), and the allowed-mentions that
+    make it actually notify come from `mentions_for` at send time, as for every
+    other alert. The nonce is salted with a `followup|` marker as well as the
+    server scope, so Discord can't mistake this for the original alert's send.
+    """
+    if not codes or len(codes) > FOLLOWUP_MAX_CODES:
+        raise ValueError(f"a follow-up names 1 to {FOLLOWUP_MAX_CODES} codes, got {len(codes)}")
+    for code in codes:
+        if not is_code(code):
+            raise ValueError(f"not a SHiFT code: {code!r}")
+    ping_prefix = f"{ping_mention} "
+    named = ", ".join(f"`{code}`" for code in codes)
+    nonce = hashlib.sha256(
+        f"{_nonce_salt(nonce_scope)}followup|{'|'.join(codes)}".encode()
+    ).hexdigest()[:25]
+    return RenderedAlert(
+        content=f"{ping_prefix}Confirmed by a second source: {named}",
+        codes=list(codes),
+        ping=True,
+        nonce=nonce,
+        ping_prefix=ping_prefix,
+    )
+
+
 # --- Admin-channel run reports (design.md §6, §8) ---
 #
 # One plain-text message to the admin channel after every POST run that
@@ -1560,6 +1599,7 @@ def render_guild_overview(
 
 
 __all__ = [
+    "FOLLOWUP_MAX_CODES",
     "DigestOutcome",
     "RenderedAlert",
     "RenderedDigest",
@@ -1570,6 +1610,7 @@ __all__ = [
     "render_code_page",
     "render_digest",
     "render_digest_summary_line",
+    "render_followup_alert",
     "render_guild_digest",
     "render_guild_run_report",
     "render_guild_overview",

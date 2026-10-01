@@ -65,7 +65,10 @@ class CodeCandidate:
     `trusted` (owner decision, 2026-09-25, QA item 7 option A): whether
     *any* sighting of this code came from a source whose trust is in
     `cfg.alerts.ping_trust`: a community-only code still posts, it just
-    doesn't get to be the reason a batch pings. `roundup` is true only
+    doesn't get to be the reason a batch pings. Since D14 (B+, 2026-10-01)
+    two different source names in the same batch count too: that's the
+    "second independent source" a later pass would otherwise have to wait
+    for. `roundup` is true only
     when *every* sighting of this code came from a roundup item (see
     `CodeSighting.roundup`); a code seen in both a roundup and a normal
     item is judged entirely by the normal one (`aggregate`), so this is
@@ -199,10 +202,12 @@ def aggregate(
     A code is `fresh` if *any* sighting of it is fresh (mixed ages -> fresh:
     one fresh mention is enough reason to alert). `golden` is likewise "any
     sighting mentions it". `trusted` is "any sighting's trust is in
-    `ping_trust`" (owner decision, 2026-09-25): a code seen only from
-    community sources is never the reason a batch pings, even though it
-    still posts. The shown source is the best-trust, then earliest-dated,
-    then first-seen sighting: ties keep first-seen order, which is what
+    `ping_trust`" (owner decision, 2026-09-25), or (D14) "two or more
+    different source names saw it": a code seen by exactly one community
+    source is never the reason a batch pings, even though it still posts.
+    (A later pass can confirm it afterwards; see `shift/fanout.py`.) The
+    shown source is the best-trust, then earliest-dated, then first-seen
+    sighting: ties keep first-seen order, which is what
     makes this deterministic across runs of the same input. Candidates
     come back in first-seen order (by code), matching A3's "announce them
     in the order they turned up" rule.
@@ -231,7 +236,9 @@ def aggregate(
         effective = normal if normal else group
         fresh = any(_is_fresh(s, now, max_age) for s in effective)
         golden = any(s.golden for s in effective)
-        trusted = any(s.trust in ping_trust for s in effective)
+        trusted = any(s.trust in ping_trust for s in effective) or (
+            len({s.source_name for s in effective}) >= 2
+        )
         best = min(effective, key=_sighting_key)
         candidates.append(
             CodeCandidate(

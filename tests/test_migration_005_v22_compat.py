@@ -1,4 +1,4 @@
-"""v2.2.0 must still run against a v5 database (design.md §15's rollback promise).
+"""v2.2.0 must still run against a v6 database (design.md §15's rollback promise).
 
 Rolling back to v2.2.0 is a TAG change, which means a v2.2.0 process opens
 a database that migration 005 has already reshaped. This file runs v2.2.0's
@@ -8,7 +8,8 @@ doesn't need the tag), loaded as a throwaway module, so what's exercised is
 v2.2's real SQL and not my memory of it.
 
 The populated database comes from the `v22_db` fixture: real migrations 001
-to 004, realistic rows, then 005.
+to 004, realistic rows, then 005 and 006 (006 adds the SHiFT follow-up tables,
+D14; the tests at the bottom of this file are about those).
 """
 
 import sqlite3
@@ -74,10 +75,10 @@ def test_the_snapshot_really_is_v22s_repo(v22):
 
 def test_v22_migrate_would_be_a_noop(v22_db):
     # v2.2's own runner is today's runner minus 005 (it globs the files it ships with,
-    # and 005 isn't one of them): it sees user_version 5 >= its newest, and skips.
+    # and 005 isn't one of them): it sees user_version 6 >= its newest, and skips.
     with closing(connect(v22_db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
-        assert migrate(conn) == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert migrate(conn) == 6
 
 
 # --- the digest guard ---
@@ -425,6 +426,77 @@ def test_after_v22_writes_v3_adopts_its_orphan_digest_and_the_day_is_not_due_twi
 def test_after_migration_the_v22_pipeline_helpers_survive_a_second_open(v22_db, v22):
     # A brand new process (v2.2 opening the file at boot) sees a consistent database.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 5
+        assert migrate(conn) == 6
         assert v22.get_digest(conn, TODAY + timedelta(days=0)).id == 12
         _assert_healthy(conn)
+
+
+# --- 006: the follow-up tables (D14) ---
+
+
+def test_v22_has_never_heard_of_the_followup_tables(v22):
+    source = SNAPSHOT.read_text()
+    for name in ("code_sightings", "guild_code_followups", "followup_ok", "guild_code_posts"):
+        assert name not in source
+
+
+def test_v22_shift_paths_work_beside_populated_followup_tables(v22, conn, codes):
+    # v3 state: a guild, its original post, sightings and a follow-up that is mid-flight.
+    repo.create_guild(conn, 42, tier="comped", set_up=True, imported_at=NOW)
+    posted = codes["posted"]
+    with conn:
+        conn.execute(
+            "INSERT INTO guild_code_posts (guild_id, code, status, claimed_at, followup_ok) "
+            "VALUES (42, ?, 'posted', ?, 1)",
+            (posted, NOW.isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO code_sightings (code, source_name, trusted, roundup, seen_at) "
+            "SELECT code, source, 0, 0, first_seen_at FROM alerted_codes "
+            "JOIN (SELECT 'r/Borderlands4' AS source UNION SELECT 'Bluesky') WHERE code = ?",
+            (posted,),
+        )
+    assert repo.queue_confirmed_followups(conn, [posted], now=_clock) == 1
+
+    # Now v2.2 is rolled back in: every SHiFT read and write it has still works.
+    new_code = "ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ-ZZZ77"
+    assert v22.known_codes(conn, [posted, new_code]) == {posted}
+    assert v22.claim_codes(
+        conn,
+        [(new_code, "Feed", "https://example.com/z")],
+        pinged=True,
+        local_day="2026-10-01",
+        now=_clock,
+        max_pings=3,
+    )
+    v22.mark_codes_posted(conn, [new_code], message_id=1)
+    v22.fail_pending_codes(conn)
+    shown, _ = v22.query_codes(conn, SINCE, 20, 0)
+    assert new_code in {c.code for c in shown}
+    v22.purge_older_than(conn, datetime(2026, 9, 29, tzinfo=UTC))
+    # None of it touched v3's rows.
+    assert conn.execute("SELECT COUNT(*) FROM code_sightings").fetchone()[0] == 2
+    assert conn.execute("SELECT status FROM guild_code_followups").fetchone()[0] == "queued"
+    _assert_healthy(conn)
+
+
+def test_rolling_forward_after_v22_wrote_codes_neither_crashes_nor_follows_them_up(v22, conn):
+    repo.create_guild(conn, 42, tier="comped", set_up=True, imported_at=NOW)
+    new_code = "ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ-ZZZ77"
+    v22.claim_codes(
+        conn,
+        [(new_code, "Feed", "https://example.com/z")],
+        pinged=False,
+        local_day="2026-10-01",
+        now=_clock,
+    )
+    v22.mark_codes_posted(conn, [new_code], message_id=5)
+    # v2.2 recorded no sightings and v3 has no guild_code_posts row for the code,
+    # so a later sighting has nobody to follow up.
+    repo.record_code_sightings(
+        conn,
+        [(new_code, "r/Borderlands4", False, False), (new_code, "Bluesky", False, False)],
+        now=_clock,
+    )
+    assert repo.queue_confirmed_followups(conn, [new_code], now=_clock) == 0
+    _assert_healthy(conn)

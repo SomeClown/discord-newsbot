@@ -73,7 +73,7 @@ def test_v3_with_rows_everywhere_upgrades_and_starts_with_empty_lounge_tables(v3
     tables = ["digests", "alerted_codes", "alert_state"]
     with closing(connect(v3_path)) as conn:
         before = _counts(conn, tables)
-        assert migrate(conn) == 5
+        assert migrate(conn) == 6
         assert _counts(conn, tables) == before
         assert _counts(conn, ["lounge_quotes_used", "lounge_state"]) == {
             "lounge_quotes_used": 0,
@@ -109,7 +109,7 @@ def test_a_failed_004_never_leaves_a_half_built_v4_that_reports_success(v3_path)
         conn.execute("DROP TABLE lounge_state")
         conn.execute("DROP TABLE IF EXISTS lounge_quotes_used")
         conn.commit()
-        assert migrate(conn) == 5
+        assert migrate(conn) == 6
         assert repo.claim_quote(
             conn,
             source_key="s",
@@ -140,9 +140,9 @@ def test_several_processes_opening_a_v3_file_at_once_all_end_up_on_v4(v3_path):
         t.join(timeout=15)
 
     assert errors == []
-    assert versions == [5] * 6
+    assert versions == [6] * 6
     with closing(connect(v3_path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_v2_1_1_opening_a_v4_database_neither_fails_nor_touches_lounge_rows(tmp_path, monkeypatch):
@@ -165,7 +165,7 @@ def test_v2_1_1_opening_a_v4_database_neither_fails_nor_touches_lounge_rows(tmp_
 
     monkeypatch.setattr(db, "_MIGRATIONS_DIR", _dir_up_to(tmp_path, 3))
     with closing(connect(path)) as conn:
-        assert migrate(conn) == 5  # returns the DB's version; it applies nothing
+        assert migrate(conn) == 6  # returns the DB's version; it applies nothing
         # v2.1.1's normal day: claim a digest, purge, read status. None of it
         # may disturb the lounge tables.
         repo.claim_digest(conn, datetime(2026, 9, 30, tzinfo=UTC).date(), force=False)
@@ -208,8 +208,8 @@ def test_backup_api_round_trip_carries_the_lounge_tables_and_version(tmp_path):
             src.backup(dst)
 
     with closing(connect(dst_path)) as restored:
-        assert restored.execute("PRAGMA user_version").fetchone()[0] == 5
-        assert migrate(restored) == 5
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert migrate(restored) == 6
         assert repo.get_lounge_state(restored).last_quote_date == "2026-09-29"
         deck = repo.quote_deck_state(restored, "file:/srv/quotes.txt")
         assert deck.used == frozenset({H2})

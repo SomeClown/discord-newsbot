@@ -54,7 +54,7 @@ def test_v2_db_with_every_known_status_migrates_cleanly(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 5
+        assert version == 6
 
         rows = {
             row["code"]: (row["status"], row["from_roundup"])
@@ -83,7 +83,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         conn.commit()
         first = migrate(conn)
         second = migrate(conn)
-    assert first == second == 5
+    assert first == second == 6
     with closing(connect(db_path)) as conn:
         row = conn.execute(
             "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
@@ -122,8 +122,8 @@ def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_four(db_p
 
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-        assert version == 5
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert version == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         row = conn.execute(
             "SELECT status, from_roundup FROM alerted_codes "
             "WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"

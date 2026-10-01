@@ -46,10 +46,16 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
-from newsbot.bot.format import RenderedAlert, render_code_alerts, render_roundup_alerts
+from newsbot.bot.format import (
+    FOLLOWUP_MAX_CODES,
+    RenderedAlert,
+    render_code_alerts,
+    render_followup_alert,
+    render_roundup_alerts,
+)
 from newsbot.collectors.base import CollectorResult, RawItem
 from newsbot.config import AppConfig
 from newsbot.pipeline.normalize import canonicalize_items
@@ -68,18 +74,28 @@ from newsbot.store.models import GuildSettings, QueuedCode, ShiftSettings
 from newsbot.store.repo import (
     ClaimedCodes,
     claim_guild_codes,
+    claim_guild_followups,
     current_shift_delivery,
     fail_pending_guild_codes,
+    fail_pending_guild_followups,
     fail_queued_guild_codes,
+    fail_queued_guild_followups,
     get_alert_state,
     known_codes,
     mark_guild_codes_failed,
     mark_guild_codes_posted,
+    mark_guild_followups_failed,
+    mark_guild_followups_posted,
+    queue_confirmed_followups,
+    queued_followup_guild_ids,
     queued_guild_codes,
+    queued_guild_followups,
     queued_guild_ids,
+    record_code_sightings,
     record_released_codes,
     record_silent_codes,
     skip_queued_guild_codes,
+    skip_queued_guild_followups,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +139,8 @@ class FanoutDeps:
     # Walks (a pass's, the startup one) take turns on this: startup fails every
     # `pending` row, which is only safe when no pass has a send in flight.
     delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Release and print only: never claim, mark or spend a ping. The CLI's mode.
+    # Release and print only: never claim, mark or spend a ping (and no
+    # follow-ups, D14). The CLI's mode.
     preview: bool = False
 
 
@@ -138,6 +155,9 @@ class GuildOutcome:
     skipped: int = 0
     pinged: bool = False
     cap_reached: bool = False
+    # "Confirmed by a second source" follow-ups (D14): codes named in the one
+    # pinged message this turn sent, if any.
+    followups_posted: int = 0
     error: str | None = None
     # Why a server's alert went out without a ping (or lost it on the way); for logs.
     reasons: tuple[str, ...] = ()
@@ -230,6 +250,7 @@ async def _claim(
     ping_codes: set[str] | None,
     timezone: str,
     from_roundup: bool,
+    followup_ok: bool = False,
 ) -> ClaimedCodes:
     """Claim queued -> pending; returns what was really claimed (maybe nothing).
 
@@ -252,6 +273,7 @@ async def _claim(
                 max_pings=None if from_roundup else deps.cfg.shift.max_pings_per_day,
                 from_roundup=from_roundup,
                 ping_codes=ping_codes,
+                followup_ok=followup_ok,
             )
 
     try:
@@ -351,6 +373,10 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
             ping_codes=trusted_codes,
             timezone=guild.timezone,
             from_roundup=False,
+            # D14: a batch with nothing trusted in it, to a server with pinging
+            # on, is the one kind of post a second source can follow up. Not a
+            # mixed batch: its untrusted codes rode the ping, or lost it to the cap.
+            followup_ok=shift.ping != "none" and not trusted_codes,
         )
         if claim.codes:  # codes a concurrent pass took are its to send; ours are the rest
             sent = [c for c in normal if c.code in set(claim.codes)]
@@ -410,6 +436,101 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     )
 
 
+async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
+    """One server's "confirmed by a second source" follow-up (D14), through the usual machinery.
+
+    Everything queued for this server goes out as one pinged message (one unit
+    of its daily ping budget, claimed before the send, with the cap re-checked
+    under the write lock); `post_alert_with_retry` gives it the same nonce
+    reuse, the same ping kept on a 429 and the same ping stripped after an
+    ambiguous failure as any other alert. The server's *current* settings
+    decide: alerts off or ping off means `skipped`, and a spent budget means
+    `skipped` too, quietly: an unpinged "confirmed" repost would be the
+    same news without the only reason to post it. A failed follow-up isn't
+    retried and isn't announced to the admin channel; the original alert
+    already landed, and a missed nudge isn't worth a notice.
+    """
+
+    def _load_sync() -> tuple[GuildSettings, int, str, list[str]] | None:
+        with closing(connect(deps.db_path)) as conn:
+            queued = queued_guild_followups(conn, guild_id)
+            if not queued:
+                return None
+            state = current_shift_delivery(conn, guild_id, deps.cfg.shift.games)
+            if state is None or state[1].ping == "none" or state[1].channel_id is None:
+                skip_queued_guild_followups(conn, guild_id, queued)
+                return None
+            guild, shift = state
+            return guild, shift.channel_id, shift.ping, queued[:FOLLOWUP_MAX_CODES]
+
+    loaded = await asyncio.to_thread(_load_sync)
+    if loaded is None:
+        return GuildOutcome(guild_id)
+    guild, channel_id, ping, codes = loaded
+
+    async def notify(text: str) -> None:
+        await deps.notify_guild(guild_id, text)
+
+    # Its own nonce scope marker (`render_followup_alert` adds "followup|"), so
+    # it can't be mistaken for the original alert's send.
+    scope = f"{guild_id}|{channel_id}"
+    # Render before claiming, for the same reason as the alerts: a claim that
+    # a render error strands is a row stuck `pending`.
+    rendered = render_followup_alert(codes, ping_mention=_mention_for(ping), nonce_scope=scope)
+
+    def _claim_sync() -> list[str]:
+        now = deps.now()
+        with closing(connect(deps.db_path)) as conn:
+            return claim_guild_followups(
+                conn,
+                guild_id,
+                codes,
+                local_day=local_run_date(now, guild.timezone).isoformat(),
+                max_pings=deps.cfg.shift.max_pings_per_day,
+                now=lambda: now,
+            )
+
+    try:
+        claimed = await asyncio.to_thread(_claim_sync)
+    except sqlite3.OperationalError:
+        logger.warning(
+            "SHiFT follow-up claim hit a busy database; follow-ups stay queued",
+            extra={"guild_id": guild_id},
+        )
+        return GuildOutcome(guild_id)
+    if not claimed:
+        return GuildOutcome(guild_id)
+    if claimed != codes:
+        rendered = render_followup_alert(
+            claimed, ping_mention=_mention_for(ping), nonce_scope=scope
+        )
+
+    poster = deps.poster_for(guild_id, channel_id, ping, notify)
+    begin_batch = getattr(poster, "begin_batch", None)
+    if begin_batch is not None:
+        begin_batch()
+    message_id, error = await post_alert_with_retry(poster, deps.sleep, rendered)
+    if error is not None:
+        logger.error(
+            "guild SHiFT follow-up post failed",
+            extra={"guild_id": guild_id, "codes": claimed, "error": str(error)},
+        )
+        await asyncio.to_thread(_followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
+        return GuildOutcome(guild_id)
+    await asyncio.to_thread(_followup_mark_sync, deps.db_path, guild_id, claimed, message_id, True)
+    return GuildOutcome(guild_id, followups_posted=len(claimed))
+
+
+def _followup_mark_sync(
+    db_path: str, guild_id: int, codes: list[str], message_id: int | None, posted: bool
+) -> None:
+    with closing(connect(db_path)) as conn:
+        if posted:
+            mark_guild_followups_posted(conn, guild_id, codes, message_id=message_id)
+        else:
+            mark_guild_followups_failed(conn, guild_id, codes)
+
+
 async def _print_batch(poster: CodeAlertPoster, rendered: list[RenderedAlert]) -> None:
     """Preview mode: hand each message to the (printing) poster, record nothing."""
     for alert in rendered:
@@ -419,14 +540,17 @@ async def _print_batch(poster: CodeAlertPoster, rendered: list[RenderedAlert]) -
 def _log_outcome(outcome: GuildOutcome) -> None:
     """One INFO line per server's turn: ids and counts only, never message text."""
     if outcome.error is not None or not (
-        outcome.posted or outcome.roundup_posted or outcome.failed
+        outcome.posted or outcome.roundup_posted or outcome.failed or outcome.followups_posted
     ):
         return
     logger.info(
         "SHiFT delivery for a guild",
         extra={
             "guild_id": outcome.guild_id,
-            "codes": outcome.posted + outcome.roundup_posted + outcome.failed,
+            "codes": outcome.posted
+            + outcome.roundup_posted
+            + outcome.failed
+            + outcome.followups_posted,
             "pinged": outcome.pinged,
             "unpinged_or_stripped_because": ",".join(outcome.reasons) or "none",
         },
@@ -465,7 +589,8 @@ async def deliver_queued_codes(
 
         def _queued_sync() -> list[int]:
             with closing(connect(deps.db_path)) as conn:
-                return queued_guild_ids(conn)
+                # Follow-ups (D14) ride the same walk: same order, pacing and deadline.
+                return sorted({*queued_guild_ids(conn), *queued_followup_guild_ids(conn)})
 
         outcomes: list[GuildOutcome] = []
         guild_ids = await asyncio.to_thread(_queued_sync)
@@ -480,6 +605,9 @@ async def deliver_queued_codes(
                 break
             try:
                 outcome = await _deliver_one(deps, guild_id)
+                if not deps.preview:
+                    followup = await _deliver_followups(deps, guild_id)
+                    outcome = replace(outcome, followups_posted=followup.followups_posted)
             except sqlite3.OperationalError:
                 # A busy database is the next pass's problem, not this server's.
                 logger.warning(
@@ -518,6 +646,7 @@ async def _fail_queued_safely(deps: FanoutDeps, guild_id: int) -> None:
 def _fail_queued_sync(db_path: str, guild_id: int) -> None:
     with closing(connect(db_path)) as conn:
         fail_queued_guild_codes(conn, guild_id)
+        fail_queued_guild_followups(conn, guild_id)
 
 
 async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
@@ -574,15 +703,24 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
             await asyncio.to_thread(_mark_seeded_sync)
         return 0
 
+    ping_trust = tuple(shift_cfg.ping_trust)
     candidates = aggregate(
         sightings,
         now=now,
         max_age=timedelta(hours=shift_cfg.max_item_age_hours),
-        ping_trust=tuple(shift_cfg.ping_trust),
+        ping_trust=ping_trust,
     )
 
     def _plan_and_record_sync() -> tuple[int, int]:
         with closing(connect(deps.db_path)) as conn:
+            # Every sighting is remembered, known code or not: a later source
+            # seeing a code we already posted is the whole point (D14). Written
+            # before the release so a crash between the two loses nothing.
+            record_code_sightings(
+                conn,
+                [(s.code, s.source_name, s.trust in ping_trust, s.roundup) for s in sightings],
+                now=lambda: now,
+            )
             known = known_codes(conn, [c.code for c in candidates])
             state = get_alert_state(conn)
             # Pings are decided per server, so the global plan only gets to
@@ -610,6 +748,10 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 queue_for_games=shift_cfg.games,
                 flags={c.code: (c.golden, c.trusted) for c in plan.to_post + plan.roundup_to_post},
             )
+            # D14: any of these codes that a second independent source (or a
+            # trusted one) has now confirmed, inside 24 hours of its first
+            # sighting, queues its follow-ups. Idempotent, so every pass can ask.
+            queue_confirmed_followups(conn, [c.code for c in candidates], now=lambda: now)
             overflow = sum(1 for _, status in plan.silent if status == "roundup")
             return len(released), overflow
 
@@ -658,6 +800,9 @@ async def recover_pending_guild_codes(
 
     def _sync() -> dict[int, list[str]]:
         with closing(connect(db_path)) as conn:
+            # A follow-up cut off mid-send is failed too, quietly: the original
+            # alert landed long ago, so there's nothing a server needs told.
+            fail_pending_guild_followups(conn, claimed_before=claimed_before)
             return fail_pending_guild_codes(conn, claimed_before=claimed_before)
 
     by_guild = await asyncio.to_thread(_sync)
