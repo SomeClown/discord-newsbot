@@ -1504,10 +1504,20 @@ class NewsBot(discord.Client):
     # --- Gateway events ---
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
+        # Lazy import, same circularity as in `setup_hook`.
+        from newsbot.bot import registration
+
         await self.lifecycle.on_guild_join(guild)
+        # Discord drops a guild's commands when the bot is removed, and the stored hash
+        # would still say they're fine, so a guild-scoped server gets its set back now.
+        # Never raises; it logs its own failures.
+        await registration.resync_guild_commands(self, guild.id)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
+        from newsbot.bot import registration
+
         await self.lifecycle.on_guild_remove(guild)
+        await registration.forget_guild_commands(self, guild.id)
         if self._digest_deps is not None:
             self._digest_deps.forget_guild(guild.id)
         # Its lounge row went with the guild's; the quote job would notice at its

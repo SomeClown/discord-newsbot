@@ -18,6 +18,11 @@ hashed (the same JSON Discord would be sent) and compared with the hash stored i
 `app_state` after the last successful sync; nothing changed, nothing sent. A failed
 sync stores no hash, so the next start tries again.
 
+The hash can lie in one case: Discord drops a guild's commands when the bot is kicked,
+and the stored hash still matches what we'd send, so a restart alone would never put
+them back. So a join to one of the guild scopes re-syncs it at once, hash or no hash,
+and a removal deletes that guild's hash.
+
 One known gap: a guild that *used* to have guild commands and no longer does (its
 lounge row was deleted) isn't in the plan, so its stale `/lounge` isn't cleared
 here. The command refuses to do anything in such a guild (it checks the row), so
@@ -53,6 +58,9 @@ from newsbot.store.db import connect
 logger = logging.getLogger(__name__)
 
 _HASH_KEY_PREFIX = "commands:"
+
+# One join, one sync, and the join handler doesn't wait on Discord's rate-limit sleeps forever.
+_RESYNC_TIMEOUT_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,52 @@ async def sync_commands(bot: NewsBot, plan: ScopePlan) -> dict[str, str]:
     return results
 
 
+def _delete_hash_sync(db_path: str | Path, key: str) -> None:
+    with closing(connect(db_path)) as conn:
+        repo.app_state_delete(conn, key)
+
+
+async def resync_guild_commands(bot: NewsBot, guild_id: int) -> str:
+    """Re-sync one guild's commands right now, ignoring the stored hash. Never raises.
+
+    For `on_guild_join`. Returns `synced`, `failed`, or `skipped` (the guild isn't one of
+    the guild sync scopes, so there's nothing of ours to restore there). One sync per
+    call: no retries, since a join handler that hammers Discord is how you get a
+    rate-limited bot. A failure is logged and swallowed, and stores no hash, so the next
+    start tries again. (CancelledError still propagates; it's a BaseException.)
+    """
+    try:
+        lounge_ids = await asyncio.to_thread(lounge_guild_ids_sync, bot.db_path)
+        imported_ids = await asyncio.to_thread(imported_guild_ids_sync, bot.db_path)
+        plan = plan_scopes(bot.cfg, lounge_ids, imported_ids)
+        if guild_id not in plan.sync_guilds:
+            return "skipped"
+        guild = discord.Object(id=guild_id)
+        digest = commands_hash(bot.tree, guild)
+        async with asyncio.timeout(_RESYNC_TIMEOUT_S):
+            synced = await bot.tree.sync(guild=guild)
+        await asyncio.to_thread(
+            _store_hash_sync, bot.db_path, _HASH_KEY_PREFIX + str(guild_id), digest
+        )
+    except Exception:
+        logger.exception("command re-sync on join failed", extra={"scope": str(guild_id)})
+        return "failed"
+    logger.info("re-synced %d commands on join", len(synced), extra={"scope": str(guild_id)})
+    return "synced"
+
+
+async def forget_guild_commands(bot: NewsBot, guild_id: int) -> None:
+    """Delete a guild's stored hash, so a later start re-syncs it. Never raises.
+
+    For `on_guild_remove`: Discord drops the guild's commands when the bot leaves, and a
+    hash that still matches would swear they're fine. Harmless for a guild with no hash.
+    """
+    try:
+        await asyncio.to_thread(_delete_hash_sync, bot.db_path, _HASH_KEY_PREFIX + str(guild_id))
+    except Exception:
+        logger.exception("could not clear the command hash", extra={"scope": str(guild_id)})
+
+
 def lounge_guild_ids_sync(db_path: str | Path) -> list[int]:
     """Guilds with a lounge row where the daily quote is on: the guilds that get `/lounge`."""
     with closing(connect(db_path)) as conn:
@@ -198,10 +252,12 @@ async def setup_commands(bot: NewsBot) -> dict[str, str]:
 __all__ = [
     "ScopePlan",
     "commands_hash",
+    "forget_guild_commands",
     "imported_guild_ids_sync",
     "lounge_guild_ids_sync",
     "plan_scopes",
     "register_commands",
+    "resync_guild_commands",
     "setup_commands",
     "sync_commands",
 ]
