@@ -1,0 +1,57 @@
+# A v3-shaped config: a catalog of three games, shared sources, Brave web
+# search, and no per-server keys at all (channels and times live in the
+# database now). Ids are fake.
+home_guild_id: 200000000000000001
+admin_channel_id: 200000000000000002
+admin_permission: manage_guild
+command_guild_ids: []
+comped_guild_ids: [200000000000000003]
+owner_report:
+  time: "21:00"
+  timezone: "America/Los_Angeles"
+collection:
+  interval_minutes: 60
+  lookback_hours: 24
+  max_items_per_game: 60
+ai:
+  subject: "video games"
+run_report: true
+web_search:
+  queries_per_game: 2
+  trust: press
+shift:
+  games: [borderlands4]
+  max_item_age_hours: 48
+  max_pings_per_day: 3
+  ping_trust: [official, press]
+  max_codes_per_item: 5
+  allow_test_command: false
+shared_sources:
+  - type: rss
+    name: "PC Gamer"
+    url: "https://www.pcgamer.com/rss/"
+    trust: press
+  - type: rss
+    name: "2K Newsroom"
+    url: "https://newsroom.2k.com/feed/rss"
+    games: [borderlands4]
+    trust: official
+catalog:
+  - key: borderlands4
+    name: "Borderlands 4"
+    aliases: ["BL4", "Borderlands4"]
+    entities: ["Gearbox"]
+    search_queries: ["Borderlands 4 news"]
+    sources:
+      - {type: steam_news, name: "Borderlands 4 Steam", app_id: 1285190, trust: official}
+      - {type: bluesky_search, query: "Borderlands 4", trust: community}
+  - key: palworld
+    name: "Palworld"
+    entities: ["Pocketpair"]
+    sources:
+      - {type: steam_news, name: "Palworld Steam", app_id: 1623730, trust: official}
+  - key: rust
+    name: "Rust"
+    aliases: ["Rust game", "Facepunch"]
+    match_name: false
+    sources: []

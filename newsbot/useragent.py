@@ -6,7 +6,7 @@ that drifts: one of them said "contact: owner" and another said
 "+contact", neither of which is a contact anyone could actually reach.
 Reddit in particular is unforgiving about a generic or missing one (see
 docs/sources-research.md), and now that this bot is meant to run on
-someone else's server, "the owner" isn't even a meaningful phrase --
+someone else's server, "the owner" isn't even a meaningful phrase;
 `NEWSBOT_CONTACT` (a URL or an email, an owner's own choice) is what
 fills in the "how do I reach you" part.
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # this comment claimed nothing could catch it drifting, which was true only
 # because nobody had written the three-line test that does; see
 # test_fallback_version_matches_pyproject.
-_FALLBACK_VERSION = "2.2.0"
+_FALLBACK_VERSION = "3.0.0"
 
 _REPO_URL = "https://github.com/someclown/discord-newsbot"
 _UNSET_CONTACT = f"{_REPO_URL}, contact unset"

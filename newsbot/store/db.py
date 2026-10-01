@@ -1,6 +1,6 @@
 """Connection setup and the migration runner.
 
-Nothing fancy: SQLite in WAL mode, one migration file so far, and a version
+Nothing fancy: SQLite in WAL mode, numbered migration files, and a version
 tracked in `PRAGMA user_version` because SQLite already gives us that for
 free (a bespoke `schema_migrations` table would just be reinventing it,
 worse). Every connection is short-lived: open, do the unit of work, close,
@@ -57,6 +57,9 @@ def migrate(conn: sqlite3.Connection) -> int:
     return current
 
 
+_FK_OFF_HEADER = "-- newsbot: foreign-keys-off"
+
+
 def _apply(conn: sqlite3.Connection, path: Path, version: int, current: int) -> int:
     """Run one migration under the write lock; return the version afterwards.
 
@@ -67,18 +70,40 @@ def _apply(conn: sqlite3.Connection, path: Path, version: int, current: int) -> 
     "already exists". Under the lock, a loser sees the winner's version and
     skips. `autocommit` is on for the duration because `executescript`
     would otherwise commit first and quietly hand the lock back.
+
+    A file whose first line is `-- newsbot: foreign-keys-off` is a table
+    rebuild, and SQLite's documented recipe for those (the "12 steps" in
+    its ALTER TABLE docs) needs foreign keys off while tables are dropped
+    and renamed, or the drop cascades into child rows. `PRAGMA
+    foreign_keys` is a silent no-op inside a transaction, so it gets
+    flipped outside `BEGIN IMMEDIATE` and restored in a `finally`. Before
+    the commit, `PRAGMA foreign_key_check` has to come back empty; any row
+    rolls the whole migration back and names the offending table.
     """
+    text = path.read_text()
+    fk_off = text.startswith(_FK_OFF_HEADER)
     old_autocommit = conn.autocommit
     conn.commit()
     conn.autocommit = True
+    old_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     try:
+        if fk_off:
+            conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("BEGIN IMMEDIATE")
         try:
             latest = conn.execute("PRAGMA user_version").fetchone()[0]
             if latest >= version:
                 conn.execute("ROLLBACK")
                 return latest
-            conn.executescript(path.read_text())
+            conn.executescript(text)
+            if fk_off:
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    tables = sorted({row[0] for row in violations})
+                    raise StoreError(
+                        f"Migration {path.name} left foreign key violations in: "
+                        f"{', '.join(tables)}. Rolled back."
+                    )
             conn.execute(f"PRAGMA user_version = {version}")
             conn.execute("COMMIT")
         except BaseException:
@@ -86,6 +111,8 @@ def _apply(conn: sqlite3.Connection, path: Path, version: int, current: int) -> 
                 conn.execute("ROLLBACK")
             raise
     finally:
+        if fk_off:
+            conn.execute(f"PRAGMA foreign_keys = {'ON' if old_fk else 'OFF'}")
         conn.autocommit = old_autocommit
     return version
 

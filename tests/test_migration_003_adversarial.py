@@ -54,7 +54,7 @@ def test_v2_db_with_every_known_status_migrates_cleanly(db_path):
         conn.commit()
 
         version = migrate(conn)
-        assert version == 4
+        assert version == 8
 
         rows = {
             row["code"]: (row["status"], row["from_roundup"])
@@ -83,7 +83,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         conn.commit()
         first = migrate(conn)
         second = migrate(conn)
-    assert first == second == 4
+    assert first == second == 8
     with closing(connect(db_path)) as conn:
         row = conn.execute(
             "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
@@ -91,7 +91,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         assert row["from_roundup"] == 1
 
 
-def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_four(db_path, monkeypatch):
+def test_v1_3_0_migrate_against_a_newer_db_is_a_noop_and_keeps_its_version(db_path, monkeypatch):
     # Build a real v2.0 database first (migrations 001-003 applied), then
     # simulate a v1.3.0 process's migrate() (which only ever globs
     # 001/002 out of its own migrations/ directory) running against it.
@@ -122,8 +122,8 @@ def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_four(db_p
 
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
-        assert version == 4
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert version == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
         row = conn.execute(
             "SELECT status, from_roundup FROM alerted_codes "
             "WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"

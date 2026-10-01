@@ -26,7 +26,7 @@ strings, each flattened and escaped again on the way in (`_safe`), so the text
 is inert on its own. A failed post reports the exception's class name and
 Discord's status codes, never its message. Quote text, member names and URL
 credentials never go into it. This module builds no Discord objects: the
-caller injects `post` and `alert`, the way `SweepDeps` does.
+caller injects `post` and `alert`, the way the other `Deps` classes do.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from newsbot.config import QuoteSourceCfg
 from newsbot.lounge.quotes import QuotePick, choose_quote, render_quote_message
 from newsbot.lounge.sources import LoadedSource, cache_dir_for, describe, load_source
 from newsbot.store.db import connect
-from newsbot.store.repo import claim_quote, get_lounge_state, quote_deck_state
+from newsbot.store.repo import claim_quote, get_lounge, get_lounge_state, quote_deck_state
 from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ _ALERT_CHARS = 1900
 _LINE_CHARS = 600
 _REASON_CHARS = 200
 
-Status = Literal["posted", "already_posted", "skipped", "post_failed"]
+Status = Literal["posted", "already_posted", "skipped", "post_failed", "no_lounge"]
 
 
 @dataclass
@@ -70,6 +70,12 @@ class QuoteDeps:
     `local_day` is today's date in the digest timezone (the caller works it
     out with `local_run_date`). `cache_dir` defaults to the per-database
     directory `sources.py` would pick anyway.
+
+    `guild_id` is the public app's switch (design.md §15): set, the date
+    guard and the no-repeat deck belong to that server's lounge row; unset,
+    it's v2.2's single lounge and its global guard. `alert` is the caller's
+    problem either way, so where a server's alerts go is decided by whoever
+    builds the deps.
     """
 
     sources: list[QuoteSourceCfg]
@@ -81,6 +87,7 @@ class QuoteDeps:
     alert: Callable[[str], Awaitable[None]]
     rng: random.Random
     cache_dir: Path | None = None
+    guild_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -97,7 +104,15 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
     """Run today's quote. `force` skips only the once-a-day guard (`/newsbot quote-now`)."""
     day = deps.local_day.isoformat()
 
-    if not force and await asyncio.to_thread(_already_posted, deps.db_path, day):
+    if deps.guild_id is not None and not await asyncio.to_thread(
+        _lounge_exists, deps.db_path, deps.guild_id
+    ):
+        # The server left (or the row was deleted) between the trigger and
+        # now. Nobody is left to tell, and nothing to post into.
+        logger.info("Lounge quote for guild %s skipped: it has no lounge row", deps.guild_id)
+        return QuoteOutcome("no_lounge")
+
+    if not force and await asyncio.to_thread(_already_posted, deps.db_path, day, deps.guild_id):
         logger.info("Lounge quote for %s already posted; nothing to do", day)
         return QuoteOutcome("already_posted")
 
@@ -137,6 +152,12 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
 
     pick = await asyncio.to_thread(_draw_and_claim, deps, src.key, loaded, day, force)
     if pick is None:
+        if deps.guild_id is not None and not await asyncio.to_thread(
+            _lounge_exists, deps.db_path, deps.guild_id
+        ):
+            # Removed mid-quote: the claim refused because the row is gone.
+            logger.info("Lounge quote for guild %s dropped: removed mid-run", deps.guild_id)
+            return QuoteOutcome("no_lounge", source_key=src.key)
         # Lost a race with the other trigger (job vs quote-now). They posted.
         logger.info("Lounge quote for %s was claimed by another run", day)
         return QuoteOutcome("already_posted", source_key=src.key)
@@ -155,14 +176,25 @@ async def run_daily_quote(deps: QuoteDeps, *, force: bool = False) -> QuoteOutco
     return QuoteOutcome("posted", message_id, src.key, tuple(notes))
 
 
-def _already_posted(db_path: str, day: str) -> bool:
+def _lounge_exists(db_path: str, guild_id: int) -> bool:
+    with closing(connect(db_path)) as conn:
+        return get_lounge(conn, guild_id) is not None
+
+
+def _already_posted(db_path: str, day: str, guild_id: int | None = None) -> bool:
     """Same rule as `claim_quote`: a stored date at or after `day` counts as posted.
 
     ISO dates sort as text. `>=` and not `==` so a clock that stepped backwards
     doesn't send us off to load sources only for the claim to say no anyway.
+    With `guild_id` it reads that server's own date; a missing row reads as
+    "not posted" and the claim sorts out the rest.
     """
     with closing(connect(db_path)) as conn:
-        last = get_lounge_state(conn).last_quote_date
+        if guild_id is None:
+            last = get_lounge_state(conn).last_quote_date
+        else:
+            lounge = get_lounge(conn, guild_id)
+            last = lounge.last_quote_date if lounge else None
     return last is not None and last >= day
 
 
@@ -171,7 +203,7 @@ def _draw_and_claim(
 ) -> QuotePick | None:
     """Read the deck, choose, claim; None if someone else claimed the day first."""
     with closing(connect(deps.db_path)) as conn:
-        deck = quote_deck_state(conn, key)
+        deck = quote_deck_state(conn, key, deps.guild_id)
         pick = choose_quote(loaded.quotes, deck, deps.rng)
         if pick is None:  # can't happen with a non-empty list; belt and suspenders
             return None
@@ -183,6 +215,7 @@ def _draw_and_claim(
             reshuffle=pick.reshuffle,
             force=force,
             now=deps.now,
+            guild_id=deps.guild_id,
         )
     return pick if won else None
 

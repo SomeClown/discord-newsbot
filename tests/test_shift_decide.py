@@ -1,7 +1,7 @@
 """Tests for newsbot.shift.decide: the pure planner behind the SHiFT alert sweep.
 
 No database, no clock, no network -- every case here is a list of
-dataclasses in, a list of dataclasses out. `test_shift_sweep.py` covers the
+dataclasses in, a list of dataclasses out. `test_shift_fanout.py` covers the
 I/O side (what actually gets written and posted); this file is the
 contract for the judgment calls: fresh vs. stale, seeded vs. not, who gets
 to spend today's ping.
@@ -10,7 +10,6 @@ to spend today's ping.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from newsbot.collectors.base import CollectorResult, RawItem
 from newsbot.config import Topic
@@ -19,12 +18,10 @@ from newsbot.shift.decide import (
     CodeSighting,
     aggregate,
     group_roundups,
-    pings_used_today,
     plan_alerts,
     seeding_healthy,
     sightings_from_items,
 )
-from newsbot.store.models import AlertState
 
 CODE_A = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
 CODE_B = "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"
@@ -617,93 +614,6 @@ def test_seeding_healthy_all_skipped_is_unhealthy():
     assert seeding_healthy([_result("a", skipped="quota")]) is False
 
 
-# --- pings_used_today ---
-
-
-def test_pings_used_today_matches_stored_day():
-    state = AlertState(
-        seeded=True,
-        last_sweep_at=None,
-        last_sweep_summary=None,
-        ping_day="2026-09-25",
-        ping_count=2,
-    )
-    assert pings_used_today(state, "2026-09-25") == 2
-
-
-def test_pings_used_today_stale_day_reads_as_zero():
-    state = AlertState(
-        seeded=True,
-        last_sweep_at=None,
-        last_sweep_summary=None,
-        ping_day="2026-09-24",
-        ping_count=3,
-    )
-    assert pings_used_today(state, "2026-09-25") == 0
-
-
-def test_pings_used_today_no_prior_day_is_zero():
-    state = AlertState(
-        seeded=True, last_sweep_at=None, last_sweep_summary=None, ping_day=None, ping_count=0
-    )
-    assert pings_used_today(state, "2026-09-25") == 0
-
-
-def _la_day(utc_dt: datetime) -> str:
-    return utc_dt.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
-
-
-def test_pings_used_today_resets_at_la_midnight_not_utc_midnight():
-    # 2026-09-25 07:30 UTC is still 2026-09-25 00:30 America/Los_Angeles
-    # (UTC-7 in September): UTC's date has already rolled to the 25th
-    # hours before LA's does, and pings_used_today has to agree with LA's
-    # calendar, not UTC's.
-    still_previous_utc_day_la_today = datetime(2026, 9, 25, 7, 30, tzinfo=UTC)
-    today = _la_day(still_previous_utc_day_la_today)
-    assert today == "2026-09-25"
-    state = AlertState(
-        seeded=True,
-        last_sweep_at=None,
-        last_sweep_summary=None,
-        ping_day="2026-09-24",
-        ping_count=1,
-    )
-    assert pings_used_today(state, today) == 0
-
-
-def test_pings_used_today_across_spring_forward():
-    # 2026-03-08 is the US spring-forward day; LA jumps from PST (UTC-8) to
-    # PDT (UTC-7) at 02:00 local. The day string itself shouldn't care --
-    # it's still one calendar day on either side of the jump.
-    before = datetime(2026, 3, 8, 9, 0, tzinfo=UTC)  # 01:00 PST
-    after = datetime(2026, 3, 8, 11, 0, tzinfo=UTC)  # 04:00 PDT
-    assert _la_day(before) == _la_day(after) == "2026-03-08"
-    state = AlertState(
-        seeded=True,
-        last_sweep_at=None,
-        last_sweep_summary=None,
-        ping_day="2026-03-08",
-        ping_count=1,
-    )
-    assert pings_used_today(state, _la_day(after)) == 1
-
-
-def test_pings_used_today_across_fall_back():
-    # 2026-11-01 is the US fall-back day; LA repeats 01:00-02:00 local.
-    # Still one calendar day, same story.
-    before = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)  # 01:00 PDT (pre-fallback)
-    after = datetime(2026, 11, 1, 13, 0, tzinfo=UTC)  # 05:00 PST (post-fallback)
-    assert _la_day(before) == _la_day(after) == "2026-11-01"
-    state = AlertState(
-        seeded=True,
-        last_sweep_at=None,
-        last_sweep_summary=None,
-        ping_day="2026-11-01",
-        ping_count=2,
-    )
-    assert pings_used_today(state, _la_day(before)) == 2
-
-
 # --- plan_alerts ---
 
 
@@ -814,3 +724,10 @@ def test_plan_alerts_seeded_preserves_first_seen_order():
         [a, b], known=set(), seeded=True, seeding_ok=True, pings_today=0, max_pings=3
     )
     assert plan.to_post == [a, b]
+
+
+def test_two_community_sightings_whose_source_names_differ_only_in_case_are_one_source():
+    same_feed = [_sighting(source_name="r/Borderlands4"), _sighting(source_name="r/borderlands4")]
+    assert not aggregate(same_feed, now=NOW, max_age=MAX_AGE)[0].trusted
+    other = [_sighting(source_name="r/Borderlands4"), _sighting(source_name="Bluesky search")]
+    assert aggregate(other, now=NOW, max_age=MAX_AGE)[0].trusted

@@ -1,12 +1,14 @@
 """End-to-end (gateway-free) tests for `/news recent` and `/news search`.
 
 Plan step 6 generalized `_first_page_and_view` so `/shift codes` could
-share it. Before that, `/news`'s handlers had never been exercised past
-their pure decision functions (`test_commands_logic.py`) and registration
-(`test_command_registration.py`) -- this file pins that the refactor left
-their actual behavior (page counts, first-page contents) unchanged, using
-the same hand-written `FakeInteraction` pattern as
-`test_commands_test_alert_handler.py` against a real temp sqlite DB.
+share it; this file pins that the shared helper left page counts and
+first-page contents alone, with a hand-written `FakeInteraction` against a
+real temp sqlite DB.
+
+These were the v2 tests (one server, config-driven). They moved to
+`make_member_news_group` when v2 retired, run as a comped server that follows
+Borderlands 4 and Palworld (comped, because stories are what these assert on;
+a free server's headlines are in `test_member_commands_scoped.py`).
 """
 
 from __future__ import annotations
@@ -18,11 +20,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from newsbot.bot.commands import make_news_group
+from newsbot.bot.commands import make_member_news_group
 from newsbot.config import load_config
+from newsbot.store import repo
 from newsbot.store.db import connect, migrate
 
-CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_v3.yaml"
+GUILD = 300000000000000001
 
 
 class FakeResponse:
@@ -51,16 +55,9 @@ class FakeFollowup:
 class FakeInteraction:
     def __init__(self, *, user_id: int = 1) -> None:
         self.user = SimpleNamespace(id=user_id)
+        self.guild_id = GUILD
         self.response = FakeResponse()
         self.followup = FakeFollowup()
-
-
-class _Choice:
-    """Stands in for `app_commands.Choice[str]`: the handlers only read `.value`/`.name`."""
-
-    def __init__(self, value: str, name: str | None = None) -> None:
-        self.value = value
-        self.name = name or value
 
 
 @pytest.fixture
@@ -68,6 +65,9 @@ def db_path(tmp_path):
     path = str(tmp_path / "newsbot.db")
     with closing(connect(path)) as conn:
         migrate(conn)
+        repo.create_guild(conn, GUILD, set_up=True, tier="comped")
+        repo.follow_game(conn, GUILD, "borderlands4", 11)
+        repo.follow_game(conn, GUILD, "palworld", 12)
     return path
 
 
@@ -76,7 +76,7 @@ def _cfg():
 
 
 def _news_command(cfg, db_path, name):
-    group = make_news_group(cfg, db_path)
+    group = make_member_news_group(cfg, db_path)
     return next(c for c in group.commands if c.name == name)
 
 
@@ -131,9 +131,7 @@ async def test_recent_seventeen_stories_page_size_six_gives_three_pages(db_path)
     command = _news_command(cfg, db_path, "recent")
     interaction = FakeInteraction()
 
-    await command.callback(
-        interaction, game=_Choice("all", "All"), days=7, label=None, public=False
-    )
+    await command.callback(interaction, game="all", days=7, label=None, public=False)
 
     assert len(interaction.followup.calls) == 1
     call = interaction.followup.calls[0]
@@ -150,9 +148,7 @@ async def test_recent_no_stories_is_still_one_page(db_path):
     command = _news_command(cfg, db_path, "recent")
     interaction = FakeInteraction()
 
-    await command.callback(
-        interaction, game=_Choice("all", "All"), days=7, label=None, public=False
-    )
+    await command.callback(interaction, game="all", days=7, label=None, public=False)
 
     embed = interaction.followup.calls[0]["embed"]
     assert embed.description == "No stories found."
@@ -168,9 +164,7 @@ async def test_recent_filters_to_the_chosen_game(db_path):
     command = _news_command(cfg, db_path, "recent")
     interaction = FakeInteraction()
 
-    await command.callback(
-        interaction, game=_Choice("palworld", "Palworld"), days=7, label=None, public=False
-    )
+    await command.callback(interaction, game="palworld", days=7, label=None, public=False)
 
     embed = interaction.followup.calls[0]["embed"]
     assert "Palworld news" in embed.description
@@ -185,7 +179,7 @@ async def test_recent_public_true_sends_non_ephemeral(db_path):
     command = _news_command(cfg, db_path, "recent")
     interaction = FakeInteraction()
 
-    await command.callback(interaction, game=_Choice("all", "All"), days=7, label=None, public=True)
+    await command.callback(interaction, game="all", days=7, label=None, public=True)
 
     assert interaction.followup.calls[0]["ephemeral"] is False
 
@@ -202,9 +196,7 @@ async def test_recent_paging_to_page_three_shows_the_oldest_story(db_path):
         )
     command = _news_command(cfg, db_path, "recent")
     interaction = FakeInteraction()
-    await command.callback(
-        interaction, game=_Choice("all", "All"), days=7, label=None, public=False
-    )
+    await command.callback(interaction, game="all", days=7, label=None, public=False)
     view = interaction.followup.calls[0]["view"]
     assert view.total_pages == 3
 

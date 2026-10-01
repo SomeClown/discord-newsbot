@@ -1,4 +1,4 @@
-"""Adversarial tests for the lounge wiring in `newsbot.bot.client` (plan task 8).
+"""Adversarial tests for the lounge wiring in `newsbot.bot.client` (plan task 8), per server.
 
 Companion to `test_lounge_client.py`, which checks that the glue works when
 everyone behaves. This file is the other party: members whose names are
@@ -8,6 +8,15 @@ the same tick, and a scheduler asked to fire at a time that either doesn't
 exist or happens twice. Where the code does something the owner might want
 to reconsider, the test pins what it does today and says so in a comment,
 so changing it later is a decision and not a surprise.
+
+These began as the v2 tests (one lounge, read from `config.yaml`) and moved to
+the per-server lounge at the cutover, assertion for assertion. Two things
+changed shape on purpose: a lounge problem is told to that server's admin
+channel through the real `Router` (so these tests also see its escaping and
+length cap), and a notifier that raises no longer escapes the handler. Three
+v2 cases are gone because the state they test can't exist now: a lounge with
+no channel id, an unresolved source list, and (reworked, below) a member with
+no guild.
 
 The fakes are the same hand-written kind as `test_lounge_client.py`; the
 member is a plain object, not a `discord.Member`, so "the attribute is
@@ -21,8 +30,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import discord
@@ -30,31 +41,27 @@ import httpx
 import pytest
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.executors.base import run_coroutine_job
-from apscheduler.jobstores.base import ConflictingIdError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import SecretStr
 
 import newsbot.__main__ as entrypoint
 import newsbot.bot.client as client_module
-from newsbot.bot.client import NewsBot, build_intents, schedule_daily_quote
-from newsbot.config import (
-    DailyQuoteCfg,
-    LoungeCfg,
-    QuoteSourceCfg,
-    Secrets,
-    WelcomeCfg,
-    load_config,
-)
+from newsbot.bot.client import NewsBot, build_intents_for_lounges, schedule_guild_quote
+from newsbot.config import QuoteSourceCfg, Secrets, load_config
+from newsbot.store import repo
 from newsbot.store.db import connect, migrate
-from newsbot.store.repo import get_lounge_state
+from newsbot.store.models import LoungeSettings
 
-CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_v3.yaml"
+GUILD = 300000000000000001
+ZONE = "America/Los_Angeles"
 LOUNGE_ID = 555000000000000001
+ADMIN_ID = 555000000000000002
 USER_ID = 424242424242424242
 USER_NAME = "Distinctive_Guest_Name"
 USER_NICK = "Distinctive_Nick_Name"
-LA = ZoneInfo("America/Los_Angeles")
+LA = ZoneInfo(ZONE)
 SOURCE = QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")
 
 
@@ -68,6 +75,15 @@ def _secrets() -> Secrets:
     )
 
 
+@dataclass(frozen=True)
+class Setup:
+    """One server and its lounge row, standing in for the v2 config these tests used to load."""
+
+    guild_id: int
+    lounge: LoungeSettings
+    cfg: object
+
+
 def _cfg(
     *,
     welcome: bool = True,
@@ -75,14 +91,18 @@ def _cfg(
     message: str = "Hi {member}, welcome to {server}",
     time: str = "08:00",
     sources: list[QuoteSourceCfg] | None = None,
-):
-    cfg = load_config(CONFIG_PATH)
-    lounge = LoungeCfg(
+) -> Setup:
+    lounge = LoungeSettings(
+        guild_id=GUILD,
         channel_id=LOUNGE_ID,
-        welcome=WelcomeCfg(enabled=welcome, message=message),
-        daily_quote=DailyQuoteCfg(enabled=quote, time=time, sources=sources or [SOURCE]),
+        welcome_enabled=welcome,
+        welcome_message=message,
+        quote_enabled=quote,
+        quote_time=time,
+        quote_sources=[{"kind": s.kind, "value": s.value} for s in (sources or [SOURCE])],
+        last_quote_date=None,
     )
-    return cfg.model_copy(update={"lounge": lounge})
+    return Setup(GUILD, lounge, load_config(CONFIG_PATH))
 
 
 @pytest.fixture
@@ -146,6 +166,7 @@ class FakeChannel:
     """Records sends. `limit` mimics Discord's 2,000 UTF-16 unit cap; `slow` yields mid-send."""
 
     def __init__(self, *, limit: int | None = None, slow: bool = False) -> None:
+        self.guild = SimpleNamespace(id=GUILD)
         self.sent: list[tuple[str, discord.AllowedMentions]] = []
         self.next_error: BaseException | None = None
         self.limit = limit
@@ -162,18 +183,25 @@ class FakeChannel:
         return FakeSent(900 + len(self.sent))
 
 
-def _bot(cfg, db_path, *, lounge: FakeChannel | None = None, admin: FakeChannel | None = None):
-    """A NewsBot with the real `alert`, routed to fake lounge and admin channels.
+def _bot(
+    setup: Setup, db_path, *, lounge: FakeChannel | None = None, admin: FakeChannel | None = None
+):
+    """A NewsBot with this lounge row and the real notice path, routed to fake channels.
 
-    Unlike `test_lounge_client._bot`, `alert` is not stubbed: the alert text,
-    its `AllowedMentions` and its "never raises" promise are part of what's
-    under test. `get_channel` returning None for an unknown id sends
-    `_lounge_channel` down its `fetch_channel` path.
+    A lounge problem goes through the real `Router.notify_guild`: the notice is
+    recorded, and the text (mentions defused, length capped) is posted to the
+    server's admin channel, here `admin_channel`. Its text, its `AllowedMentions`
+    and its "never raises" promise are part of what's under test.
     """
-    bot = NewsBot(cfg, _secrets(), db_path)
+    with closing(connect(db_path)) as conn:
+        repo.create_guild(
+            conn, setup.guild_id, set_up=True, timezone=ZONE, admin_channel_id=ADMIN_ID
+        )
+        repo.upsert_lounge(conn, setup.lounge)
+    bot = NewsBot(setup.cfg, _secrets(), db_path, lounges=[setup.lounge])
     bot.lounge_channel = lounge if lounge is not None else FakeChannel()  # type: ignore[attr-defined]
     bot.admin_channel = admin if admin is not None else FakeChannel()  # type: ignore[attr-defined]
-    channels = {LOUNGE_ID: bot.lounge_channel, cfg.admin_channel_id: bot.admin_channel}  # type: ignore[attr-defined]
+    channels = {LOUNGE_ID: bot.lounge_channel, ADMIN_ID: bot.admin_channel}  # type: ignore[attr-defined]
     bot.get_channel = lambda channel_id: channels.get(channel_id)  # type: ignore[method-assign]
 
     async def fetch_channel(channel_id: int):
@@ -292,14 +320,17 @@ async def test_missing_flags_alerts_and_the_member_is_not_retried(db_path):
     assert bot.lounge_channel.sent == []
 
 
-async def test_a_member_with_no_guild_alerts_and_does_not_raise(db_path):
+async def test_a_member_with_no_guild_is_ignored_and_does_not_raise(db_path):
+    # v2 alerted the one admin channel. With a server per lounge a member with no server
+    # has nobody to tell, so it's ignored (discord.py never builds one, so this is a what-if).
     cfg = _cfg()
     bot = _bot(cfg, db_path)
 
     await bot.on_member_join(FakeMember(None))
+    await bot.on_member_update(FakeMember(None, pending=True), FakeMember(None))
 
     assert bot.lounge_channel.sent == []
-    assert len(bot.admin_channel.sent) == 1
+    assert bot.admin_channel.sent == []
 
 
 async def test_update_in_another_guild_is_ignored_and_does_not_use_up_the_member(db_path):
@@ -471,17 +502,6 @@ async def test_a_failed_welcome_is_not_retried_for_the_same_member(db_path):
     assert len(bot.admin_channel.sent) == 1
 
 
-async def test_a_missing_lounge_channel_id_is_an_alert_not_a_crash(db_path):
-    cfg = _cfg()
-    cfg = cfg.model_copy(update={"lounge": cfg.lounge.model_copy(update={"channel_id": None})})
-    bot = _bot(cfg, db_path)
-
-    await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
-
-    ((alert, _),) = bot.admin_channel.sent
-    assert "RuntimeError" in alert
-
-
 async def test_cancelled_send_propagates_without_an_alert(db_path):
     cfg = _cfg()
     channel = FakeChannel()
@@ -510,7 +530,7 @@ async def test_cancelled_fetch_propagates_without_an_alert(db_path):
 
 
 async def test_a_broken_admin_channel_does_not_raise_out_of_the_handler(db_path):
-    # The real `alert` is `send_alert`, which swallows its own failures, so a
+    # The real `alert` goes through the router, which swallows its own failures, so a
     # dead admin channel can't take the handler down.
     cfg = _cfg()
     lounge, admin = FakeChannel(), FakeChannel()
@@ -523,24 +543,20 @@ async def test_a_broken_admin_channel_does_not_raise_out_of_the_handler(db_path)
     assert admin.sent == []
 
 
-async def test_an_alert_that_itself_raises_propagates_out_of_the_handler(db_path):
-    # Documented, not endorsed: `_maybe_welcome` awaits `self.alert` inside its
-    # own except block with no second net. The production `alert` never
-    # raises (see the test above), and discord.py's event dispatcher catches
-    # whatever a handler raises and routes it to `on_error`, so this is
-    # belt-and-braces territory. Pinned so a change is deliberate.
+async def test_a_notifier_that_itself_raises_does_not_propagate_out_of_the_handler(db_path):
+    # v2 pinned the opposite ("documented, not endorsed": the alert was awaited inside the
+    # except block with no second net). `notify_lounge_guild` has the net now: it never raises.
     cfg = _cfg()
     channel = FakeChannel()
     channel.next_error = RuntimeError("send failed")
     bot = _bot(cfg, db_path, lounge=channel)
 
-    async def broken_alert(text: str) -> None:
+    async def broken_notifier(guild_id: int, text: str) -> None:
         raise ValueError("the pager is on fire")
 
-    bot.alert = broken_alert  # type: ignore[method-assign]
+    bot.guild_notifier = broken_notifier
 
-    with pytest.raises(ValueError, match="pager"):
-        await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
+    await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))  # must not raise
 
 
 async def test_logs_at_every_level_carry_no_name_id_nick_or_mention(db_path, caplog):
@@ -585,7 +601,7 @@ async def test_failure_log_has_no_traceback_and_no_exception_message(db_path, ca
     await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
 
     (failure,) = [r for r in caplog.records if r.getMessage().startswith("welcome failed")]
-    assert failure.getMessage() == "welcome failed: RuntimeError"
+    assert failure.getMessage() == f"welcome failed in guild {GUILD}: RuntimeError"
     assert failure.levelno == logging.ERROR
     assert failure.exc_info is None
     for record in caplog.records:
@@ -604,7 +620,9 @@ async def test_failure_log_for_a_discord_error_carries_status_and_code_only(db_p
     await bot.on_member_join(FakeMember(FakeGuild(cfg.guild_id)))
 
     (failure,) = [r for r in caplog.records if r.getMessage().startswith("welcome failed")]
-    assert failure.getMessage().startswith("welcome failed: Forbidden (status=403, code=")
+    assert failure.getMessage().startswith(
+        f"welcome failed in guild {GUILD}: Forbidden (status=403, code="
+    )
     assert USER_NAME not in logging.Formatter("%(message)s").format(failure)
 
 
@@ -614,12 +632,12 @@ async def test_failure_log_for_a_discord_error_carries_status_and_code_only(db_p
 async def test_quote_job_crash_alerts_once_and_does_not_propagate(db_path):
     bot = _bot(_cfg(welcome=False, quote=True), db_path)
 
-    async def boom(force: bool):
+    async def boom(guild_id: int, force: bool):
         raise RuntimeError("kaboom")
 
-    bot.run_quote = boom  # type: ignore[method-assign]
+    bot.run_guild_quote = boom  # type: ignore[method-assign]
 
-    await bot._quote_job()
+    await bot._guild_quote_job(GUILD)
 
     ((alert, mentions),) = bot.admin_channel.sent
     assert alert == "newsbot: daily quote job crashed: kaboom"
@@ -634,11 +652,11 @@ async def _crash_with(db_path, error: BaseException) -> FakeChannel:
     admin = FakeChannel(limit=2000)
     bot = _bot(_cfg(welcome=False, quote=True), db_path, admin=admin)
 
-    async def boom(force: bool):
+    async def boom(guild_id: int, force: bool):
         raise error
 
-    bot.run_quote = boom  # type: ignore[method-assign]
-    await bot._quote_job()
+    bot.run_guild_quote = boom  # type: ignore[method-assign]
+    await bot._guild_quote_job(GUILD)
     return admin
 
 
@@ -704,8 +722,8 @@ async def test_cancelled_run_releases_the_quote_lock(db_path, monkeypatch):
     monkeypatch.setattr(client_module, "run_daily_quote", cancelled)
     try:
         with pytest.raises(asyncio.CancelledError):
-            await bot._quote_job()
-        assert bot._quote_lock.locked() is False
+            await bot._guild_quote_job(GUILD)
+        assert bot._guild_quote_locks[GUILD].locked() is False
         assert bot.admin_channel.sent == []
     finally:
         await bot.http_client.aclose()
@@ -719,12 +737,14 @@ def _quote_file(tmp_path: Path) -> QuoteSourceCfg:
 
 def _used_rows(db_path: str) -> int:
     with closing(connect(db_path)) as conn:
-        return conn.execute("SELECT COUNT(*) FROM lounge_quotes_used").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM lounge_quotes_used WHERE guild_id = ?", (GUILD,)
+        ).fetchone()[0]
 
 
 def _last_day(db_path: str) -> str | None:
     with closing(connect(db_path)) as conn:
-        return get_lounge_state(conn).last_quote_date
+        return repo.get_lounge(conn, GUILD).last_quote_date
 
 
 @pytest.mark.parametrize(
@@ -741,7 +761,7 @@ async def test_racing_job_and_forced_run_agree_with_the_database(
     bot = _bot(_cfg(welcome=False, quote=True, sources=[_quote_file(tmp_path)]), db_path)
     bot.http_client = _no_network_client()
     try:
-        outcomes = await asyncio.gather(*(bot.run_quote(force) for force in order))
+        outcomes = await asyncio.gather(*(bot.run_guild_quote(GUILD, force) for force in order))
     finally:
         await bot.http_client.aclose()
 
@@ -761,26 +781,11 @@ async def test_explicit_source_list_reaches_the_deps_in_order(db_path):
         QuoteSourceCfg(kind="url", value="https://example.com/q.txt"),
         SOURCE,
     ]
-    bot = _bot(_cfg(quote=True, sources=sources), db_path)
+    setup = _cfg(quote=True, sources=sources)
+    bot = _bot(setup, db_path)
     bot.http_client = _no_network_client()
     try:
-        assert bot.build_quote_deps().sources == sources
-    finally:
-        await bot.http_client.aclose()
-
-
-async def test_an_unresolved_source_list_reads_as_not_ready_yet(db_path):
-    # Documented: `sources=None` (which `load_config` always replaces with the
-    # default list) is reported with the same "before setup_hook" message as a
-    # missing HTTP client. Slightly misleading, but the state is unreachable
-    # through `load_config`, so it's a footnote and not a bug.
-    cfg = load_config(CONFIG_PATH)
-    lounge = LoungeCfg(channel_id=LOUNGE_ID, daily_quote=DailyQuoteCfg(enabled=True, sources=None))
-    bot = NewsBot(cfg.model_copy(update={"lounge": lounge}), _secrets(), db_path)
-    bot.http_client = _no_network_client()
-    try:
-        with pytest.raises(RuntimeError, match="setup_hook"):
-            bot.build_quote_deps()
+        assert bot.build_guild_quote_deps(setup.lounge, ZONE).sources == sources
     finally:
         await bot.http_client.aclose()
 
@@ -797,14 +802,15 @@ async def test_an_unresolved_source_list_reads_as_not_ready_yet(db_path):
         (datetime(2026, 9, 30, 0, 0, 1, tzinfo=UTC), date(2026, 9, 29)),
     ],
 )
-async def test_local_day_follows_digest_timezone_not_utc(
+async def test_local_day_follows_the_servers_timezone_not_utc(
     db_path, monkeypatch, utc_moment, expected
 ):
     _freeze(monkeypatch, utc_moment)
-    bot = _bot(_cfg(quote=True), db_path)
+    setup = _cfg(quote=True)
+    bot = _bot(setup, db_path)
     bot.http_client = _no_network_client()
     try:
-        deps = bot.build_quote_deps()
+        deps = bot.build_guild_quote_deps(setup.lounge, ZONE)
     finally:
         await bot.http_client.aclose()
 
@@ -816,10 +822,11 @@ async def test_local_day_is_fixed_when_the_deps_are_built(db_path, monkeypatch):
     # Documented: the day is computed in `build_quote_deps`, not per call, so a
     # run that starts at 23:59:59 and finishes after midnight is still "yesterday's".
     clock = _freeze(monkeypatch, datetime(2026, 9, 30, 6, 59, 59, tzinfo=UTC))
-    bot = _bot(_cfg(quote=True), db_path)
+    setup = _cfg(quote=True)
+    bot = _bot(setup, db_path)
     bot.http_client = _no_network_client()
     try:
-        deps = bot.build_quote_deps()
+        deps = bot.build_guild_quote_deps(setup.lounge, ZONE)
         clock.current += timedelta(seconds=5)
     finally:
         await bot.http_client.aclose()
@@ -837,9 +844,9 @@ async def test_double_fire_on_the_fall_back_day_still_posts_one_quote(
     bot = _bot(_cfg(welcome=False, quote=True, sources=[_quote_file(tmp_path)]), db_path)
     bot.http_client = _no_network_client()
     try:
-        await bot._quote_job()
+        await bot._guild_quote_job(GUILD)
         clock.current = datetime(2026, 11, 1, 9, 30, tzinfo=UTC)  # 01:30 PST
-        await bot._quote_job()
+        await bot._guild_quote_job(GUILD)
     finally:
         await bot.http_client.aclose()
 
@@ -857,8 +864,7 @@ def _fire_times(time: str, start: datetime, count: int) -> list[datetime]:
     async def callback() -> None:
         pass
 
-    trigger = schedule_daily_quote(scheduler, _cfg(welcome=False, quote=True, time=time), callback)
-    trigger = trigger.trigger
+    trigger = schedule_guild_quote(scheduler, GUILD, time, ZONE, callback).trigger
     assert isinstance(trigger, CronTrigger)
     previous, now, fires = None, start, []
     for _ in range(count):
@@ -936,7 +942,7 @@ def test_time_inside_the_repeated_hour_fires_twice_on_the_fall_back_day():
     assert len([f for f in later if f.astimezone(LA).date() == date(2026, 11, 1)]) == 1
 
 
-async def test_the_job_id_is_unique_and_a_second_registration_is_a_conflict():
+async def test_each_servers_job_id_is_its_own_and_a_repeat_replaces_it():
     scheduler = AsyncIOScheduler(timezone=LA)
     scheduler.start(paused=True)
 
@@ -944,27 +950,34 @@ async def test_the_job_id_is_unique_and_a_second_registration_is_a_conflict():
         pass
 
     try:
-        schedule_daily_quote(scheduler, _cfg(quote=True), callback)
-        with pytest.raises(ConflictingIdError):
-            schedule_daily_quote(scheduler, _cfg(quote=True), callback)
-        assert [job.id for job in scheduler.get_jobs()] == ["daily-quote"]
+        schedule_guild_quote(scheduler, GUILD, "08:00", ZONE, callback)
+        schedule_guild_quote(scheduler, GUILD + 1, "08:00", ZONE, callback)
+        assert sorted(job.id for job in scheduler.get_jobs()) == [
+            f"daily-quote-{GUILD}",
+            f"daily-quote-{GUILD + 1}",
+        ]
     finally:
         scheduler.shutdown(wait=False)
 
 
-async def test_a_second_registration_before_start_fails_when_the_scheduler_starts():
-    # Documented: before `start()`, add_job just queues, so the duplicate is
-    # only noticed at start. setup_hook registers once, so this is a footnote.
+async def test_a_second_registration_before_start_replaces_the_first():
+    # Documented: before `start()`, add_job just queues.
     scheduler = AsyncIOScheduler(timezone=LA)
 
     async def callback() -> None:
         pass
 
-    schedule_daily_quote(scheduler, _cfg(quote=True), callback)
-    schedule_daily_quote(scheduler, _cfg(quote=True), callback)
+    schedule_guild_quote(scheduler, GUILD, "08:00", ZONE, callback)
+    schedule_guild_quote(scheduler, GUILD, "09:00", ZONE, callback)
 
-    with pytest.raises(ConflictingIdError):
-        scheduler.start()
+    # v2 pinned a ConflictingIdError here. Jobs are `replace_existing` now, because a
+    # re-sync moves one server's time, so the second registration simply wins.
+    scheduler.start(paused=True)
+    try:
+        (job,) = scheduler.get_jobs()
+        assert str(job.trigger.fields[5]) == "9"  # the hour
+    finally:
+        scheduler.shutdown(wait=False)
 
 
 @pytest.mark.parametrize(
@@ -993,7 +1006,7 @@ async def test_misfire_grace_boundary_is_300_seconds_inclusive(monkeypatch, late
         ran.append(1)
 
     scheduler = AsyncIOScheduler(timezone=LA)
-    job = schedule_daily_quote(scheduler, _cfg(quote=True), callback)
+    job = schedule_guild_quote(scheduler, GUILD, "08:00", ZONE, callback)
 
     events = await run_coroutine_job(job, "default", [scheduled], "test")
 
@@ -1001,8 +1014,11 @@ async def test_misfire_grace_boundary_is_300_seconds_inclusive(monkeypatch, late
     assert bool(ran) is (event == EVENT_JOB_EXECUTED)
 
 
-async def _setup_and_list_jobs(cfg, db_path) -> tuple[set[str], bool]:
-    bot = NewsBot(cfg, _secrets(), db_path)
+async def _setup_and_list_jobs(setup: Setup, db_path) -> tuple[set[str], bool]:
+    with closing(connect(db_path)) as conn:
+        repo.create_guild(conn, setup.guild_id, set_up=True, timezone=ZONE)
+        repo.upsert_lounge(conn, setup.lounge)
+    bot = NewsBot(setup.cfg, _secrets(), db_path, lounges=[setup.lounge])
 
     async def _fake_sync(*args, **kwargs):
         return []
@@ -1010,6 +1026,7 @@ async def _setup_and_list_jobs(cfg, db_path) -> tuple[set[str], bool]:
     bot.tree.sync = _fake_sync  # type: ignore[method-assign]
     try:
         await bot.setup_hook()
+        await bot.schedule_lounge_quotes()  # what on_ready does, once the scheduler exists
         return {job.id for job in bot.scheduler.get_jobs()}, bot.intents.members
     finally:
         bot.scheduler.shutdown(wait=False)
@@ -1019,10 +1036,10 @@ async def _setup_and_list_jobs(cfg, db_path) -> tuple[set[str], bool]:
 @pytest.mark.parametrize(
     ("welcome", "quote"), [(True, False), (False, True), (True, True), (False, False)]
 )
-async def test_setup_hook_wires_each_feature_independently(db_path, welcome, quote):
+async def test_each_feature_is_wired_independently(db_path, welcome, quote):
     jobs, members = await _setup_and_list_jobs(_cfg(welcome=welcome, quote=quote), db_path)
 
-    assert ("daily-quote" in jobs) is quote
+    assert (f"daily-quote-{GUILD}" in jobs) is quote
     assert members is welcome
 
 
@@ -1032,7 +1049,7 @@ async def test_setup_hook_wires_each_feature_independently(db_path, welcome, quo
 @pytest.mark.parametrize("welcome", [True, False])
 @pytest.mark.parametrize("quote", [True, False])
 def test_intents_members_iff_welcome_and_nothing_else_privileged(welcome, quote):
-    intents = build_intents(_cfg(welcome=welcome, quote=quote))
+    intents = build_intents_for_lounges([_cfg(welcome=welcome, quote=quote).lounge])
 
     assert intents.members is welcome
     assert intents.presences is False
@@ -1047,7 +1064,7 @@ def test_intents_members_iff_welcome_and_nothing_else_privileged(welcome, quote)
 
 def _wire_main(monkeypatch, tmp_path, run) -> None:
     class StubBot:
-        def __init__(self, cfg, secrets, db_path) -> None:
+        def __init__(self, cfg, secrets, db_path, **kwargs) -> None:
             pass
 
         def run(self, token: str, **kwargs) -> None:

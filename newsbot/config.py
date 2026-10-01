@@ -8,6 +8,14 @@ either one. If the config is wrong, we'd rather the process refuse to start
 with a message that says exactly what's wrong than limp along half-configured
 and drop stories from a topic nobody noticed was misspelled (ask me how I
 know).
+
+Two shapes of `config.yaml` load here (design.md §15). The v3 shape is a
+global `catalog:` of games; the v2 shape is per-server `topics:` and
+`sources:`. If there's no `catalog:`, the catalog is *derived* from the v2
+keys, so the config already running in production keeps loading and the bot
+behaves exactly as it did. If there are both, the catalog wins and the old
+keys are only read by the one-time import (`LegacySetup`), like a moving box
+nobody has unpacked yet.
 """
 
 from __future__ import annotations
@@ -15,15 +23,24 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 import yaml
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    SecretStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
@@ -39,6 +56,8 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 # Discord allows 25 choices per slash-command option, and /news recent spends
 # one of them on "All". Hence 24, not the round number I first wrote.
 _MAX_TOPICS = 24
+# v3 catalog cap: one Discord select menu holds 25 options, and there's no "All" in it.
+_MAX_CATALOG_GAMES = 25
 
 
 class ConfigError(Exception):
@@ -69,6 +88,52 @@ def _reject_bool_channel_id(v: object) -> object:
     return v
 
 
+def _reject_bool_guild_id(v: object) -> object:
+    """The guild-id twin of `_reject_bool_channel_id`, with a message that says "guild".
+
+    (I reused the channel one at first, so a bad `home_guild_id` complained
+    about `channel_id`. Nobody deserves that at startup.)
+    """
+    if isinstance(v, bool):
+        raise ValueError("must be a number, not true or false")
+    return v
+
+
+def _reject_blank_name(v: str) -> str:
+    if not v.strip():
+        raise ValueError("can't be blank")
+    return v
+
+
+def _check_search_queries(v: list[str]) -> list[str]:
+    if any(not q.strip() for q in v):
+        raise ValueError("search_queries entries must be non-empty strings")
+    return v
+
+
+class GameInfo(Protocol):
+    """What the filter, the prompts and web search need to know about a game.
+
+    v2's `Topic` and v3's `GameCfg` both satisfy this, which is the whole
+    reason it exists: the pipeline doesn't care which config shape a game
+    came from, and I'd rather not teach it to. Read-only properties, so a
+    frozen or plain model both fit.
+    """
+
+    @property
+    def key(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def aliases(self) -> list[str]: ...
+    @property
+    def entities(self) -> list[str]: ...
+    @property
+    def search_queries(self) -> list[str]: ...
+    @property
+    def match_name(self) -> bool: ...
+
+
 class Topic(BaseModel):
     key: str
     name: str
@@ -83,17 +148,46 @@ class Topic(BaseModel):
     # topics are happy with "{name} news" and one weird topic never is.
     search_queries: list[str] = []
 
+    @property
+    def match_name(self) -> bool:
+        """Always true for a v2 topic; only catalog games can opt out (see `GameInfo`)."""
+        return True
+
     @field_validator("channel_id", mode="before")
     @classmethod
     def _validate_channel_id_not_bool(cls, v: object) -> object:
         return _reject_bool_channel_id(v)
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name_not_blank(cls, v: str) -> str:
+        return _reject_blank_name(v)
+
+    @field_validator("aliases", "entities")
+    @classmethod
+    def _drop_blank_terms(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """Drop blank aliases and entities, with a warning, instead of refusing to load.
+
+        v2.2 never checked these, so a config with `aliases: [""]` loaded and
+        ran; refusing it now would turn an upgrade into an outage over a
+        stray dash in a YAML list. A blank term compiles to a regex that
+        matches between any two punctuation marks, so it can't stay, and
+        dropping it is the closest thing to what the owner meant.
+        """
+        kept = [t for t in v if t.strip()]
+        if len(kept) != len(v):
+            logging.getLogger(__name__).warning(
+                "topic %r: dropping %d blank %s entries (a blank term matches nearly everything)",
+                info.data.get("key", "?"),
+                len(v) - len(kept),
+                info.field_name,
+            )
+        return kept
+
     @field_validator("search_queries")
     @classmethod
     def _validate_search_queries(cls, v: list[str]) -> list[str]:
-        if any(not q.strip() for q in v):
-            raise ValueError("search_queries entries must be non-empty strings")
-        return v
+        return _check_search_queries(v)
 
 
 class DigestCfg(BaseModel):
@@ -176,6 +270,149 @@ Source = Annotated[
 ]
 
 
+class SharedRssSource(RssSource, extra="forbid"):
+    """An RSS source that belongs to no one game (design.md §15, decision D1)."""
+
+    games: list[str] | None = None
+
+
+class SharedSteamSource(SteamSource, extra="forbid"):
+    games: list[str] | None = None
+
+
+class SharedBlueskySource(BlueskySource, extra="forbid"):
+    games: list[str] | None = None
+
+
+# `web_search` is in this union only so a stray one parses far enough for
+# load_config to say where it belongs, instead of pydantic's union-tag error.
+SharedSourceCfg = Annotated[
+    SharedRssSource | SharedSteamSource | SharedBlueskySource | WebSearchSource,
+    Field(discriminator="type"),
+]
+
+_SHARED_BY_TYPE: dict[str, type[RssSource | SteamSource | BlueskySource]] = {
+    "rss": SharedRssSource,
+    "steam_news": SharedSteamSource,
+    "bluesky_search": SharedBlueskySource,
+}
+
+
+class GameCfg(BaseModel, extra="forbid"):
+    """One catalog game (v3): a `Topic` without a channel, plus its own sources.
+
+    Channels are per server now, so they live in the database and this has
+    none. `match_name: false` is for names that are also ordinary words
+    (Rust, Destiny, Apex): the aliases do the matching instead.
+    """
+
+    key: str
+    name: str
+    aliases: list[str] = []
+    entities: list[str] = []
+    search_queries: list[str] = []
+    match_name: bool = True
+    # A source listed here belongs to this game, so it never says `topics`
+    # (load_config rejects one that does).
+    sources: list[Source] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _let_the_channel_id_precheck_speak(cls, data: object) -> object:
+        # `channel_id` is a mistake with its own, better message (load_config's
+        # raw pre-check: "use /newsbot follow"). Left to extra="forbid" it would
+        # be reported twice, and would stop every cross-check from running.
+        if isinstance(data, dict) and "channel_id" in data:
+            return {k: v for k, v in data.items() if k != "channel_id"}
+        return data
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_not_blank(cls, v: str) -> str:
+        return _reject_blank_name(v)
+
+    @field_validator("aliases", "entities")
+    @classmethod
+    def _validate_terms_not_blank(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        # Unlike a v2 topic, nothing old depends on a blank term here, so it's
+        # an error rather than a shrug. It would match nearly every headline.
+        if any(not t.strip() for t in v):
+            raise ValueError(f"{info.field_name} can't have blank entries")
+        return v
+
+    @field_validator("search_queries")
+    @classmethod
+    def _validate_search_queries(cls, v: list[str]) -> list[str]:
+        return _check_search_queries(v)
+
+
+class WebSearchCfg(BaseModel, extra="forbid"):
+    """Brave News search, once a day, for comped servers' games (design.md §15).
+
+    Brave has always been one global source, so it gets one global block
+    instead of a slot in every game's source list.
+    """
+
+    name: str = "Brave Search"
+    queries_per_game: int = Field(2, ge=1)
+    query_templates: list[str] = ["{name} news", "{name} update OR patch OR leak"]
+    trust: Trust = "press"
+
+
+class ShiftCfg(BaseModel, extra="forbid"):
+    """Global SHiFT detection. Per-server channel and ping live in the database."""
+
+    # In the v2 shape, empty means every game (alerts.topics' old reading). In the
+    # v3 shape, leaving it out means borderlands4 and an empty list is an error.
+    games: list[str] = []
+    max_item_age_hours: int = Field(48, ge=1, le=720)
+    # Per server, per that server's local day; 0 means codes post but never ping.
+    max_pings_per_day: int = Field(3, ge=0)
+    ping_trust: list[Trust] = ["official", "press"]
+    max_codes_per_item: int = Field(5, ge=1)
+    # Ignored since the cutover (/newsbot test-alert is gone); kept so a v2.2 file still loads.
+    allow_test_command: bool = False
+
+
+class CollectionCfg(BaseModel, extra="forbid"):
+    interval_minutes: int = Field(60, ge=15, le=1440)
+    lookback_hours: int = Field(24, ge=1)
+    max_items_per_game: int = Field(60, ge=1)
+    # How often a non-priority subreddit is fetched, in hours (1 means every
+    # one, every pass). Priority ones (SHiFT games, comped servers' games)
+    # always go every pass; see pipeline/collect.py.
+    reddit_rotation_hours: int = Field(3, ge=1, le=24)
+
+
+class AiCfg(BaseModel, extra="forbid"):
+    # What SYSTEM_PROMPT calls the games ("the video games ..."); it was
+    # digest.subject in v2 and the prompt stays byte-identical by default.
+    subject: str = "video games"
+
+
+class OwnerReportCfg(BaseModel, extra="forbid"):
+    """When the owner's daily all-servers summary goes out."""
+
+    time: str = "21:00"
+    timezone: str = "America/Los_Angeles"
+
+    @field_validator("time")
+    @classmethod
+    def _validate_time(cls, v: str) -> str:
+        if not _TIME_RE.match(v):
+            raise ValueError(f"owner_report.time {v!r} is not HH:MM (24-hour)")
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"owner_report.timezone {v!r} is not a known IANA zone") from exc
+        return v
+
+
 class AlertsCfg(BaseModel, extra="forbid"):
     """Settings for the SHiFT code alert sweep (design.md §12).
 
@@ -198,7 +435,7 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # still get recorded and posted, just never with @everyone attached.
     max_pings_per_day: int = Field(3, ge=0)
     allow_test_command: bool = False
-    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics --
+    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics:
     # a Diablo IV patch note has never once contained a Borderlands SHiFT
     # code, and pinging the whole server for every game's codes when the
     # owner only cares about one is a worse default than the sweep quietly
@@ -320,15 +557,121 @@ class LoungeCfg(BaseModel, extra="forbid"):
         return _reject_bool_channel_id(v)
 
 
-class AppConfig(BaseModel):
+class LegacySetup(BaseModel):
+    """The one-time import's view of the v2 keys: one server's whole setup.
+
+    Built whenever `guild_id` is present, whichever shape the rest of the
+    file is in. After the import has run, none of this is read again.
+    """
+
     guild_id: int
+    admin_channel_id: int | None
+    digest_time: str
+    timezone: str
+    games: list[tuple[str, int]]
+    shift_enabled: bool
+    shift_channel_id: int | None
+    shift_ping: Literal["everyone", "none"]
+    lounge: LoungeCfg | None
+    alerts_max_pings: int
+
+
+class AppConfig(BaseModel):
+    """What the running bot reads: the v3 settings, and nothing from the v2 keys.
+
+    The v2 keys (`guild_id`, `digest`, `topics`, `sources`, `alerts`, `lounge`)
+    live on `_RawConfig` below, which only `load_config` ever sees. Whatever
+    the rest of the bot needs from them is already in here by the time the
+    loader returns: games and sources in the catalog, the SHiFT and collection
+    settings in their blocks, and the one server's old setup in `legacy` for
+    the import to chew on exactly once.
+    """
+
+    # Global settings (v3).
+    home_guild_id: int | None = Field(None, gt=0)
+    # Bot-wide owner alerts go to `owner_channel_id`; when it's unset they fall back to
+    # `admin_channel_id`, which is what a single-server self-host and every v2-shaped file
+    # has. In a v2 file `admin_channel_id` is also the one server's own admin channel, and
+    # only the one-time import reads it as that (through `legacy`).
+    owner_channel_id: int | None = None
     admin_channel_id: int | None = None
     admin_permission: str = "manage_guild"
-    digest: DigestCfg
-    topics: list[Topic]
-    sources: list[Source]
+    command_guild_ids: list[int] = []
+    comped_guild_ids: list[int] = []
+    owner_report: OwnerReportCfg = OwnerReportCfg()
+    collection: CollectionCfg = CollectionCfg()
+    ai: AiCfg = AiCfg()
+    run_report: bool = True
+    web_search: WebSearchCfg | None = None
+    shift: ShiftCfg = ShiftCfg()
+    shared_sources: list[SharedSourceCfg] = []
+    catalog: list[GameCfg] = []
+    legacy: LegacySetup | None = None
+
+    @field_validator("home_guild_id", mode="before")
+    @classmethod
+    def _validate_guild_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_guild_id(v)
+
+    @field_validator("owner_channel_id", "admin_channel_id")
+    @classmethod
+    def _placeholder_channel_is_none(cls, v: int | None) -> int | None:
+        # config.example.yaml's "fill me in" is `owner_channel_id: 000000000000000000`, and
+        # nothing positive can be a channel id's placeholder. Zero (or a typo'd negative)
+        # means "no channel" here, at the one place every consumer reads it from, so the
+        # Router doesn't go asking Discord for channel 0 on every alert.
+        return v if v is not None and v > 0 else None
+
+    @property
+    def owner_channel_key(self) -> str:
+        """Which key the owner's alert channel is coming from: the new one, else the old one."""
+        return "owner_channel_id" if self.owner_channel_id is not None else "admin_channel_id"
+
+    @property
+    def effective_owner_channel_id(self) -> int | None:
+        """Where bot-wide owner alerts go: `owner_channel_id`, else `admin_channel_id`."""
+        if self.owner_channel_id is not None:
+            return self.owner_channel_id
+        return self.admin_channel_id
+
+    @field_validator("command_guild_ids", "comped_guild_ids", mode="before")
+    @classmethod
+    def _validate_guild_id_list(cls, v: object) -> object:
+        if isinstance(v, list):
+            for item in v:
+                _reject_bool_guild_id(item)
+        return v
+
+    @field_validator("command_guild_ids", "comped_guild_ids")
+    @classmethod
+    def _validate_guild_ids_positive(cls, v: list[int]) -> list[int]:
+        if any(i <= 0 for i in v):
+            raise ValueError("guild ids must be positive integers")
+        return v
+
+
+class _RawConfig(AppConfig):
+    """`AppConfig` plus the v2 keys: what the YAML parses into, before `load_config` is done.
+
+    The v2 fields are optional because a v3 file has none of them. They stay
+    here, not on `AppConfig`, so nothing past the loader can quietly keep
+    reading a v2 setting that the database now owns.
+    """
+
+    guild_id: int | None = Field(None, gt=0)
+    digest: DigestCfg | None = None
+    topics: list[Topic] = []
+    sources: list[Source] = []
     alerts: AlertsCfg = AlertsCfg()
     lounge: LoungeCfg = LoungeCfg()
+
+    # `guild_id` is v2's key and gets the same checks as `home_guild_id`, since
+    # it's copied into it. v2.2 would have failed at runtime on a non-positive
+    # one anyway; this just says so at startup.
+    @field_validator("guild_id", mode="before")
+    @classmethod
+    def _validate_legacy_guild_id_not_bool(cls, v: object) -> object:
+        return _reject_bool_guild_id(v)
 
 
 class Secrets(BaseModel):
@@ -359,8 +702,15 @@ def _format_pydantic_error(error: dict, raw: dict) -> str:
     # Left alone they'd come out as "lounge.daily_quote.time: Value error,
     # lounge.daily_quote.time '99:99' is not HH:MM", which says the path twice
     # and the words "Value error" once too often.
-    if error["type"] == "value_error" and message.startswith("Value error, lounge."):
+    if error["type"] == "value_error" and message.startswith(
+        ("Value error, lounge.", "Value error, owner_report.")
+    ):
         return message.removeprefix("Value error, ")
+    if error["type"] == "value_error":
+        message = message.removeprefix("Value error, ")
+    elif error["type"] == "extra_forbidden":
+        where = ".".join(str(p) for p in loc[:-1]) or "the top level"
+        message += f" (unknown key {str(loc[-1])!r} in {where}; check the spelling)"
     if (
         len(loc) == 3
         and loc[0] == "topics"
@@ -415,7 +765,7 @@ def _source_problem(i: int, src: QuoteSourceCfg) -> str | None:
     return None
 
 
-def _check_lounge(cfg: AppConfig, config_path: Path, errors: list[str]) -> AppConfig:
+def _check_lounge(cfg: _RawConfig, config_path: Path, errors: list[str]) -> _RawConfig:
     """Cross-check the `lounge:` block, appending to `errors`; return `cfg` with sources filled in.
 
     Pydantic has already checked each field on its own. This is the part that
@@ -481,6 +831,229 @@ def _check_lounge(cfg: AppConfig, config_path: Path, errors: list[str]) -> AppCo
     return cfg.model_copy(update={"lounge": lounge.model_copy(update={"daily_quote": quote})})
 
 
+_LEGACY_KEYS = ("guild_id", "digest", "topics", "sources", "alerts", "lounge")
+
+
+def _with_default_name(source):
+    """Fill in a Bluesky source's default name (see the uniqueness check in load_config)."""
+    if isinstance(source, BlueskySource) and source.name is None:
+        return source.model_copy(update={"name": _bluesky_default_name(source.query)})
+    return source
+
+
+def _shape_problems(raw: dict) -> list[str]:
+    """Problems with which keys are present at all, judged from the raw YAML.
+
+    A v3 config has `catalog:`; a v2 config has `topics:` and `sources:` (and
+    the per-server keys around them). Neither is its own error, since "field
+    required" for four fields at once doesn't tell anyone which shape they
+    were going for. A v2 config missing just one of its own keys still gets
+    pydantic's familiar wording, so nobody has to relearn what a typo looks like.
+    """
+    if "catalog" in raw:
+        return []
+    if "topics" not in raw and "sources" not in raw:
+        return ["config needs a catalog: (v3), or the v2 topics: and sources: to import from"]
+    return [
+        f"{key}: Field required"
+        for key in ("guild_id", "digest", "topics", "sources")
+        if key not in raw
+    ]
+
+
+def _catalog_raw_problems(raw: dict) -> list[str]:
+    """`catalog[i].channel_id`: not a model field, so a plain BaseModel would quietly ignore it."""
+    problems = []
+    catalog = raw.get("catalog")
+    if isinstance(catalog, list):
+        for i, entry in enumerate(catalog):
+            if isinstance(entry, dict) and "channel_id" in entry:
+                problems.append(
+                    f"catalog[{i}].channel_id: channels are per server now; use /newsbot follow"
+                )
+    return problems
+
+
+def _at_least_one(value: int, where: str) -> int:
+    """Clamp a v2 number up to 1 (with a warning) for a v3 field that needs >= 1.
+
+    v2.2 took 0 or a negative number for these without complaint, and what it
+    did with them was quietly post nothing: `lookback_hours: 0` means
+    "nothing is recent", `max_items_per_topic: 0` caps every topic to an
+    empty list, and `queries_per_topic: 0` slices the query list to nothing.
+    v3 can't express "collect nothing" (and shouldn't want to), so 1 is the
+    nearest value that means something, and the owner gets told.
+    """
+    if value >= 1:
+        return value
+    logging.getLogger(__name__).warning(
+        "%s is %d, which v2 accepted but which only ever made the bot collect nothing; "
+        "using 1 instead",
+        where,
+        value,
+    )
+    return 1
+
+
+def _derive_catalog(
+    topics: Sequence[Topic], sources: Sequence[Source]
+) -> tuple[list[GameCfg], list[SharedSourceCfg], WebSearchCfg | None]:
+    """Regroup v2 `topics` plus `sources` into catalog, shared sources and web search.
+
+    A source naming exactly one known topic belongs to that game. Anything
+    else (no topics, or several) is shared, keeping the restriction as
+    `games`. The first `web_search` source becomes the global block.
+    """
+    games = {t.key: GameCfg(**t.model_dump(exclude={"channel_id"})) for t in topics}
+    shared: list[SharedSourceCfg] = []
+    web_search: WebSearchCfg | None = None
+    for source in sources:
+        if isinstance(source, WebSearchSource):
+            if web_search is None:
+                web_search = WebSearchCfg(
+                    name=source.name,
+                    queries_per_game=_at_least_one(source.queries_per_topic, "queries_per_topic"),
+                    query_templates=source.query_templates,
+                    trust=source.trust,
+                )
+            else:
+                logging.getLogger(__name__).warning(
+                    "more than one web_search source configured; v3 has one global block, "
+                    "so %r is not used",
+                    source.name,
+                )
+            continue
+        scope = source.topics or []
+        if len(scope) == 1 and scope[0] in games:
+            games[scope[0]].sources.append(source.model_copy(update={"topics": None}))
+        else:
+            fields = source.model_dump(exclude={"topics"})
+            shared.append(_SHARED_BY_TYPE[source.type](**fields, games=scope or None))
+    return list(games.values()), shared, web_search
+
+
+# The one game with SHiFT codes. A v3 `shift.games` that's left out defaults to
+# it, because the v2 reading of an empty list ("every game") would hand every
+# server's codes to every other game's feeds. A catalog without it just never
+# matches anything: quiet, and safe.
+_SHIFT_GAME = "borderlands4"
+
+
+def _v3_shift_games(cfg: AppConfig, raw: dict) -> tuple[AppConfig, list[str]]:
+    """Apply v3's `shift.games` rule: left out means Borderlands 4, an empty list is an error.
+
+    Only the v3 shape gets this. The v2 shape keeps its old reading (empty
+    means every game), because `alerts.topics: []` has always meant that.
+    """
+    shift_raw = raw.get("shift")
+    if isinstance(shift_raw, dict) and "games" in shift_raw:
+        if not cfg.shift.games:
+            return cfg, [
+                "shift.games is empty: list the games to watch for SHiFT codes "
+                f"(or leave it out for {_SHIFT_GAME})"
+            ]
+        return cfg, []
+    shift = cfg.shift.model_copy(update={"games": [_SHIFT_GAME]})
+    return cfg.model_copy(update={"shift": shift}), []
+
+
+def _v3_problems(cfg: AppConfig) -> list[str]:
+    """Cross-checks on a v3 catalog: keys, sources, and everything that names a game."""
+    errors: list[str] = []
+    if len(cfg.catalog) > _MAX_CATALOG_GAMES:
+        errors.append(
+            f"catalog has {len(cfg.catalog)} games; the limit is {_MAX_CATALOG_GAMES} "
+            "(a Discord select menu holds 25 options)"
+        )
+    keys: set[str] = set()
+    for i, game in enumerate(cfg.catalog):
+        if not _TOPIC_KEY_RE.match(game.key):
+            errors.append(f"catalog[{i}].key {game.key!r} must match ^[a-z0-9_]+$")
+        if game.key in keys:
+            errors.append(f"duplicate game key {game.key!r}")
+        keys.add(game.key)
+        if not game.match_name and not game.aliases:
+            errors.append(
+                f"match_name is false for {game.key} but it has no aliases, "
+                "so nothing would ever match"
+            )
+        for j, source in enumerate(game.sources):
+            where = f"catalog[{i}] ({game.key}).sources[{j}]"
+            if isinstance(source, WebSearchSource):
+                errors.append(f"{where}: web_search goes in the top-level web_search: block")
+            elif source.topics is not None:
+                errors.append(
+                    f"{where} ({source.name}): remove topics; "
+                    "a source listed under a game belongs to that game"
+                )
+
+    for j, shared in enumerate(cfg.shared_sources):
+        if isinstance(shared, WebSearchSource):
+            errors.append(
+                f"shared_sources[{j}]: web_search goes in the top-level web_search: block"
+            )
+            continue
+        if shared.topics is not None:
+            errors.append(f"shared_sources[{j}] ({shared.name}): use games:, not topics:")
+        for g in shared.games or []:
+            if g not in keys:
+                errors.append(f"shared_sources[{j}] ({shared.name}) names unknown game {g!r}")
+
+    for g in cfg.shift.games:
+        if g not in keys:
+            errors.append(f"shift.games names unknown game {g!r}")
+
+    # source_health is keyed by name, so the check spans every place a source can live.
+    names = [s.name for game in cfg.catalog for s in game.sources]
+    names += [s.name for s in cfg.shared_sources]
+    if cfg.web_search is not None:
+        names.append(cfg.web_search.name)
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            errors.append(f"duplicate source name {name!r}")
+        seen.add(name)
+
+    for i, topic in enumerate(cfg.topics):
+        if topic.key not in keys:
+            errors.append(
+                f"topics[{i}] ({topic.key}) isn't in catalog; "
+                "the v2 import needs every old game in the catalog"
+            )
+    return errors
+
+
+def _build_legacy(cfg: _RawConfig, guild_id: int, digest: DigestCfg, raw: dict) -> LegacySetup:
+    alerts = cfg.alerts
+    return LegacySetup(
+        guild_id=guild_id,
+        # config.example.yaml ships `admin_channel_id: 000000000000000000` as its "fill me in"
+        # placeholder, and v2 only ever failed to post to channel 0. The database wants a real
+        # id or nothing (a CHECK says so), and a first `python -m newsbot` after copying the
+        # example shouldn't die in the import over a placeholder, so zero reads as "no admin
+        # channel", which is what it always meant.
+        admin_channel_id=cfg.admin_channel_id if (cfg.admin_channel_id or 0) > 0 else None,
+        digest_time=digest.time,
+        timezone=digest.timezone,
+        games=[(t.key, t.channel_id) for t in cfg.topics],
+        shift_enabled=alerts.enabled,
+        shift_channel_id=alerts.channel_id,
+        shift_ping="everyone" if alerts.max_pings_per_day > 0 else "none",
+        # Present in the file at all, even disabled: the import decides what
+        # a disabled block is worth, not the loader.
+        lounge=cfg.lounge if "lounge" in raw else None,
+        alerts_max_pings=alerts.max_pings_per_day,
+    )
+
+
+def _yaml_kind(value: object) -> str:
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, str):
+        return "plain text"
+    return f"a bare {type(value).__name__} value"
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Load, validate, and cross-check `config.yaml`.
 
@@ -489,13 +1062,19 @@ def load_config(path: str | Path) -> AppConfig:
     whack-a-mole against a stack trace.
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            "Invalid config:\n  - the top level of the file must be a set of "
+            f"`key: value` settings, not {_yaml_kind(raw)}"
+        )
+    log = logging.getLogger(__name__)
 
     # A pre-check against the raw YAML, not a pydantic field: DigestCfg no
     # longer declares channel_id at all, and a plain BaseModel silently
     # ignores fields it doesn't recognize: an old v1 config.yaml that
     # still sets digest.channel_id would otherwise load "successfully"
     # with that value quietly going nowhere, which is a worse outcome
-    # than the field simply not existing. Collected ahead of pydantic's
+    # than the field not existing. Collected ahead of pydantic's
     # own errors so it folds into the same combined ConfigError either way.
     pre_errors: list[str] = []
     digest_raw = raw.get("digest")
@@ -504,14 +1083,28 @@ def load_config(path: str | Path) -> AppConfig:
             "digest.channel_id was removed in v2.0: move it to a channel_id "
             "on each topic (topics[].channel_id); there is no fallback"
         )
+    pre_errors += _shape_problems(raw)
+    pre_errors += _catalog_raw_problems(raw)
 
     try:
-        cfg = AppConfig.model_validate(raw)
+        cfg = _RawConfig.model_validate(raw)
     except ValidationError as exc:
         errors = pre_errors + [_format_pydantic_error(e, raw) for e in exc.errors()]
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors)) from exc
 
+    # Unknown top-level keys stay legal (v2.2 and hybrid files carry keys this
+    # loader doesn't read), so they can't be errors; but `comped_guild_id`
+    # quietly dropping a server's premium tier is exactly the kind of thing a
+    # log line is for. `legacy` is ours, not something a file gets to set.
+    unknown_top = sorted(str(k) for k in raw if k not in _RawConfig.model_fields or k == "legacy")
+    if unknown_top:
+        log.warning(
+            "ignoring unknown top-level keys in config (typos?): %s", ", ".join(unknown_top)
+        )
+
     errors: list[str] = list(pre_errors)
+    is_v3 = "catalog" in raw
+    explicit = cfg.model_fields_set
 
     # admin_permission must name a real discord.Permissions flag, checked
     # against VALID_FLAGS (the actual name -> bit mapping), not hasattr()
@@ -541,7 +1134,9 @@ def load_config(path: str | Path) -> AppConfig:
             errors.append(f"duplicate topic key {topic.key!r}")
         seen_keys.add(topic.key)
 
-    known_keys = seen_keys
+    # The keys alerts.topics may name: the catalog's when there is one (a
+    # derived catalog has exactly the topics' keys, so it's the same set).
+    known_keys = {g.key for g in cfg.catalog} if is_v3 else seen_keys
 
     for topic_key in cfg.alerts.topics:
         if topic_key not in known_keys:
@@ -561,87 +1156,156 @@ def load_config(path: str | Path) -> AppConfig:
         # said everything looked fine.
         errors.append(
             "alerts.allow_test_command is true but alerts.enabled is false: "
-            "/newsbot test-alert has nothing to test with alerts disabled"
+            "v2.2's /newsbot test-alert has nothing to test with alerts disabled "
+            "(v3 ignores the key, but a file v2.2 would refuse is refused here too)"
         )
 
     # Fill in Bluesky default names before the uniqueness check, since
     # source_health.source_name is the primary key: two sources silently
     # sharing a name would silently share health tracking too.
-    resolved_sources = []
-    for source in cfg.sources:
-        if isinstance(source, BlueskySource) and source.name is None:
-            source = source.model_copy(update={"name": _bluesky_default_name(source.query)})
-        resolved_sources.append(source)
-    cfg = cfg.model_copy(update={"sources": resolved_sources})
+    cfg = cfg.model_copy(
+        update={
+            "sources": [_with_default_name(s) for s in cfg.sources],
+            "catalog": [
+                g.model_copy(update={"sources": [_with_default_name(s) for s in g.sources]})
+                for g in cfg.catalog
+            ],
+            "shared_sources": [_with_default_name(s) for s in cfg.shared_sources],
+        }
+    )
 
+    if is_v3:
+        errors += _v3_problems(cfg)
+        cfg, shift_errors = _v3_shift_games(cfg, raw)
+        errors += shift_errors
+    else:
+        # Derive mode: no catalog, so build one from the v2 keys, before the
+        # web_search filter below throws the Brave source away for lack of a
+        # key. Blocks the file spells out itself win over the derived ones.
+        games, shared, web_search = _derive_catalog(cfg.topics, cfg.sources)
+        if "shared_sources" in raw:
+            errors.append("shared_sources needs a catalog: (the v2 shape derives its own)")
+        update: dict[str, object] = {"catalog": games, "shared_sources": shared}
+        if cfg.digest is not None:
+            derived = {
+                "collection": CollectionCfg(
+                    interval_minutes=cfg.alerts.interval_minutes,
+                    lookback_hours=_at_least_one(
+                        cfg.digest.lookback_hours, "digest.lookback_hours"
+                    ),
+                    max_items_per_game=_at_least_one(
+                        cfg.digest.max_items_per_topic, "digest.max_items_per_topic"
+                    ),
+                ),
+                "ai": AiCfg(subject=cfg.digest.subject),
+                "run_report": cfg.digest.report_to_admin,
+                "shift": ShiftCfg(
+                    games=cfg.alerts.topics,
+                    max_item_age_hours=cfg.alerts.max_item_age_hours,
+                    max_pings_per_day=cfg.alerts.max_pings_per_day,
+                    ping_trust=cfg.alerts.ping_trust,
+                    max_codes_per_item=cfg.alerts.max_codes_per_item,
+                    allow_test_command=cfg.alerts.allow_test_command,
+                ),
+                "web_search": web_search,
+            }
+            update.update({k: v for k, v in derived.items() if k not in explicit})
+        cfg = cfg.model_copy(update=update)
+        # v3's own cross-check only runs for a catalog:, but an explicit shift:
+        # block in a v2-shaped file can name a ghost game just as easily, and
+        # the sweep would then watch nothing without a word. The derived shift
+        # is skipped: its games are alerts.topics, already checked above.
+        if "shift" in explicit:
+            for g in cfg.shift.games:
+                if g not in known_keys:
+                    errors.append(f"shift.games names unknown game {g!r}")
+
+    warned_brave = False
     seen_names: set[str] = set()
     filtered_sources = []
     for source in cfg.sources:
-        for topic_key in getattr(source, "topics", None) or []:
-            if topic_key not in known_keys:
-                errors.append(f"source {source.name!r} references unknown topic {topic_key!r}")
-        if source.name in seen_names:
-            errors.append(f"duplicate source name {source.name!r}")
-        seen_names.add(source.name)
+        if not is_v3:
+            for topic_key in getattr(source, "topics", None) or []:
+                if topic_key not in known_keys:
+                    errors.append(f"source {source.name!r} references unknown topic {topic_key!r}")
+            if source.name in seen_names:
+                errors.append(f"duplicate source name {source.name!r}")
+            seen_names.add(source.name)
 
         if isinstance(source, WebSearchSource) and not os.environ.get("BRAVE_API_KEY"):
             # This isn't a hard failure: web search is one of four collector
             # types, and refusing to start over a missing optional key would
             # be a worse outcome than just running without it.
-            logging.getLogger(__name__).warning(
-                "web_search source configured but BRAVE_API_KEY is not set; disabling it"
-            )
+            log.warning("web_search source configured but BRAVE_API_KEY is not set; disabling it")
+            warned_brave = True
             continue
         filtered_sources.append(source)
     cfg = cfg.model_copy(update={"sources": filtered_sources})
 
+    if is_v3 and cfg.web_search is not None and not warned_brave:
+        if not os.environ.get("BRAVE_API_KEY"):
+            log.warning("web_search configured but BRAVE_API_KEY is not set; disabling it")
+
     cfg = _check_lounge(cfg, Path(path), errors)
+
+    # D9: the home guild defaults to the old single guild. A prod config sets
+    # home_guild_id itself at rollout; that's a config value, not a code default.
+    if cfg.guild_id is not None:
+        if cfg.home_guild_id is None:
+            cfg = cfg.model_copy(update={"home_guild_id": cfg.guild_id})
+        if cfg.digest is None:
+            errors.append("guild_id is set but digest: is missing; the v2 import needs both")
+        else:
+            cfg = cfg.model_copy(
+                update={"legacy": _build_legacy(cfg, cfg.guild_id, cfg.digest, raw)}
+            )
 
     if errors:
         raise ConfigError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))
 
-    if cfg.alerts.allow_test_command:
-        # /newsbot test-alert lets anyone with admin_permission post a fake
-        # SHiFT code alert on demand: exactly what the private test guild
-        # needs and exactly what a production config should never carry,
-        # so a startup log line is the one place this gets said out loud.
-        logging.getLogger(__name__).warning(
-            "alerts.allow_test_command is true; /newsbot test-alert will be registered"
-        )
+    if is_v3:
+        old_keys = [k for k in _LEGACY_KEYS if k in raw]
+        if old_keys:
+            log.info(
+                "catalog: is present, so these v2 keys are only read by the one-time "
+                "import; once it has run they can be deleted from config.yaml: %s",
+                ", ".join(old_keys),
+            )
 
-    return cfg
+    # /newsbot test-alert went away in v3 (owner decision, 2026-10-01: there
+    # is no per-server version of it). The key still loads, because v2.2's
+    # AlertsCfg forbids unknown keys and a rollback has to keep working, but
+    # it no longer does anything, and a silent no-op is how people end up
+    # wondering where their command went. The v3 `shift:` block has the same
+    # key, so it gets the same warning.
+    for block, setting in (("alerts", cfg.alerts), ("shift", cfg.shift)):
+        if setting.allow_test_command:
+            log.warning(
+                "%s.allow_test_command is ignored: /newsbot test-alert was removed in v3", block
+            )
 
-
-def configured_source_names(cfg: AppConfig) -> set[str]:
-    """The `source_name` every currently-configured source records health under.
-
-    This has to match `build_collectors` exactly: every `Collector` sets
-    `self.name = source.name`, and `cfg.sources` already has Bluesky's
-    default name filled in by the time `load_config` returns it (see
-    above), so this is just "read `.name` off what's configured" with one
-    place to fix if a fifth source type ever shows up and someone forgets.
-    Used to filter `/newsbot status` down to sources that still exist,
-    instead of every source that ever recorded health (see the IGN
-    incident in CLAUDE.md).
-    """
-    return {source.name for source in cfg.sources}
+    # The v2 keys have done their job (the catalog, the shift: block and
+    # `legacy` carry everything the bot still needs), so the bot gets the
+    # v3 view and nothing else.
+    return AppConfig(**{name: getattr(cfg, name) for name in AppConfig.model_fields})
 
 
 def count_configured_web_search_sources(path: str | Path) -> int:
-    """How many `web_search` sources `path` names, before `load_config` gets a chance to drop any.
+    """How many web searches `path` asks for, counted from the raw YAML.
 
-    `load_config` silently disables a `web_search` source (with its own
-    startup warning) when `BRAVE_API_KEY` isn't set, which is the right
-    call at boot but means `AppConfig.sources` can no longer answer "was
-    web_search ever configured at all": exactly the question
-    `--check-sources` needs answered, to tell "not configured" apart from
-    "configured, but skipped for lack of a key". Re-reads the raw YAML
-    rather than reusing `load_config`'s own parse, since that parse is
-    already past the point where the answer got thrown away.
+    `load_config` warns and carries on when `BRAVE_API_KEY` isn't set, which is
+    the right call at boot, but it means the loaded config can't tell "web
+    search was never configured" from "configured, and I have no key for it".
+    That's exactly the question `--check-sources` needs answered, so this
+    re-reads the file: a top-level `web_search:` block (v3) counts as one, and
+    so does each v2 `type: web_search` entry under `sources:`.
     """
     raw = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(raw, dict):
+        return 0
     sources = raw.get("sources") or []
-    return sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
+    legacy = sum(1 for s in sources if isinstance(s, dict) and s.get("type") == "web_search")
+    return legacy + (1 if raw.get("web_search") is not None else 0)
 
 
 def load_check_sources_secrets(env: Mapping[str, str] = os.environ) -> Secrets:
@@ -651,7 +1315,7 @@ def load_check_sources_secrets(env: Mapping[str, str] = os.environ) -> Secrets:
     `config.yaml` before anything talks to Claude or Discord, so it has
     no business demanding either credential. `Secrets` still needs a
     value for `anthropic_api_key` (it isn't optional), so this gives it
-    an obvious placeholder instead of reading the environment for one --
+    an obvious placeholder instead of reading the environment for one;
     the point isn't that the value is empty, it's that this function
     never even looks.
     """

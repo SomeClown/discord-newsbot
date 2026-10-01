@@ -6,8 +6,9 @@ committed fixture in a test. So this module fetches the bytes with httpx
 and hands them to `feedparser.parse` cold. The one wrinkle worth a comment:
 Reddit 429s a burst of requests even from a well-behaved single client, so
 a source whose host is reddit.com gets tagged with a `rate_limit_key` that
-`run_collectors` uses to space its requests out, and a couple of retries
-with backoff here besides.
+`run_collectors` uses to space its requests out. Other hosts get a couple of
+retries with backoff here; Reddit doesn't, because a 429 from it means "stop
+asking" and `run_collectors` is the one that acts on it (see `RateLimited`).
 """
 
 from __future__ import annotations
@@ -17,22 +18,24 @@ import calendar
 import ipaddress
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from time import struct_time
 
 import feedparser
 import httpx
 
 from newsbot import text
-from newsbot.collectors.base import RawItem
+from newsbot.collectors.base import RateLimited, RawItem
 from newsbot.config import RssSource
 from newsbot.useragent import user_agent_headers
 
 _HEADERS = user_agent_headers()
 _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 
-# Reddit's 429 usually clears after a short pause; a couple of retries here
-# is cheap insurance on top of the per-host gap `run_collectors` already
-# adds between Reddit sources. Kept well under pipeline/run.py's 20s
+# A non-Reddit host's 429 usually clears after a short pause; a couple of
+# retries here is cheap insurance. (Reddit's retries used to live here too;
+# they were three more requests to a host that had just asked us to stop.)
+# Kept well under pipeline/run.py's 20s
 # per-collector timeout (_COLLECT_TIMEOUT_S): the old (5.0, 15.0) pair
 # summed to 20s in sleeps *alone*, before any request had actually gone
 # out, which meant the third (and only successful) attempt could never
@@ -41,11 +44,15 @@ _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 _RETRY_BACKOFFS_S = (3.0, 6.0)
 
 # A feed has no business being bigger than this. Protects against a huge
-# or malicious response parking this collector on an unbounded read --
+# or malicious response parking this collector on an unbounded read;
 # the truncated body just fails to parse as valid XML/Atom, which comes
 # back as the same "feed did not parse" error a genuinely broken feed
 # gives.
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+# The redirect check's own DNS lookup gets this long. `getaddrinfo` has no timeout of its own,
+# and a resolver that never answers would park the whole collection pass behind one feed.
+_DNS_TIMEOUT_S = 10.0
 
 
 async def _reject_private_redirect(response: httpx.Response) -> None:
@@ -71,7 +78,14 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
         # will have their own opinion about a response that never came.
         try:
             loop = asyncio.get_running_loop()
-            infos = await loop.getaddrinfo(host, None)
+            async with asyncio.timeout(_DNS_TIMEOUT_S):
+                infos = await loop.getaddrinfo(host, None)
+        except TimeoutError:
+            # Unlike a plain DNS failure, a resolver that stalls is a host nobody vetted, and a
+            # stalled lookup is how a collection pass could hang. Refuse the source. (This
+            # clause goes first because TimeoutError is an OSError, and the next one waves
+            # those through.)
+            raise ValueError(f"could not check where {host} points: DNS lookup timed out") from None
         except OSError:
             return
         addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
@@ -83,14 +97,35 @@ async def _reject_private_redirect(response: httpx.Response) -> None:
             raise ValueError(f"redirected to a non-public host: {host} ({addr})")
 
 
+def _retry_after_s(response: httpx.Response) -> float | None:
+    """Retry-After in seconds (a number or an HTTP date), or None if absent or junk."""
+    value = response.headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            seconds = (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+        except TypeError, ValueError:
+            return None
+    return seconds if seconds > 0 else None
+
+
 async def _fetch_body(
     http: httpx.AsyncClient,
     url: str,
     *,
     sleep: Callable[[float], Awaitable[None]],
+    retry_429: bool = True,
 ) -> bytes:
-    """Fetch `url`'s body, streamed and capped at `_MAX_RESPONSE_BYTES`, retrying 429s."""
-    attempts = 1 + len(_RETRY_BACKOFFS_S)
+    """Fetch `url`'s body, streamed and capped at `_MAX_RESPONSE_BYTES`, retrying 429s.
+
+    With `retry_429` off, a 429 raises `RateLimited` straight away instead of
+    asking again: that's Reddit's mode, where the right response to "slow
+    down" is to stop for the whole pass, not to try again in three seconds.
+    """
+    attempts = 1 + len(_RETRY_BACKOFFS_S) if retry_429 else 1
     for attempt in range(attempts):
         if attempt:
             await sleep(_RETRY_BACKOFFS_S[attempt - 1])
@@ -98,6 +133,8 @@ async def _fetch_body(
             await _reject_private_redirect(response)
             if response.status_code == 429 and attempt < attempts - 1:
                 continue
+            if response.status_code == 429 and not retry_429:
+                raise RateLimited(_retry_after_s(response))
             response.raise_for_status()
             chunks = []
             total = 0
@@ -169,7 +206,12 @@ class RssCollector:
         self.rate_limit_key = "reddit" if host in _REDDIT_HOSTS else None
 
     async def collect(self, http: httpx.AsyncClient) -> list[RawItem]:
-        body = await _fetch_body(http, str(self._source.url), sleep=self._sleep)
+        body = await _fetch_body(
+            http,
+            str(self._source.url),
+            sleep=self._sleep,
+            retry_429=self.rate_limit_key is None,
+        )
         # feedparser.parse() and clean_text() are both plain synchronous
         # CPU work (XML parsing, regex-based HTML stripping): running
         # them straight on the event loop would stall every other
@@ -194,7 +236,7 @@ class RssCollector:
             title = (entry.get("title") or "").strip()
             if not title:
                 # Official Bluesky accounts come in through their RSS
-                # mirror, and a post doesn't really have a headline --
+                # mirror, and a post doesn't really have a headline;
                 # feedparser gives us a bare description instead.
                 title = text.first_line(raw_excerpt) or "(untitled)"
             raw_full_text = _entry_full_text(entry)

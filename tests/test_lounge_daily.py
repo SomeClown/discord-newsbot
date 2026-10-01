@@ -163,7 +163,7 @@ async def test_lost_race_is_already_posted_without_a_post(tmp_path, db_path, mon
     src = _file(tmp_path, "a.txt", ["One.", "Two."])
     assert (await run_daily_quote(_deps(db_path, [src], spy))).status == "posted"
     # Pretend the pre-check ran just before the other trigger committed.
-    monkeypatch.setattr(daily, "_already_posted", lambda db, day: False)
+    monkeypatch.setattr(daily, "_already_posted", lambda db, day, guild_id=None: False)
     out = await run_daily_quote(_deps(db_path, [src], spy, seed=5))
     assert out.status == "already_posted"
     assert len(spy.posts) == 1

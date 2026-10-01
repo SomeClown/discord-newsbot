@@ -20,7 +20,7 @@ from newsbot.bot.format import RenderedDigest, to_text
 
 
 class PublishError(Exception):
-    """A publish attempt failed. `run_daily` retries a few times before giving up on it.
+    """A publish attempt failed. The digest runner retries a few times before giving up on it.
 
     `posted_by_topic` carries whatever topic -> message id mapping the
     failed attempt already got back from Discord before it died: a
@@ -42,6 +42,15 @@ class PublishError(Exception):
     something no amount of waiting will fix; whatever's in
     `posted_by_topic` at that point is what gets recorded on the `failed`
     row.
+
+    `retry_after` is how many seconds Discord said to wait, when the failure
+    was a 429 that said so. Only the SHiFT code alert retry reads it.
+
+    `rejected` is `True` only when Discord definitely refused the message (a
+    429), so nothing landed and nobody was pinged. A timeout, a 5xx or a
+    dropped connection stay `False`: the message may have landed with the
+    response lost on the way back. The SHiFT retry keys its ping decision on
+    that difference.
     """
 
     def __init__(
@@ -51,6 +60,8 @@ class PublishError(Exception):
         *,
         posted_by_topic: Mapping[str, int] | None = None,
         retryable: bool = True,
+        retry_after: float | None = None,
+        rejected: bool = False,
     ) -> None:
         super().__init__(message)
         self.posted_by_topic: dict[str, int] = dict(posted_by_topic or {})
@@ -58,6 +69,8 @@ class PublishError(Exception):
             list(posted_ids) if posted_ids is not None else list(self.posted_by_topic.values())
         )
         self.retryable = retryable
+        self.retry_after = retry_after
+        self.rejected = rejected
 
 
 class Publisher(Protocol):
@@ -74,8 +87,8 @@ class PrintPublisher:
     """Writes the digest to stdout instead of posting it anywhere.
 
     Message ids don't mean anything outside a real chat, so this always
-    returns an empty mapping; `save_run` is happy to store `[]` for
-    `posted_message_ids` just as it would for any other run.
+    returns an empty mapping, which is what a run with nothing posted looks like
+    to everything downstream.
     """
 
     async def publish(self, r: RenderedDigest) -> dict[str, int]:

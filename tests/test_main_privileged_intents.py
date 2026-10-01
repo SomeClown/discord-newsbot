@@ -38,7 +38,7 @@ def _secrets() -> Secrets:
 
 def _wire(monkeypatch, tmp_path, run) -> None:
     class StubBot:
-        def __init__(self, cfg, secrets, db_path) -> None:
+        def __init__(self, cfg, secrets, db_path, **kwargs) -> None:
             pass
 
         def run(self, token: str, **kwargs) -> None:
@@ -73,6 +73,8 @@ def test_privileged_intents_required_exits_2_with_one_line(monkeypatch, tmp_path
     assert "Server Members" in err
     assert "Developer Portal" in err
     assert "lounge.welcome.enabled" in err
+    assert "guild_lounge" in err  # plan 3.11: the welcome switch is a database row now
+    assert err == entrypoint.PRIVILEGED_INTENTS_MESSAGE
 
 
 def test_a_clean_run_still_exits_0(monkeypatch, tmp_path, capsys):

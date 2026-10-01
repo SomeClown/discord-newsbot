@@ -1,0 +1,207 @@
+# APPROVED catalog entries for the v3 public app (plan task 17; owner approved 2026-09-30, decision D11).
+#
+# APPROVED by the owner on 2026-09-30 (decision D11), with Evercold dropped. Nothing here is
+# live: after approval, task 18 copies the approved entries into
+# config.example.yaml's catalog:, and the owner adds them to prod config.yaml
+# during rollout step 5. The full findings, verification counts and rejects
+# are in docs/sources-research.md, section "v3 catalog (2026-10)".
+#
+# Every source below was fetched once on 2026-09-30 with the project's own
+# collectors (serially, 2 s apart, Reddit 35 s apart) and returned items.
+# Anything that failed or came back stale is left out and listed as rejected
+# in the research doc. Shape follows plan section 3.1: sources under a game
+# carry no `topics` (the game is implied), and shared sources use `games:`.
+#
+# The existing three games (borderlands4, palworld, diablo4) and today's
+# shared sources (PC Gamer, Eurogamer, GamesRadar+, PCGamesN, 2K Newsroom)
+# are unchanged and not repeated here.
+
+catalog:
+  - key: fortnite
+    name: "Fortnite"
+    aliases: []
+    # "Epic Games" left out on purpose: it mostly matches the weekly Epic
+    # Games Store freebie stories, and free servers show uncertain matches
+    # as headlines with no LLM to filter them.
+    entities: []
+    search_queries:
+      - "Fortnite news"
+      - "Fortnite update OR season OR patch notes"
+    match_name: true
+    # No official source could be verified (fortnite.com/news returns 403;
+    # no domain-verified Bluesky account; not on Steam). Coverage is the
+    # subreddit plus keyword matches from the shared press feeds.
+    sources:
+      - {type: rss, name: "r/FortNiteBR", url: "https://www.reddit.com/r/FortNiteBR/top/.rss?t=day", trust: community}
+
+  - key: callofduty
+    name: "Call of Duty"
+    # "CoD"/"COD" are deliberately NOT aliases: case-insensitive matching
+    # turns them into the fish and cash on delivery. "Warzone" is a mild risk
+    # ("turned into a warzone") but nearly all hits in testing were the game.
+    # Update the aliases each autumn when the new game ships.
+    aliases: ["Warzone", "Modern Warfare 4", "MW4", "Black Ops 7", "BO7"]
+    entities: ["Infinity Ward", "Treyarch"]   # "Activision" dropped: Halo and Xbox layoff stories
+    search_queries:
+      - "\"Call of Duty\" news"
+      - "\"Modern Warfare 4\" OR Warzone update OR season"
+    match_name: true
+    sources:
+      # The umbrella Call of Duty app carries the announcements for Black Ops 7,
+      # Warzone and Modern Warfare 4. The MW4 (4435490) and Warzone (1962663)
+      # apps returned 0 announcements; recheck MW4 after its 2026-10-23 launch.
+      - {type: steam_news, name: "Call of Duty Steam", app_id: 1938090, trust: official}
+      - {type: rss, name: "Call of Duty Bluesky", url: "https://bsky.app/profile/did:plc:7jjrye4uusbxcpmenc7bw4uh/rss", trust: official}
+      - {type: rss, name: "r/CallOfDuty", url: "https://www.reddit.com/r/CallOfDuty/top/.rss?t=day", trust: community}
+
+  - key: marvelrivals
+    name: "Marvel Rivals"
+    aliases: ["MarvelRivals"]
+    entities: []                              # "NetEase" dropped: matched unrelated NetEase business news
+    search_queries:
+      - "\"Marvel Rivals\" news"
+      - "Marvel Rivals season OR patch OR balance"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Marvel Rivals Steam", app_id: 2767030, trust: official}
+      - {type: rss, name: "r/marvelrivals", url: "https://www.reddit.com/r/marvelrivals/top/.rss?t=day", trust: community}
+
+  - key: valorant
+    name: "VALORANT"
+    aliases: ["VCT"]
+    entities: []                              # "Riot Games" would mostly bring League of Legends
+    search_queries:
+      - "VALORANT news"
+      - "VALORANT patch notes OR agent OR VCT"
+    match_name: true
+    # The domain-verified VALORANT and Riot Games Bluesky accounts both
+    # returned 0 items, and playvalorant.com has no RSS. Subreddit only.
+    sources:
+      - {type: rss, name: "r/VALORANT", url: "https://www.reddit.com/r/VALORANT/top/.rss?t=day", trust: community}
+
+  - key: cs2
+    name: "Counter-Strike 2"
+    aliases: ["CS2", "Counter-Strike"]
+    entities: []                              # "Valve" dropped: Steam hardware and store stories
+    search_queries:
+      - "\"Counter-Strike 2\" news"
+      - "CS2 update OR patch OR major"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Counter-Strike 2 Steam", app_id: 730, trust: official}
+      - {type: rss, name: "HLTV News", url: "https://www.hltv.org/rss/news", trust: press}
+      - {type: rss, name: "r/GlobalOffensive", url: "https://www.reddit.com/r/GlobalOffensive/top/.rss?t=day", trust: community}
+
+  - key: apexlegends
+    name: "Apex Legends"
+    # The full name is specific, so match_name stays true. Bare "Apex" must
+    # never become an alias: in testing it matched a Witcher 3 article, a
+    # Warframe hotfix and a Call of Duty post. "Respawn" is left out too; it's
+    # also an everyday gaming verb.
+    aliases: ["ApexLegends"]
+    entities: []
+    search_queries:
+      - "\"Apex Legends\" news"
+      - "Apex Legends season OR patch OR update"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Apex Legends Steam", app_id: 1172470, trust: official}
+      - {type: rss, name: "r/apexlegends", url: "https://www.reddit.com/r/apexlegends/top/.rss?t=day", trust: community}
+
+  - key: rust
+    name: "Rust"
+    # Common word (the metal, the programming language, the 2024 film, "shake
+    # off the rust"), so the name doesn't match on its own. The price: press
+    # stories that only say "Rust" are missed unless they name Facepunch.
+    aliases: ["Rust Console Edition", "playrust"]
+    entities: ["Facepunch"]
+    search_queries:
+      - "Facepunch Rust news"
+      - "Facepunch Rust update OR devblog OR wipe"
+    match_name: false
+    sources:
+      - {type: steam_news, name: "Rust Steam", app_id: 252490, trust: official}
+      - {type: rss, name: "Rust Facepunch News", url: "https://rust.facepunch.com/rss/news", trust: official}
+      - {type: rss, name: "r/playrust", url: "https://www.reddit.com/r/playrust/top/.rss?t=day", trust: community}
+
+  - key: destiny2
+    name: "Destiny 2"
+    # The full name is specific; bare "Destiny" is not ("it will tell me your
+    # destiny" turned up in r/ffxiv), so it isn't an alias. "Bungie" is left
+    # out as an entity because most Bungie news right now is Marathon.
+    aliases: ["Destiny2", "This Week in Destiny"]
+    entities: []
+    search_queries:
+      - "\"Destiny 2\" news"
+      - "\"Destiny 2\" update OR expansion OR Bungie"
+    match_name: true
+    # Heads up: Destiny 2's official channels have been quiet since late June
+    # 2026 (Bungie says regular updates aren't returning). Expect "0 items"
+    # on most days from the Steam and Bluesky sources.
+    sources:
+      - {type: steam_news, name: "Destiny 2 Steam", app_id: 1085660, trust: official}
+      - {type: rss, name: "Destiny 2 Bluesky", url: "https://bsky.app/profile/did:plc:lakwqi74b3kcqzk6mpk4kqvy/rss", trust: official}
+      - {type: rss, name: "r/DestinyTheGame", url: "https://www.reddit.com/r/DestinyTheGame/top/.rss?t=day", trust: community}
+
+  - key: warframe
+    name: "Warframe"
+    aliases: []
+    entities: ["Digital Extremes"]
+    search_queries:
+      - "Warframe news"
+      - "Warframe update OR hotfix OR Devstream"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Warframe Steam", app_id: 230410, trust: official}
+      - {type: rss, name: "Warframe PC Update Notes", url: "https://forums.warframe.com/forum/3-pc-update-notes.xml/", trust: official}
+      - {type: rss, name: "Warframe Bluesky", url: "https://bsky.app/profile/did:plc:24m2xjetjmjfdbgo752skciu/rss", trust: official}
+      - {type: rss, name: "r/Warframe", url: "https://www.reddit.com/r/Warframe/top/.rss?t=day", trust: community}
+
+  - key: ffxiv
+    name: "Final Fantasy XIV"
+    # "Evercold" (from one PCGamesN headline) was dropped on 2026-09-30:
+    # nobody could confirm what it is, and an unverified alias is noise.
+    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail"]
+    entities: ["Naoki Yoshida"]               # "Square Enix" dropped: every other Square Enix game
+    search_queries:
+      - "\"Final Fantasy XIV\" OR FFXIV news"
+      - "FFXIV patch OR update OR \"Live Letter\""
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
+      - {type: rss, name: "FFXIV Lodestone Topics", url: "https://na.finalfantasyxiv.com/lodestone/news/topics.xml", trust: official}
+      - {type: rss, name: "FFXIV Lodestone News", url: "https://na.finalfantasyxiv.com/lodestone/news/news.xml", trust: official}
+      - {type: rss, name: "r/ffxiv", url: "https://www.reddit.com/r/ffxiv/top/.rss?t=day", trust: community}
+
+  - key: aniimo
+    name: "Aniimo"
+    aliases: []
+    entities: ["Pawprint Studio"]
+    search_queries:
+      - "Aniimo news"
+      - "Aniimo update OR patch OR event"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "Aniimo Steam", app_id: 4126040, trust: official}
+      - {type: rss, name: "r/Aniimo", url: "https://www.reddit.com/r/Aniimo/top/.rss?t=day", trust: community}
+
+  - key: wardogs
+    name: "WARDOGS"
+    # Matching is on the one word "Wardogs", so the 2016 film "War Dogs"
+    # (two words) doesn't collide. "Team17" left out: its news is mostly Worms.
+    aliases: []
+    entities: ["Bulkhead"]
+    search_queries:
+      - "WARDOGS game news"
+      - "WARDOGS Bulkhead update OR patch OR season"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
+      - {type: rss, name: "r/WarDogs", url: "https://www.reddit.com/r/WarDogs/top/.rss?t=day", trust: community}
+
+# Additional shared sources (on top of today's five).
+shared_sources:
+  # Bungie's own news feed. Most of it is Marathon right now, so it's shared
+  # and restricted to destiny2 by keyword instead of dedicated: only posts
+  # that name Destiny 2 get through (6 of 25 in testing).
+  - {type: rss, name: "Bungie News", url: "https://www.bungie.net/en/Rss/News", games: [destiny2], trust: official}

@@ -20,10 +20,13 @@ from pathlib import Path
 import httpx
 
 from newsbot.config import (
+    _SHARED_BY_TYPE,
     AppConfig,
-    DigestCfg,
+    CollectionCfg,
+    GameCfg,
     RssSource,
     Topic,
+    WebSearchCfg,
     WebSearchSource,
     load_check_sources_secrets,
     load_config,
@@ -54,12 +57,40 @@ sources: []
 
 
 def _cfg(sources: list, topics: list[Topic] | None = None) -> AppConfig:
+    """A catalog of one game (or `topics`, as games) with `sources` as shared, unscoped sources.
+
+    Web search is its own block now, not a source in the list; everything else is shared, so
+    items match by keyword exactly as the v2 test's unscoped sources did.
+    """
+    games = [
+        GameCfg(key=t.key, name=t.name, aliases=t.aliases, entities=t.entities)
+        for t in (
+            topics
+            or [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
+        )
+    ]
+    shared = [
+        _SHARED_BY_TYPE[s.type](**s.model_dump(exclude={"topics"}))
+        for s in sources
+        if s.type != "web_search"
+    ]
+    web_search = next(
+        (
+            WebSearchCfg(queries_per_game=s.queries_per_topic, trust=s.trust)
+            for s in sources
+            if s.type == "web_search"
+        ),
+        None,
+    )
     return AppConfig(
-        guild_id=1,
-        digest=DigestCfg(time="09:00", timezone="UTC", lookback_hours=87600),
-        topics=topics
-        or [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])],
-        sources=sources,
+        catalog=games,
+        shared_sources=shared,
+        web_search=web_search,
+        # A big lookback, not the 24h default: the RSS fixture below is
+        # dated to whenever it was written, not "whenever this test
+        # happens to run", and normalize() drops anything older than
+        # the lookback regardless of how relevant it otherwise is.
+        collection=CollectionCfg(lookback_hours=87600),
     )
 
 
@@ -124,7 +155,7 @@ async def test_web_search_configured_but_unkeyed_is_dropped_before_running():
     cfg = _cfg([source])
     async with httpx.AsyncClient(transport=_transport({})) as http:
         report = await run_check_sources(cfg, load_check_sources_secrets({}), http)
-    assert report.results == []  # build_collectors already dropped it
+    assert report.results == []  # build_catalog_collectors drops it without a key
 
 
 async def test_web_search_configured_and_keyed_runs_and_appears_in_results():
@@ -222,7 +253,16 @@ def test_render_report_handles_unicode_and_empty_source_names():
 # --- exit code is always 0, whatever the run's own outcome ---
 
 
-async def test_cli_exit_code_is_zero_even_when_every_source_fails(tmp_path):
+async def test_cli_exit_code_is_zero_even_when_every_source_fails(tmp_path, monkeypatch):
+    # The CLI builds its own client, so hand it one whose transport answers 500 to everything.
+    # (This used to open a real socket to api.steampowered.com, which is how a test suite
+    # ends up waiting on somebody else's network.)
+    real_client = httpx.AsyncClient
+    failing = httpx.MockTransport(lambda request: httpx.Response(500))
+    monkeypatch.setattr(
+        "newsbot.pipeline.run.httpx.AsyncClient",
+        lambda **kwargs: real_client(transport=failing, **kwargs),
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "guild_id: 1\n"
@@ -256,10 +296,10 @@ async def test_topic_counts_match_a_direct_filter_items_call_on_the_same_items()
     async with httpx.AsyncClient(transport=transport) as http:
         results = await run_collectors([RssCollector(source)], http, timeout_s=20)
     collected = [item for result in results for item in result.items]
-    lookback = timedelta(hours=cfg.digest.lookback_hours)
+    lookback = timedelta(hours=cfg.collection.lookback_hours)
     normalized = normalize(collected, lambda _urls: set(), datetime.now(UTC), lookback)
-    grouped = filter_items(normalized, cfg.topics, cfg.digest.max_items_per_topic)
-    expected_counts = {topic.key: len(grouped.get(topic.key, [])) for topic in cfg.topics}
+    grouped = filter_items(normalized, cfg.catalog, cfg.collection.max_items_per_game)
+    expected_counts = {game.key: len(grouped.get(game.key, [])) for game in cfg.catalog}
 
     assert report.topic_counts == expected_counts
 

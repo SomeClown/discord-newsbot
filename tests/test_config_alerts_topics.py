@@ -19,7 +19,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 def test_alerts_topics_defaults_to_empty_list(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(FIXTURE)
-    assert cfg.alerts.topics == []
+    assert cfg.shift.games == []
 
 
 def test_alerts_topics_accepts_known_topic_keys(monkeypatch, tmp_path):
@@ -33,7 +33,7 @@ alerts:
 """
     )
     cfg = load_config(path)
-    assert cfg.alerts.topics == ["borderlands4"]
+    assert cfg.shift.games == ["borderlands4"]
 
 
 def test_alerts_topics_rejects_unknown_topic_key(monkeypatch, tmp_path):
@@ -61,4 +61,4 @@ alerts:
 """
     )
     cfg = load_config(path)
-    assert cfg.alerts.topics == []
+    assert cfg.shift.games == []

@@ -1,6 +1,6 @@
 # discord-newsbot: Design
 
-Status: v1 design, approved in brainstorming 2026-09-23. This is the living design doc; update it when the design changes.
+Status: v1 design, approved in brainstorming 2026-09-23. This is the living design doc; update it when the design changes. **Since v3.0 (2026-10-01) the bot is a public, many-server app: §15 is the current design, and it supersedes the single-server parts of §1 to §8, §12, §13 and §14, each marked where it applies.** Sections 1 to 14 still describe how a single server's pipeline works and why, which is most of what v3 reuses.
 
 The owner accepted all ten spec deviations (SPEC-DEV 1–10) proposed in `docs/plans/2026-09-23-v1-implementation.md` section 4, plus the later decisions recorded in `docs/sources-research.md`, and this document has been updated to match. Digest time is confirmed as 09:00 America/Los_Angeles.
 
@@ -22,12 +22,12 @@ A Discord bot for a ~50-member community server built around **Borderlands 4**, 
 - Reddit API (subreddit RSS is used instead)
 - Per-user subscriptions or DMs
 - Web dashboard or archive site
-- Multiple guilds at once (config design keeps this possible later)
+- Multiple guilds at once (config design keeps this possible later). **Superseded by §15**: v3.0 serves any number of servers.
 - Automated LLM-judge evaluation of summary quality
 
 ## 2. Architecture
 
-A single container running a single Python process (Approach A). One `discord.py` client also runs the daily job on an in-process scheduler (APScheduler). The code is split into modules with narrow interfaces, so the job could later move to a separate worker container (Approach B) by changing only how it's packaged.
+A single container running a single Python process (Approach A). One `discord.py` client also runs the jobs on an in-process scheduler (APScheduler): as of v3 (§15), an hourly shared collection, a five-minute summaries job, an every-minute per-server digest check, and a few housekeeping jobs. The code is split into modules with narrow interfaces, so the jobs could later move to a separate worker container (Approach B) by changing only how it's packaged.
 
 The pipeline never talks to Discord directly. It hands a rendered digest to a `Publisher` (`pipeline/publisher.py`): the headless CLI's publisher prints it, and the bot's `DiscordPublisher` (`bot/client.py`) posts it. This is what lets the guard, storage, retry and fallback logic be written once and tested without a gateway connection at all; the bot is a thin adapter on top of the same pipeline the CLI runs.
 
@@ -38,37 +38,52 @@ newsbot/
     rss.py  steam.py  bluesky.py  web_search.py
   pipeline/
     normalize.py   URL canonicalization, dedupe vs store
-    filter.py      keyword topic matching, "uncertain" flag, dedicated-source matches
+    filter.py      keyword game matching, "uncertain" flag, dedicated-source matches
     summarize.py   Claude call, prompt assembly, schema validation, fallback
-    run.py         orchestrates one daily run; also the headless CLI (`python -m newsbot.pipeline.run`)
+    collect.py     (v3, §15) the hourly shared collection: collect, normalize, filter, store, source health, SHiFT hook
+    summaries.py   (v3) comped summaries, made once per game per cycle and shared
+    guild_digest.py (v3) one server's digest: claim, render, publish (resumable), save, run report
+    run.py         the headless CLI (`python -m newsbot.pipeline.run`) and a few shared helpers; it used to hold `run_daily`, which v3 split into the three modules above
     publisher.py   the Publisher protocol; PrintPublisher for the CLI
-    lock.py        the one run lock, shared by the daily job and the SHiFT alert sweep (§12)
-  shift/           SHiFT code alerts (§12, v1.2) -- separate near-real-time path, not the digest
+    lock.py        the collection pass's lock (v3; it was the one run lock shared by the digest and the SHiFT sweep)
+  guilds/          (v3, §15) per-server state
+    importer.py    the one-time import of a v2 single-server config; the lounge re-sync
+    schedule.py    pure: which servers are due, DST-safe due instants, item windows
+    lifecycle.py   pure: join, removal and startup reconciliation plans
+    notify.py      the router: owner channel vs. a server's own notices and admin channel
+  shift/           SHiFT code alerts (§12, v1.2; §15 for the per-server fan-out), separate from the digest
     match.py       pure code/Golden Key text matcher, fixed pattern, no ReDoS surface
     decide.py      pure planner -- new/fresh/seeded/too_old, ping-or-not, the daily cap
-    sweep.py       the I/O side: runs sweep collectors, claim/post/record, shares pipeline/lock.py
+    fanout.py      (v3) release a code once, queue it for every eligible server, deliver per server; D14 follow-ups
+    sweep.py       what's left of the v2 sweep: the poster protocol and the retry-without-a-second-ping rule
   store/
-    migrations/    numbered .sql files
-    db.py          connection, WAL, migration runner
+    migrations/    numbered .sql files (001 to 008)
+    db.py          connection, WAL, migration runner (incl. the foreign-keys-off rebuild)
     repo.py        all queries (no SQL elsewhere)
   bot/
-    client.py      discord client, scheduler wiring, healthcheck, DiscordPublisher, DiscordCodeAlertPoster
-    commands.py    /news recent, /news search, /newsbot status|run-now|preview|test-alert
+    client.py      discord client, scheduler wiring, healthcheck, DiscordPublisher, DiscordCodeAlertPoster, lifecycle handlers
+    commands.py    /news recent|search, /shift codes, /newsbot setup|follow|unfollow|games|settings|shift|status|preview|run-now, /lounge quote-now
+    setup_views.py (v3) the /newsbot setup wizard
+    owner_commands.py (v3) /owner servers (home guild only)
+    registration.py (v3) which commands exist where, synced only when they changed
+    permissions.py (v3) per-server permission checks, the startup sweep
     format.py      digest + result embeds + code alerts, paging, UTF-16-aware limit checks
-  lounge/          welcomes and the daily quote (§14, v2.2); no Discord objects except in bot/client.py
+  lounge/          welcomes and the daily quote (§14, v2.2; keyed per server by `guild_lounge` since v3, and only the imported server has one); no Discord objects except in bot/client.py
     default_sources.py  the built-in Wikiquote list (public-domain authors)
     quotes.py      `%` splitting, hashing, the per-source deck, message rendering
     wikiquote.py   fetch (MediaWiki Action API) and parse one Wikiquote page
     sources.py     load a file, URL or Wikiquote source; the weekly limit and saved copies
     daily.py       one quote run: pick, load, draw, record, post, and the admin messages
     welcome.py     placeholder checks, rendering, the 24-hour rule
-  alerts.py        admin-channel notifications
+  alerts.py        low-level channel sends (the router in guilds/notify.py decides who gets what)
   healthcheck.py   Docker HEALTHCHECK entry point
 ```
 
 **Stack:** Python 3.14, discord.py, APScheduler, httpx, feedparser, pydantic, the anthropic SDK, and stdlib `sqlite3`. Dependencies are managed with plain `venv` + `pip`, no uv: ranges in `pyproject.toml`, fully pinned `requirements.txt` as the lock file, regenerated with `scripts/lock.sh`.
 
 ## 3. Configuration
+
+**Superseded by §15** as of v3.0: `config.yaml` is global only (a `catalog:` of games with their sources, plus a few global settings), and everything below that belongs to one server (`guild_id`, `digest.time`/`timezone`, `topics[].channel_id`, `alerts`, `lounge`) lives in the database. A file in the shape below is the "v2 shape": v3 still loads it, derives a catalog from `topics` and `sources`, and imports the one server it describes, once. The rest of this section is that v2 shape, which is also what v2.2.0 reads.
 
 `config.yaml` is mounted read-only. Secrets live in `.env`, which is git-ignored, and an `.env.example` is committed.
 
@@ -135,7 +150,9 @@ The seed source list (`config.example.yaml`) was researched and verified live on
 
 ## 4. Daily pipeline
 
-`pipeline/run.py` runs these steps in order. Each is a separate function that can be tested on its own.
+**Superseded by §15** as of v3.0: `run_daily` is gone. Steps 1 to 3 (collect, normalize, filter) run hourly for everybody in `pipeline/collect.py`, step 4 (summarize) runs ahead of time for comped servers in `pipeline/summaries.py`, and step 5 (claim, publish, save) runs per server in `pipeline/guild_digest.py`. The rules in each step below still hold; what moved is who runs them and when.
+
+`pipeline/run.py` ran these steps in order (v1 and v2). Each is a separate function that can be tested on its own.
 
 1. **Collect.** All collectors run concurrently, each with its own timeout. They return `RawItem(url, title, excerpt, source_name, trust, published_at, topics)`. `topics` is `None` (match against every topic) unless the source scopes it; see the dedicated-source rule below. If a collector fails, the failure is logged, recorded in source health, and skipped.
 2. **Normalize and dedupe.** URLs are canonicalized: scheme and host lowercased, fragment and default port dropped, tracking params (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref`, `ref_src`, `igshid`, `si`, `feature`) stripped while every other query param is kept (YouTube's `v=` and Steam's `appid=` depend on that), a trailing slash dropped from a non-root path, and the path percent-re-encoded so stray angle brackets, quotes or bidi-override characters can't break a Discord `<url>` autolink. A URL with userinfo in the netloc (`user@host`) or a hostname that doesn't survive IDNA encoding is rejected outright, as is anything that isn't `http(s)`. `http` and `https` are **not** merged into one canonical form. Items whose canonical URL is already in `items`, or older than `lookback_hours`, are dropped. **Items with no `published_at`** (common from Brave and some feeds) are kept rather than dropped; URL dedupe against the store already prevents them from repeating forever.
@@ -176,17 +193,37 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | `alerted_codes` | code (PK, `length(code) = 29`), first_seen_at, source_name, item_url, message_id (nullable), pinged (bool), status (`seeded`/`too_old`/`pending`/`posted`/`failed`/`roundup`), from_roundup (bool, default 0): added by migration 002 (v1.2, §12); `roundup` added by the same still-unreleased migration (QA item 7, owner decision 2026-09-25); `from_roundup` added by migration 003 (v2.0, §13), backfilled from `status = 'roundup'`; see §13's rollback note for why it exists |
 | `alert_state` | key (PK), value: a small key/value scratchpad for the alert sweep's cross-run facts (`seeded_at`, `last_sweep_at`, `last_sweep_summary`, `ping_day`, `ping_count`); added by migration 002 |
 | `lounge_quotes_used` | source_key, quote_hash (sha256 of the normalized quote text), used_at, PK(source_key, quote_hash): each source's no-repeat deck; added by migration 004 (v2.2, §14) |
-| `lounge_state` | key (PK), value: a small key/value scratchpad, currently `last_quote_date` for the once-a-day guard; added by migration 004 |
+| `lounge_state` | key (PK), value: a small key/value scratchpad, currently `last_quote_date` for the once-a-day guard; added by migration 004. v3 still mirrors the imported server's date here so a rollback to v2.2 keeps its guard |
+
+**v3 tables (§15; migrations 005 to 008).** `digests` and `stories` change shape (below); the rest are new.
+
+| Table | Columns |
+|---|---|
+| `guilds` | guild_id (PK), digest_time, timezone, admin_channel_id (nullable), tier (`free`/`comped`), set_up, joined_at, imported_at (set only by the v2 import), permission_problems (the last startup check's text, to notify only on change), updated_at |
+| `guild_games` | guild_id (FK, CASCADE), game_key, channel_id, PK(guild_id, game_key); a trigger caps a guild at 10 |
+| `guild_shift` | guild_id (PK, FK, CASCADE), enabled, channel_id, ping (`none`, `everyone` or a role id), enabled_at, ping_day, ping_count |
+| `guild_code_posts` | guild_id (FK), code (FK `alerted_codes`), status, message_id, pinged, from_roundup, claimed_at, followup_ok (006); PK(guild_id, code). Delivery status per server; the global `alerted_codes` row means "released" |
+| `guild_code_followups` | guild_id, code, status (`queued`/`pending`/`posted`/`failed`/`skipped`), message_id, pinged, queued_at, claimed_at; PK(guild_id, code), which is what makes "at most one follow-up per server per code, ever" true (006) |
+| `code_sightings` | code, source_name, trusted, roundup, seen_at; PK(code, source_name): what lets a second independent source confirm a community code (006) |
+| `guild_lounge` | guild_id (PK, FK, CASCADE), channel_id, welcome_enabled, welcome_message, quote_enabled, quote_time, quote_sources (JSON, already resolved), last_quote_date |
+| `guild_notices` | id, guild_id (FK, CASCADE), created_at, text (1 to 2000 chars): a server's problem notes, newest 20 kept per server |
+| `game_summaries` | id, game_key, run_date (a label, not a key), status (`ok`/`fallback`), window_start, window_end, coverage_notes, note, input_tokens, output_tokens, created_at, items_after, items_upto (007): one comped summary and the item ids it covers |
+| `app_state` | key (PK), value: command hashes (`commands:<scope>`), the owner report's date, per-server crash backoff, the "told them about the stuck v2.2 digest" markers, and `import` (below) |
+| `items_fts` | external-content FTS5 table over `items(title, excerpt)`, kept in sync by triggers: free servers' `/news search` (owner decision D2) |
+
+`digests` was rebuilt as a column superset: `run_date` is no longer `UNIQUE` on its own, but `UNIQUE (guild_id, run_date)`; `guild_id` is nullable (rows v2.2 writes have none), and it gained `posted_by_game` (JSON, written through as each game posts, which is what makes a resume skip posted games), `window_start`, `window_end`, `attempts`, and (007) `items_after`, `items_upto` and `game_items_upto`. `stories.digest_id` is now nullable (`ON DELETE SET NULL`), and `stories` gained `summary_id`, so a story can belong to a shared summary instead of one server's digest. `lounge_quotes_used` was rebuilt with a nullable `guild_id` and two partial unique indexes (one for stamped rows, one for the NULL rows v2.2 writes), so a rolled-back v2.2 still can't insert the same quote twice. `items` was rebuilt with `AUTOINCREMENT` (008). Why a rebuild and not an addition is in §15's "As built".
 
 `items` has no `topic_key` column: an item can match more than one topic, and `url` needs to stay UNIQUE, so the many-to-many relationship (plus each match's `uncertain` flag) lives in `item_topics` instead (SPEC-DEV 1).
 
 - **Double-post guard:** `claim_digest` refuses to hand out a `pending` row for `run_date` if one already exists with status `pending`, `ok` or `partial`; see the ordering in section 4 for why `pending` exists at all. `/newsbot run-now` can force past any of those states after confirmation, replacing that day's row in place (same id). A `failed` row always allows a reclaim, since that day never actually posted.
 - **Record-then-post guard (§12):** `alerted_codes` plays the same role for code alerts that `claim_digest`'s `pending` row plays for the digest: a batch of codes and the day's ping budget are claimed as `pending` in one transaction *before* anything is sent, and only flipped to `posted` once the send actually lands. A process that dies in between leaves codes `pending`; `fail_pending_codes()` flips those to `failed` at the next startup (and the admin channel is told which codes), so a future sweep never retries a post that might already be sitting in the channel.
-- **Retention:** a nightly job deletes items and stories older than 90 days. `alerted_codes` and `alert_state` are never touched by retention: there's no lookback window on "have we ever alerted this code before."
+- **Retention:** a nightly job (03:30 in `owner_report.timezone`) deletes items and stories older than 90 days, and, since v3, shared summaries and server notices older than 90 days. `alerted_codes`, `alert_state` and `guild_code_posts` are never touched by retention: there's no lookback window on "have we ever alerted this code before." A server's own rows (settings, digest records, SHiFT post records) live until the bot is removed from it, then go at once (§15).
 - **Migrations:** numbered `.sql` files are applied at startup, and the applied version is tracked in `PRAGMA user_version`. Migration 002 (v1.2) is purely additive: a pre-1.2 binary still starts up fine against a database already migrated to version 2, it just never reads or writes the two new tables.
 - **Backups:** a host cron job runs `sqlite3 /data/newsbot.db ".backup ..."` each day and keeps the 7 newest. A restore can cause a SHiFT code to re-alert (its `alerted_codes` row rolls back too), bounded by `max_item_age_hours` and `max_pings_per_day`; see `docs/deploy.md`'s restore runbook.
 
 ## 6. Discord interface
+
+**Superseded by §15** as of v3.0 for everything server-specific. The member commands are unchanged in shape but limited to the games the invoking server follows, and the admin commands are now a per-server set (`/newsbot setup|follow|unfollow|games|settings|shift|status|preview|run-now`), registered globally and re-checked at run time; `/newsbot test-alert` is gone (owner decision 2026-10-01), `/newsbot quote-now` became `/lounge quote-now` (registered only in servers with a lounge), and the owner has `/owner servers` in the home server. Below is the v2 interface, which is still the right description of how an embed, a limit and a pager behave.
 
 **Gateway intents:** default only, no privileged intents. Invite permissions: Send Messages, Embed Links, Create Public Threads, Use Application Commands. **Superseded by §13** as of v2.0: there's no combined digest channel left to create a thread on, so the invite no longer needs Create Public Threads; see §13's per-game-channel permissions instead. **Also superseded by §14** as of v2.2: with lounge welcomes on, the bot requests the privileged Server Members intent, which must be enabled in the Developer Portal first; with welcomes off, still default only.
 
@@ -224,18 +261,20 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 
 ## 7. Deployment
 
+(Superseded by §15 where it says catch-up: v3 has no startup catch-up step. A server whose digest time has passed with no digest for its local day is simply due at the next minute's check, which is the same thing without a special case. The deploy window and the rest below are unchanged.)
+
 - Multi-stage `Dockerfile` on `python:3.14-slim`, running as a non-root user
 - `docker-compose.yml`: base service settings shared by prod and dev: `restart: unless-stopped`, read-only root filesystem, and log rotation (json-file, max-size 10m, max-file 3). Deliberately carries no `image` and no `env_file`: those differ per environment and live in `docker-compose.prod.yml` (`env_file: .env`, `./config.yaml:/app/config.yaml:ro`, `./data:/data`) and `docker-compose.dev.yml` (`env_file: .env.dev`, `./config.dev.yaml:/app/config.yaml:ro`) respectively. The split exists because Compose merges `env_file` lists by concatenation across `-f` files rather than replacing them; a base-level `env_file: .env` would still be loaded under the dev override, so a secret missing from `.env.dev` could silently fall back to prod's `.env`.
 - Healthcheck: the process writes a heartbeat file every 60s when the gateway is connected and the scheduler is running. The healthcheck fails if the file is more than 3 minutes old.
 - GitHub Actions runs `ruff` and `pytest` on every push. On `main`, once tests pass, it builds and pushes the image to GHCR. The Droplet deploys with `docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`.
 - The Discord gateway uses outgoing connections only, so no inbound ports or domain are needed.
-- **Missed-run catch-up:** on startup, if today's digest is missing and the scheduled time has passed, run it (subject to the double-post guard).
+- **Missed-run catch-up (v1 and v2):** on startup, if today's digest is missing and the scheduled time has passed, run it (subject to the double-post guard). v3 does the same through the every-minute due check (§15), with no separate startup step.
 
 ## 8. Error handling
 
 | Failure | Behavior |
 |---|---|
-| Single source down or malformed | Log it, update `source_health`, continue. At 3 consecutive daily failures, flag it in `/newsbot status` and send an admin alert |
+| Single source down or malformed | Log it, update `source_health`, continue. At 3 consecutive daily failures, flag it in `/newsbot status` and send an admin alert. **v3 (§15):** collection is hourly, so the owner is alerted once at 12 consecutive failed collections (half a day), the counter resets on a success, and the daily owner report lists every failing source |
 | Brave quota exceeded / 429 | Skip web search for this run. The digest header notes the reduced coverage |
 | Claude API error or invalid JSON | Retry with exponential backoff, 3 attempts. Then fall back to a plain headline list for that topic, with a note. Digest status becomes `partial` |
 | Discord post fails | Retry 3 times, then set digest status to `failed` and send an admin alert |
@@ -259,6 +298,8 @@ already cover it).
 - The container runs as non-root with a read-only config mount
 
 ## 10. Testing
+
+**Since v3:** about 7,900 tests, a bit under three minutes. The suite never touches the real network: `tests/network_guard.py` answers every DNS lookup with a public test address and makes a real outbound connection raise on the spot. The raise alone wasn't enough (the collectors catch `Exception`, so a blocked connection became an ordinary "source failed" and the test passed anyway), so the guard also records every attempt and fails the test at teardown if any are left; a test that blocks one on purpose says so with `blocked_attempts.acknowledge()`, and `@pytest.mark.real_network` opts out. The v2.2 compatibility of the migrations is tested by running v2.2's SQL against a migrated database (`tests/test_migration_005_v22_compat.py`).
 
 - **Unit tests (pytest, no network):** collector parsers against committed sample responses; canonicalization, dedupe, and topic-matching cases; prompt assembly; schema validation, retry, and fallback using a stubbed Claude client; migrations, the double-post guard, retention, and `/news` queries against a temporary SQLite database; embed limits, sorting, the empty-topic case, and paging in `format.py`.
 - **Integration test:** fixture feeds through a stubbed Claude and a temporary database, checking the formatted digest. No Discord or network access.
@@ -303,7 +344,7 @@ alerts:
   max_codes_per_item: 5              # A17, QA item 7 -- roundup/megathread threshold
 ```
 
-**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping; the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) is provided so the path can be exercised end to end without waiting for a real code. **Superseded by §13** as of v2.0: that permission is needed in `alerts.channel_id`'s SHiFT codes channel, not the digest channel; see §13's startup permission check.
+**Discord requirements.** The bot's role needs "Mention @everyone, @here, and All Roles" in the digest channel; without it Discord posts the message but silently drops the ping; the poster checks this permission itself before every ping and sends an admin alert when it's missing, rather than assuming the grant worked. `/newsbot status` shows the last sweep time and the number of codes alerted. A dev-only way to inject a test code (`/newsbot test-alert`, gated behind `alerts.allow_test_command`) was provided so the path could be exercised end to end without waiting for a real code; **it was removed in v3** (owner decision 2026-10-01: there's no per-server version of it), and the config key is accepted and ignored so a v2.2 file still loads. **Superseded by §13** as of v2.0: that permission is needed in `alerts.channel_id`'s SHiFT codes channel, not the digest channel; see §13's startup permission check.
 
 ### Implementation clarifications (A1–A13, recorded 2026-09-25)
 
@@ -341,7 +382,11 @@ code without also reading the plan:
   `cfg.digest.timezone` (`local_run_date`), not UTC midnight.
 - **A9 Source health:** sweeps never write `source_health` and never
   trigger the 3-consecutive-failures alert; sweep health lives in
-  `alert_state.last_sweep_summary` instead.
+  `alert_state.last_sweep_summary` instead. **Superseded by §15** as of
+  v3.0: the hourly collection is the only collection there is, so it writes
+  `source_health` for every non-skipped source, and the owner is alerted once
+  at 12 consecutive failed collections (D8). `alert_state.last_sweep_*` is
+  still written, for the owner report.
 - **A10 Lock:** a sweep skips its turn (no wait) if the run lock is held;
   the daily job still waits for it, same as before this feature existed.
 - **A11 Too-old codes (owner decision):** a code first seen only in a
@@ -420,7 +465,7 @@ The combined digest channel goes away. Each game's daily digest posts to its own
 **Per-game digests.**
 - At the digest time, each topic with at least one story (or fallback headline) gets exactly one message in its channel: that topic's embed, rendered and trimmed as today (official → reported → rumor; "+N more, use /news" when over limits). No header message, no discussion thread. Topics with nothing post nothing. Topics post in config order.
 - Still one `digests` row per local day: the claim/publish/save guard, catch-up, `run-now` confirmation, and `failed`-with-posted-ids semantics are unchanged in meaning.
-- The resumable publisher's unit of progress becomes the topic: posted message ids are tracked per topic; a retry after a transient failure posts only topics not yet posted. A run where some topics posted and a later one failed is recorded `failed` with the posted ids, and `run-now` asks for confirmation before re-running.
+- The resumable publisher's unit of progress becomes the topic: posted message ids are tracked per topic; a retry after a transient failure posts only topics not yet posted. A run where some topics posted and a later one failed is recorded `failed` with the posted ids, and `run-now` asks for confirmation before re-running. **Superseded by §15** as of v3.0 for a *permanent* per-channel error (a 404, a 403, a non-text channel): the publisher skips that game, posts the rest, and the digest is recorded `partial` with the skipped game and its reason in the notes and that server told, because one deleted channel shouldn't cost a server its other games. Transient errors still retry with backoff, and progress is now written to the database as each game posts.
 - Game channels need View Channel, Send Messages, Embed Links. Create Public Threads is no longer needed.
 
 **SHiFT codes channel.**
@@ -442,6 +487,8 @@ The combined digest channel goes away. Each game's daily digest posts to its own
 **Rollback.** Implementation needed one additive schema change after all: migration 003 adds `alerted_codes.from_roundup` (backfilled from `status='roundup'`), because §13's original plan to reuse `status='posted'` for a roundup-posted code turned out to collide with `/shift codes`'s "from a roundup" marker; nothing else on the row would have distinguished the two. Migration 003 is purely additive, the same shape as 002: v1.3.0 runs unmodified against a v2 database, it just never reads or writes the new column. Rolling back means restoring a v1 `config.yaml` (v1.3.0 requires `digest.channel_id` and rejects unknown `alerts` keys, so the v2-shaped config won't load as-is) along with `TAG=1.3.0`; no database restore is needed either direction.
 
 ## 14. Lounge: bot welcomes and a daily quote (approved 2026-09-29, quote sources revised the same day)
+
+**v3.0 note (§15).** The lounge is unchanged in behavior and now runs from a `guild_lounge` row instead of the `lounge:` block: the one-time import writes the row for the imported server, a `lounge:` block still in `config.yaml` is re-applied to it at every startup (decision D5, so the welcome text and quote sources stay editable), and no other server can have one (no command sets it up; a second lounge is out of scope). Welcome and quote times use the server's own time zone, quote usage and the once-a-day guard are per server, and the Server Members intent is requested only if some `guild_lounge` row has welcomes on. The text below is the v2.2 design.
 
 Two member-facing messages in a new "lounge" channel (`#the-speakeasy-lounge` on the prod server): a welcome for each new member, replacing Discord's built-in random welcome, and one quote a day. Everything else stays in the admin channel: system, admin, server status and bot status messages, run reports, health and permission alerts. Owner decisions:
 - Replace Discord's welcome with one static welcome the owner writes, kept in `config.yaml`.
@@ -533,7 +580,7 @@ lounge:
    - Quote text is untrusted: it goes through `esc()` like news text, and the message is sent with `AllowedMentions.none()`.
    - Attributions come only from the source (the Wikiquote page, or the owner's file), never from an agent's or model's memory.
 
-**The test trigger.** `/newsbot quote-now` (admin only; registered when the daily quote is enabled) runs the same path as the scheduled job.
+**The test trigger.** `/newsbot quote-now` (admin only; registered when the daily quote is enabled) runs the same path as the scheduled job. **Superseded by §15** as of v3.0: it's `/lounge quote-now`, registered per server only where the lounge row has the quote on, and `/newsbot quote-now` no longer exists.
 - If today's quote hasn't posted, it posts it and the scheduled run skips today.
 - If today's quote has posted, it asks for confirmation before posting another.
 - Every posted quote is recorded as used either way.
@@ -589,8 +636,197 @@ The quote table holds source names and hashes of quote text only. Wikiquote is c
 - **URL sources** follow redirects by hand: https only, at most 5, and no request is ever made to an http address. They're refetched each time they're picked, with a 1 MB cap and a 10-second limit.
 - **Admin messages** (`lounge/daily.py`, source notes for fallbacks and sources that failed on the way go out as one message per run) never show URL credentials, query strings or fragments; an address without `//` that contains `@` shows as `scheme:(address hidden)`. Every admin alert is capped at Discord's limit. A failed post reports only the error type and Discord's HTTP status and code; the details are in the log. Welcome failures log only the error type and HTTP status, nothing about the member.
 - **Daily picking.** Each day shuffles the sources and tries them in that order until one yields quotes, so the first pick is uniform across sources. Each source has its own deck, and a reshuffle never repeats yesterday's quote. The job is recorded before the post: a failed post leaves the quote used and the day done, with one admin message and no retry.
-- **`quote-now`:** if today's quote already posted (or the stored date is later than today) it asks before posting another. Every posted quote counts as used. A scheduled quote missed during downtime is skipped, with no catch-up.
+- **`quote-now`** (`/lounge quote-now` since v3): if today's quote already posted (or the stored date is later than today) it asks before posting another. Every posted quote counts as used. A scheduled quote missed during downtime is skipped, with no catch-up.
 - **Known scheduling-library issue.** APScheduler 3.x skips a cron job set between 00:00 and 00:59 on the day after the spring-forward DST change. The default 08:00 quote and the 09:00 digest aren't affected.
 - **Deploy window.** Never deploy 09:00 to 09:15 America/Los_Angeles (`deploy.sh` refuses), and avoid about 07:55 to 08:05: a restart there skips the day's quote, since a missed one is never caught up.
 
 **Rollback.** Migration 004 is additive, so v2.1.1 runs against a v2.2 database untouched. v2.1.1's config loader ignores unrecognized top-level keys, so the `lounge:` block can stay in `config.yaml`. Rolling back is `TAG=2.1.1` plus switching Discord's built-in welcome back on; the Server Members intent can stay enabled.
+
+## 15. Public app, part 1: many servers, free tier (v3.0, approved 2026-09-30)
+
+The bot becomes a public Discord app: one bot, run by the owner, that any server can install. This is sub-project 1 of three agreed on 2026-09-28 (the "hybrid" cost model). Part 2 (server admins bring their own API keys) and part 3 (a paid Discord server subscription) get their own designs later. This section leaves room for them and builds neither.
+
+Owner decisions (2026-09-30):
+- **A curated game catalog first,** custom sources later (C).
+- **Setup through slash commands,** with a web dashboard possible later (C).
+- **The free tier is the headlines digest plus SHiFT code alerts** (B). AI summaries and web search are premium.
+- **The current bot becomes the public app** (A). The friend's server becomes the first server, marked comped premium, so it keeps AI summaries and web search on the owner's keys.
+- **One model for everyone** (A). `config.yaml` holds global settings and the catalog; per-server settings live in the database and are set with commands. A one-time import carries the current setup over. Self-hosting keeps working the same way.
+- **The lounge stays on the friend's server only** for now (A). Revisit at verification, when the Server Members intent has to be justified.
+- **The launch catalog has 15 games:** Borderlands 4, Palworld, Diablo IV, Fortnite, Call of Duty (one entry covering the current game and Warzone), Marvel Rivals, VALORANT, Counter-Strike 2, Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo and WARDOGS. Aniimo and WARDOGS are added only if their sources hold up.
+- **SHiFT pings are the admin's choice** (A). The default is no ping; a role or `@everyone` can be chosen.
+- **Each server can set an optional admin channel for its own problems** (A). Without one, problems show in that server's `/newsbot status`. The owner's admin channel gets bot-wide health only.
+- **Defaults accepted:**
+  - Manage Server to configure.
+  - At most 10 followed games per server.
+  - Each server has its own digest time and time zone, defaulting to 09:00, with catch-up after downtime.
+  - A single first-contact message on join.
+  - A server's settings are deleted right away when the bot is removed (the one-time import's report is the one record kept; see "As built").
+  - Premium for anyone but the comped server is out of scope.
+  - The terms and privacy policy are updated before going public.
+  - "Public Bot" is switched on last.
+- **Approach 1:** collect on a schedule, digest on demand.
+
+**Configuration (breaking, hence v3.0.0).**
+- `config.yaml` becomes global only:
+  - API keys and `NEWSBOT_CONTACT`;
+  - `home_guild_id` and `owner_channel_id` (the owner's server and channel, for bot-wide alerts and owner-only commands; `admin_channel_id` is the older name and still works as the fallback when `owner_channel_id` is unset);
+  - the collection interval and AI settings;
+  - `catalog:`, one entry per game: `key`, display `name`, `aliases`, `entities`, and its sources. That's today's `topics` plus `sources`, regrouped per game.
+- Per-server keys move to the database: `guild_id`, per-topic `channel_id`, `digest.time`/`timezone`, `alerts.channel_id`/`enabled`, and `lounge`. The loader accepts the old shape only for the one-time import.
+- Each catalog entry still passes today's source validation. Adding a game later is a config change, not a code change.
+
+**Data (migrations 005 to 008; 005 is not purely additive, see "As built").**
+- `guilds`: guild id, digest time, time zone, optional admin channel, `tier` (`free` or `comped`; paid comes later), `set_up` flag, joined-at.
+- `guild_games`: guild, game key, channel. Primary key (guild, game). At most 10 per guild.
+- `guild_shift`: guild, enabled, channel, ping (`none`, a role id, or `everyone`).
+- `guild_lounge`: the friend's server's welcome and quote settings, imported from `lounge:`. Only that row exists for now.
+- `items` stays shared, tagged with the games it matched.
+- `digests` gains a guild column: one row per guild per local day, with the guard, catch-up, run-now confirmation and resumable publisher keyed per guild.
+- A new `game_summaries` table holds the Claude summaries, one per game per comped "cycle": a stored summary is reused by a comped guild's digest if it starts exactly where that guild's coverage of the game ended and is at most 6 hours older than this one's due time (plan §3.6), so servers on one schedule share one call and servers on different schedules each get their own whole window.
+- **SHiFT codes:** detection stays global (`alerted_codes` or its successor records each code once). Posting is tracked per guild (code, guild, status), and the daily ping cap counts per guild.
+- The lounge quote tables gain a guild column.
+
+**One-time import.** On the first start with an old-shape config and no `guilds` rows, the bot writes the friend's server as the first guild (`comped`), with:
+- its games and channels;
+- digest time and time zone;
+- SHiFT settings (channel, `everyone` ping);
+- admin channel;
+- lounge settings.
+
+It logs exactly what it imported and lists the old keys that can now be deleted. With any `guilds` rows present it never runs again.
+
+**Collection (hourly, shared).**
+- The widened SHiFT sweep fetches every catalog game's sources once per interval, whichever servers follow them. It canonicalizes, dedupes, filters by topic and stores the items.
+- Source health is global. Failures are reported to the owner, never per server.
+- SHiFT detection runs on new Borderlands items and fans out per guild.
+- Web search runs only for games followed by a comped guild, once a day before the earliest comped digest.
+
+**Digests (per server, on demand).**
+- A job runs every minute. It finds the guilds whose local digest time has passed with no digest recorded for that local day, then runs each one. Catch-up after downtime falls out of the same check.
+- A guild's digest posts one message per followed game in that game's channel, built from the stored items of the last 24 hours:
+  - **Free:** the headline list, today's fallback format (official, then reported, then rumor; "+N more, use /news").
+  - **Comped:** the stored Claude summary for that game and day, computed once and reused.
+- Many guilds due at once are processed one after another, with a short pause after each guild that sent something (none after a quiet one) to respect Discord's rate limits. Nothing is fetched at digest time.
+- **A `pending` row is a lease** (task 6 hardening). The publisher refreshes `updated_at` as each game posts and every 60 seconds, and a row may be resumed only once it has been quiet for 10 minutes, so a second process or a fast restart can't resume a digest that's still posting. The claim re-checks that, the 10-minute retry gap and the 3-attempt cap under `BEGIN IMMEDIATE`. Each guild's run gets 5 minutes inside the tick; a timeout or a graceful cancel (a deploy) leaves the row `pending` for the lease to bring back, rather than marking it `failed`.
+- **An unfinished row keeps its own date, within reason.** A retryable `failed` or resumable `pending` row is finished for the day it was written even after the guild's local date moves on (at most a day back; an older one is left alone and the next digest starts fresh), and the next day's digest waits for it. Every resume is an attempt: a row that has used all of them is marked failed and its server told once, instead of being resumed forever. Windows chain from the last digest that posted; a previous end at or after this digest's end gives an empty window (nothing new, saved `ok`), never a 24-hour look-back that repeats items. A server's very first digest, when it runs at least five minutes late, ends at the moment it runs.
+- **Windows are time to read and item ids to count.** A collection pass stamps `collected_at` when it starts and stores its items later, so a time window can miss them for good. A digest covers item ids instead: past the previous digest's mark, up to the newest id stored at the window's end (migration 007). Whatever commits afterwards lands in the next digest, exactly once. Ids never repeat (migration 008, `AUTOINCREMENT`), and the mark is kept per game: a game the server wasn't told about in its previous digest (just followed, or unfollowed and followed again) starts with the first-digest floor of a day for itself, and a game a failed digest never reached carries over from its own last mark.
+- A run that crashes before it claims anything keeps its backoff in `app_state` (10 minutes, doubling to 6 hours), and its server hears about it once per digest day.
+- Headline lines are one line each: titles are flattened (all whitespace collapsed) and cut to 300 UTF-16 units, and a line whose URL is over 1000 units is dropped, so no item can forge a line or crowd out the rest.
+- `/news recent` and `/news search` read the shared data, limited to the games the server follows.
+
+**Commands.**
+- Commands are registered globally; Discord can take up to an hour to show changes.
+- Admin commands carry the Manage Server default permission and are checked again at run time. All replies are ephemeral:
+  - `/newsbot setup`: a guided first run. Pick a time zone, a digest time, games (a multi-select from the catalog) and a channel for them. Running it again edits the existing settings.
+  - `follow game: channel:` and `unfollow game:`, with catalog autocomplete and the 10-game limit.
+  - `games`, and `settings time: timezone: admin_channel:`. Time zones are validated against the IANA database, with autocomplete.
+  - `shift channel: ping: enabled:`, which explains itself if Borderlands 4 isn't followed.
+  - `status`, `preview` and `run-now`, all scoped to the server.
+- Member commands (`/news recent`, `/news search`, `/shift codes`) work as today, limited to the followed games.
+- `/owner servers` is registered only in the owner's home server (a guild-scoped copy of `/newsbot` would have shown two `/newsbot` entries there, hence its own group). It shows counts only: servers, how many are set up, free and comped, today's digest results, SHiFT servers, servers with permission problems and the month's spend.
+
+**First contact, joining and leaving.**
+- **On join:** create the guild row (free, not set up) and post one message, with no mentions, in the system channel, or else the first channel the bot may speak in, pointing at `/newsbot setup`. It's the only unprompted message the bot sends.
+- **On removal:** delete that guild's rows at once; shared items stay. At startup, rows for guilds the bot is no longer in are deleted as well.
+- **A deleted or unusable channel:** that part is skipped and reported to the server's admin channel or `status`. The bot never picks another channel on its own.
+
+**Permission checks.** These run per server after `setup`, `follow` and `settings` (with an immediate reply naming the channel and the missing permission), and for every server at startup. Problems go to the server's admin channel or its `status`. The owner sees only counts.
+
+**SHiFT alerts per server.**
+- Each code is posted once per guild with alerts on, in its SHiFT channel. Posting status is per guild, and one guild's failure never blocks another.
+- Pings follow the guild's choice. The existing rules still apply: trusted sources only, the first message of a batch, a per-guild cap of 3 per day, and roundups unpinged.
+- **Confirmed by a second source (D14, B+, owner 2026-10-01).** A community-only code still posts at once, unpinged. If a second independent source (a different source name, any trust) sees it within 24 hours of its first sighting, or an official or press source does, each server whose original post went out unpinged because the batch was untrusted, and which has pinging on, gets one short follow-up ("Confirmed by a second source: `CODE`") carrying its chosen ping and spending one unit of its daily cap. A spent cap skips it silently; cap-reached, roundup and ping-off originals never get one; a server gets at most one per code, ever. Roundup sightings do not confirm. It rides the same queue and send path as any alert (migration 006: `code_sightings`, `guild_code_followups`, `guild_code_posts.followup_ok`; v2.2.0 ignores all of it).
+- Enabling alerts starts from codes found after that moment, with no backlog.
+- Delivery is a queue. Releasing a code queues a row (`queued`) for every server eligible at that moment, in the release's own transaction. Delivery walks the queue per server in `guild_id` order (at the start of every pass, and at startup), re-reads that server's current settings at its turn (alerts off, no channel or no followed SHiFT game means `skipped`; otherwise its current ping choice and cap apply), claims `queued` to `pending`, sends, then marks `posted` or `failed`. A walk cut short by the hook timeout leaves the rest `queued`. A stale `pending` row (a crash between claim and send) becomes `failed` with a notice to that server and is never re-sent.
+- A roundup past the 50-code cap sends one line to the owner's alert path (not any server), as v2 did.
+- The mentions tripwire still allows exactly one `everyone=True` code path, which now decides from the guild's setting.
+
+**Admin routing.** A server's run report and posting failures go to its admin channel if set, otherwise to its `status`. The owner's admin channel gets:
+- source health;
+- crashes;
+- the collection report;
+- a daily one-line summary, such as "digests posted to 37 of 38 servers; 1 failed (missing permissions)".
+
+**Privacy and terms.** Both are updated before the switch to public:
+- what's stored per server (settings and channel ids), deleted on removal;
+- that nothing is stored about members;
+- that the lounge runs only on the friend's server;
+- a support contact the owner will answer.
+
+**Going public, in order:**
+1. Test everything on the test server with the dev bot, including the import against a copy of the friend's real config and a second owner-created test server, which shows two servers don't bleed into each other.
+2. Upgrade the friend's server (the import runs, and nothing visible changes).
+3. Update the terms and privacy policy.
+4. Only then switch on "Public Bot" in the Developer Portal and share the install link.
+
+**Testing.**
+- **Automated:**
+  - import, once and only once;
+  - migration 005 against a v2.2 database;
+  - the per-guild scheduler across time zones, DST and catch-up;
+  - digests from shared items;
+  - a comped summary computed once and reused;
+  - SHiFT fan-out with per-guild caps and ping choices;
+  - join, leave and startup cleanup;
+  - the 10-game limit;
+  - command permissions;
+  - admin routing (server problems never reach the owner channel, and the reverse);
+  - pacing under many due digests.
+- **Load:** a simulated run of a few hundred fake guilds due at 09:00.
+- **Manual:** the test-server checks above.
+
+**Risks.**
+1. The import mis-carrying the friend's setup. Mitigation: tested against a real copy, logged, and the old keys are kept until the owner deletes them.
+2. Discord rate limits with many guilds due at once. Mitigation: pacing and the load test.
+3. Source quality for 12 new games. Mitigation: `--check-sources` and a per-game review.
+4. Up to an hour's delay on global command changes.
+5. The Server Members intent at verification (revisit at about 75 servers).
+6. The owner's time once strangers can report issues.
+
+**Effort.** Roughly 1.5 to 2 weeks of agent time, plus a day or two of source research in parallel.
+
+**v2.2 compatibility.** Migrations 005 to 008 rebuild some tables as supersets and add the rest (see "As built"), so v2.2.0's code still reads and writes them, and the code keeps the one-time import of a v2-shaped config and the tests that pin the compatibility. Production is the one deployment that needs the import, once; it's carried out by hand and the operator docs don't cover it (owner decision, 2026-10-01).
+
+### As built (2026-10-01)
+
+Where the code settled on something this section leaves open or says differently, and what the owner decided along the way. The plan with every task and review round is `docs/plans/2026-09-30-public-app.md`; this is the version a reader of the code needs.
+
+**Flags raised in planning, and how they resolved.**
+- **Multi-game feeds and Brave (D1).** The unscoped press feeds (PC Gamer, Eurogamer, GamesRadar+, PCGamesN, 2K Newsroom) belong to no one game, so config gets a top-level `shared_sources:` list, fetched once and keyword-matched against every game (an optional `games:` restricts one), and a top-level `web_search:` block. A source under a game says no `topics:`.
+- **A v2 config still loads.** With no `catalog:`, the loader derives one from the old `topics` and `sources` (a source naming exactly one topic goes under that game; the rest are shared) and builds a `legacy` view for the import. With a `catalog:`, the old keys are read only by the import, and the log lists the ones that can be deleted. v2.2's `AlertsCfg` and `LoungeCfg` reject unknown keys, so every new setting is top-level, which is what lets a hybrid file (old keys plus `catalog:`) still load under `TAG=2.2.0`.
+- **Guild-only commands (D3).** `/owner servers` and `/lounge quote-now` are guild-scoped top-level groups, not subcommands of the global `/newsbot`.
+- **Free headlines (D4).** Order official, press, community, then confident before uncertain, then newest; `🟢 OFFICIAL` on official items only, no "rumor" label; "+N more, use /news" over the limit.
+- **Free `/news` (D2).** Free servers read stored item headlines (`items`, searched through `items_fts`); comped servers read stories.
+- **Lounge after the import (D5).** A `lounge:` block left in `config.yaml` is re-synced into the imported server's row at every startup, and `last_quote_date` is never moved backwards.
+- **Comping (D6, D12).** `comped_guild_ids` sets listed servers to `comped` at join and at startup; nothing is ever downgraded. Prod lists the friend's server there, which changes nothing today (the import comps it) and keeps a kick and a re-invite from bringing it back as free. The re-joined server is a fresh row: not set up, no games, SHiFT or lounge (the import never reruns), and nothing posts until an admin runs `/newsbot setup`. The home or test server stays out of the list, because a second comped server following other games changes the summarizer's prompt.
+- **A pending digest at startup (D7).** It's resumed, not alerted and left: games that posted are written through to the row as they land, so a resume posts only the missing ones. Worst case is one duplicate game post if the process died mid-send.
+- **Source health (D8).** One owner alert at 12 consecutive failed collections, reset on a success.
+- **Reddit rotation and backoff (owner decision, 2026-10-01).** The first live pass with 15 subreddits took 553 s and five of them got 429 even at 35 s spacing, so Reddit no longer runs whole. *Priority* subreddits go every pass: those of the `shift.games` games, and those of any game a set-up comped server follows (read from the database each pass, so it tracks their game lists; the friend's three stay hourly). The rest *rotate*: each pass takes the stalest `ceil(n / passes per rotation)` of them, where passes per rotation is `collection.reddit_rotation_hours` (1 to 24, default 3) over the interval; with the example catalog that's 3 priority plus 4 rotating, about 7 requests a pass. Last-fetch times are `app_state` rows (`reddit_fetched:<source name>`), so a restart keeps the queue. Never-fetched sources rank first but still count against the cap, so a fresh deploy doesn't send all of them at once. A source that ran and failed is stamped like any other (a dead feed doesn't camp at the front). A 429 from Reddit is not retried: the source and the rest of the Reddit queue are skipped for that pass (`RateLimited`, `skipped`), and a `Retry-After` (capped at 6 hours) also closes Reddit for the passes it covers (held in memory with the rate-limit state, so a restart forgets it). Skipped and rotated-out sources write no `source_health` row and aren't stamped, so they stay due and go first next pass, can't trip the 12-failure owner alert, and `/newsbot status` (which counts a source as failing only when its `consecutive_failures` is above zero) doesn't show them as failing. A rotating subreddit's failures accrue per fetch, so its 12-in-a-row alert takes about 36 hours of wall time instead of 12. Each pass logs one INFO line, "Reddit fetched N, rotated out M, backed off K". Collection has never skipped a game nobody follows (it collects the whole catalog); that is unchanged, and a free-tier-only game's subreddit simply rotates. Non-Reddit sources are unchanged, and other hosts keep their 429 retries.
+- **Home guild (D9).** `home_guild_id` defaults to the old `guild_id`; the owner's own test server is the home server in prod, with a prod-alerts channel in it. The router refuses to post owner alerts outside the home server, and startup says so loudly if the owner channel and `home_guild_id` don't match. The owner channel is its own key, `owner_channel_id`, so it can sit in the home server while `admin_channel_id` stays the friend's own admin channel (the import reads only that one, as the friend's server's admin channel). When `owner_channel_id` is unset the owner alerts fall back to `admin_channel_id`, which is what single-server self-hosts and v2-shaped files have; the v3 example keeps `admin_channel_id` only in its commented single-server block.
+- **Support contact (D10).** `justsomeclown@gmail.com`, on the privacy and terms pages (owner-approved for exactly that use).
+- **The catalog (D11).** The 12 researched games were approved as proposed on 2026-09-30, with the unverified FFXIV alias "Evercold" dropped; see `docs/sources-research.md` ("v3 catalog") and `config.example.yaml`.
+- **SHiFT 429 (D13).** A send Discord refuses with a 429 reached nobody, so its retry keeps the ping; any ambiguous failure (a timeout, a 5xx, a dropped connection) strips the ping from every later attempt. The invariant is at most one ping-bearing send that could have landed.
+- **Brave results for free servers (D15).** They stay visible: the items are stored for everyone, and hiding them would cost code for nothing, since the search runs anyway for comped servers.
+
+**SHiFT "confirmed by a second source" (D14, B+).** From prod data: of five codes since 2026-09-25, only the official Steam one pinged, because Gearbox mostly posts codes on X (not a source) and the community sources (r/Borderlands4, the Bluesky search) are never trusted. A community code still posts at once, unpinged. It is *confirmed* when its non-roundup sightings, first seen within 24 hours of the code's first sighting, include two different source names (compared without regard to case) or any trusted (official or press) one. Two source names in the same pass count too, and then the code simply pings on its first post. Confirmation queues one follow-up ("Confirmed by a second source: `CODE`") per server whose original post went out unpinged because the whole batch was untrusted and which had pinging on at that moment (`guild_code_posts.followup_ok`). A trusted code that lost its ping to the cap, a mixed batch, a roundup, ping off, or a failed original never qualifies, so cap-reached codes get no follow-up. A follow-up uses the same queue, claim, deadline, retry and D13 rules as any alert under a salted nonce (so Discord can't dedupe it as the original), spends one unit of the server's daily budget (skipped silently if the budget is spent, with no unpinged repost), and several codes confirmed in one pass share one message and one unit. At most one per (server, code), ever. Accepted behaviors: a confirmation that arrives while the original is still `queued` waits for the next sighting; a stale second sighting still confirms (we ask that we *see* it within 24 hours, not that the item is fresh); source names are compared case-insensitively.
+
+**Migration 005 is not purely additive.** Three tables are rebuilt as column supersets inside a foreign-keys-off transaction (`-- newsbot: foreign-keys-off` on the first line is the runner's switch; it runs `PRAGMA foreign_key_check` before committing and rolls back, naming the table, if anything's orphaned): `digests` (its `run_date` was `UNIQUE`, so two servers couldn't have a row on the same day), `stories` (`digest_id` was `NOT NULL` with no `ON DELETE`, so a comped server could never be deleted), and `lounge_quotes_used` (no usable key for a per-server deck). The purely additive alternative, a separate `guild_digests` table, would have broken v2.2's double-post guard on rollback (it would repost a day v3 already posted) and the stories foreign key. The rebuild keeps every v2.2 column, so v2.2 still reads and writes the tables; its inserts leave `guild_id` NULL, and v3's startup adopts those rows for the imported server, which closes the rollback-then-roll-forward double post. **006** adds the SHiFT follow-up tables (a new file, because 005 may already have run on a development database), **007** the item watermarks, and **008** rebuilds `items` with `AUTOINCREMENT`.
+
+**Watermarks, per server and per game (007, 008).** A digest's window is the time it *says* it covers; the item ids are what it *does*. A collection pass stamps `collected_at` when it starts and stores its items minutes later, so a pass that began at 08:59:30 and committed at 09:01 stored items no later window would ever pick up. `items.id` is assigned at commit, so a digest covers the ids past the previous digest's mark up to the newest one stored at its window's end (floored at 48 hours by `collected_at`, 24 hours for a first digest), and whatever commits afterward lands in the next digest, exactly once. Ids never repeat (008), so a purge that empties the table can't hide a new burst behind an old mark. Coverage is kept per (server, game): `digests.game_items_upto` records the mark for each game the digest followed (a summary game's is where its summary ended), and the next digest reads each game's mark from the newest recent digest that covered it. A game a failed digest never reached is looked past (it resumes from its older mark); a game the server wasn't following (just followed, or unfollowed and followed again) gets the first-digest floor for itself. An item appears at most once per server per game. Summaries record the ids they cover too, and a server reuses one only if it starts exactly where that server's own coverage ended and it isn't more than 6 hours older than the digest's due time, so servers on one schedule share one call and servers on different schedules each get a whole window.
+
+**Preview, run-now and cooldowns.** `/newsbot preview` and a confirmed `run-now` each get one go per server per 10 minutes, kept in memory (a restart forgives everyone). The slot is reserved when the check passes, so two admins pressing together can't both get through, and handed back if the work didn't happen (a bad time zone, a preview that raised, a run refused as `skipped`). The bot's owner is never held back and never starts or extends a server's clock. A preview with nothing new still uses the slot (accepted). A comped preview's in-memory summary is remembered for 30 minutes per game, keyed by the coverage and the newest stored item id, so a preview with nothing new costs no model call and one after new items arrive recomputes.
+
+**The bot-not-in-server gate.** A server can install the commands without the bot user (an invite with only the `applications.commands` scope). Every admin command, `/lounge quote-now` included, checks that the bot is actually in the server before creating or changing anything, and says so.
+
+**Owner channel check.** At startup the bot asks whether the effective owner channel (`owner_channel_id`, else `admin_channel_id`) and `home_guild_id` make sense together: the channel exists, is in the home server, and is one the bot can send in. A mismatch is logged as an ERROR and printed to stderr, naming whichever key is in effect, with a one-line fix that says to set `owner_channel_id`. It never exits, because the friend's digests are fine and shouldn't pay for the owner's typo.
+
+**Retention.** Items and stories 90 days (unchanged), plus shared summaries and server notices 90 days; a server's notices keep the newest 20. `alerted_codes` and `guild_code_posts` are kept like v2. A removed server's rows go at once; `app_state['import']` (the friend's server id, its channel ids and counts) is the one per-server record kept, because it's what stops the import from running twice, and the privacy policy says so.
+
+**CLI.** `python -m newsbot.pipeline.run`: `--check-sources [--game KEY ...]` needs no database or credentials; `--collect` runs one pass into `--db`, and its SHiFT delivery is a preview (the queue is printed, nothing is claimed, marked posted or failed, no ping is spent); `--dry-run [--guild ID]` previews a server's next digest on a throwaway copy of `--db`, so nothing is written (the one-time import and the migration included); `--post-to-stdout`, `--fixtures` and `--collect` write to `--db` and never belong near a live database. `--sweep` is an alias for `--collect`.
+
+**`shift.games`.** In a v3 file, leaving it out means `[borderlands4]` and an empty list is an error; in a v2 file, `alerts.topics: []` still means every game, because it always did.
+
+**Tests.** About 7,900, under three minutes, with a network guard that fails a test on any real connection (§10).
+
+**Follow-ups not done.** Moving SHiFT delivery into a job of its own if the bot gets big (delivery runs inside the collection hook's 120-second budget, so at about 170 or more SHiFT-enabled servers a big drop drains over several hourly passes); a local monthly budget for Brave (it has none, and its cost doesn't grow with servers); and a realism note on the load test: only Discord is fake in it (about 50 sends a second overall and 5 per 5 seconds per channel, with a few random 429s), so its timings describe the bot's own pacing and retry against that model and not Discord's real limits. `scripts/loadtest_digests.py` is the real-time version of the same experiment; neither has been tried against the real thing.

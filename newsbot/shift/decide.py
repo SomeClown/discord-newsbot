@@ -1,17 +1,17 @@
-"""Decide what to do about the SHiFT codes a sweep just found. No I/O in here.
+"""Decide what to do about the SHiFT codes a collection pass just found. No I/O in here.
 
 `shift/match.py` finds codes in text; this module decides what happens to
 them, which is the part with all the actual judgment calls: is this code
 new, is it too old to bother anyone about, has today already spent its
 `@everyone` budget. Every one of those is a pure function of its inputs, on
-purpose: `shift/sweep.py` is where a plan produced here actually turns
+purpose: `shift/fanout.py` is where a plan produced here actually turns
 into a database write or a Discord message, and keeping the deciding and
 the doing in separate modules is what let this file's tests run in
 milliseconds against a list of dataclasses instead of a temp SQLite file.
 
 Game scoping (A6, plan step 5b) lives here too: an item only counts toward
 a sighting if `pipeline.filter.filter_items` would have matched it to one
-of `cfg.alerts.topics`: the same confident/dedicated-source rules the
+of `cfg.shift.games`: the same confident/dedicated-source rules the
 digest itself uses, not a separate keyword check invented for this module.
 """
 
@@ -24,7 +24,6 @@ from newsbot.collectors.base import CollectorResult, RawItem, Trust
 from newsbot.config import Topic
 from newsbot.pipeline.filter import filter_items
 from newsbot.shift.match import find_codes, mentions_golden_key
-from newsbot.store.models import AlertState
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
@@ -65,7 +64,10 @@ class CodeCandidate:
     `trusted` (owner decision, 2026-09-25, QA item 7 option A): whether
     *any* sighting of this code came from a source whose trust is in
     `cfg.alerts.ping_trust`: a community-only code still posts, it just
-    doesn't get to be the reason a batch pings. `roundup` is true only
+    doesn't get to be the reason a batch pings. Since D14 (B+, 2026-10-01)
+    two different source names in the same batch count too: that's the
+    "second independent source" a later pass would otherwise have to wait
+    for. `roundup` is true only
     when *every* sighting of this code came from a roundup item (see
     `CodeSighting.roundup`); a code seen in both a roundup and a normal
     item is judged entirely by the normal one (`aggregate`), so this is
@@ -91,7 +93,7 @@ class AlertPlan:
     `MAX_ROUNDUP_CODES`, design.md §13 D3). `to_post` is already in the
     order an alert message should announce them; `roundup_to_post` is the
     same idea for fresh roundup-only codes (design.md §13: these now post
-    too, just unpinged and in their own "from a roundup" message) --
+    too, just unpinged and in their own "from a roundup" message);
     kept separate from `to_post` because roundup codes never contribute to
     `ping`/`cap_reached` and never spend the ping budget. `mark_seeded`
     tells the caller whether this batch is the one that gets to flip the
@@ -128,7 +130,7 @@ def sightings_from_items(
     different Gearbox game.
 
     An item naming more than `max_codes_per_item` distinct codes is a
-    roundup or megathread, not a genuine single-code announcement --
+    roundup or megathread, not a genuine single-code announcement:
     every sighting it produces is marked `roundup=True` (owner decision,
     2026-09-25); `aggregate` is what actually decides what that means for
     each code.
@@ -199,10 +201,12 @@ def aggregate(
     A code is `fresh` if *any* sighting of it is fresh (mixed ages -> fresh:
     one fresh mention is enough reason to alert). `golden` is likewise "any
     sighting mentions it". `trusted` is "any sighting's trust is in
-    `ping_trust`" (owner decision, 2026-09-25): a code seen only from
-    community sources is never the reason a batch pings, even though it
-    still posts. The shown source is the best-trust, then earliest-dated,
-    then first-seen sighting: ties keep first-seen order, which is what
+    `ping_trust`" (owner decision, 2026-09-25), or (D14) "two or more
+    different source names saw it": a code seen by exactly one community
+    source is never the reason a batch pings, even though it still posts.
+    (A later pass can confirm it afterwards; see `shift/fanout.py`.) The
+    shown source is the best-trust, then earliest-dated, then first-seen
+    sighting: ties keep first-seen order, which is what
     makes this deterministic across runs of the same input. Candidates
     come back in first-seen order (by code), matching A3's "announce them
     in the order they turned up" rule.
@@ -231,7 +235,9 @@ def aggregate(
         effective = normal if normal else group
         fresh = any(_is_fresh(s, now, max_age) for s in effective)
         golden = any(s.golden for s in effective)
-        trusted = any(s.trust in ping_trust for s in effective)
+        trusted = any(s.trust in ping_trust for s in effective) or (
+            len({s.source_name.casefold() for s in effective}) >= 2
+        )
         best = min(effective, key=_sighting_key)
         candidates.append(
             CodeCandidate(
@@ -259,17 +265,6 @@ def seeding_healthy(results: list[CollectorResult]) -> bool:
     non_skipped = [r for r in results if r.skipped is None]
     successes = sum(1 for r in non_skipped if r.error is None)
     return successes >= 1 and successes * 2 >= len(non_skipped)
-
-
-def pings_used_today(state: AlertState, today: str) -> int:
-    """How many pings the day named `today` (in `cfg.digest.timezone`) has already spent.
-
-    `state.ping_count` only means anything alongside a matching
-    `state.ping_day`: a `ping_day` from a prior local day has already
-    effectively reset to zero, it just hasn't been written back yet
-    (`claim_codes` does that lazily, the next time it's asked to spend).
-    """
-    return state.ping_count if state.ping_day == today else 0
 
 
 def group_roundups(candidates: list[CodeCandidate]) -> list[list[CodeCandidate]]:
@@ -305,7 +300,7 @@ def plan_alerts(
 ) -> AlertPlan:
     """Turn this batch's candidates into what to record, post, and post-unpinged.
 
-    Codes already in `known` (any status, ever) are dropped outright --
+    Codes already in `known` (any status, ever) are dropped outright;
     they're not this function's business anymore. What's left splits into
     a roundup-only pipeline and a normal one (`CodeCandidate.roundup`);
     both then split the same way on `seeded`, but only the normal pipeline
@@ -388,7 +383,6 @@ __all__ = [
     "CodeSighting",
     "aggregate",
     "group_roundups",
-    "pings_used_today",
     "plan_alerts",
     "seeding_healthy",
     "sightings_from_items",

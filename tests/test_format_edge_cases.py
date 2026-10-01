@@ -1,8 +1,8 @@
 """Edge cases for newsbot.bot.format, beyond the implementer's tests.
 
 test_format.py already covers the happy paths: sort order, the 4096-char
-trim-and-"+N more" boundary, empty/fallback topics (now: no message at
-all), and a basic @everyone + bold escape. This file goes after the
+trim-and-"+N more" boundary, empty topics (no message at all), and a basic
+@everyone + bold escape. This file goes after the
 sharper corners: the 256-char title limit, the coverage-note footer cap,
 markdown spoofing beyond a bare `**bold**` (masked links, backticks,
 spoilers), mention types `esc()` does and doesn't catch, and very long
@@ -13,14 +13,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from newsbot.bot.format import discord_len, esc, render_digest, render_status
+from newsbot.bot.format import discord_len, esc, render_guild_digest
 from newsbot.config import Topic
-from newsbot.pipeline.summarize import StoryDraft, TopicSummary
-from newsbot.store.models import DigestRow, StatusSnapshot, Usage
+from newsbot.pipeline.summarize import StoryDraft
 
 RUN_DATE = date(2026, 9, 23)
 PALWORLD = Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])
-_EMPTY_USAGE = Usage(input_tokens=0, output_tokens=0)
 
 
 def _draft(headline="Headline", summary="Summary.", label="official", n_urls=1, update_of=None):
@@ -34,9 +32,16 @@ def _draft(headline="Headline", summary="Summary.", label="official", n_urls=1, 
     )
 
 
-def _summary(topic_key, stories=None, *, fallback=False, note=None):
-    return TopicSummary(
-        topic_key=topic_key, stories=stories or [], fallback=fallback, note=note, usage=_EMPTY_USAGE
+def _digest(topics, stories_by_game, coverage_notes=()):
+    """`render_guild_digest` with a stored summary (a list of stories) per game key."""
+    return render_guild_digest(
+        RUN_DATE,
+        topics,
+        {t.key: t.channel_id for t in topics},
+        stories_by_game=stories_by_game,
+        items_by_game={},
+        notes_by_game={},
+        coverage_notes=list(coverage_notes),
     )
 
 
@@ -107,9 +112,7 @@ def test_esc_neutralizes_channel_mentions():
 def test_topic_title_is_truncated_at_256_chars():
     long_name = "Diablo IV: " + "A Very Long Subtitle " * 20
     topic = Topic(key="diablo4", name=long_name, channel_id=1, aliases=[], entities=[])
-    rendered = render_digest(
-        RUN_DATE, [topic], {"diablo4": _summary("diablo4", [_draft("A")])}, {}, []
-    )
+    rendered = _digest([topic], {"diablo4": [_draft("A")]}, [])
     embed = _first_embed(rendered)
     assert len(embed.title) <= 256
 
@@ -119,9 +122,7 @@ def test_topic_title_is_truncated_at_256_chars():
 
 def test_coverage_footer_is_truncated_well_under_the_embed_footer_limit():
     long_notes = [f"a very long coverage note number {i} about a skipped source" for i in range(50)]
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [_draft("A")])}, {}, long_notes
-    )
+    rendered = _digest([PALWORLD], {"palworld": [_draft("A")]}, long_notes)
     footer_text = _first_embed(rendered).footer.text
     assert discord_len(footer_text) <= 512
 
@@ -131,13 +132,7 @@ def test_coverage_footer_defuses_mentions_but_does_not_markdown_escape():
     # literal backslashes sitting in the text (QA follow-up); mentions
     # still get defused (the one thing a footer *can* do something with),
     # but "**gotcha**" stays as plain, unescaped, still-inert text.
-    rendered = render_digest(
-        RUN_DATE,
-        [PALWORLD],
-        {"palworld": _summary("palworld", [_draft("A")])},
-        {},
-        ["@everyone **gotcha**"],
-    )
+    rendered = _digest([PALWORLD], {"palworld": [_draft("A")]}, ["@everyone **gotcha**"])
     footer_text = _first_embed(rendered).footer.text
     assert "@everyone" not in footer_text
     assert "\\" not in footer_text
@@ -149,9 +144,7 @@ def test_coverage_footer_defuses_mentions_but_does_not_markdown_escape():
 
 def test_a_single_pathologically_long_headline_is_hard_truncated_not_dropped():
     stories = [_draft(headline="H" * 5000, summary="short")]
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
-    )
+    rendered = _digest([PALWORLD], {"palworld": stories}, [])
     description = _first_embed(rendered).description
     assert len(description) <= 4096
     assert description.endswith("…")
@@ -165,9 +158,7 @@ def test_a_very_long_single_url_does_not_blow_the_description_limit():
         item_urls=["https://example.com/" + "a" * 3000],
         update_of_story_id=None,
     )
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", [draft])}, {}, []
-    )
+    rendered = _digest([PALWORLD], {"palworld": [draft]}, [])
     description = _first_embed(rendered).description
     assert len(description) <= 4096
 
@@ -183,9 +174,7 @@ def test_multi_codepoint_emoji_headline_does_not_crash_and_respects_the_limit():
     # discord_len() (the real Discord-facing measure), not just len().
     emoji_headline = "\U0001f468‍\U0001f469‍\U0001f467‍\U0001f466 " * 200
     stories = [_draft(headline=emoji_headline[:190], summary="Family news.")]
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
-    )
+    rendered = _digest([PALWORLD], {"palworld": stories}, [])
     description = _first_embed(rendered).description
     assert discord_len(description) <= 4096
     assert "\U0001f468" in description
@@ -205,9 +194,7 @@ def test_description_truncation_never_splits_a_surrogate_pair_near_the_boundary(
     # description limit, and landing mid-emoji if truncation were done in
     # raw UTF-16 units instead of by codepoint.
     stories = [_draft(headline="H", summary="🤖" * 2100)]
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
-    )
+    rendered = _digest([PALWORLD], {"palworld": stories}, [])
     description = _first_embed(rendered).description
     assert discord_len(description) <= 4096
     # A split surrogate pair can't exist in a Python str at all (the type
@@ -224,34 +211,14 @@ def test_topic_title_truncation_respects_utf16_units_not_codepoints():
     # len()-based [:256] slice would let all 200 through untouched.
     long_name = "🤖" * 200
     topic = Topic(key="diablo4", name=long_name, channel_id=1, aliases=[], entities=[])
-    rendered = render_digest(
-        RUN_DATE, [topic], {"diablo4": _summary("diablo4", [_draft("A")])}, {}, []
-    )
+    rendered = _digest([topic], {"diablo4": [_draft("A")]}, [])
     embed = _first_embed(rendered)
     assert discord_len(embed.title) <= 256
-
-
-def test_status_last_digest_field_value_respects_utf16_field_limit():
-    snap = StatusSnapshot(
-        last_digest=DigestRow(
-            id=1, run_date=RUN_DATE, status="ok", posted_message_ids=[], error_notes=None
-        ),
-        source_health=[],
-        items_last_24h=0,
-        stories_last_24h=0,
-        month_input_tokens=0,
-        month_output_tokens=0,
-    )
-    embed = render_status(snap, 0.0)
-    field = next(f for f in embed.fields if f.name == "Last digest")
-    assert discord_len(field.value) <= 1024
 
 
 def test_unicode_headline_with_combining_marks_and_rtl_text_round_trips():
     headline = "Ω مرحبا Zürich café é test"
     stories = [_draft(headline=headline, summary="Summary.")]
-    rendered = render_digest(
-        RUN_DATE, [PALWORLD], {"palworld": _summary("palworld", stories)}, {}, []
-    )
+    rendered = _digest([PALWORLD], {"palworld": stories}, [])
     description = _first_embed(rendered).description
     assert headline in description

@@ -23,6 +23,7 @@ import httpx
 from newsbot.config import (
     AppConfig,
     BlueskySource,
+    GameInfo,
     RssSource,
     Secrets,
     SteamSource,
@@ -47,6 +48,30 @@ class QuotaExceeded(Exception):
     """
 
 
+# What a rate-limited and a backed-off result say in `CollectorResult.skipped`.
+SKIP_RATE_LIMITED = "rate limited"
+SKIP_BACKED_OFF = "backed off"
+
+# Retry-After is the other party's say-so, and "come back in a week" shouldn't
+# park a source for a week. Six hours is four missed passes at the default
+# interval, which is plenty of manners for one subreddit.
+MAX_BACKOFF_S = 6 * 3600.0
+
+
+class RateLimited(QuotaExceeded):
+    """Raised when a rate-limited host says 429 and we're done asking for now.
+
+    It's a skip, not a failure: nothing is wrong with the source, we were
+    just too eager. `run_collectors` also takes it as the cue to stop sending
+    anything else to the same `rate_limit_key` for the rest of the call.
+    `retry_after_s` is the host's `Retry-After`, when it gave one.
+    """
+
+    def __init__(self, retry_after_s: float | None = None) -> None:
+        super().__init__(SKIP_RATE_LIMITED)
+        self.retry_after_s = retry_after_s
+
+
 @dataclass(frozen=True, slots=True)
 class RawItem:
     """One collected item, before normalization, dedupe or topic matching.
@@ -60,7 +85,7 @@ class RawItem:
     patch-notes post never shows up in a 500-character excerpt. It's
     memory-only: `compare=False` and `repr=False` keep it out of
     equality checks and log lines, and `StoredItem` (what actually reaches
-    `save_run`) has no field for it at all, so there's no code path that
+    the database) has no field for it at all, so there's no code path that
     could persist it or hand it to the LLM even by accident.
     """
 
@@ -83,6 +108,8 @@ class CollectorResult:
     items: list[RawItem]
     error: str | None = None  # a real failure -> counts against source_health
     skipped: str | None = None  # e.g. "quota", "auth" -> a coverage note, not a failure
+    # Set with `skipped == SKIP_RATE_LIMITED` when the host sent a usable Retry-After.
+    retry_after_s: float | None = None
 
 
 class Collector(Protocol):
@@ -102,6 +129,14 @@ async def _run_one(
         async with asyncio.timeout(timeout_s):
             items = await collector.collect(http)
         return CollectorResult(collector.name, collector.source_type, items)
+    except RateLimited as exc:
+        return CollectorResult(
+            collector.name,
+            collector.source_type,
+            [],
+            skipped=SKIP_RATE_LIMITED,
+            retry_after_s=exc.retry_after_s,
+        )
     except QuotaExceeded as exc:
         return CollectorResult(
             collector.name, collector.source_type, [], skipped=str(exc) or "quota"
@@ -131,6 +166,11 @@ class RateLimitState:
     """
 
     last_fetch: dict[str, float] = field(default_factory=dict)
+    # key -> the `clock()` reading before which that key gets no requests,
+    # set when a host's 429 came with a Retry-After. Lives as long as the
+    # process, like `last_fetch`: a restart forgets it, and the cost of that
+    # is one more polite 429.
+    backoff_until: dict[str, float] = field(default_factory=dict)
 
 
 async def run_collectors(
@@ -173,7 +213,19 @@ async def run_collectors(
 
     async def run_keyed_group(key: str, members: list[Collector]) -> list[CollectorResult]:
         results = []
+        halted = False
         for i, collector in enumerate(members):
+            if halted or (
+                rate_limit_state is not None
+                and clock() < rate_limit_state.backoff_until.get(key, float("-inf"))
+            ):
+                # Backed off: not a failure, and it never touched the host.
+                results.append(
+                    CollectorResult(
+                        collector.name, collector.source_type, [], skipped=SKIP_BACKED_OFF
+                    )
+                )
+                continue
             if rate_limit_state is not None:
                 last = rate_limit_state.last_fetch.get(key)
                 if last is not None:
@@ -182,9 +234,17 @@ async def run_collectors(
                         await sleep(wait)
             elif i:
                 await sleep(rate_limit_gap_s)
-            results.append(await _run_one(collector, http, timeout_s))
+            result = await _run_one(collector, http, timeout_s)
+            results.append(result)
             if rate_limit_state is not None:
                 rate_limit_state.last_fetch[key] = clock()
+            if result.skipped == SKIP_RATE_LIMITED:
+                # One 429 and the whole key sits down; hammering on is how
+                # a polite 429 turns into a long one.
+                halted = True
+                if rate_limit_state is not None and result.retry_after_s:
+                    wait_s = min(result.retry_after_s, MAX_BACKOFF_S)
+                    rate_limit_state.backoff_until[key] = clock() + wait_s
         return results
 
     async def run_solo(collector: Collector) -> list[CollectorResult]:
@@ -196,21 +256,23 @@ async def run_collectors(
     return [result for group in grouped for result in group]
 
 
-def build_collectors(
-    cfg: AppConfig, secrets: Secrets, *, include_web_search: bool = True
+def build_catalog_collectors(
+    cfg: AppConfig,
+    secrets: Secrets,
+    *,
+    include_web_search: bool = True,
+    web_search_games: Sequence[GameInfo] | None = None,
 ) -> list[Collector]:
-    """Turn every configured source into its matching collector.
+    """Build a collector for every catalog and shared source, each tagged with its game.
 
-    A `web_search` source with no `BRAVE_API_KEY` is skipped here too, as a
-    second line of defense: `config.py` already warns and is expected to
-    have dropped it, but a collector built without a key it needs would
-    just fail on every run instead of being invisible, which is worse.
+    A source listed under a game gets that game as its `topics`, so its
+    items are confident matches for it (design.md §4, unchanged). A shared
+    source gets its `games` restriction as `topics`, or none, and the keyword
+    matcher decides.
 
-    `include_web_search=False` is the SHiFT alert sweep's own reason to
-    call this (design.md §12): Brave News has a modest free allowance, and
-    an hourly sweep calling it 24x a day on top of the daily digest's own
-    calls would eat through it for a collector type that's the least
-    likely place to find a redeem code anyway.
+    Web search is built only if `BRAVE_API_KEY` is set (same second line of
+    defense as above), and searches `web_search_games`, which defaults to
+    the whole catalog; the daily job narrows it to comped servers' games.
     """
     from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
     from newsbot.collectors.rss import RssCollector
@@ -223,18 +285,34 @@ def build_collectors(
             secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
         )
 
-    collectors: list[Collector] = []
-    for source in cfg.sources:
+    def one(source: RssSource | SteamSource | BlueskySource) -> Collector:
         if isinstance(source, RssSource):
-            collectors.append(RssCollector(source))
-        elif isinstance(source, SteamSource):
-            collectors.append(SteamCollector(source))
-        elif isinstance(source, BlueskySource):
-            collectors.append(BlueskyCollector(source, bluesky_session))
-        elif isinstance(source, WebSearchSource):
-            if not include_web_search or not secrets.brave_api_key:
-                continue
-            collectors.append(
-                WebSearchCollector(source, cfg.topics, secrets.brave_api_key.get_secret_value())
-            )
+            return RssCollector(source)
+        if isinstance(source, SteamSource):
+            return SteamCollector(source)
+        return BlueskyCollector(source, bluesky_session)
+
+    collectors: list[Collector] = []
+    for game in cfg.catalog:
+        for source in game.sources:
+            if isinstance(source, WebSearchSource):
+                continue  # load_config already rejected this; belt and braces
+            collectors.append(one(source.model_copy(update={"topics": [game.key]})))
+    for shared in cfg.shared_sources:
+        if isinstance(shared, WebSearchSource):
+            continue
+        collectors.append(one(shared.model_copy(update={"topics": shared.games})))
+
+    if include_web_search and cfg.web_search is not None and secrets.brave_api_key:
+        as_source = WebSearchSource(
+            type="web_search",
+            name=cfg.web_search.name,
+            queries_per_topic=cfg.web_search.queries_per_game,
+            query_templates=cfg.web_search.query_templates,
+            trust=cfg.web_search.trust,
+        )
+        games = cfg.catalog if web_search_games is None else web_search_games
+        collectors.append(
+            WebSearchCollector(as_source, games, secrets.brave_api_key.get_secret_value())
+        )
     return collectors

@@ -8,6 +8,16 @@ This is the recipe book from doing that for Borderlands 4, Palworld, and
 Diablo IV ([`docs/sources-research.md`](sources-research.md) has the full write-up, warts and all);
 the lessons generalize to whatever game you're pointing this at.
 
+**A note on shapes (v3).** Since v3.0 a game and its sources live in
+`config.yaml`'s `catalog:`: sources go under the game's own `sources:` (that's
+what makes them *dedicated*, so they take no `topics:` line), wide feeds that
+cover many games go in `shared_sources:`, and Brave is a top-level
+`web_search:` block with `queries_per_game`. `config.minimal.yaml` shows that
+shape. The snippets below are in the older v2 shape (games in `topics:`, a
+top-level `sources:` list with `topics: [yourgame]` on each), which still
+loads and is converted for you. Translate as you go; the advice (what to look
+for, what to alias, what to watch out for) is unchanged.
+
 ## Steam: `steam_news`
 
 If your game is on Steam, this is usually the best official source and the
@@ -204,15 +214,14 @@ rather than a literal word.
 
 ## Brave's free tier, and the math
 
-`web_search` sources cost real requests against Brave's News Search API.
-`queries_per_topic` (default 2) times however many topics you have is the
-requests-per-run figure; multiply by however many times a day you'd run this
-(once, for the daily digest; the SHiFT alert sweep deliberately excludes
-`web_search` and never touches Brave at all) to get requests per day. Three
-topics at the default `queries_per_topic: 2` is 6 requests a run, about 180
-a month: comfortably inside Brave's free tier as shipped in
-`config.example.yaml`. Scale the arithmetic to your own topic count before
-assuming it'll stay free.
+Web search costs real requests against Brave's News Search API.
+`queries_per_game` (`queries_per_topic` in the v2 shape; default 2) times the
+number of games a comped server follows is the requests-per-day figure: it runs
+once a day, only for games a comped server follows, and the hourly collection
+never touches Brave at all. Three games at the default of 2 is 6 requests a
+day, about 180 a month: comfortably inside Brave's free tier as shipped in
+`config.example.yaml`. Scale the arithmetic to the number of games your comped
+servers follow before assuming it'll stay free.
 
 ## Verifying with `--check-sources`
 
@@ -224,8 +233,9 @@ python -m newsbot.pipeline.run --config config.yaml --check-sources
 ```
 
 This runs every configured collector for real, once, and prints a report:
-item counts and the first error line per source, plus which topics matched
-how many items. It needs no Anthropic key and no Discord token; it only
+item counts and the first error line per source, grouped by game, plus which
+games matched how many items (`--game yourgame` restricts it to one game's
+sources, plus the shared ones matched only against it). It needs no Anthropic key and no Discord token; it only
 needs `BRAVE_API_KEY` (and Bluesky's, if you've set those up) for the
 sources that actually use them, and says so plainly for anything skipped.
 It's the fastest way to find out a feed URL is wrong, a subreddit is

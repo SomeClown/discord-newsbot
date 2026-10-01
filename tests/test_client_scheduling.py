@@ -1,152 +1,30 @@
 """Tests for the pure decision functions behind newsbot.bot.client and newsbot.healthcheck.
 
 Per plan section 5, the bot layer is tested only at this level: no gateway
-mocking, no fake `discord.Client`. `should_catch_up`, the CronTrigger's
-DST behavior, `local_run_date`, and the healthcheck's staleness check are
-all plain functions (or, for CronTrigger, a library object we can query
-directly) that don't need a running bot to exercise.
+mocking, no fake `discord.Client`. `_should_alert_two_instances`,
+`local_run_date`, and the healthcheck's staleness check are all plain functions
+that don't need a running bot to exercise.
+
+The v2 pieces that used to be here are gone with the daily job: `should_catch_up`
+(startup catch-up) and the CronTrigger DST checks for the 09:00 digest. Every one of
+those assertions has a per-server equivalent in `test_schedule.py` and
+`test_schedule_adversarial.py`, where the due check replaced both: before the time is
+not due, at the time is due, a finished row is not due again, a clean failure retries
+only after ten minutes and three attempts, a failure that posted something never retries
+alone, a v2.2 `pending` row waits for an admin, and the spring-forward gap, the
+fall-back repeat and a restart just after local midnight all give the right answer.
+(The quote's own cron still has its DST checks in `test_lounge_client_adversarial.py`.)
 """
 
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from apscheduler.triggers.cron import CronTrigger
-
-from newsbot.bot.client import _should_alert_two_instances, should_catch_up
+from newsbot.bot.client import _should_alert_two_instances
 from newsbot.healthcheck import is_healthy
 from newsbot.pipeline.run import local_run_date
-from newsbot.store.models import DigestRow
-
-_TZ = ZoneInfo("America/Los_Angeles")
-_DIGEST_TIME = time(9, 0)
-
-
-def _digest_row(status: str, posted_message_ids: list[int] | None = None) -> DigestRow:
-    return DigestRow(
-        id=1,
-        run_date=date(2026, 9, 23),
-        status=status,
-        posted_message_ids=posted_message_ids or [],
-        error_notes=None,
-    )
-
-
-# --- should_catch_up ---
-
-
-def test_should_catch_up_before_scheduled_time_is_false():
-    now_local = datetime(2026, 9, 23, 8, 59, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is False
-
-
-def test_should_catch_up_after_time_no_row_is_true():
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is True
-
-
-def test_should_catch_up_after_time_ok_row_is_false():
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("ok")) is False
-
-
-def test_should_catch_up_after_time_partial_row_is_false():
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("partial")) is False
-
-
-def test_should_catch_up_after_time_failed_row_is_true():
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("failed")) is True
-
-
-def test_should_catch_up_after_time_pending_row_is_false():
-    # A pending row means we don't know whether it already posted (the
-    # process may have crashed between publish and save): the caller is
-    # responsible for alerting an admin in this case, not for guessing.
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, _digest_row("pending")) is False
-
-
-def test_should_catch_up_after_time_failed_row_with_posted_ids_is_false():
-    # Some of the digest already landed in the channel before publishing
-    # died: an unattended catch-up retry here would double-post the
-    # header. This is the caller's cue to alert an admin instead (see
-    # _PARTIAL_FAILURE_STARTUP_ALERT), the same as a pending row.
-    now_local = datetime(2026, 9, 23, 9, 1, tzinfo=_TZ)
-    row = _digest_row("failed", posted_message_ids=[111, 222])
-    assert should_catch_up(now_local, _DIGEST_TIME, row) is False
-
-
-def test_should_catch_up_exactly_at_scheduled_time_is_true():
-    now_local = datetime(2026, 9, 23, 9, 0, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is True
-
-
-def test_should_catch_up_restart_just_after_local_midnight_is_false():
-    # A restart at 00:01 local is a new local day that hasn't reached its
-    # digest time yet: there's no digest row for *today* to be confused
-    # by, and 00:01 < 09:00 regardless.
-    now_local = datetime(2026, 9, 24, 0, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is False
-
-
-def test_should_catch_up_on_spring_forward_day_before_digest_time():
-    # 2026-03-08 is the US spring-forward Sunday (2 a.m. -> 3 a.m.) in
-    # America/Los_Angeles. should_catch_up only ever sees an already
-    # resolved local wall-clock time, so the missing hour shouldn't be
-    # able to confuse a plain time-of-day comparison.
-    now_local = datetime(2026, 3, 8, 8, 59, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is False
-
-
-def test_should_catch_up_on_spring_forward_day_after_digest_time():
-    now_local = datetime(2026, 3, 8, 9, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is True
-
-
-def test_should_catch_up_on_fall_back_day_before_digest_time():
-    # 2026-11-01 is the US fall-back Sunday (2 a.m. -> 1 a.m., so 1 a.m.
-    # happens twice). Nothing here is anywhere near that hour, but it's
-    # worth pinning that a fall-back day is otherwise an unremarkable day
-    # as far as this function is concerned.
-    now_local = datetime(2026, 11, 1, 8, 59, tzinfo=_TZ)
-    assert should_catch_up(now_local, _DIGEST_TIME, None) is False
-
-
-def test_should_catch_up_digest_time_inside_dst_skipped_hour_before_the_jump():
-    # A digest configured for 02:30 local names a wall-clock moment that
-    # literally never happens on spring-forward day. should_catch_up
-    # doesn't know or care: it's still just comparing two time-of-day
-    # values, so "real local clock hasn't reached 02:30 yet" still reads
-    # as False even though the clock is about to skip past it entirely.
-    digest_time = time(2, 30)
-    now_local = datetime(2026, 3, 8, 1, 59, tzinfo=_TZ)
-    assert should_catch_up(now_local, digest_time, None) is False
-
-
-def test_should_catch_up_digest_time_inside_dst_skipped_hour_after_the_jump():
-    # Local clocks jump straight from 01:59:59 to 03:00:00. The first real
-    # moment after that jump (03:01) is later in wall-clock time than the
-    # nominal-but-nonexistent 02:30 digest time, so catch-up still fires.
-    digest_time = time(2, 30)
-    now_local = datetime(2026, 3, 8, 3, 1, tzinfo=_TZ)
-    assert should_catch_up(now_local, digest_time, None) is True
-
-
-def test_should_catch_up_ambiguous_fall_back_time_agrees_on_both_occurrences():
-    # 01:30 local happens twice on fall-back day (once at UTC-7, once at
-    # UTC-8). should_catch_up only looks at .time(), so both occurrences
-    # of "01:30 local" should get the same answer against a 09:00 digest
-    # time: the ambiguity is real, but it doesn't matter here.
-    digest_time = _DIGEST_TIME
-    first_occurrence = datetime(2026, 11, 1, 1, 30, tzinfo=_TZ, fold=0)
-    second_occurrence = datetime(2026, 11, 1, 1, 30, tzinfo=_TZ, fold=1)
-    assert should_catch_up(first_occurrence, digest_time, None) is False
-    assert should_catch_up(second_occurrence, digest_time, None) is False
-
 
 # --- _should_alert_two_instances (QA step 20, group 6i) ---
 
@@ -168,40 +46,10 @@ def test_should_alert_two_instances_false_within_cooldown():
 
 
 def test_should_alert_two_instances_false_exactly_at_cooldown_boundary():
-    # Strict >=, matching should_catch_up's own strict-boundary convention
-    # elsewhere in this module.
+    # >=, so the boundary itself counts as "cooled down".
     last = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
     now = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
     assert _should_alert_two_instances(last, now, timedelta(hours=1)) is True
-
-
-# --- CronTrigger DST behavior ---
-
-
-def test_cron_trigger_next_fire_lands_on_local_9am_around_spring_forward():
-    # 2026-03-08 is the US spring-forward Sunday (2 a.m. -> 3 a.m.) in
-    # America/Los_Angeles.
-    trigger = CronTrigger(hour=9, minute=0, timezone=_TZ)
-    now = datetime(2026, 3, 7, 12, 0, tzinfo=_TZ)
-    next_fire = trigger.get_next_fire_time(None, now)
-    assert next_fire.astimezone(_TZ).date() == date(2026, 3, 8)
-    assert next_fire.astimezone(_TZ).time() == time(9, 0)
-
-
-def test_cron_trigger_next_fire_lands_on_local_9am_around_fall_back():
-    # 2026-11-01 is the US fall-back Sunday (2 a.m. -> 1 a.m.).
-    trigger = CronTrigger(hour=9, minute=0, timezone=_TZ)
-    now = datetime(2026, 10, 31, 12, 0, tzinfo=_TZ)
-    next_fire = trigger.get_next_fire_time(None, now)
-    assert next_fire.astimezone(_TZ).date() == date(2026, 11, 1)
-    assert next_fire.astimezone(_TZ).time() == time(9, 0)
-
-
-def test_cron_trigger_next_fire_same_day_before_scheduled_time():
-    trigger = CronTrigger(hour=9, minute=0, timezone=_TZ)
-    now = datetime(2026, 9, 23, 2, 0, tzinfo=_TZ)
-    next_fire = trigger.get_next_fire_time(None, now)
-    assert next_fire.astimezone(_TZ).date() == date(2026, 9, 23)
 
 
 # --- local_run_date ---

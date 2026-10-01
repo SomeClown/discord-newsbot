@@ -1,26 +1,50 @@
-"""Orchestrate one daily run, and give it a front door that doesn't need Discord.
+"""The command-line front door: run the pipeline's pieces without a Discord connection.
 
-Everything upstream of this module (collectors, normalize, filter,
-summarize, format) is a pure function or close to one: given inputs, it
-returns outputs, and none of it knows the word "Discord" exists. This
-module is where that stops being true: it's the one place that has to
-juggle a database, a language model, a publish target and a wall clock all
-at once, and get the ordering right when any one of them fails partway
-through.
+This module used to be the pipeline. `run_daily` collected, summarized,
+claimed, published and saved one server's digest in one long breath, and it
+was the one place that had to juggle a database, a model, a publish target and
+a wall clock at once. The public app split that into pieces that each do one
+job: `pipeline/collect.py` fetches the whole catalog every hour,
+`pipeline/summaries.py` makes the comped servers' summaries ahead of time, and
+`pipeline/guild_digest.py` claims, posts and saves one server's digest from
+what's already stored. `run_daily` retired at the cutover. What's left here is
+the front door that lets a person run those pieces from a terminal, plus the
+few helpers they all still share (`RunKind`, `local_run_date`, the publish
+retry loop).
 
-The ordering it protects is the double-post guard (SPEC-DEV 2): claim
-today's slot with a `pending` row *before* doing anything slow, publish,
-and only then save. A crash between claim and save leaves a `pending` row
-and nothing else, annoying (it blocks the next automatic run until
-someone force-reclaims it), but never a duplicate post, which was the
-actual failure mode worth avoiding.
+`python -m newsbot.pipeline.run` has these modes:
 
-`python -m newsbot.pipeline.run --dry-run` runs this whole thing with no
-Discord connection at all, printing the digest to a terminal instead. That
-CLI is also most of how this module gets tested: a fixture-backed run
-exercises the real guard, the real save transaction and the real retry
-logic against a temp SQLite file, with nothing on the other end of the
-`httpx.AsyncClient` but canned JSON.
+- `--check-sources [--game KEY ...]` runs the real sources once and reports.
+  It needs no database, no Anthropic key and no Discord token.
+- `--collect` runs one collection pass into `--db`. SHiFT detection runs and
+  newly found codes are released (queued for each server), but delivery is a
+  preview: the queue is printed, and nothing is claimed, marked posted or
+  failed, and no server's ping count moves. The real bot's own walk delivers
+  the queue, so a CLI run next to it can't drain it. (`--sweep` is the old
+  name; it still works for one release, with a note on stderr.)
+- `--dry-run` (the default) previews one server's next digest from what's
+  stored. It writes nothing, not even the one-time import or the schema
+  migration: it works on a throwaway copy of `--db`, so the real file comes
+  out byte-identical. (Pointing it at a v2.2 database and having it quietly
+  freeze the SHiFT ping budget at import time was the lesson there.)
+- `--post-to-stdout [--force]` is the same server's real run, printed instead
+  of posted. It claims, prints and saves, so it exercises the per-server guard.
+- `--fixtures DIR` swaps the collectors for canned JSON and implies one
+  collection pass first, so `--fixtures --stub-llm --dry-run` stays a fully
+  offline run, which is how most of this gets tested.
+- `--now` is the clock for every step, the due check and the window math
+  included.
+
+Every mode but `--check-sources` runs the v2 import first (`ensure_imported`),
+so a self-hoster's first `--dry-run` after upgrading just works. Only the
+read-only mode, a digest preview with no collection pass (no `--collect`, no
+`--fixtures`), runs it against the throwaway copy; `--collect`, `--fixtures` and
+`--post-to-stdout` write for real, so they import for real. Which means none of
+those three belongs anywhere near a live production database.
+
+A reminder for anyone adding an import: `guild_digest.py` and `summaries.py`
+import from this module, so this module imports them lazily, inside the
+functions that need them.
 """
 
 from __future__ import annotations
@@ -31,29 +55,31 @@ import json
 import logging
 import os
 import re
+import shutil
+import sqlite3
 import sys
-from collections.abc import Awaitable, Callable
+import tempfile
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
 
 import httpx
 
-from newsbot.bot.format import RenderedDigest, render_digest, render_run_report
+from newsbot.bot.format import to_text
 from newsbot.collectors.base import (
     Collector,
     CollectorResult,
-    RateLimitState,
     RawItem,
-    build_collectors,
+    build_catalog_collectors,
     run_collectors,
 )
 from newsbot.config import (
     AppConfig,
     ConfigError,
+    GameCfg,
     Secrets,
     count_configured_web_search_sources,
     load_check_sources_secrets,
@@ -61,8 +87,7 @@ from newsbot.config import (
     load_secrets,
 )
 from newsbot.logging_setup import configure_logging
-from newsbot.pipeline.filter import TopicItem, filter_items
-from newsbot.pipeline.lock import _run_lock, is_run_in_progress
+from newsbot.pipeline.filter import filter_items
 from newsbot.pipeline.normalize import normalize
 from newsbot.pipeline.publisher import PrintPublisher, Publisher, PublishError
 from newsbot.pipeline.summarize import (
@@ -71,24 +96,10 @@ from newsbot.pipeline.summarize import (
     LLMResult,
     StoriesOut,
     StoryOut,
-    TopicSummary,
-    summarize_topic,
 )
+from newsbot.store import repo
 from newsbot.store.db import assert_fts5, connect, migrate
-from newsbot.store.models import PriorStory, StoredItem, StoryToSave, Usage
-from newsbot.store.repo import (
-    claim_digest,
-    existing_urls,
-    get_digest,
-    mark_digest_failed,
-    recent_headlines,
-    record_source_result,
-    save_run,
-)
 from newsbot.useragent import user_agent_headers, warn_if_contact_unset
-
-if TYPE_CHECKING:
-    from newsbot.shift.sweep import CodeAlertPoster, CodeCheckOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +108,8 @@ _COLLECT_TIMEOUT_S = 20.0
 _PUBLISH_BACKOFF_S = (2.0, 4.0, 8.0)  # 3 retries after the first attempt
 
 
-class RunMode(StrEnum):
-    POST = "post"
-    PREVIEW = "preview"
-
-
 class RunKind(StrEnum):
-    """Why this POST run happened, shown on the admin-channel run report (design.md §6).
+    """Why a server's digest is running, shown on its run report (design.md §6).
 
     Deliberately doesn't say *who* ran `/newsbot run-now`: the privacy
     policy promises we don't keep user ids around, and this is not the
@@ -115,581 +121,21 @@ class RunKind(StrEnum):
     RUN_NOW = "run-now"
 
 
-@dataclass
-class Deps:
-    cfg: AppConfig
-    db_path: str
-    http: httpx.AsyncClient
-    llm: LLMClient
-    collectors: list[Collector]
-    now: Callable[[], datetime]
-    alert: Callable[[str], Awaitable[None]]
-    # Shared with the SHiFT alert sweep (design.md §12) so Reddit's gap is
-    # honored across the daily job and every hourly sweep, not reset fresh
-    # each time. `None` (the default) keeps this run's own collection
-    # exactly as it's always behaved: nothing about the daily job
-    # requires cross-call state on its own.
-    rate_limit_state: RateLimitState | None = None
-    # Set by the bot layer when alerts.enabled; None means "no poster
-    # configured", which is also every existing test's default: the
-    # daily POST hook (added in `_run_claimed`) is a no-op without one.
-    code_alert_poster: CodeAlertPoster | None = None
-    # Why this POST run is happening (scheduled cron, startup catch-up,
-    # or /newsbot run-now). `None` (the default, and every existing test's
-    # default) means "don't send an admin-channel run report": the
-    # report hook added in `_run_claimed` is a no-op without one, so every
-    # caller that predates this feature sees exactly today's behavior.
-    run_kind: RunKind | None = None
-
-
-@dataclass
-class PipelineOutcome:
-    status: Literal["ok", "partial", "failed", "skipped"]
-    rendered: RenderedDigest | None
-    notes: list[str]
-    usage: Usage
-
-
 def local_run_date(now: datetime, timezone: str) -> date:
     """The local calendar date `now` falls on in `timezone`.
 
-    Not UTC's date: the digest is keyed by the *local* day, because the
-    owner reads it in the morning, not at midnight UTC. Near midnight UTC
-    the two dates genuinely differ (a run at 02:00 UTC is still "yesterday"
-    at 09:00 America/Los_Angeles), which is exactly the case worth a test.
+    Not UTC's date: a digest is keyed by the *local* day, because people read
+    it in the morning, not at midnight UTC. Near midnight UTC the two dates
+    genuinely differ (a run at 02:00 UTC is still "yesterday" at 09:00
+    America/Los_Angeles), which is exactly the case worth a test.
     """
     from zoneinfo import ZoneInfo
 
     return now.astimezone(ZoneInfo(timezone)).date()
 
 
-def _normalize_sync(
-    items: list[RawItem], db_path: str, now: datetime, lookback: timedelta
-) -> list[RawItem]:
-    # Runs inside asyncio.to_thread: the sqlite connection it opens for
-    # the known-urls lookback is created and used entirely within this
-    # worker thread, never touching the event loop.
-    with closing(connect(db_path)) as conn:
-        return normalize(items, lambda urls: existing_urls(conn, urls), now, lookback)
-
-
-def _prior_headlines_sync(
-    db_path: str, topic_keys: list[str], since: datetime
-) -> dict[str, list[PriorStory]]:
-    with closing(connect(db_path)) as conn:
-        return {key: recent_headlines(conn, key, since) for key in topic_keys}
-
-
-async def build_digest(
-    deps: Deps, run_date: date
-) -> tuple[
-    RenderedDigest,
-    list[StoredItem],
-    list[StoryToSave],
-    str,
-    list[str],
-    Usage,
-    list[CollectorResult],
-    list[RawItem],
-    dict[str, TopicSummary],
-    dict[str, list[TopicItem]],
-]:
-    """Run collect, normalize, filter and summarize. Writes nothing.
-
-    Returns everything `run_daily` needs to decide what happened and, in
-    POST mode, what to save: the rendered digest, the items and stories
-    ready for `repo.save_run`, an overall status (`ok`/`partial`), header
-    notes, token usage, the raw per-collector results (for source health
-    bookkeeping, which happens one level up), the raw collected items
-    (before normalize's own store-dedupe and digest lookback window;
-    SHiFT code alerts, design.md §12: the daily run's own code check
-    runs against these, on its own `max_item_age_hours`/once-per-code
-    rules rather than the digest's, since `StoredItem` (what actually
-    reaches `save_run`) has no `full_text` field to find a code in
-    anyway), and the per-topic summaries plus fallback items `render_digest`
-    already used to build `rendered`: handed back out again so the
-    admin-channel run report (design.md §6) can build its own per-topic
-    story counts without re-deriving them from a rendered embed.
-    """
-    cfg = deps.cfg
-    now = deps.now()
-
-    results = await run_collectors(
-        deps.collectors,
-        deps.http,
-        timeout_s=_COLLECT_TIMEOUT_S,
-        rate_limit_state=deps.rate_limit_state,
-    )
-    for result in results:
-        logger.info(
-            "collector finished",
-            extra={
-                "source_name": result.source_name,
-                "source_type": result.source_type,
-                "item_count": len(result.items),
-                "error": result.error,
-                "skipped": result.skipped,
-            },
-        )
-    collected = [item for result in results for item in result.items]
-
-    lookback = timedelta(hours=cfg.digest.lookback_hours)
-    normalized = await asyncio.to_thread(_normalize_sync, collected, deps.db_path, now, lookback)
-
-    grouped = filter_items(normalized, cfg.topics, cfg.digest.max_items_per_topic)
-
-    since = now - _PRIOR_HEADLINE_WINDOW
-    prior_by_topic = await asyncio.to_thread(
-        _prior_headlines_sync, deps.db_path, [t.key for t in cfg.topics], since
-    )
-
-    summaries: dict[str, TopicSummary] = {}
-    for topic in cfg.topics:
-        topic_items = grouped.get(topic.key)
-        if not topic_items:
-            continue
-        summaries[topic.key] = await summarize_topic(
-            deps.llm,
-            topic,
-            topic_items,
-            prior_by_topic.get(topic.key, []),
-            all_topics=cfg.topics,
-            subject=cfg.digest.subject,
-        )
-
-    stored_items = _build_stored_items(grouped)
-    stories_to_save = [
-        StoryToSave(
-            topic_key=topic_key,
-            headline=draft.headline,
-            summary=draft.summary,
-            label=draft.label,
-            item_urls=draft.item_urls,
-            update_of_story_id=draft.update_of_story_id,
-        )
-        for topic_key, summary in summaries.items()
-        for draft in summary.stories
-    ]
-
-    fallback_items = {
-        topic_key: grouped.get(topic_key, [])
-        for topic_key, summary in summaries.items()
-        if summary.fallback
-    }
-
-    coverage_notes = [
-        f"{result.source_name}: {result.skipped}" for result in results if result.skipped
-    ]
-    status = "partial" if coverage_notes or any(s.fallback for s in summaries.values()) else "ok"
-
-    usage = Usage(
-        input_tokens=sum(s.usage.input_tokens for s in summaries.values()),
-        output_tokens=sum(s.usage.output_tokens for s in summaries.values()),
-    )
-
-    rendered = render_digest(run_date, cfg.topics, summaries, fallback_items, coverage_notes)
-    return (
-        rendered,
-        stored_items,
-        stories_to_save,
-        status,
-        coverage_notes,
-        usage,
-        results,
-        collected,
-        summaries,
-        fallback_items,
-    )
-
-
-def _build_stored_items(grouped: dict[str, list[TopicItem]]) -> list[StoredItem]:
-    """Collapse `filter_items`' per-topic grouping back into one row per item.
-
-    An item that matched two topics shows up in two of `grouped`'s lists,
-    but it's one row in `items`: `item_topics` is what carries the
-    one-to-many relationship, so this rebuilds a url -> item map alongside
-    a url -> {topic_key: uncertain} map and zips them back together.
-    """
-    item_by_url: dict[str, RawItem] = {}
-    topics_by_url: dict[str, dict[str, bool]] = {}
-    for topic_key, topic_items in grouped.items():
-        for topic_item in topic_items:
-            item_by_url[topic_item.item.url] = topic_item.item
-            topics_by_url.setdefault(topic_item.item.url, {})[topic_key] = topic_item.uncertain
-
-    return [
-        StoredItem(
-            url=url,
-            title=item.title,
-            excerpt=item.excerpt,
-            source_name=item.source_name,
-            trust=item.trust,
-            published_at=item.published_at,
-            topics=topics_by_url[url],
-        )
-        for url, item in item_by_url.items()
-    ]
-
-
-async def run_daily(
-    deps: Deps,
-    publisher: Publisher,
-    *,
-    mode: RunMode,
-    force: bool = False,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> PipelineOutcome:
-    """Run one day's pipeline, in POST or PREVIEW mode.
-
-    PREVIEW never claims, never writes source health, and never saves:
-    it reads the store (for dedupe and prior headlines) and nothing more,
-    so running a preview can never change what the real job sees later.
-
-    POST claims the day first (SPEC-DEV 2), builds the digest, records
-    source health, publishes with retry, and only then saves items,
-    stories and the final status in one transaction. A publish failure
-    after the claim leaves the digest `failed` with nothing saved, so a
-    retry recollects instead of finding "no new items" against data that
-    never actually reached anyone.
-    """
-    async with _run_lock:
-        if mode is RunMode.PREVIEW:
-            return await _run_preview(deps, publisher)
-        return await _run_post(deps, publisher, force=force, sleep=sleep)
-
-
-async def _run_preview(deps: Deps, publisher: Publisher) -> PipelineOutcome:
-    run_date = local_run_date(deps.now(), deps.cfg.digest.timezone)
-    try:
-        (
-            rendered,
-            _items,
-            _stories,
-            status,
-            notes,
-            usage,
-            _results,
-            _collected,
-            _summaries,
-            _fallback_items,
-        ) = await build_digest(deps, run_date)
-        await publisher.publish(rendered)
-    except Exception as exc:  # a preview must never take the bot down with it
-        logger.exception("preview run failed")
-        await deps.alert(f"newsbot: preview failed: {exc}")
-        return PipelineOutcome(status="failed", rendered=None, notes=[str(exc)], usage=Usage(0, 0))
-    return PipelineOutcome(status=status, rendered=rendered, notes=notes, usage=usage)
-
-
-async def _run_post(
-    deps: Deps, publisher: Publisher, *, force: bool, sleep: Callable[[float], Awaitable[None]]
-) -> PipelineOutcome:
-    run_started_at = deps.now()
-    run_date = local_run_date(run_started_at, deps.cfg.digest.timezone)
-
-    digest_id = await asyncio.to_thread(_claim_sync, deps.db_path, run_date, force, deps.now)
-    if digest_id is None:
-        return PipelineOutcome(
-            status="skipped",
-            rendered=None,
-            notes=["today's digest is already claimed"],
-            usage=Usage(0, 0),
-        )
-
-    try:
-        return await _run_claimed(
-            deps, publisher, digest_id, run_date, run_started_at=run_started_at, sleep=sleep
-        )
-    except BaseException as exc:
-        # build_digest failing and publish failing after retries both
-        # already have their own handling below, and return a normal
-        # PipelineOutcome instead of raising. If something gets past both
-        # of those, it's a shape of failure this module didn't
-        # anticipate (a bug, a publisher raising something other than
-        # PublishError, the run getting cancelled), and the one thing
-        # that must not happen is `digest_id` staying `pending` forever,
-        # since that blocks every run (and, pre-group-4, every admin)
-        # after it. Record it failed with whatever got posted (a
-        # PublishError-shaped exception carries that; anything else
-        # didn't get far enough to post anything) and keep propagating:
-        # this function isn't the place to decide whether the caller can
-        # recover from it.
-        # ...unless the outcome was already saved. The admin report and the
-        # SHiFT code check both run after `save_run` commits, and a
-        # cancellation that lands in either of them used to reach this
-        # handler and relabel a digest that had posted perfectly well as
-        # "failed". Which is a lie, and the kind that makes the next
-        # run-now ask the wrong question. test-engineer caught it.
-        status = await asyncio.to_thread(_digest_status_sync, deps.db_path, run_date)
-        if status in ("ok", "partial"):
-            logger.warning(
-                "error after %s's digest was saved as %s; leaving it as is", run_date, status
-            )
-            raise
-        # A PublishError carries what landed. A CancelledError carries
-        # nothing, so ask the publisher itself: a deploy that interrupts
-        # Palworld must still remember that Borderlands 4 already posted,
-        # or the next catch-up posts it twice. (The plan said so; the first
-        # draft forgot, and test-engineer noticed.)
-        posted_ids = list(
-            getattr(exc, "posted_ids", None) or getattr(publisher, "posted_ids", None) or []
-        )
-        logger.exception("unhandled error after claiming %s; marking it failed", run_date)
-        await asyncio.to_thread(
-            _mark_failed_sync,
-            deps.db_path,
-            digest_id,
-            f"unhandled error: {exc!r}",
-            posted_ids,
-            deps.now,
-        )
-        raise
-
-
-async def _run_claimed(
-    deps: Deps,
-    publisher: Publisher,
-    digest_id: int,
-    run_date: date,
-    *,
-    run_started_at: datetime,
-    sleep: Callable[[float], Awaitable[None]],
-) -> PipelineOutcome:
-    """The part of `_run_post` that runs once the day is claimed.
-
-    Split out from `_run_post` so that function's outer `except
-    BaseException` reads as what it is: a last-resort net around
-    everything below, not the normal control flow. Every failure this
-    function already knows how to handle (a bad collect/summarize, a
-    publish that never recovers) returns a `PipelineOutcome` instead of
-    raising; anything that raises past here is `_run_post`'s problem.
-    """
-    try:
-        (
-            rendered,
-            items,
-            stories,
-            status,
-            notes,
-            usage,
-            results,
-            collected,
-            summaries,
-            fallback_items,
-        ) = await build_digest(deps, run_date)
-    except Exception as exc:
-        logger.exception("build_digest failed")
-        await asyncio.to_thread(
-            _mark_failed_sync, deps.db_path, digest_id, f"build failed: {exc}", [], deps.now
-        )
-        await deps.alert(f"newsbot: digest build failed: {exc}")
-        return PipelineOutcome(status="failed", rendered=None, notes=[str(exc)], usage=Usage(0, 0))
-
-    await _record_source_health(deps, results)
-
-    posted_by_topic, publish_error = await _publish_with_retry(publisher, rendered, sleep=sleep)
-    message_ids = list(posted_by_topic.values())
-    publish_finished_at = deps.now()
-
-    if publish_error is not None:
-        await asyncio.to_thread(
-            _mark_failed_sync,
-            deps.db_path,
-            digest_id,
-            f"publish failed: {publish_error}",
-            message_ids,
-            deps.now,
-        )
-        # The SHiFT alert check (design.md §12) runs regardless of whether
-        # the digest itself made it out: a code sitting in today's
-        # collected items doesn't stop being real because the digest
-        # publish failed. It runs *after* the digest row above is already
-        # durably `failed` (QA item 3), not before: a cancellation landing
-        # inside the code check used to be able to unwind past this whole
-        # function before `_mark_failed_sync` ever ran, letting
-        # `_run_post`'s own outer handler mark the digest failed a second
-        # time with the wrong notes and an empty id list. Now there's
-        # nothing left for a cancellation here to corrupt: the digest's
-        # own outcome is already on disk.
-        await _maybe_check_codes(deps, collected, results)
-        await deps.alert(_render_publish_failure_alert(rendered, posted_by_topic, publish_error))
-        return PipelineOutcome(
-            status="failed", rendered=rendered, notes=[*notes, str(publish_error)], usage=usage
-        )
-
-    await asyncio.to_thread(
-        _save_run_sync,
-        deps.db_path,
-        digest_id,
-        items,
-        stories,
-        status,
-        message_ids,
-        "; ".join(notes) or None,
-        usage,
-        deps.now,
-    )
-    await _maybe_send_run_report(
-        deps,
-        status=status,
-        run_date=run_date,
-        summaries=summaries,
-        fallback_items=fallback_items,
-        results=results,
-        usage=usage,
-        notes=notes,
-        posted_by_topic=posted_by_topic,
-        duration=publish_finished_at - run_started_at,
-    )
-    # Same reasoning as the failure branch above, mirrored for success:
-    # the code check runs only once today's digest is already saved `ok`/
-    # `partial` with its real message ids, so a cancellation inside it has
-    # nothing left to corrupt.
-    await _maybe_check_codes(deps, collected, results)
-    return PipelineOutcome(status=status, rendered=rendered, notes=notes, usage=usage)
-
-
-async def _maybe_send_run_report(
-    deps: Deps,
-    *,
-    status: str,
-    run_date: date,
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    results: list[CollectorResult],
-    usage: Usage,
-    notes: list[str],
-    posted_by_topic: dict[str, int],
-    duration: timedelta,
-) -> None:
-    """Send the admin-channel run report (design.md §6, §13), if this run earns one.
-
-    A no-op whenever there's no `run_kind` (every caller that predates
-    this feature, and every test that doesn't set one up), `report_to_admin`
-    is off, or `status` isn't `ok`/`partial`: a `failed` run already gets
-    a detailed alert of its own above, and a report on top of that would
-    just be noise about the same failure twice. Only ever called once
-    today's digest row is already durably saved (same ordering
-    `_maybe_check_codes` relies on, for the same reason): nothing in here
-    may change what already landed, so any exception (a bug in
-    `render_run_report`; a Discord hiccup inside `deps.alert`, which
-    already swallows its own) is caught and logged, never re-raised.
-
-    `posted_by_topic` is exactly what `DiscordPublisher.publish` handed
-    back (or `{}`, for a publisher that predates this or doesn't post
-    anywhere): a topic key -> message id mapping `render_run_report` uses
-    to build each posted topic's own `[jump]` link (design.md §13).
-    """
-    if deps.run_kind is None or not deps.cfg.digest.report_to_admin:
-        return
-    if status not in ("ok", "partial"):
-        return
-    try:
-        text = render_run_report(
-            status=status,
-            run_date=run_date,
-            run_kind=deps.run_kind,
-            topics=deps.cfg.topics,
-            summaries=summaries,
-            fallback_items=fallback_items,
-            results=results,
-            usage=usage,
-            duration=duration,
-            notes=notes,
-            guild_id=deps.cfg.guild_id,
-            posted_by_topic=posted_by_topic,
-        )
-        await deps.alert(text)
-    except Exception:
-        logger.exception("failed to build or send the admin-channel run report")
-
-
-def _claim_sync(
-    db_path: str, run_date: date, force: bool, now: Callable[[], datetime]
-) -> int | None:
-    with closing(connect(db_path)) as conn:
-        return claim_digest(conn, run_date, force=force, now=now)
-
-
-def _digest_status_sync(db_path: str, run_date: date) -> str | None:
-    with closing(connect(db_path)) as conn:
-        row = get_digest(conn, run_date)
-    return row.status if row is not None else None
-
-
-def _mark_failed_sync(
-    db_path: str, digest_id: int, notes: str, message_ids: list[int], now: Callable[[], datetime]
-) -> None:
-    with closing(connect(db_path)) as conn:
-        mark_digest_failed(conn, digest_id, notes, message_ids, now=now)
-
-
-def _save_run_sync(
-    db_path: str,
-    digest_id: int,
-    items: list[StoredItem],
-    stories: list[StoryToSave],
-    status: str,
-    message_ids: list[int],
-    notes: str | None,
-    usage: Usage,
-    now: Callable[[], datetime],
-) -> None:
-    with closing(connect(db_path)) as conn:
-        save_run(conn, digest_id, items, stories, status, message_ids, notes, usage, now=now)
-
-
-def _record_health_sync(db_path: str, results: list[CollectorResult], now: datetime) -> list[str]:
-    """Update source_health for every non-skipped result.
-
-    Returns the names of sources that just hit exactly 3 consecutive
-    failures, so the caller knows who to alert about.
-    """
-    newly_flagged = []
-    with closing(connect(db_path)) as conn:
-        for result in results:
-            if result.skipped is not None:
-                continue
-            consecutive = record_source_result(conn, result.source_name, now, result.error)
-            if result.error is not None and consecutive == 3:
-                newly_flagged.append(result.source_name)
-    return newly_flagged
-
-
-async def _record_source_health(deps: Deps, results: list[CollectorResult]) -> None:
-    flagged = await asyncio.to_thread(_record_health_sync, deps.db_path, results, deps.now())
-    for source_name in flagged:
-        await deps.alert(f"newsbot: source {source_name!r} has failed 3 runs in a row")
-
-
-def _render_publish_failure_alert(
-    rendered: RenderedDigest, posted_by_topic: dict[str, int], publish_error: PublishError
-) -> str:
-    """Say which games posted and which didn't, and only blame retries that happened.
-
-    `rendered.messages` is every topic that had something to post today
-    (empty topics never make it in); `posted_by_topic` is the subset that
-    actually got a message id back before `publish_error` ended the
-    attempt. Without naming both sides, "publish failed after retries"
-    told an admin *that* something broke but not whether Diablo IV's
-    channel is now missing a digest or Borderlands 4's is: exactly the
-    thing you'd want to know before deciding whether `run-now` (which
-    reposts everything, §10 of deploy.md) is worth the duplicate posts.
-
-    "after retries" is only true for a retryable error: a permanent one
-    (`PublishError.retryable is False`, a 4xx or a channel that's gone)
-    never got a second attempt, so saying so would be misleading.
-    """
-    posted = [m.topic_name for m in rendered.messages if m.topic_key in posted_by_topic]
-    missing = [m.topic_name for m in rendered.messages if m.topic_key not in posted_by_topic]
-    verb = "publish failed after retries" if publish_error.retryable else "publish failed"
-    posted_part = ", ".join(posted) if posted else "none"
-    missing_part = ", ".join(missing) if missing else "none"
-    return f"newsbot: {verb}: {publish_error}; posted: {posted_part}; did not post: {missing_part}"
-
-
 async def _publish_with_retry(
-    publisher: Publisher, rendered: RenderedDigest, *, sleep: Callable[[float], Awaitable[None]]
+    publisher: Publisher, rendered, *, sleep: Callable[[float], Awaitable[None]]
 ) -> tuple[dict[str, int], PublishError | None]:
     """Retry `publisher.publish()` on transient failure, with backoff.
 
@@ -704,9 +150,9 @@ async def _publish_with_retry(
     on something no amount of waiting fixes. On final failure, the
     mapping returned comes from the error itself
     (`PublishError.posted_by_topic`), not an empty one: those ids are
-    real messages sitting in real channels, and `_run_post` needs them to
-    record against the `failed` row so a human (or `needs_confirmation`)
-    knows part of the digest already posted.
+    real messages sitting in real channels, and the caller needs them to
+    record against the `failed` row so a human (or the run-now
+    confirmation) knows part of the digest already posted.
     """
     last_error: PublishError | None = None
     for attempt in range(len(_PUBLISH_BACKOFF_S) + 1):
@@ -719,85 +165,6 @@ async def _publish_with_retry(
             if attempt < len(_PUBLISH_BACKOFF_S):
                 await sleep(_PUBLISH_BACKOFF_S[attempt])
     return (dict(last_error.posted_by_topic) if last_error else {}), last_error
-
-
-async def _maybe_check_codes(
-    deps: Deps, collected: list[RawItem], results: list[CollectorResult]
-) -> None:
-    """Run the SHiFT alert check against this run's own collected items (design.md §12).
-
-    A no-op whenever alerts aren't configured (`code_alert_poster is
-    None`) or aren't enabled: every existing caller of `run_daily`, and
-    every test that doesn't set one up, sees exactly today's behavior.
-    Deliberately swallows everything: a bug in the alert path is a problem
-    worth an admin alert, never a reason to turn a digest that posted fine
-    into a `failed` one. `shift/sweep.py` is imported lazily, here and
-    only here, so the normal case (alerts off) never pays for importing a
-    module it isn't going to use, and so `pipeline/run.py` and
-    `shift/sweep.py` can each import from the other without either one
-    eagerly importing the other at module load time.
-
-    `seeding_ok` is computed the same way the hourly sweep computes it
-    `decide.seeding_healthy(results)`, rather than always `True`. The
-    daily run does run every non-web_search collector for real, but "for
-    real" isn't "successfully": a run where most of those sources timed
-    out shouldn't get to declare today's (mostly missing) haul the
-    historical baseline any more than an unhealthy sweep should (A1).
-
-    Callers only ever reach this once today's digest row is already
-    durably recorded (QA item 3, `_run_claimed`): `_save_run_sync` on
-    success, `_mark_failed_sync` on a publish failure, so by the time
-    this runs, there's no digest outcome left for anything in here to
-    corrupt. That's what makes it safe to catch `BaseException`, not just
-    `Exception`: a cancellation landing here (the scheduler shutting the
-    process down mid-sweep, say) used to be able to unwind past this
-    function *before* the digest was saved, and `_run_post`'s own
-    catch-all would then mark an already-published digest `failed` with
-    an empty id list. Swallowing it here instead just means this one
-    best-effort code check didn't finish: the next sweep interval (or
-    tomorrow's run) tries again; the digest that already posted stays
-    exactly as posted.
-    """
-    if not deps.cfg.alerts.enabled or deps.code_alert_poster is None:
-        return
-    try:
-        from newsbot.shift.decide import seeding_healthy
-        from newsbot.shift.sweep import SweepDeps, process_items
-
-        # The hourly sweep never runs web_search at all (it builds its own
-        # collector list with include_web_search=False, to keep Brave
-        # within its free allowance): a code that only ever showed up in
-        # a Brave result was never seeded by any sweep, so the daily run's
-        # own check has to hold itself to the same restriction, not just
-        # collect from everything it happens to have on hand. Filtered by
-        # object identity, not URL: `collected` is exactly `results`' own
-        # items, unmodified by anything upstream of here, so id() is a
-        # precise, collision-proof way to ask "which result did this item
-        # come from" without assuming two different sources never share a
-        # URL.
-        web_search_item_ids = {
-            id(item)
-            for result in results
-            if result.source_type == "web_search"
-            for item in result.items
-        }
-        sweepable_items = [item for item in collected if id(item) not in web_search_item_ids]
-
-        sweep_deps = SweepDeps(
-            cfg=deps.cfg,
-            db_path=deps.db_path,
-            http=deps.http,
-            collectors=[],
-            now=deps.now,
-            alert=deps.alert,
-            poster=deps.code_alert_poster,
-            rate_limit_state=deps.rate_limit_state,
-        )
-        await process_items(sweep_deps, sweepable_items, seeding_ok=seeding_healthy(results))
-    except BaseException as exc:  # never let an alert-path bug, or a cancellation, touch
-        # the digest's own already-recorded outcome; see the docstring above.
-        logger.exception("SHiFT code alert check failed")
-        await deps.alert(f"newsbot: SHiFT code alert check failed: {exc}")
 
 
 # --- Offline running: fixture collectors and a canned-JSON stub LLM ---
@@ -891,20 +258,24 @@ async def _stdout_alert(text: str) -> None:
     print(f"[alert] {text}", file=sys.stderr)
 
 
+async def _stdout_guild_notice(guild_id: int, text: str) -> None:
+    print(f"[notice for server {guild_id}] {text}", file=sys.stderr)
+
+
 class _DropWebSearchKeyWarning(logging.Filter):
-    """Filters out load_config's "BRAVE_API_KEY is not set" warning, and nothing else."""
+    """Filters out load_config's "BRAVE_API_KEY is not set" warnings, and nothing else."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        return "web_search source configured but BRAVE_API_KEY is not set" not in message
+        return "BRAVE_API_KEY is not set" not in message
 
 
 @contextmanager
 def _quiet_web_search_key_warning():
-    """Silence config.py's "web_search ... BRAVE_API_KEY is not set" warning for one call.
+    """Silence config.py's "web search ... BRAVE_API_KEY is not set" warning for one call.
 
     Only ever used around `load_config` when `--fixtures` is given:
-    `--fixtures` throws every real collector away, `web_search` included,
+    `--fixtures` throws every real collector away, web search included,
     so a config that happens to have one configured has nothing to warn
     about here: the warning exists to flag a real run that's about to
     quietly lose a source, not an offline demo that was never going to
@@ -921,47 +292,211 @@ def _quiet_web_search_key_warning():
         config_logger.removeFilter(warning_filter)
 
 
+# --- The modes ---
+
+
+def _parse_now(text: str) -> datetime:
+    """`--now` as an aware datetime (a bare timestamp is read as UTC). Raises `ValueError`."""
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+async def _run_collect_cli(
+    cfg: AppConfig, db_path: str, collectors: list[Collector], now: Callable[[], datetime]
+):
+    """One collection pass into `db_path`; SHiFT codes are released and printed, never delivered.
+
+    The fan-out runs in preview mode: no claim, no posted or failed marks, no
+    ping spent, no pending recovery. Delivering for real is the bot's job.
+    """
+    from newsbot.pipeline.collect import CollectionDeps, run_collection
+    from newsbot.shift.fanout import FanoutDeps, make_shift_hook
+    from newsbot.shift.sweep import PrintCodeAlertPoster
+
+    fanout = FanoutDeps(
+        cfg=cfg,
+        db_path=db_path,
+        now=now,
+        poster_for=lambda _guild_id, _channel_id, _ping, _notify: PrintCodeAlertPoster(),
+        notify_guild=_stdout_guild_notice,
+        alert_owner=_stdout_alert,
+        preview=True,
+    )
+    async with httpx.AsyncClient(headers=user_agent_headers()) as http:
+        deps = CollectionDeps(
+            cfg=cfg,
+            db_path=db_path,
+            http=http,
+            collectors=collectors,
+            now=now,
+            alert=_stdout_alert,
+            shift_hook=make_shift_hook(fanout),
+        )
+        return await run_collection(deps)
+
+
+def _pick_guild(db_path: str, wanted: int | None) -> tuple[int | None, str | None]:
+    """The server a digest mode runs for, or `(None, why not)`.
+
+    `--guild` names one. Without it, exactly one set-up server is the
+    self-hoster's case and gets picked; none or several is an error that says
+    what there is to choose from.
+    """
+    with closing(connect(db_path)) as conn:
+        guilds = repo.list_set_up_guilds(conn)
+    ids = sorted(g.guild_id for g in guilds)
+    if wanted is not None:
+        if wanted not in ids:
+            listed = ", ".join(str(i) for i in ids) or "none"
+            return None, f"server {wanted} isn't set up in this database (set up: {listed})"
+        return wanted, None
+    if not ids:
+        return None, "no server is set up in this database yet"
+    if len(ids) > 1:
+        return None, "several servers are set up; pick one with --guild (" + ", ".join(
+            str(i) for i in ids
+        ) + ")"
+    return ids[0], None
+
+
+async def _run_digest_cli(
+    cfg: AppConfig,
+    db_path: str,
+    guild_id: int,
+    now: Callable[[], datetime],
+    llm: LLMClient | None,
+    *,
+    post: bool,
+    force: bool,
+) -> int:
+    """Preview (`post=False`) or really run (`post=True`) one server's digest; print, don't post."""
+    from newsbot.guilds.schedule import due_guilds
+    from newsbot.pipeline.guild_digest import (
+        GuildDigestDeps,
+        GuildTimeZoneError,
+        preview_guild_digest,
+        run_guild_digest,
+    )
+    from newsbot.pipeline.summaries import (
+        SummaryDeps,
+        dry_run_lookup,
+        retry_lookup,
+        summary_lookup,
+    )
+
+    summary_for = retry_for = None
+    if llm is not None:
+        summary_deps = SummaryDeps(cfg=cfg, db_path=db_path, llm=llm, now=now, alert=_stdout_alert)
+        # A rehearsal must not leave summaries behind for the real digest to reuse.
+        summary_for = summary_lookup(summary_deps) if post else dry_run_lookup(summary_deps)
+        retry_for = retry_lookup(summary_deps) if post else None
+    deps = GuildDigestDeps(
+        cfg=cfg,
+        db_path=db_path,
+        now=now,
+        publisher_for=lambda _guild, _scope, _already, _on_posted: PrintPublisher(),
+        notify_guild=_stdout_guild_notice,
+        summary_for=summary_for,
+        retry_summary=retry_for,
+    )
+    try:
+        if not post:
+            preview = await preview_guild_digest(deps, guild_id)
+            if preview is None:
+                print(
+                    f"newsbot: server {guild_id} isn't set up or follows no games", file=sys.stderr
+                )
+                return 1
+            print(to_text(preview.rendered))
+            for note in preview.notes:
+                print(f"[note] {note}", file=sys.stderr)
+            return 0
+
+        if force:
+            outcome = await run_guild_digest(deps, guild_id, kind=RunKind.RUN_NOW, force=True)
+        else:
+            with closing(connect(db_path)) as conn:
+                candidates = repo.due_candidates(conn)
+            due = next(
+                (d for d in due_guilds(candidates, now(), deps.running) if d.guild_id == guild_id),
+                None,
+            )
+            if due is None:
+                print(
+                    f"newsbot: server {guild_id} isn't due a digest at {now().isoformat()} "
+                    "(not yet its time, or today's is already claimed); use --force to run anyway",
+                    file=sys.stderr,
+                )
+                return 0
+            kind = RunKind.CATCH_UP if due.catch_up else RunKind.SCHEDULED
+            outcome = await run_guild_digest(deps, guild_id, kind=kind, due=due)
+    except GuildTimeZoneError as exc:
+        print(f"newsbot: {exc}", file=sys.stderr)
+        return 1
+    logger.info(
+        "guild digest run finished",
+        extra={"guild_id": guild_id, "status": outcome.status, "notes": outcome.notes},
+    )
+    for note in outcome.notes:
+        print(f"[note] {note}", file=sys.stderr)
+    return 1 if outcome.status == "failed" else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m newsbot.pipeline.run`: the CLI front door for a run with no Discord.
 
-    Defaults to PREVIEW against a `PrintPublisher`; `--post-to-stdout`
-    switches to POST (still printing, not posting), which is the only way
-    to exercise the claim/save transaction and the double-post guard
-    without a live bot token. `--fixtures` replaces the real collectors
-    with `FixtureCollector`s reading canned JSON, and `--stub-llm`
-    replaces `AnthropicLLM` with `StubLLM` reading canned stories; either
-    can be used alone or together, and together they add up to a fully
-    offline run. `--sweep` runs one SHiFT code alert sweep instead of the
-    daily pipeline, and never touches the LLM either way.
+    See the module docstring for the modes. `--config` (or `$NEWSBOT_CONFIG`)
+    is always required. Secrets (`ANTHROPIC_API_KEY`, and `BRAVE_API_KEY` and
+    Bluesky's if configured) are only loaded for whatever `--fixtures` and
+    `--stub-llm` didn't replace, so a fully offline run needs none of them.
 
-    `--config` (or `$NEWSBOT_CONFIG`) is always required. Secrets
-    (`ANTHROPIC_API_KEY`, and `BRAVE_API_KEY`/Bluesky's if configured) are
-    only loaded for whatever `--fixtures`/`--stub-llm`/`--sweep` didn't
-    replace, so a fully offline run (`--fixtures` and `--stub-llm`
-    together) needs none of them.
-
-    `--check-sources` is its own thing entirely, checked before any of
-    the above: it runs every real, configured collector once, prints a
-    per-source and per-topic report, and exits, without ever loading
-    `ANTHROPIC_API_KEY` or `DISCORD_TOKEN`. Meant for sanity-checking a
-    new `config.yaml` (self-host plan task 3) before spending an Anthropic
-    call or a Discord token on it.
+    `--check-sources` is its own thing entirely, checked before any database
+    is touched: it never loads `ANTHROPIC_API_KEY` or `DISCORD_TOKEN`, so it
+    works for sanity-checking a new `config.yaml` before spending an
+    Anthropic call or a Discord token on it.
     """
     parser = argparse.ArgumentParser(prog="python -m newsbot.pipeline.run")
     parser.add_argument("--config", default=os.environ.get("NEWSBOT_CONFIG"))
     parser.add_argument("--db", default=os.environ.get("NEWSBOT_DB", "./data/newsbot.db"))
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run",
         action="store_true",
-        help="PREVIEW mode with PrintPublisher (the default; this flag just makes it explicit)",
+        help=(
+            "preview one server's next digest from stored items (the default mode); works on a "
+            "throwaway copy of --db, so nothing is written, the one-time import included"
+        ),
     )
-    parser.add_argument(
+    mode.add_argument(
         "--post-to-stdout",
         action="store_true",
-        help="POST mode with PrintPublisher: exercises the guard/save, prints instead of posting",
+        help=(
+            "run one server's digest for real (claim, print, save), printing instead of "
+            "posting; writes to --db, so never point it at a live database"
+        ),
     )
     parser.add_argument(
-        "--fixtures", help="directory of *.json fixture files, replacing collectors"
+        "--guild",
+        type=int,
+        help="the server for --dry-run and --post-to-stdout; optional when exactly one is set up",
+    )
+    parser.add_argument(
+        "--collect",
+        action="store_true",
+        help=(
+            "run one collection pass into --db (new SHiFT codes are released and printed; "
+            "nothing is delivered, claimed or marked posted, and no ping is spent); "
+            "still writes to --db, so never point it at a live database"
+        ),
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="the old name for --collect; kept as an alias for one release",
+    )
+    parser.add_argument(
+        "--fixtures",
+        help="directory of *.json fixture files, replacing collectors (implies one --collect pass)",
     )
     parser.add_argument(
         "--stub-llm", help="JSON file of canned stories, replacing the Claude client"
@@ -970,24 +505,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--now",
         help=(
-            "ISO 8601 timestamp to use as this run's clock instead of the real wall "
-            "clock (e.g. 2026-09-23T09:00:00Z); mainly for --fixtures, whose canned "
+            "ISO 8601 timestamp to use as every step's clock instead of the real wall "
+            "clock (e.g. 2026-09-23T17:00:00Z); mainly for --fixtures, whose canned "
             "published_at values are pinned to a fixed date and drift out of "
-            "digest.lookback_hours the moment 'today' moves on without them"
+            "collection.lookback_hours the moment 'today' moves on without them"
         ),
-    )
-    parser.add_argument(
-        "--sweep",
-        action="store_true",
-        help="run one SHiFT code alert sweep (design.md §12) instead of the daily pipeline",
     )
     parser.add_argument(
         "--check-sources",
         action="store_true",
         help=(
-            "run every configured source for real and report items/errors per source and "
-            "topic, then exit; needs no Anthropic or Discord credential"
+            "run the configured sources for real and report items/errors per source and "
+            "game, then exit; needs no Anthropic or Discord credential"
         ),
+    )
+    parser.add_argument(
+        "--game",
+        action="append",
+        metavar="KEY",
+        help="with --check-sources: only check this catalog game (repeatable)",
     )
     args = parser.parse_args(argv)
 
@@ -997,6 +533,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.config:
         print("newsbot: --config (or $NEWSBOT_CONFIG) is required", file=sys.stderr)
         return 2
+    if args.game and not args.check_sources:
+        print("newsbot: --game only works together with --check-sources", file=sys.stderr)
+        return 2
     try:
         with _quiet_web_search_key_warning() if args.fixtures else nullcontext():
             cfg = load_config(args.config)
@@ -1004,147 +543,188 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    def _real_now() -> datetime:
-        return datetime.now(UTC)
-
-    now: Callable[[], datetime] = _real_now
+    now: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731
     if args.now:
         try:
-            parsed_now = datetime.fromisoformat(args.now)
+            parsed_now = _parse_now(args.now)
         except ValueError as exc:
             print(
                 f"newsbot: --now {args.now!r} is not a valid ISO 8601 timestamp: {exc}",
                 file=sys.stderr,
             )
             return 2
-        if parsed_now.tzinfo is None:
-            parsed_now = parsed_now.replace(tzinfo=UTC)
-
-        def _fixed_now() -> datetime:
-            return parsed_now
-
-        now = _fixed_now
+        now = lambda: parsed_now  # noqa: E731
 
     if args.check_sources:
-        return asyncio.run(_run_check_sources_cli(cfg, args.config))
+        unknown = [key for key in args.game or [] if key not in {g.key for g in cfg.catalog}]
+        if unknown:
+            print(
+                "newsbot: --game names a game that isn't in the catalog: " + ", ".join(unknown),
+                file=sys.stderr,
+            )
+            return 2
+        return asyncio.run(_run_check_sources_cli(cfg, args.config, games=args.game))
 
-    # Secrets are only needed for the pieces --fixtures/--stub-llm didn't
+    if args.sweep:
+        print(
+            "newsbot: --sweep is now --collect (SHiFT detection runs inside the collection "
+            "pass); the old name stays as an alias for one release",
+            file=sys.stderr,
+        )
+        args.collect = True
+    want_collect = args.collect or bool(args.fixtures)
+    want_digest = args.dry_run or args.post_to_stdout or not args.collect
+
+    # The one mode that must leave the file alone: a digest preview with no collection pass.
+    read_only = want_digest and not args.post_to_stdout and not want_collect
+    with _read_only_copy(args.db) if read_only else nullcontext(args.db) as db_path:
+        return _run_modes(args, db_path, cfg, now, want_collect, want_digest, read_only=read_only)
+
+
+def _run_modes(
+    args: argparse.Namespace,
+    db_path: str,
+    cfg: AppConfig,
+    now: Callable[[], datetime],
+    want_collect: bool,
+    want_digest: bool,
+    *,
+    read_only: bool,
+) -> int:
+    """Everything `main` does once it knows which database file it's really working on."""
+    # Secrets are only needed for the pieces --fixtures and --stub-llm didn't
     # replace: real collectors want BRAVE_API_KEY (and Bluesky's, if
-    # configured), the real LLM wants ANTHROPIC_API_KEY. A fully offline
-    # run (both flags given) needs neither. --sweep never touches the LLM
-    # at all, so it only needs secrets when it's building real collectors.
+    # configured), the real LLM wants ANTHROPIC_API_KEY.
     secrets = None
-    if not args.fixtures or (not args.stub_llm and not args.sweep):
+    needs_collectors = want_collect and not args.fixtures
+    needs_llm = want_digest and not args.stub_llm
+    if needs_collectors or needs_llm:
         try:
             secrets = load_secrets(require_discord=False)
         except ConfigError as exc:
             print(str(exc), file=sys.stderr)
             return 2
 
-    db_parent = Path(args.db).parent
+    db_parent = Path(db_path).parent
     if str(db_parent) not in ("", "."):
         db_parent.mkdir(parents=True, exist_ok=True)
-    with closing(connect(args.db)) as conn:
+    with closing(connect(db_path)) as conn:
         migrate(conn)
         assert_fts5(conn)
 
-    if args.fixtures:
-        collectors: list[Collector] = build_fixture_collectors(Path(args.fixtures))
-    elif args.sweep:
-        collectors = build_collectors(cfg, secrets, include_web_search=False)
-    else:
-        collectors = build_collectors(cfg, secrets)
+    from newsbot.guilds.importer import ImportFailedError, ensure_imported
 
-    if args.sweep:
-        return _run_sweep_cli(cfg, args.db, collectors, now=now)
+    try:
+        report = ensure_imported(db_path, cfg, now)
+    except ImportFailedError as exc:
+        print(f"newsbot: {exc}", file=sys.stderr)
+        return 2
+    if report is not None:
+        print(f"[import] {report.owner_notice()}", file=sys.stderr)
+        if read_only:
+            print(
+                "[import] that happened in a throwaway copy; a dry run leaves your database alone",
+                file=sys.stderr,
+            )
 
-    llm: LLMClient
+    if want_collect:
+        if args.fixtures:
+            collectors = build_fixture_collectors(Path(args.fixtures))
+        else:
+            from newsbot.pipeline.collect import build_collection_collectors
+
+            collectors = build_collection_collectors(cfg, secrets)
+        outcome = asyncio.run(_run_collect_cli(cfg, db_path, collectors, now))
+        if outcome.skipped:
+            print("newsbot: collection skipped, a run is already in progress", file=sys.stderr)
+        else:
+            print(f"collection: {outcome.summary}")
+
+    if not want_digest:
+        return 0
+
+    guild_id, why_not = _pick_guild(db_path, args.guild)
+    if guild_id is None:
+        print(f"newsbot: {why_not}", file=sys.stderr)
+        return 2
+
+    llm: LLMClient | None
     if args.stub_llm:
         llm = StubLLM(Path(args.stub_llm))
     else:
         llm = AnthropicLLM(secrets.anthropic_api_key.get_secret_value())
-
-    mode = RunMode.POST if args.post_to_stdout else RunMode.PREVIEW
-
-    async def _run() -> PipelineOutcome:
-        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
-            deps = Deps(
-                cfg=cfg,
-                db_path=args.db,
-                http=http,
-                llm=llm,
-                collectors=collectors,
-                now=now,
-                alert=_stdout_alert,
-            )
-            return await run_daily(deps, PrintPublisher(), mode=mode, force=args.force)
-
-    outcome = asyncio.run(_run())
-    logger.info(
-        "pipeline run finished",
-        extra={
-            "status": outcome.status,
-            "input_tokens": outcome.usage.input_tokens,
-            "output_tokens": outcome.usage.output_tokens,
-            "notes": outcome.notes,
-        },
+    return asyncio.run(
+        _run_digest_cli(
+            cfg, db_path, guild_id, now, llm, post=args.post_to_stdout, force=args.force
+        )
     )
-    return 0 if outcome.status in ("ok", "partial", "skipped") else 1
 
 
-def _run_sweep_cli(
-    cfg: AppConfig,
-    db_path: str,
-    collectors: list[Collector],
-    *,
-    now: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> int:
-    """`python -m newsbot.pipeline.run --sweep`: one sweep, printed instead of posted.
+def _backup_read_only(db_path: Path, copy: Path) -> None:
+    """Back `db_path` up into `copy` through a read-only connection (safe against a live writer)."""
+    source = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        with closing(sqlite3.connect(copy)) as target:
+            source.backup(target)
+    finally:
+        source.close()
 
-    A thin CLI wrapper around `shift.sweep.run_code_sweep`, imported
-    lazily for the same reason `pipeline/run.py`'s other code-alert entry
-    point does (see `_maybe_check_codes`): it keeps a normal digest run
-    from ever needing to import `shift/sweep.py` at all. `now` defaults to
-    the real wall clock; `main`'s `--now` overrides it the same way it
-    overrides the daily pipeline's, for the same reason (see that flag's
-    own help text).
+
+def _backup_from_file_copy(db_path: Path, copy: Path, scratch: Path) -> None:
+    """The fallback: copy the file and its `-wal` into `scratch`, and back up from that.
+
+    A WAL database wants to write a `-shm` file next to itself even to be read, and a
+    read-only data directory (a root-owned volume, a mounted backup) won't allow
+    it, so `mode=ro` can fail with "unable to open database file". Copying the
+    pair somewhere writable gets SQLite to do the WAL recovery itself. It isn't atomic
+    against a live writer (a checkpoint between the two copies could tear it); for a
+    rehearsal on a throwaway copy I'll take that over refusing to run.
     """
-    from newsbot.shift.sweep import PrintCodeAlertPoster, SweepDeps, run_code_sweep
+    staged = scratch / "staged.db"
+    shutil.copyfile(db_path, staged)
+    wal = Path(f"{db_path}-wal")
+    if wal.exists():
+        shutil.copyfile(wal, Path(f"{staged}-wal"))
+    source = sqlite3.connect(staged)
+    try:
+        with closing(sqlite3.connect(copy)) as target:
+            source.backup(target)
+    finally:
+        source.close()
 
-    async def _run() -> CodeCheckOutcome | None:
-        async with httpx.AsyncClient(headers=user_agent_headers()) as http:
-            deps = SweepDeps(
-                cfg=cfg,
-                db_path=db_path,
-                http=http,
-                collectors=collectors,
-                now=now,
-                alert=_stdout_alert,
-                poster=PrintCodeAlertPoster(),
-            )
-            return await run_code_sweep(deps)
 
-    outcome = asyncio.run(_run())
-    if outcome is None:
-        print("newsbot: sweep skipped, a run is already in progress", file=sys.stderr)
-        return 0
-    logger.info(
-        "sweep finished",
-        extra={
-            "new_candidates": outcome.new_candidates,
-            "posted": outcome.posted,
-            "silent": outcome.silent,
-            "failed": outcome.failed,
-            "ping": outcome.ping,
-            "cap_reached": outcome.cap_reached,
-        },
-    )
-    return 0 if outcome.failed == 0 else 1
+@contextmanager
+def _read_only_copy(db_path: str):
+    """Yield a throwaway copy of the database at `db_path`, so a rehearsal can't touch the real one.
+
+    The import, the migrations and `connect()`'s own WAL pragma all write, and a
+    dry run that "only" imports has already spent a v2.2 server's SHiFT ping
+    budget at the wrong moment. So the file is opened read-only, copied with
+    sqlite's backup API (which is safe against a live writer) into a temp
+    directory, and everything runs there. If it can't be opened read-only (a
+    read-only data directory can't hold the WAL's `-shm`), the file and its `-wal`
+    are copied instead and backed up from the copy. A path that doesn't exist yet just
+    starts empty in the temp directory; nothing gets created at the real one.
+    """
+    with tempfile.TemporaryDirectory(prefix="newsbot-dry-run-") as scratch:
+        copy = Path(scratch) / "copy.db"
+        source = Path(db_path)
+        if source.exists():
+            try:
+                _backup_read_only(source, copy)
+            except sqlite3.OperationalError:
+                logger.info("couldn't open the database read-only; copying its files instead")
+                copy.unlink(missing_ok=True)
+                _backup_from_file_copy(source, copy, Path(scratch))
+        yield str(copy)
+
+
+# --- --check-sources ---
 
 
 @dataclass
 class CheckSourcesReport:
-    """What `--check-sources` found: per-source results and per-topic match counts.
+    """What `--check-sources` found: per-source results and per-game match counts.
 
     Deliberately holds nothing that touches a database or a wall clock
     beyond what `run_check_sources` needs internally: this is meant to be
@@ -1156,31 +736,76 @@ class CheckSourcesReport:
     topic_counts: dict[str, int]
 
 
-async def run_check_sources(
-    cfg: AppConfig, secrets: Secrets, http: httpx.AsyncClient
-) -> CheckSourcesReport:
-    """Run every real, configured collector once and report what came back.
+def _restricted(cfg: AppConfig, games: Sequence[str] | None) -> AppConfig:
+    """`cfg` cut down to `games`: their own sources, and the shared ones that could cover them.
 
-    Same collect -> normalize -> filter shape `build_digest` uses, minus
-    everything downstream of "did this source have anything relevant to
-    say": no summarizing (no Anthropic call, ever), no store dedupe (the
-    `existing_urls` lookup is a no-op empty set, since this is a
-    stateless sanity check, not a real run and shouldn't need a writable
-    `--db` to work), and nothing saved anywhere. `build_collectors`
-    itself already declines to build a `web_search` collector without
-    `secrets.brave_api_key` (config.py's own load-time filtering usually
-    means it was never in `cfg.sources` to begin with); the CLI wrapper
-    is what turns that absence into a readable note instead of just
-    a source that silently isn't in the results.
+    A shared source with no `games` restriction stays (the keyword matcher
+    decides what it's about, and with only these games in the catalog that's
+    all it can say); one restricted to other games goes.
     """
-    collectors = build_collectors(cfg, secrets)
-    results = await run_collectors(collectors, http, timeout_s=_COLLECT_TIMEOUT_S)
+    if not games:
+        return cfg
+    wanted = set(games)
+    return cfg.model_copy(
+        update={
+            "catalog": [g for g in cfg.catalog if g.key in wanted],
+            "shared_sources": [
+                s for s in cfg.shared_sources if not s.games or wanted.intersection(s.games)
+            ],
+        }
+    )
+
+
+async def run_check_sources(
+    cfg: AppConfig, secrets: Secrets, http: httpx.AsyncClient, *, games: Sequence[str] | None = None
+) -> CheckSourcesReport:
+    """Run the catalog's and shared sources once (and web search, if keyed) and report.
+
+    The same collect, normalize, filter shape the hourly pass uses, minus
+    everything downstream of "did this source have anything relevant to say":
+    no summarizing (no Anthropic call, ever), no store dedupe (the
+    `existing_urls` lookup is an empty set, since this is a stateless sanity
+    check and shouldn't need a writable database), and nothing saved anywhere.
+    `games` limits it to those games' own sources plus the shared sources
+    that could cover them, matched only against those games.
+    `build_catalog_collectors` itself declines to build web search without
+    `secrets.brave_api_key`; the CLI wrapper turns that absence into a
+    readable note instead of a source that silently isn't in the results.
+    """
+    sub = _restricted(cfg, games)
+    collectors = build_catalog_collectors(sub, secrets, web_search_games=sub.catalog)
+    timeout_s = _COLLECT_TIMEOUT_S
+    if sub.web_search is not None and secrets.brave_api_key is not None:
+        # The search collector pauses between queries, so its time grows with the games
+        # searched; the flat 20 s would cut a big catalog off mid-way.
+        from newsbot.pipeline.collect import _web_search_timeout
+
+        timeout_s = max(
+            timeout_s, _web_search_timeout(len(sub.catalog), sub.web_search.queries_per_game)
+        )
+    results = await run_collectors(collectors, http, timeout_s=timeout_s)
     collected = [item for result in results for item in result.items]
-    lookback = timedelta(hours=cfg.digest.lookback_hours)
+    lookback = timedelta(hours=sub.collection.lookback_hours)
     normalized = normalize(collected, lambda _urls: set(), datetime.now(UTC), lookback)
-    grouped = filter_items(normalized, cfg.topics, cfg.digest.max_items_per_topic)
-    topic_counts = {topic.key: len(grouped.get(topic.key, [])) for topic in cfg.topics}
+    grouped = filter_items(normalized, sub.catalog, sub.collection.max_items_per_game)
+    topic_counts = {game.key: len(grouped.get(game.key, [])) for game in sub.catalog}
     return CheckSourcesReport(results=results, topic_counts=topic_counts)
+
+
+def _group_results(
+    cfg: AppConfig, results: Sequence[CollectorResult]
+) -> list[tuple[str, list[CollectorResult]]]:
+    """Results grouped for the table: each game's own sources in catalog order, then the rest."""
+    owner: dict[str, GameCfg] = {s.name: g for g in cfg.catalog for s in g.sources}
+    by_game: dict[str, list[CollectorResult]] = {g.key: [] for g in cfg.catalog}
+    other: list[CollectorResult] = []
+    for result in results:
+        game = owner.get(result.source_name)
+        (by_game[game.key] if game is not None else other).append(result)
+    groups = [(f"{g.name}", by_game[g.key]) for g in cfg.catalog if by_game[g.key]]
+    if other:
+        groups.append(("Shared and web search", other))
+    return groups
 
 
 def render_check_sources_report(
@@ -1198,37 +823,40 @@ def render_check_sources_report(
     command itself look like it failed. The summary line at the bottom
     is what carries that news instead.
 
-    `web_search_skipped` is how many *unkeyed* `web_search` sources
-    `web_search_note` is talking about. `load_config` drops those before
-    `run_check_sources` ever builds a collector, so they never become a
-    `CollectorResult` with `skipped` set, and the summary's own `skipped`
-    count (built from `report.results`) would otherwise read "0 skipped"
-    right above a table note saying web_search itself was skipped: true
+    `web_search_skipped` is how many *unkeyed* web searches
+    `web_search_note` is talking about. They never become a
+    `CollectorResult` with `skipped` set (no collector is built without a
+    key), so the summary's own `skipped` count would otherwise read "0
+    skipped" right above a table note saying web search was skipped: true
     of the results list, misleading about what actually happened.
     """
     lines = ["Sources:"]
     if report.results:
         name_w = max(len("SOURCE"), *(len(r.source_name) for r in report.results))
         type_w = max(len("TYPE"), *(len(r.source_type) for r in report.results))
-        lines.append(f"  {'SOURCE':<{name_w}}  {'TYPE':<{type_w}}  {'ITEMS':>5}  FIRST ERROR")
-        for r in report.results:
-            first_line = (
-                (r.error or r.skipped or "").splitlines()[0] if (r.error or r.skipped) else ""
-            )
-            lines.append(
-                f"  {r.source_name:<{name_w}}  {r.source_type:<{type_w}}  "
-                f"{len(r.items):>5}  {first_line}"
-            )
+        for heading, group in _group_results(cfg, report.results):
+            lines.append(f"  {heading}")
+            lines.append(f"    {'SOURCE':<{name_w}}  {'TYPE':<{type_w}}  {'ITEMS':>5}  FIRST ERROR")
+            for r in group:
+                first_line = (
+                    (r.error or r.skipped or "").splitlines()[0] if (r.error or r.skipped) else ""
+                )
+                lines.append(
+                    f"    {r.source_name:<{name_w}}  {r.source_type:<{type_w}}  "
+                    f"{len(r.items):>5}  {first_line}"
+                )
     else:
         lines.append("  (no sources configured)")
     if web_search_note:
         lines.append(f"  {web_search_note}")
 
     lines.append("")
-    lines.append("Topics matched:")
-    for topic in cfg.topics:
-        count = report.topic_counts.get(topic.key, 0)
-        lines.append(f"  {topic.key} ({topic.name}): {count} item(s)")
+    lines.append("Games matched:")
+    for game in cfg.catalog:
+        if game.key not in report.topic_counts:
+            continue
+        count = report.topic_counts[game.key]
+        lines.append(f"  {game.key} ({game.name}): {count} item(s)")
 
     ok = sum(1 for r in report.results if r.error is None and r.skipped is None)
     failed = sum(1 for r in report.results if r.error is not None)
@@ -1237,18 +865,18 @@ def render_check_sources_report(
     lines.append("")
     lines.append(
         f"Summary: {ok} source(s) ok, {failed} failed, {skipped} skipped; "
-        f"{total_items} item(s) matched across {len(cfg.topics)} topic(s)."
+        f"{total_items} item(s) matched across {len(report.topic_counts)} game(s)."
     )
     return "\n".join(lines)
 
 
 def _web_search_note(cfg: AppConfig, secrets: Secrets, config_path: str) -> str | None:
-    """The one extra line `--check-sources` prints about `web_search`, or `None`.
+    """The one extra line `--check-sources` prints about web search, or `None`.
 
-    `None` when web_search isn't configured at all (nothing to say) or
+    `None` when web search isn't configured at all (nothing to say) or
     when it's configured *and* keyed (it ran, and shows up in the
     ordinary source table like anything else): a note only earns its
-    place when there's a source in config.yaml that didn't get a chance
+    place when there's a search in config.yaml that didn't get a chance
     to run.
     """
     configured = count_configured_web_search_sources(config_path)
@@ -1261,7 +889,9 @@ def _web_search_note(cfg: AppConfig, secrets: Secrets, config_path: str) -> str 
     return None
 
 
-async def _run_check_sources_cli(cfg: AppConfig, config_path: str) -> int:
+async def _run_check_sources_cli(
+    cfg: AppConfig, config_path: str, games: Sequence[str] | None = None
+) -> int:
     """`python -m newsbot.pipeline.run --check-sources`: the CLI wrapper around `run_check_sources`.
 
     Never reads `ANTHROPIC_API_KEY` or `DISCORD_TOKEN`, directly or
@@ -1270,12 +900,15 @@ async def _run_check_sources_cli(cfg: AppConfig, config_path: str) -> int:
     """
     secrets = load_check_sources_secrets()
     async with httpx.AsyncClient(headers=user_agent_headers()) as http:
-        report = await run_check_sources(cfg, secrets, http)
+        report = await run_check_sources(cfg, secrets, http, games=games)
     web_search_note = _web_search_note(cfg, secrets, config_path)
     web_search_skipped = count_configured_web_search_sources(config_path) if web_search_note else 0
     print(
         render_check_sources_report(
-            cfg, report, web_search_note=web_search_note, web_search_skipped=web_search_skipped
+            _restricted(cfg, games),
+            report,
+            web_search_note=web_search_note,
+            web_search_skipped=web_search_skipped,
         )
     )
     return 0
@@ -1287,18 +920,12 @@ if __name__ == "__main__":
 
 __all__ = [
     "CheckSourcesReport",
-    "Deps",
     "FixtureCollector",
-    "PipelineOutcome",
     "RunKind",
-    "RunMode",
     "StubLLM",
-    "build_digest",
     "build_fixture_collectors",
-    "is_run_in_progress",
     "local_run_date",
     "main",
     "render_check_sources_report",
     "run_check_sources",
-    "run_daily",
 ]

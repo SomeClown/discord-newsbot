@@ -1,5 +1,6 @@
-# Example config.yaml, seeded from the source research in
-# docs/sources-research.md (verified 2026-09-23) and the owner decisions at
+# Example config.yaml for the v3 (public app) shape. The game sources were
+# seeded from the research in docs/sources-research.md (the first three games
+# verified 2026-09-23, the other twelve 2026-09-30) and the owner decisions at
 # the bottom of that file. Copy this to config.yaml, swap the placeholder
 # Discord IDs for real ones, and you have a bot that starts up and actually
 # has something to say. The source list won't stay perfect forever (press
@@ -7,115 +8,162 @@
 # actual RSS feed the week after I stop checking for one), but it's a real
 # starting point, not a stub.
 #
+# What changed in v3: this file is global only. It holds the keys and the
+# catalog of games (with each game's sources). Everything that belongs to one
+# server (its channels, digest time, time zone, SHiFT settings) lives in the
+# database and is set from Discord with /newsbot setup. docs/design.md §15 has
+# the why, and the commented "single-server keys" block at the bottom covers
+# the one feature (the lounge) that still hangs off a server named in this file.
+#
 # Every ID below that says "placeholder" is fake and must be replaced; the
 # bot will happily start up pointed at a channel that doesn't exist and then
 # fail confusingly later, which is a worse failure mode than a config error.
 
-guild_id: 000000000000000000          # placeholder: your server's ID
-admin_channel_id: 000000000000000000  # placeholder: optional, alerts go here
+# --- Whose bot is this ---
+
+# Your own server, where the owner-only /owner servers command lives and
+# where bot-wide alerts (a source that's been dead for half a day, a crashed
+# job, the daily owner report) land. If you leave it out and the bottom block's
+# guild_id is present, it defaults to that. A public bot should always set it, so the
+# alerts don't show up in a stranger's server.
+home_guild_id: 123456789012345678     # placeholder: your server's ID
+
+# The channel for those alerts. It has to be a channel in home_guild_id: the
+# bot refuses to post it anywhere else, and says so at startup if it can't.
+# Zero or leaving it out means no owner alerts at all.
+#
+# `admin_channel_id` is the older name for this key and still works as a
+# fallback: when owner_channel_id is unset, the owner alerts go to it. A v3
+# file has no use for it. A server's own admin channel (where its run reports
+# and notices land) is set per server from Discord with /newsbot settings, and
+# the one place this file still carries an `admin_channel_id` is the bottom
+# block, where it names that server's own admin channel.
+owner_channel_id: 000000000000000000  # placeholder: a channel in your home server
+
+# The Discord permission an admin needs to run /newsbot. Also what Discord's
+# own menu uses to decide who sees the command.
 admin_permission: manage_guild
 
-digest:
-  # v2.0: there is no digest.channel_id here anymore; the combined
-  # digest channel is gone, and each game posts to its own topics[].
-  # channel_id below instead. A config still setting digest.channel_id
-  # (a v1 leftover) fails validation with a message pointing at the
-  # per-topic replacement; there's no silent fallback.
-  time: "09:00"
+# Empty (the default) registers the commands globally, which is what a public
+# bot wants, and which Discord can take up to an hour to show. List server
+# ids here and the commands are copied into just those servers instead, never
+# globally, and they show up instantly. That's what you want for a dev bot
+# and for any self-hosted copy that serves one server. /owner only exists in
+# a server listed here (or home_guild_id, when this is empty).
+command_guild_ids: []
+
+# Servers that get AI summaries and web search on your own keys, not just
+# headlines. This is how a self-hosted copy keeps summaries: list your own
+# server's id. Listed servers are set to comped when the bot joins them and
+# at every startup, and nothing is ever downgraded automatically. The server named by
+# the bottom block's guild_id is comped anyway; listing it here as well is what
+# keeps a kick and a re-invite from bringing it back as free.
+#
+# Don't list your home or test server on the public bot. The summarizer's
+# prompt names every game any comped server follows, so a second comped server
+# following other games changes the prompt, and a changed prompt needs an
+# owner-reviewed /newsbot preview before it ships.
+comped_guild_ids: []
+
+# The daily one-message summary sent to owner_channel_id ("digests posted to
+# 37 of 38 servers; 1 failed (missing permissions)"), plus the collection
+# report. The time zone also decides when the bot's own housekeeping runs
+# (the 03:30 retention purge).
+owner_report:
+  time: "21:00"
   timezone: "America/Los_Angeles"
+
+# --- Collection, summaries, reports ---
+
+# Every game's sources are fetched once an hour for everybody, whichever
+# servers follow them. Servers' digests are built from what's stored, so
+# nothing is fetched when a digest posts. Shortening the interval buys fresher
+# SHiFT codes and costs more requests to people who didn't ask for them.
+# Reddit is the slow part: the collector spaces Reddit feeds 35 seconds apart,
+# and Reddit still answers 429 to a burst of fifteen from a datacenter address.
+# So most subreddits take turns. The ones that must stay fresh go every pass
+# (the SHiFT games' subreddits, and the subreddits of any game a comped server
+# follows); the rest rotate, stalest first, a few per pass, so each is fetched
+# about every reddit_rotation_hours. With the 15 below that is about 7 Reddit
+# requests a pass (about 4 minutes) instead of 15. A 429 stops Reddit for the
+# rest of that pass, and for longer if Reddit says so (Retry-After); that's a
+# skip, never a source failure.
+collection:
+  interval_minutes: 60      # 15 to 1440
   lookback_hours: 24
-  max_items_per_topic: 60
-  # After every scheduled/catch-up/run-now digest that actually posts (ok
-  # or partial), send a one-message plain-text status report to the admin
-  # channel: story counts, source health for that run, estimated Claude
-  # cost, how long it took, and a jump link. Only takes effect when
-  # admin_channel_id (above) is set. Defaults to true; uncomment to turn
-  # it off if the admin channel would rather only hear about failures.
-  # report_to_admin: false
-  # What the summarizer prompt calls the things `topics` are ("the video
-  # games Borderlands 4, Palworld and Diablo IV"). Defaults to "video
-  # games"; a fork tracking something else (tabletop RPG news, say) can
-  # say so here instead of editing pipeline/prompts.py. Any change here
-  # still needs an owner-reviewed `/newsbot preview` before merging.
-  # subject: "video games"
+  max_items_per_game: 60
+  reddit_rotation_hours: 3  # 1 to 24; 1 fetches every subreddit every pass
 
-topics:
-  - key: borderlands4
-    name: "Borderlands 4"
-    channel_id: 111111111111111111  # placeholder: this game's own channel (v2.0)
-    # Bare "Borderlands" was tempting and wrong: it also matches BL1-3, Tiny
-    # Tina, the 2024 movie, and (I am not making this up) an academic
-    # "Association for Borderlands Studies". "BL4" and "Borderlands4" don't
-    # have that problem, so those are the whole alias list.
-    aliases: ["BL4", "Borderlands4"]
-    entities: ["Gearbox"]             # 2K/Take-Two dropped: they mostly bring NBA and GTA noise
-    search_queries:
-      - "Borderlands 4 news"
-      - "Borderlands 4 update OR DLC OR patch"
-  - key: palworld
-    name: "Palworld"
-    channel_id: 111111111111111112  # placeholder: this game's own channel (v2.0)
-    aliases: []                       # the name is distinctive enough that it needs no help
-    entities: ["Pocketpair"]
-    search_queries:
-      - "Palworld news"
-      - "Palworld update OR patch OR DLC"
-  - key: diablo4
-    name: "Diablo IV"
-    channel_id: 111111111111111113  # placeholder: this game's own channel (v2.0)
-    # "D4" got dropped for the same reason "Borderlands" did: it's a chess
-    # opening, a TTRPG die, and a Nikon camera before it's ever this game.
-    # "Diablo V"/"Diablo 5" are in here on purpose, not by accident: Diablo V
-    # was announced at BlizzCon 2026, and until it's a real product with its
-    # own news volume, its coverage rides along on the Diablo IV topic. Give
-    # it a topic of its own later by moving these two lines; that's the
-    # whole migration.
-    aliases: ["Diablo 4", "Lord of Hatred", "Vessel of Hatred", "Diablo V", "Diablo 5"]
-    entities: ["Blizzard"]            # Activision Blizzard/Microsoft Gaming dropped: corporate-press noise
-    search_queries:
-      - "\"Diablo 4\" OR \"Diablo IV\""
-      - "Diablo 4 season OR patch OR hotfix"
+# What the summarizer prompt calls the things in the catalog ("the video
+# games Borderlands 4, Palworld and Diablo IV"). Any change here still needs
+# an owner-reviewed `/newsbot preview` before merging.
+ai:
+  subject: "video games"
 
-sources:
-  # --- Official: Steam announcements (the collector adds
-  # feeds=steam_community_announcements itself; without that filter these
-  # apps' feeds fill up with SteamDB "top sellers" posts and a Russian press
-  # aggregator, which is not what anyone signed up for) ---
-  - type: steam_news
-    name: "Borderlands 4 Steam"
-    app_id: 1285190
-    topics: [borderlands4]
-    trust: official
-  - type: steam_news
-    name: "Palworld Steam"
-    app_id: 1623730
-    topics: [palworld]
-    trust: official
-  - type: steam_news
-    name: "Diablo IV Steam"
-    app_id: 2344520
-    topics: [diablo4]
-    trust: official
+# After a digest posts (ok or partial), send a one-message report to that
+# server's own admin channel, if it set one: story counts, source health and
+# a jump link. Servers pick that channel with /newsbot settings admin_channel:.
+run_report: true
 
-  # --- Official: RSS ---
-  # news.blizzard.com has no RSS feed anywhere (checked /rss, /feed, and the
-  # page's autodiscovery: nothing). The Diablo IV forums' Blizzard Tracker
-  # group feed is the next best thing: it mirrors every official post,
-  # including the news.blizzard.com articles, hotfix notes and PSAs, via
-  # Discourse's per-group RSS. It's a little noisier than a real news feed
-  # (a CM's reply in a random thread shows up under that thread's title, and
-  # a busy hotfix thread can appear two or three times), but clustering
-  # handles the duplicates and it's strictly better than Steam, where
-  # Diablo IV's official posts land about once a month.
-  - type: rss
-    name: "Diablo IV Blizzard Tracker"
-    url: "https://us.forums.blizzard.com/en/d4/groups/blizzard-tracker/posts.rss"
-    topics: [diablo4]
-    trust: official
+# Brave News search, catching outlets not in the RSS lists below. It runs once
+# a day, only for games a comped server follows, so its cost doesn't grow with
+# the number of servers. The results go into the shared item store, so free
+# servers can see them in their headlines too (no extra cost, owner decision
+# D15). Needs BRAVE_API_KEY in .env; without it, load_config disables this
+# with a startup warning instead of failing. Each game's own search_queries
+# (below) are used when it has them, because the default templates guess at
+# phrasing the press doesn't use ("Diablo IV news" is not how anyone writes
+# about Diablo IV); a game without any falls back to query_templates.
+web_search:
+  queries_per_game: 2
+  query_templates: ["{name} news", "{name} update OR patch OR leak"]
+  trust: press
+
+# SHiFT code detection (design.md §12 and §15). Detection is global: the bot
+# looks for codes in every source of the games listed here, once per
+# collection pass, and each server that turned alerts on (/newsbot shift)
+# hears about them in its own channel with its own ping. Nothing is posted
+# anywhere until a server turns it on, and a server that turns it on starts
+# with codes found after that moment, with no backlog.
+#
+# This is specifically the Borderlands-family redeem code format
+# (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX); it doesn't recognize any other game's
+# codes. Leaving `games` out means [borderlands4]. Listing a game that isn't
+# in the catalog is an error, and so is an empty list (a code from an
+# unrelated game pinging a server is a worse default than a deliberate list).
+# The old v2 reading of "empty means every game" applies only to a v2-shaped
+# file's alerts.topics.
+shift:
+  games: [borderlands4]
+  max_item_age_hours: 48
+  # Per server, per that server's own local day. 0 means codes still post and
+  # still show in /shift codes, but never with a ping.
+  max_pings_per_day: 3
+  # Which sources can make a code ping on its first post. A community-only
+  # code (a Reddit thread, a Bluesky search) posts unpinged. If a second,
+  # independent source (a different source name; case doesn't matter) or an
+  # official or press one sees it within 24 hours, each server that has
+  # pinging on gets one short "Confirmed by a second source" follow-up with
+  # its chosen ping. That follow-up costs one of the server's daily pings.
+  ping_trust: [official, press]
+  # An item naming more than this many distinct codes is a roundup or
+  # megathread, not a genuine single-code announcement; its codes post under
+  # a "from a roundup" header, never pinged, and a roundup never counts as a
+  # second source.
+  max_codes_per_item: 5
+
+# --- Sources every game shares ---
+
+# Wide-coverage feeds that belong to no single game. They're fetched once and
+# keyword-matched against every game in the catalog, so a PC Gamer story about
+# Palworld lands in Palworld's headlines and one about Fortnite in Fortnite's.
+# Add `games: [key, ...]` to a source to restrict it to those games (Bungie
+# News, below, does).
+shared_sources:
   # gearboxsoftware.com/feed still resolves but hasn't posted since 2021;
   # borderlands.2k.com has no feed at all. The 2K Newsroom is the closest
   # thing to an official Borderlands press feed, at the cost of also
-  # covering NBA, WWE and Civ; it's unscoped on purpose, so the keyword
+  # covering NBA, WWE and Civ; it's shared on purpose, so the keyword
   # matcher decides what's relevant.
   # YouTube channel feeds (youtube.com/feeds/videos.xml?channel_id=...) used
   # to live here, one per game plus Gearbox. Every one of them, and every
@@ -126,57 +174,14 @@ sources:
     name: "2K Newsroom"
     url: "https://newsroom.2k.com/feed/rss"
     trust: official
-  # The official Bluesky accounts work fine over plain RSS, no app password
-  # needed; that's only required for *searching* Bluesky (see the
-  # bluesky_search sources below). These are cheap to keep even when quiet:
-  # Palworld's account hasn't posted since June, and that's fine, it'll just
-  # show "0 items" on the source health report instead of causing a fuss.
+  # Bungie's own news feed. Most of it is Marathon right now, so it's shared
+  # and restricted to Destiny 2 by keyword instead of dedicated: only posts
+  # that name Destiny 2 get through (6 of 25 in testing).
   - type: rss
-    name: "Borderlands Bluesky"
-    url: "https://bsky.app/profile/did:plc:sxmjis6jypsib2k7rk6pjoau/rss"
-    topics: [borderlands4]
+    name: "Bungie News"
+    url: "https://www.bungie.net/en/Rss/News"
+    games: [destiny2]
     trust: official
-  - type: rss
-    name: "Palworld Bluesky"
-    url: "https://bsky.app/profile/did:plc:g3nrnn7t2tvoekp5flrexiby/rss"
-    topics: [palworld]
-    trust: official
-  - type: rss
-    name: "Diablo Bluesky"
-    url: "https://bsky.app/profile/did:plc:wxfwmaqg4kgiwzxcygdt2myj/rss"
-    topics: [diablo4]
-    trust: official
-
-  # --- Community: subreddits ---
-  # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest posts,
-  # and on a subreddit that gets bug reports and help threads all day, a
-  # once-a-day run would see whatever happened to post in the last hour
-  # rather than what people actually cared about. /top with t=day gets the
-  # day's 25 highest-voted posts instead.
-  # Reddit rate-limits hard, even from a residential IP: five feeds fired
-  # at once got one 200 and four 429s, and 45 seconds of spacing cleared it
-  # up. The collector's `run_collectors` fires sources concurrently, so
-  # these three need serialized fetching or a per-host pause. It also might
-  # just block the production box's IP outright; I only tested from home.
-  # If that happens, the source health report will show it, not a crash.
-  - type: rss
-    name: "r/Borderlands4"
-    url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day"
-    topics: [borderlands4]
-    trust: community
-  - type: rss
-    name: "r/Palworld"
-    url: "https://www.reddit.com/r/Palworld/top/.rss?t=day"
-    topics: [palworld]
-    trust: community
-  - type: rss
-    name: "r/diablo4"
-    url: "https://www.reddit.com/r/diablo4/top/.rss?t=day"
-    topics: [diablo4]
-    trust: community
-
-  # --- Press: wide-coverage feeds, no `topics`, so the keyword matcher
-  # decides what belongs where ---
   - type: rss
     name: "PC Gamer"
     url: "https://www.pcgamer.com/rss/"
@@ -194,97 +199,329 @@ sources:
     url: "https://www.pcgamesn.com/mainrss.xml"
     trust: press
 
-  # --- Community: Bluesky search ---
-  # These are here so the config is ready the day you're willing to make a
-  # Bluesky app password; until BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are
-  # both set, every one of these three gets skipped, not attempted. That's
-  # not a guess: an unauthenticated search against Bluesky's public API
-  # returns a 403 whose body is HTML from BunnyCDN, not even a proper JSON
-  # error. The official-account RSS feeds above don't need auth and keep
-  # working regardless, so skipping these only costs you the wider
-  # "anyone talking about it" search, not the official accounts themselves.
-  - type: bluesky_search
-    query: "\"Borderlands 4\""
-    topics: [borderlands4]
-    trust: community
-  - type: bluesky_search
-    query: "Palworld"
-    topics: [palworld]
-    trust: community
-  - type: bluesky_search
-    query: "\"Diablo 4\""
-    topics: [diablo4]
-    trust: community
+# --- The catalog ---
+#
+# At most 25 games (a Discord select menu holds 25 options), and a server
+# follows at most 10 of them. Order matters in exactly one place: the AI
+# summarizer's prompt lists the games a comped server follows in catalog
+# order, so reordering the first three would change the prompt and need an
+# owner-reviewed /newsbot preview. Keep Borderlands 4, Palworld and Diablo IV
+# first, in that order, and add new games after them.
+#
+# A source listed under a game belongs to that game and says no `topics:`
+# (it's implied). That's the dedicated-source rule: every item it returns
+# counts as a confident match for its game even if the text never names the
+# game, which is right for an official blog and wrong for a wide feed, so
+# wide feeds live in shared_sources above. `match_name: false` is for names
+# that are also ordinary words (Rust): the name doesn't match on its own and
+# the aliases and entities do the work. A game with it false needs aliases.
+# There's no channel_id here; channels are per server now (/newsbot follow).
 
-  # --- Press: Brave News search, catches outlets not in the RSS list above ---
-  # Each topic sets its own search_queries (see above), because the default
-  # template guesses "{name} news" (which for Diablo IV becomes literally
-  # "Diablo IV news") and most of the press writes "Diablo 4". A topic
-  # without search_queries falls back to query_templates below; right now
-  # every topic here has its own, so the templates are just the safety net
-  # for whatever topic gets added next without an owner reviewing its
-  # queries first.
-  - type: web_search
-    queries_per_topic: 2
-    trust: press
+catalog:
+  - key: borderlands4
+    name: "Borderlands 4"
+    # Bare "Borderlands" was tempting and wrong: it also matches BL1-3, Tiny
+    # Tina, the 2024 movie, and (I am not making this up) an academic
+    # "Association for Borderlands Studies". "BL4" and "Borderlands4" don't
+    # have that problem, so those are the whole alias list.
+    aliases: ["BL4", "Borderlands4"]
+    entities: ["Gearbox"]             # 2K/Take-Two dropped: they mostly bring NBA and GTA noise
+    search_queries:
+      - "Borderlands 4 news"
+      - "Borderlands 4 update OR DLC OR patch"
+    sources:
+      # Official: Steam announcements (the collector adds
+      # feeds=steam_community_announcements itself; without that filter these
+      # apps' feeds fill up with SteamDB "top sellers" posts and a Russian
+      # press aggregator, which is not what anyone signed up for).
+      - {type: steam_news, name: "Borderlands 4 Steam", app_id: 1285190, trust: official}
+      # The official Bluesky accounts work fine over plain RSS, no app
+      # password needed; that's only required for *searching* Bluesky (see
+      # the bluesky_search sources below). These are cheap to keep even when
+      # quiet: Palworld's account hasn't posted since June, and that's fine,
+      # it'll just show "0 items" on the source health report.
+      - {type: rss, name: "Borderlands Bluesky", url: "https://bsky.app/profile/did:plc:sxmjis6jypsib2k7rk6pjoau/rss", trust: official}
+      # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest
+      # posts, and on a subreddit that gets bug reports and help threads all
+      # day, an hourly look would see whatever happened to post in the last
+      # hour rather than what people actually cared about. Reddit
+      # rate-limits hard, even from a residential IP (five feeds fired at
+      # once got one 200 and four 429s), so the collector spaces them out. It
+      # also might just block the production box's IP outright. If that
+      # happens, the source health report will show it, not a crash. One
+      # subreddit per game keeps the hourly pass short.
+      - {type: rss, name: "r/Borderlands4", url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", trust: community}
+      # Community: Bluesky search. These are here so the config is ready the
+      # day you're willing to make a Bluesky app password; until
+      # BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are both set, every one of
+      # these three gets skipped, not attempted. That's not a guess: an
+      # unauthenticated search against Bluesky's public API returns a 403
+      # whose body is HTML from BunnyCDN, not even a proper JSON error. The
+      # official-account RSS feeds don't need auth and keep working
+      # regardless.
+      - {type: bluesky_search, query: "\"Borderlands 4\"", trust: community}
 
-# SHiFT code alerts (design.md §12, v1.2): an hourly sweep separate from
-# the daily digest that posts any new SHiFT/Golden Key redeem code it finds,
-# with an @everyone ping (once per code, ever, capped per day). This is
-# specifically the Borderlands-family redeem code format
-# (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX); it doesn't recognize any other game's
-# codes, so leave this block out entirely for a game that isn't a
-# Borderlands title. Commented out by default (AlertsCfg.enabled defaults
-# to False with the block entirely absent too, but writing it out and
-# commenting it is the more honest "here's what turning this on actually
-# looks like" than making an owner go read config.py to find the field
-# names) and opt-in on purpose: turning it on means the bot can @everyone
-# your whole server, so know what that means in your own server before
-# you uncomment it. Fill in topics for your own game list, and see
-# README.md's "SHiFT code alerts" section and docs/deploy.md before
-# flipping enabled to true in prod: the bot's role needs the "Mention
-# @everyone, @here, and All Roles" permission in the SHiFT codes channel,
-# or the ping silently gets dropped.
+  - key: palworld
+    name: "Palworld"
+    aliases: []                       # the name is distinctive enough that it needs no help
+    entities: ["Pocketpair"]
+    search_queries:
+      - "Palworld news"
+      - "Palworld update OR patch OR DLC"
+    sources:
+      - {type: steam_news, name: "Palworld Steam", app_id: 1623730, trust: official}
+      - {type: rss, name: "Palworld Bluesky", url: "https://bsky.app/profile/did:plc:g3nrnn7t2tvoekp5flrexiby/rss", trust: official}
+      - {type: rss, name: "r/Palworld", url: "https://www.reddit.com/r/Palworld/top/.rss?t=day", trust: community}
+      - {type: bluesky_search, query: "Palworld", trust: community}
+
+  - key: diablo4
+    name: "Diablo IV"
+    # "D4" got dropped for the same reason "Borderlands" did: it's a chess
+    # opening, a TTRPG die, and a Nikon camera before it's ever this game.
+    # "Diablo V"/"Diablo 5" are in here on purpose, not by accident: Diablo V
+    # was announced at BlizzCon 2026, and until it's a real product with its
+    # own news volume, its coverage rides along on the Diablo IV entry. Give
+    # it an entry of its own later by moving these two aliases; that's the
+    # whole migration.
+    aliases: ["Diablo 4", "Lord of Hatred", "Vessel of Hatred", "Diablo V", "Diablo 5"]
+    entities: ["Blizzard"]            # Activision Blizzard/Microsoft Gaming dropped: corporate-press noise
+    search_queries:
+      - "\"Diablo 4\" OR \"Diablo IV\""
+      - "Diablo 4 season OR patch OR hotfix"
+    sources:
+      - {type: steam_news, name: "Diablo IV Steam", app_id: 2344520, trust: official}
+      # news.blizzard.com has no RSS feed anywhere (checked /rss, /feed, and
+      # the page's autodiscovery: nothing). The Diablo IV forums' Blizzard
+      # Tracker group feed is the next best thing: it mirrors every official
+      # post, including the news.blizzard.com articles, hotfix notes and PSAs,
+      # via Discourse's per-group RSS. It's a little noisier than a real news
+      # feed (a CM's reply in a random thread shows up under that thread's
+      # title, and a busy hotfix thread can appear two or three times), but
+      # clustering handles the duplicates and it's strictly better than Steam,
+      # where Diablo IV's official posts land about once a month.
+      - {type: rss, name: "Diablo IV Blizzard Tracker", url: "https://us.forums.blizzard.com/en/d4/groups/blizzard-tracker/posts.rss", trust: official}
+      - {type: rss, name: "Diablo Bluesky", url: "https://bsky.app/profile/did:plc:wxfwmaqg4kgiwzxcygdt2myj/rss", trust: official}
+      - {type: rss, name: "r/diablo4", url: "https://www.reddit.com/r/diablo4/top/.rss?t=day", trust: community}
+      - {type: bluesky_search, query: "\"Diablo 4\"", trust: community}
+
+  # The next twelve were researched on 2026-09-30 (docs/sources-research.md,
+  # "v3 catalog") and approved by the owner the same day. They have fewer
+  # official sources than the first three. Free servers see uncertain matches
+  # as headlines with no LLM to filter them, so the entity lists are short on
+  # purpose (publisher names like Activision, Valve and Riot Games mostly
+  # bring other games' news).
+
+  - key: fortnite
+    name: "Fortnite"
+    aliases: []
+    # "Epic Games" left out on purpose: it mostly matches the weekly Epic
+    # Games Store freebie stories.
+    entities: []
+    search_queries:
+      - "Fortnite news"
+      - "Fortnite update OR season OR patch notes"
+    # No official source could be verified (fortnite.com/news returns 403; no
+    # domain-verified Bluesky account; not on Steam). Coverage is the
+    # subreddit plus keyword matches from the shared press feeds.
+    sources:
+      - {type: rss, name: "r/FortNiteBR", url: "https://www.reddit.com/r/FortNiteBR/top/.rss?t=day", trust: community}
+
+  - key: callofduty
+    name: "Call of Duty"
+    # "CoD"/"COD" are deliberately NOT aliases: case-insensitive matching
+    # turns them into the fish and cash on delivery. "Warzone" is a mild risk
+    # ("turned into a warzone") but nearly all hits in testing were the game.
+    # Update the aliases each autumn when the new game ships.
+    aliases: ["Warzone", "Modern Warfare 4", "MW4", "Black Ops 7", "BO7"]
+    entities: ["Infinity Ward", "Treyarch"]   # "Activision" dropped: Halo and Xbox layoff stories
+    search_queries:
+      - "\"Call of Duty\" news"
+      - "\"Modern Warfare 4\" OR Warzone update OR season"
+    sources:
+      # The umbrella Call of Duty app carries the announcements for Black Ops
+      # 7, Warzone and Modern Warfare 4. The MW4 (4435490) and Warzone
+      # (1962663) apps returned 0 announcements; recheck MW4 after its
+      # 2026-10-23 launch.
+      - {type: steam_news, name: "Call of Duty Steam", app_id: 1938090, trust: official}
+      - {type: rss, name: "Call of Duty Bluesky", url: "https://bsky.app/profile/did:plc:7jjrye4uusbxcpmenc7bw4uh/rss", trust: official}
+      - {type: rss, name: "r/CallOfDuty", url: "https://www.reddit.com/r/CallOfDuty/top/.rss?t=day", trust: community}
+
+  - key: marvelrivals
+    name: "Marvel Rivals"
+    aliases: ["MarvelRivals"]
+    entities: []                              # "NetEase" dropped: matched unrelated NetEase business news
+    search_queries:
+      - "\"Marvel Rivals\" news"
+      - "Marvel Rivals season OR patch OR balance"
+    sources:
+      - {type: steam_news, name: "Marvel Rivals Steam", app_id: 2767030, trust: official}
+      - {type: rss, name: "r/marvelrivals", url: "https://www.reddit.com/r/marvelrivals/top/.rss?t=day", trust: community}
+
+  - key: valorant
+    name: "VALORANT"
+    aliases: ["VCT"]
+    entities: []                              # "Riot Games" would mostly bring League of Legends
+    search_queries:
+      - "VALORANT news"
+      - "VALORANT patch notes OR agent OR VCT"
+    # The domain-verified VALORANT and Riot Games Bluesky accounts both
+    # returned 0 items, and playvalorant.com has no RSS. Subreddit only.
+    sources:
+      - {type: rss, name: "r/VALORANT", url: "https://www.reddit.com/r/VALORANT/top/.rss?t=day", trust: community}
+
+  - key: cs2
+    name: "Counter-Strike 2"
+    aliases: ["CS2", "Counter-Strike"]
+    entities: []                              # "Valve" dropped: Steam hardware and store stories
+    search_queries:
+      - "\"Counter-Strike 2\" news"
+      - "CS2 update OR patch OR major"
+    sources:
+      - {type: steam_news, name: "Counter-Strike 2 Steam", app_id: 730, trust: official}
+      - {type: rss, name: "HLTV News", url: "https://www.hltv.org/rss/news", trust: press}
+      - {type: rss, name: "r/GlobalOffensive", url: "https://www.reddit.com/r/GlobalOffensive/top/.rss?t=day", trust: community}
+
+  - key: apexlegends
+    name: "Apex Legends"
+    # The full name is specific, so match_name stays true. Bare "Apex" must
+    # never become an alias: in testing it matched a Witcher 3 article, a
+    # Warframe hotfix and a Call of Duty post. "Respawn" is left out too; it's
+    # also an everyday gaming verb.
+    aliases: ["ApexLegends"]
+    entities: []
+    search_queries:
+      - "\"Apex Legends\" news"
+      - "Apex Legends season OR patch OR update"
+    sources:
+      - {type: steam_news, name: "Apex Legends Steam", app_id: 1172470, trust: official}
+      - {type: rss, name: "r/apexlegends", url: "https://www.reddit.com/r/apexlegends/top/.rss?t=day", trust: community}
+
+  - key: rust
+    name: "Rust"
+    # Common word (the metal, the programming language, the 2024 film, "shake
+    # off the rust"), so the name doesn't match on its own. The price: press
+    # stories that only say "Rust" are missed unless they name Facepunch.
+    aliases: ["Rust Console Edition", "playrust"]
+    entities: ["Facepunch"]
+    search_queries:
+      - "Facepunch Rust news"
+      - "Facepunch Rust update OR devblog OR wipe"
+    match_name: false
+    sources:
+      - {type: steam_news, name: "Rust Steam", app_id: 252490, trust: official}
+      - {type: rss, name: "Rust Facepunch News", url: "https://rust.facepunch.com/rss/news", trust: official}
+      - {type: rss, name: "r/playrust", url: "https://www.reddit.com/r/playrust/top/.rss?t=day", trust: community}
+
+  - key: destiny2
+    name: "Destiny 2"
+    # The full name is specific; bare "Destiny" is not ("it will tell me your
+    # destiny" turned up in r/ffxiv), so it isn't an alias. "Bungie" is left
+    # out as an entity because most Bungie news right now is Marathon.
+    aliases: ["Destiny2", "This Week in Destiny"]
+    entities: []
+    search_queries:
+      - "\"Destiny 2\" news"
+      - "\"Destiny 2\" update OR expansion OR Bungie"
+    # Heads up: Destiny 2's official channels have been quiet since late June
+    # 2026 (Bungie says regular updates aren't returning). Expect "0 items"
+    # on most days from the Steam and Bluesky sources.
+    sources:
+      - {type: steam_news, name: "Destiny 2 Steam", app_id: 1085660, trust: official}
+      - {type: rss, name: "Destiny 2 Bluesky", url: "https://bsky.app/profile/did:plc:lakwqi74b3kcqzk6mpk4kqvy/rss", trust: official}
+      - {type: rss, name: "r/DestinyTheGame", url: "https://www.reddit.com/r/DestinyTheGame/top/.rss?t=day", trust: community}
+
+  - key: warframe
+    name: "Warframe"
+    aliases: []
+    entities: ["Digital Extremes"]
+    search_queries:
+      - "Warframe news"
+      - "Warframe update OR hotfix OR Devstream"
+    sources:
+      - {type: steam_news, name: "Warframe Steam", app_id: 230410, trust: official}
+      - {type: rss, name: "Warframe PC Update Notes", url: "https://forums.warframe.com/forum/3-pc-update-notes.xml/", trust: official}
+      - {type: rss, name: "Warframe Bluesky", url: "https://bsky.app/profile/did:plc:24m2xjetjmjfdbgo752skciu/rss", trust: official}
+      - {type: rss, name: "r/Warframe", url: "https://www.reddit.com/r/Warframe/top/.rss?t=day", trust: community}
+
+  - key: ffxiv
+    name: "Final Fantasy XIV"
+    # "Evercold" (from one PCGamesN headline) was dropped on 2026-09-30:
+    # nobody could confirm what it is, and an unverified alias is noise.
+    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail"]
+    entities: ["Naoki Yoshida"]               # "Square Enix" dropped: every other Square Enix game
+    search_queries:
+      - "\"Final Fantasy XIV\" OR FFXIV news"
+      - "FFXIV patch OR update OR \"Live Letter\""
+    sources:
+      - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
+      - {type: rss, name: "FFXIV Lodestone Topics", url: "https://na.finalfantasyxiv.com/lodestone/news/topics.xml", trust: official}
+      - {type: rss, name: "FFXIV Lodestone News", url: "https://na.finalfantasyxiv.com/lodestone/news/news.xml", trust: official}
+      - {type: rss, name: "r/ffxiv", url: "https://www.reddit.com/r/ffxiv/top/.rss?t=day", trust: community}
+
+  - key: aniimo
+    name: "Aniimo"
+    aliases: []
+    entities: ["Pawprint Studio"]
+    search_queries:
+      - "Aniimo news"
+      - "Aniimo update OR patch OR event"
+    sources:
+      - {type: steam_news, name: "Aniimo Steam", app_id: 4126040, trust: official}
+      - {type: rss, name: "r/Aniimo", url: "https://www.reddit.com/r/Aniimo/top/.rss?t=day", trust: community}
+
+  - key: wardogs
+    name: "WARDOGS"
+    # Matching is on the one word "Wardogs", so the 2016 film "War Dogs"
+    # (two words) doesn't collide. "Team17" left out: its news is mostly Worms.
+    aliases: []
+    entities: ["Bulkhead"]
+    search_queries:
+      - "WARDOGS game news"
+      - "WARDOGS Bulkhead update OR patch OR season"
+    sources:
+      - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
+      - {type: rss, name: "r/WarDogs", url: "https://www.reddit.com/r/WarDogs/top/.rss?t=day", trust: community}
+
+# --- Single-server keys (needed only for the lounge) ---
+#
+# The lounge (a welcome for new members and a daily quote) has no setup
+# command. It's configured here, for one server, through the keys below: the
+# first start reads them once into the database, and the lounge: block further
+# down is re-applied at every start. If you don't want a lounge, leave all of
+# this commented out; everything else about a server is set from Discord with
+# /newsbot setup.
+#
+# The keys describe that one server: guild_id names it, topics: lists the games
+# it follows with a channel each, and alerts: is its SHiFT channel. Every game
+# in topics: has to be in the catalog above, and a server can follow at most 10
+# games. That server is comped (AI summaries).
+#
+# guild_id: 123456789012345678            # placeholder: the server the lounge belongs to
+# admin_channel_id: 111111111111111113    # placeholder: that server's own admin channel
+# digest:
+#   time: "09:00"
+#   timezone: "America/Los_Angeles"
+# topics:
+#   - key: borderlands4
+#     name: "Borderlands 4"
+#     channel_id: 111111111111111111      # placeholder: this game's own channel
+#   - key: palworld
+#     name: "Palworld"
+#     channel_id: 111111111111111112      # placeholder
 # alerts:
 #   enabled: true
-#   # v2.0: SHiFT alerts get their own dedicated channel now, separate from
-#   # every game's digest channel; required once enabled is true, no
-#   # fallback to a game channel or the admin channel.
-#   channel_id: 111111111111111114  # placeholder: a channel just for this
-#   # Scope the sweep to specific topic keys (A6); empty means every
-#   # topic, but a code from an unrelated game pinging the whole server
-#   # is a worse default than a deliberate, narrow list. Borderlands 4 is
-#   # the game that actually has SHiFT codes among the three this example
-#   # config tracks; Palworld and Diablo IV don't use this reward system.
-#   topics: [borderlands4]
-#   interval_minutes: 60
-#   max_item_age_hours: 48
-#   # 3 pings a day is the shipped default. For a quiet start, set this to
-#   # 0: codes still get recorded and are visible via /shift codes, just
-#   # never with an @everyone attached, until you decide you want the
-#   # ping. At 0, the bot's role doesn't even need the "Mention @everyone"
-#   # permission in the SHiFT channel; the startup permission check knows
-#   # that and won't flag it as missing.
-#   max_pings_per_day: 3
-#   # Which sources can trigger the @everyone ping (QA item 7 option A):
-#   # every new code still posts regardless of trust, this only decides
-#   # whether the batch it's in pings. community-only codes always post
-#   # quietly.
-#   ping_trust: [official, press]
-#   # An item naming more than this many distinct codes is a roundup or
-#   # megathread, not a genuine single-code announcement; its codes are
-#   # recorded silently ('roundup') and never alert (QA item 7).
-#   max_codes_per_item: 5
-#   # WARNING: this registers /newsbot test-alert, which lets any admin
-#   # post a fake code alert (with a real @everyone ping, cap and
-#   # once-per-code guard included) on demand. Meant for the private test
-#   # guild only; leave this false (or the whole alerts: block out) in
-#   # a production config. config.py logs a startup warning if it's true.
-#   allow_test_command: false
-
-# Lounge welcomes and a daily quote (design.md §14, v2.2). Two optional
-# features that share one channel, both off unless you uncomment this block.
-# Full walkthrough: docs/self-host.md ("Lounge welcomes and a daily quote").
+#   channel_id: 111111111111111114        # placeholder: the SHiFT codes channel
+#   max_pings_per_day: 3                  # 0 means no ping; anything else pings @everyone
+#
+# The lounge works on that one server only. Both features are off unless
+# the lounge: block below is present. Full walkthrough: docs/self-host.md ("Lounge
+# welcomes and a daily quote").
+#
+# While a lounge: block stays in this file, it's re-applied to the server's
+# database row at every startup (and the log says when something changed), so
+# you edit the welcome text or quote sources here and restart. Delete the
+# block and the database row stands alone, with no way to edit it short of the
+# database. This needs `guild_id` above to be present too.
 #
 # FIRST, if you turn on the welcome: in the Discord Developer Portal, open
 # your application's Bot page and switch on Server Members Intent (under
@@ -319,11 +556,12 @@ sources:
 #       That's it. No test, no dress code, and the only real rule is "don't be the reason we need more rules." Grab a drink, say hello, and try not to judge the rest of us too harshly. We were like this when you found us.
 #   daily_quote:
 #     enabled: true
-#     # HH:MM, 24-hour, in digest.timezone. Default 08:00. A quote missed
-#     # because the bot was down is skipped, never caught up. Known quirk: the
-#     # scheduling library (APScheduler 3.x) skips a job set between 00:00
-#     # and 00:59 on the day after the spring-forward clock change, so don't
-#     # pick a midnight-hour time. The default 08:00 isn't affected.
+#     # HH:MM, 24-hour, in that server's time zone (digest.timezone).
+#     # Default 08:00. A quote missed because the bot was down is skipped,
+#     # never caught up. Known quirk: the scheduling library (APScheduler 3.x)
+#     # skips a job set between 00:00 and 00:59 on the day after the
+#     # spring-forward clock change, so don't pick a midnight-hour time. The
+#     # default 08:00 isn't affected.
 #     time: "08:00"
 #     # Where quotes come from. Leave `sources` out and the bot uses its
 #     # built-in list: Wikiquote pages for Oscar Wilde, Mark Twain, Benjamin
@@ -366,7 +604,7 @@ sources:
 #       # - wikiquote: "Hunter S. Thompson"
 #       # - wikiquote: "Friendship"
 #
-# To try it without waiting for the clock, an admin can run
-# `/newsbot quote-now`. It posts today's quote and the scheduled run then
-# skips today; if today's already posted it asks before posting another.
-# It exists only while daily_quote is enabled.
+# To try it without waiting for the clock, an admin can run `/lounge
+# quote-now` in the lounge server. It posts today's quote and the scheduled
+# run then skips today; if today's already posted it asks before posting
+# another. It exists only in a server whose lounge has the quote on.

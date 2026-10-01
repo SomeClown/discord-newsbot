@@ -1,19 +1,39 @@
 # discord-newsbot
 
-A Discord bot, built for one particular ~50-person community server's three
-games: **Borderlands 4**, **Palworld**, and **Diablo IV**. Once a day it
-reads the internet (official blogs, Steam announcements, subreddits,
-Bluesky, and a general web search) so the server doesn't have to, and posts an AI-summarized digest. Members can also ask it for
-recent news or search past stories on demand.
+A Discord bot that reads the internet every morning so your server doesn't
+have to. Pick the games you follow from a catalog (Borderlands 4, Palworld,
+Diablo IV, Fortnite, Call of Duty, Marvel Rivals, VALORANT, Counter-Strike 2,
+Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo and
+WARDOGS), and at the time you choose it posts a digest of the day's news for
+each one, in the channel you pick. It can also announce new Borderlands SHiFT
+codes, and members can ask it for recent news or search it on demand.
 
-It is not a general-purpose news bot, and it isn't one bot serving many
-Discord servers at once: each server that runs this bot runs its own copy,
-with its own token, config, and database. But the topics and sources are
-entirely config-driven (see [Configuration](#configuration) below), so
-pointing your own copy at a different game, or three different games
-entirely, is a config edit, not a code change. **[Run your own
-copy](#run-your-own-copy)** below is where to start if that's what brought
-you here.
+It started as one bot for one ~50-person server and three games. Since v3.0
+it's one bot that any server can install: the maintainer runs a public copy,
+each server sets itself up with slash commands, and the sources are fetched
+once an hour for everybody. If you'd rather run a copy of your own, that
+still works and is [documented](#run-your-own-copy) below.
+
+**Status.** v3.0.0 is built and in testing. Production still runs v2.2.0, and the bot
+isn't open to the public yet.
+
+## Free and comped servers
+
+Two tiers, and only one of them costs the maintainer money.
+
+- **Free (every server):** a headline digest for each game you follow, plus
+  SHiFT code alerts if you turn them on. No AI is involved. The headlines come
+  from the shared collection (official blogs, Steam announcements, subreddits,
+  Bluesky, gaming sites, and web search results), sorted official first, then
+  press, then community. `/news recent` and `/news search` show those same
+  stored headlines.
+- **Comped (a few servers the maintainer covers on his own keys):** the same,
+  except the digest is an AI-written summary (Claude), with stories labeled
+  official, reported or rumor and linked to their sources. Web search only runs
+  for games a comped server follows.
+
+There is no paid tier yet. If you run your own copy, you decide which of your
+servers are comped, with `comped_guild_ids` in your config.
 
 ## Run your own copy
 
@@ -22,7 +42,7 @@ Two documents cover this:
 - **[`docs/finding-sources.md`](docs/finding-sources.md)**: recipes for
   finding Steam, Bluesky, subreddit, and press sources for your own
   game, plus the aliasing lessons (some words match more than you'd think)
-  that came out of doing this for the three games above.
+  that came out of doing this for the games above.
 - **[`docs/self-host.md`](docs/self-host.md)**: the actual setup guide:
   prerequisites, creating your own Discord application, keys and costs,
   `config.yaml` and `.env`, choosing an image, and the first run.
@@ -34,11 +54,24 @@ the two documents above are.
 
 ## What a digest looks like
 
-As of v2.0, each game gets its own channel (`topics[].channel_id`) and its
-own message: no combined channel, no header, no discussion thread. A game
-with nothing new that day posts nothing at all. Something like this
-(illustrative only, not real scraped content), posted to that game's own
-`#borderlands4`:
+Each game you follow gets its own message in the channel you picked for it:
+no combined channel, no header, no discussion thread. A game with nothing new
+that day posts nothing at all. A free server's looks something like this
+(illustrative only, not real scraped content):
+
+> **Borderlands 4**
+> • 🟢 OFFICIAL · Hotfix 5 now live — <https://example.com>
+> • Datamined patch notes point to a new Vault Hunter — <https://example.com>
+> • Mayhem 6 loot rates, explained by a very tired player — <https://example.com>
+
+Official items get the marker and go first, then press, then community, then
+newest. Nothing is labeled "rumor": a headline list makes no claim about
+whether something is true, and calling every Reddit post a rumor would be
+unkind to Reddit. When the list is too long for one message, whole lines are
+dropped from the bottom and the last one says how many were cut and points at
+`/news`.
+
+A comped server's digest has the AI-written stories instead:
 
 > 🟢 **OFFICIAL · Hotfix 5 now live**
 > Fixes a crash on the Vault of the Traveler boss fight and adjusts loot drop
@@ -50,70 +83,104 @@ with nothing new that day posts nothing at all. Something like this
 > official yet.
 > [PC Gamer](https://example.com) +2 more
 
-Stories are sorted official, then reported, then rumor, each labeled so
-nobody mistakes a leak for a patch note. A coverage caveat ("Brave search
-skipped: quota exceeded"), if there is one that day, rides along in that
-game's own embed footer instead of a shared header; there's no longer a
-shared message for it to live in.
+Sorted official, then reported, then rumor, each labeled so nobody mistakes a
+leak for a patch note. A coverage caveat ("Brave search skipped: quota
+exceeded"), if there is one that day, rides along in that game's embed footer.
 
 ## Commands
 
-- **`/news recent game:<topic|All> days:<1-30, default 7> label:<official|reported|rumor, optional> public:<bool, default false>`**:
-  recent stories for a game (or all of them), optionally filtered by label.
+Everything below is server-only (no DMs). Until an admin has run
+`/newsbot setup`, the member commands say so and do nothing else.
+
+**Anyone:**
+
+- **`/news recent game:<a followed game|All> days:<1-30, default 7> label:<official|reported|rumor, optional> public:<bool, default false>`**:
+  recent news for a game this server follows (or all of them). On a free
+  server it lists stored headlines, and `label` is ignored; on a comped
+  server it lists stories, and `label` filters them.
 - **`/news search query:<text> days:<1-30, default 30> public:<bool, default false>`**:
-  full-text search over story headlines and summaries.
-- **`/newsbot status`** (admin): last run and its status, source health, item/story
-  counts for the last 24h, and estimated Claude spend for the month.
-- **`/newsbot run-now`** (admin): runs the pipeline and posts immediately. Asks
-  for confirmation if today's digest already went out.
-- **`/newsbot preview`** (admin): runs the pipeline and shows the digest only to
-  the admin who ran it. Nothing is saved or posted, so a preview never
-  changes what the next real run sees.
-- **`/newsbot test-alert code:<XXXXX-XXXXX-XXXXX-XXXXX-XXXXX> golden:<bool, default false>`**
-  (admin, **dev only**): posts a fake SHiFT code alert to exercise the
-  sweep end to end, without waiting for a real code to show up. Only
-  registered when `alerts.allow_test_command: true`; see
-  [SHiFT code alerts](#shift-code-alerts) below.
+  full-text search over the headlines (free) or the story headlines and
+  summaries (comped), limited to the games this server follows.
 - **`/shift codes days:<1-90, default 14> public:<bool, default false>`**:
-  lists every SHiFT code the bot has ever seen and posted (or would have
-  posted) within the window, newest first, each with a copyable code block,
-  first-seen date, and source link. Only registered when `alerts.enabled:
-  true`; see [SHiFT code alerts](#shift-code-alerts) below.
-- **`/newsbot quote-now`** (admin): posts today's lounge quote now, and the
-  scheduled one then skips today. Asks for confirmation if today's quote
-  already went out. Only registered when `lounge.daily_quote.enabled: true`;
-  see [Lounge](#lounge) below.
+  lists every SHiFT code the bot has seen and posted within the window,
+  newest first, each with a copyable code block, first-seen date, and source
+  link. Only for servers that follow a game SHiFT detection covers
+  (Borderlands 4 by default).
 
 Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
 only the person who ran the command can use.
 
-## Admin-channel run reports
+**Server admins (Manage Server, the `admin_permission` setting):**
 
-After every scheduled, catch-up, or `/newsbot run-now` digest that actually
-posts (`ok` or `partial`), the admin channel gets a one-message plain-text
-report: story counts per topic, that run's own source health, estimated
-Claude spend, how long it took, and a jump link to the digest:
+- **`/newsbot setup`**: a guided first run, shown only to you. Pick a time
+  zone, a digest time, up to 10 games, and the channel for them, then Save.
+  Run it again any time to edit.
+- **`/newsbot follow game: channel:`** and **`unfollow game:`**: add, move or
+  drop one game (with autocomplete), so each game can have its own channel.
+  **`/newsbot games`** lists what you follow and the rest of the catalog.
+- **`/newsbot settings time: timezone: admin_channel: clear_admin_channel:`**:
+  change the digest time (`HH:MM`), the time zone (any IANA zone, with
+  autocomplete), and where this server's own run reports and problem notes go.
+- **`/newsbot shift channel: enabled: ping: role:`**: SHiFT code alerts for
+  this server: where they post, and whether they ping nobody (the default),
+  `@everyone`, or a role. See [SHiFT code alerts](#shift-code-alerts).
+- **`/newsbot status`**: this server's tier, digest time and next due time,
+  the last digest with jump links, each followed game with how many of its
+  sources are healthy, SHiFT settings and today's pings, and the newest problem
+  notes. It never shows spend.
+- **`/newsbot preview`**: builds the digest the server would get next and shows
+  it only to you. Nothing is posted or saved. Once per server per 10 minutes.
+- **`/newsbot run-now`**: posts the digest immediately. Asks for confirmation if
+  today's already went out; a confirmed re-run reposts every game, and is
+  also limited to once per server per 10 minutes.
+
+Every admin command re-checks the permission on the server side, and the bot
+refuses to manage a server it isn't actually in (an invite with only the
+commands scope). The bot's owner is never held to the 10-minute limits.
+
+**Owner only:**
+
+- **`/owner servers`**: registered in the owner's home server alone. Counts
+  only: servers, how many are set up, free and comped, today's digests by
+  status, servers with SHiFT on or with permission problems, and the month's
+  spend.
+- **`/lounge quote-now`** (admin, in a server with a lounge): posts today's
+  lounge quote now, and the scheduled one then skips today. Asks first if
+  today's already went out. See [Lounge](#lounge).
+
+## Run reports and problems
+
+A server's own problems (a channel the bot can't post in, a digest that
+failed) and its run reports go to that server and nobody else. If an admin set
+a channel with `/newsbot settings admin_channel:`, they're posted there;
+either way the newest few show up in `/newsbot status`. After each digest that
+posts (`ok` or `partial`), the admin channel gets a one-message report:
 
 > ✅ **Digest posted** · Sat Sep 27 (scheduled)
-> 7 stories: Borderlands 4 2 · Palworld 1 · Diablo IV 4
-> Sources: 22 of 23 ok (r/diablo4: timed out)
-> Claude: ~$0.02 · took 1m52s · [jump to digest](<message link>)
+> 7 items: Borderlands 4 2 [jump] · Palworld 1 [jump] · Diablo IV 4 [jump]
+> Took 1m52s
 
-A `partial` run (a source skipped, or a topic fell back to a plain headline
-list) swaps the emoji for ⚠️ and adds a `Notes:` line. A `failed` or
-`skipped` run sends no report (those already get their own detailed admin
-alert, see below), and `/newsbot preview` never reports at all, since
-nothing it does is real. `run-now`'s report never says who ran it: the
-privacy policy promises we don't keep user ids around.
+It lists what each game posted with a jump link, any game that was skipped
+and why, and how long it took. It has no source health and no spend: that's
+the owner's business, not a server's. A `partial` run (a game's channel
+refused the post, or a summary fell back to headlines) swaps the emoji for ⚠️
+("Digest posted with gaps") and adds a `Notes:` line. A game whose channel was
+deleted or locked is skipped and reported, and the rest of the server's games
+still post; the bot never picks a different channel on its own.
+`/newsbot preview` never reports. Controlled by `run_report` (default `true`),
+and only takes effect when the server has an admin channel.
 
-Controlled by `digest.report_to_admin` (default `true`), and only takes
-effect when `admin_channel_id` is set.
+The owner's channel gets something else entirely: bot-wide health only. A
+source that failed 12 collections in a row (half a day), a crashed job, the
+import notice, permission-problem counts, and one daily line like "digests
+posted to 37 of 38 servers; 1 failed (missing permissions)". Server problems
+never go there, and the owner's alerts never go to a server.
 
 ## Lounge
 
-Optional, and off unless `config.yaml` has a `lounge:` block (v2.2). Two
-things, both posted to one channel:
+Optional, for one server only (v2.2, kept by v3): the one named by `guild_id`
+in `config.yaml`. It's off unless the file has a `lounge:` block. Two things, both posted to one channel:
 
 - **A welcome** for each new member, written by you in `config.yaml`, with
   `{member}` and `{server}` as the only placeholders. Bots are never
@@ -121,8 +188,8 @@ things, both posted to one channel:
   **Server Members Intent** switched on in the Developer Portal before the
   bot starts; without it the bot says so and exits after a 10-minute wait.
 - **A daily quote**, fortune-cookie style, at a time you pick (default
-  08:00 in `digest.timezone`). Quotes come from Wikiquote pages, a text file
-  of your own, or a raw https link, mixed as you like. With no list
+  08:00 in the server's time zone). Quotes come from Wikiquote pages, a text
+  file of your own, or a raw https link, mixed as you like. With no list
   configured it draws from a built-in one: Oscar Wilde, Mark Twain,
   Benjamin Franklin, William Shakespeare, Jane Austen, Edgar Allan Poe and
   Marcus Aurelius, all public-domain authors. Nothing repeats until a
@@ -130,7 +197,10 @@ things, both posted to one channel:
   possible but carry real copyright risk, so they're commented-out examples
   in `config.example.yaml`, never a default.
 
-Setup, source types, Docker paths and rollback are in
+There's no command to set a lounge up, and no other server can have one: the
+settings are read from `config.yaml` into the database, and a `lounge:` block
+left there is re-applied to them at every start.
+Setup, source types and Docker paths are in
 [`docs/self-host.md`](docs/self-host.md) §13; the design is
 [`docs/design.md`](docs/design.md) §14.
 
@@ -139,114 +209,130 @@ Setup, source types, Docker paths and rollback are in
 This is specifically for Borderlands-family games: it recognizes only
 Gearbox's own SHiFT/Golden Key redeem code format
 (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) and nothing else, so it has nothing to do
-if your own game doesn't use that reward system. It's opt-in for a reason
-covered below (an `@everyone` ping is the one thing this bot does that's
-hard to take back); `max_pings_per_day: 0` gets you codes recorded and
-listable via `/shift codes` with no ping at all, a reasonable way to start
-quiet.
+for any other game. It's opt-in per server for a reason covered below (an
+`@everyone` ping is the one thing this bot does that's hard to take back):
+alerts are off until an admin runs `/newsbot shift`, and the ping defaults to
+**none**.
 
-A separate, near-real-time path alongside the daily digest (`alerts:` in
-`config.yaml`, off by default): an hourly sweep runs every collector except
-`web_search` (no Claude call, no `items`/`stories` writes), and the daily
-09:00 run also checks its own collected items, looking for a SHiFT/Golden
-Key redeem code (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) in the item's full text.
-A new code posts to its own dedicated channel (`alerts.channel_id`, as of
-v2.0; no more sharing the digest channel) with an `@everyone` ping.
+Detection is global and happens once per hourly collection pass: the bot
+looks for codes in every source of the games listed under `shift: games:` in
+`config.yaml` (default `borderlands4`), in each item's full text. Each new
+code is then queued for every server with alerts on, and delivered to that
+server's own channel with that server's own ping choice and daily cap. Turning
+alerts on starts from codes found after that moment; there's no backlog.
 
 Safeguards, since a ping is the one thing this bot can do that's hard to
 take back:
 
 - **Once per code, ever.** Every code seen is recorded in `alerted_codes`;
-  a code already there never alerts again, on any later sweep.
-- **Silent seeding.** The first sweep after enabling the feature (or after
-  losing its own "seeded" marker) records whatever codes it finds without
-  posting, so months of old codes already sitting in a feed don't flood
-  the channel the moment this is turned on.
+  a code already there never alerts again.
+- **Silent seeding.** The first collection after the feature's marker is
+  missing records whatever codes it finds without posting, so months of old
+  codes already sitting in a feed don't flood anyone.
 - **Age limit.** A code first seen only in an item older than
-  `alerts.max_item_age_hours` (default 48) is recorded but never posted.
-- **Daily ping cap.** At most `alerts.max_pings_per_day` (default 3)
-  messages a day carry a ping (local day, `digest.timezone`); beyond
-  that, codes still post, just without `@everyone`, and an admin alert
-  notes it.
-- **Scoped to specific games.** `alerts.topics` (default: every topic)
-  restricts the sweep to items that match those topics, the same
-  confident/dedicated-source rule the digest itself uses: a Diablo IV
-  patch note has never once contained a Borderlands SHiFT code.
+  `shift.max_item_age_hours` (default 48) is recorded but never posted.
+- **Daily ping cap, per server.** At most `shift.max_pings_per_day` (default
+  3) messages a day carry a ping, counted in that server's own local day;
+  beyond that, codes still post, just unpinged, and the server is told.
 - **Who can trigger a ping.** Every new code still posts, but only a code
-  seen from a source whose trust is in `alerts.ping_trust` (default:
-  `official`, `press`) is enough to make its batch carry the `@everyone`.
-  A community-only code (a Reddit thread guessing at one, say) still
-  posts quietly; it just isn't, on its own, the reason a ping fires. A
-  batch mixing trusted and community-only codes pings once and puts the
-  trusted code(s) first in the message. A batch with nothing trusted in
-  it doesn't spend the daily cap either; there was nothing for the cap
-  to actually stop.
+  seen from a source whose trust is in `shift.ping_trust` (default:
+  `official`, `press`) makes its batch carry the server's ping. A
+  community-only code (a Reddit thread guessing at one, say) posts quietly.
+- **A second source can earn the ping.** If a community-only code is then seen
+  by a second, independent source (a different source name, compared without
+  regard to case) or an official or press one within 24 hours of its first
+  sighting, each server whose original post went out unpinged for that reason,
+  and has pinging on, gets one short follow-up: "Confirmed by a second
+  source", with its chosen ping, spending one of that day's pings. A spent cap
+  skips it silently; a server gets at most one per code, ever. Two sources
+  seeing a code in the same pass just ping on the first post. A confirmation
+  that arrives while the original is still queued waits for the next sighting,
+  and a stale second sighting still counts (the bot only asks that it *sees*
+  the second source within 24 hours). Roundup sightings never confirm.
 - **Roundups post, but without a ping.** An item naming more than
-  `alerts.max_codes_per_item` (default 5) distinct codes is a roundup or
-  megathread, not a genuine single-code announcement. As of v2.0, a fresh
-  code whose only sightings are roundup items still posts to the SHiFT
-  channel: under a separate "SHiFT codes from a roundup" header naming
-  the source, never with `@everyone`, and never spending the daily ping
-  cap; capped at 50 fresh roundup codes per check; anything past that is
-  recorded silently instead, with an admin note. A code that also shows up
-  in a normal, non-roundup item in the same run is judged entirely by that
-  normal item instead, same as before.
+  `shift.max_codes_per_item` (default 5) distinct codes is a roundup or
+  megathread, not a genuine single-code announcement. A fresh code whose
+  only sightings are roundup items still posts under a separate "SHiFT codes
+  from a roundup" header naming the source, never pinged, and never spending
+  the cap; capped at 50 fresh roundup codes per pass, with the rest recorded
+  silently and the owner told.
+- **A failed send keeps its ping only if nobody could have been pinged.** If
+  Discord answers 429 (it refused the message), the retry keeps the ping,
+  because nobody was notified. Any ambiguous failure (a timeout, a 5xx, a
+  dropped connection) strips the ping from every later attempt, so at most
+  one ping-bearing send could ever have landed.
 
-`/newsbot status` shows the last sweep's time and source summary, how many
-codes have ever posted, and today's ping spend against the cap (plus
-`(seeding)` while the marker's still unset). `/shift codes` (see
-[Commands](#commands) above) lists every code the bot knows about,
-including roundup ones, marked as such. `/newsbot test-alert` (dev
-only, gated behind `alerts.allow_test_command`) posts one fake code
-through the exact same claim/post/cap machinery a real one would use,
-which is how the private test guild verifies the whole path (including the
-Discord permission below) without waiting for Gearbox to hand out a code.
+`/newsbot status` shows the server's SHiFT settings and today's ping spend
+against the cap. `/shift codes` lists every code the bot knows about,
+including roundup ones, marked as such.
 
-**Discord permission required:** the bot's role needs **View Channel**,
-**Send Messages**, and **Mention @everyone, @here, and All Roles** in the
-SHiFT codes channel. Without the mention permission, Discord still posts
-the alert message, it just silently drops the notification; the bot
-notices (it checks the permission before every ping) and sends an admin
-alert instead of failing quietly. On top of that per-ping check, the bot
-also checks every configured channel's permissions once at startup and
-sends a single admin alert naming anything missing anywhere; see
-[`docs/deploy.md`](docs/deploy.md) for how to grant it.
+**Discord permission required:** the bot's role needs **View Channel** and
+**Send Messages** in the SHiFT channel, plus **Mention @everyone, @here, and
+All Roles** if the ping is `everyone` (or a role that isn't mentionable).
+Without the mention permission, Discord still posts the alert message, it
+just silently drops the notification; the bot checks before every ping,
+posts anyway, and tells that server's admins. `/newsbot shift` also checks
+what's missing the moment it's saved, and the bot checks every server's
+channels once at startup, telling each server only when its problems change.
 
 ## Architecture
 
 A single container runs a single Python process: one `discord.py` client
-that also drives the daily job on an in-process `APScheduler` scheduler. The
-pipeline (collect → normalize/dedupe → filter by topic → summarize with
-Claude → store and post) is written as plain functions with no Discord
-dependency, so it can run headless from the CLI or be tested without a
-gateway connection at all; the bot is a thin adapter on top of it.
+that also drives the jobs on an in-process `APScheduler` scheduler. The
+work is plain functions with no Discord dependency, so it can run headless
+from the CLI or be tested without a gateway connection at all; the bot is a
+thin adapter on top of it. Three jobs do the real work:
+
+- **Hourly collection** (`pipeline/collect.py`): fetch every catalog game's
+  sources once, normalize, dedupe, filter by game, store the items, run
+  SHiFT detection, and queue codes for each server.
+- **Summaries every 5 minutes** (`pipeline/summaries.py`): make the comped
+  servers' Claude summaries ahead of time, once per game per cycle, so a
+  digest never waits on Claude.
+- **Digests every minute** (`pipeline/guild_digest.py`, `guilds/schedule.py`):
+  find the servers whose local digest time has passed with no digest for their
+  day, then claim, render, post and save each one. Catch-up after downtime
+  falls out of the same check.
 
 ```
 newsbot/
-  config.py        load + validate config.yaml and secrets (pydantic)
+  config.py        load + validate config.yaml and secrets (pydantic); derives a catalog from a v2 file
   collectors/       one module per source type -> list[RawItem]
     rss.py  steam.py  bluesky.py  web_search.py
   pipeline/
+    collect.py      the hourly shared collection, source health, SHiFT hook
+    summaries.py    comped summaries, made once per game per cycle and reused
+    guild_digest.py one server's digest: claim, render, publish (resumable), save
     normalize.py    URL canonicalization, dedupe vs. the store
-    filter.py       keyword topic matching, "uncertain" flag, dedicated sources
+    filter.py       keyword game matching, "uncertain" flag, dedicated sources
     summarize.py    Claude call, prompt assembly, schema validation, fallback
-    run.py          orchestrates one daily run; also the headless CLI entry point
+    run.py          the headless CLI entry point (check-sources, collect, dry-run)
     publisher.py    Publisher protocol (stdout for the CLI, Discord for the bot)
-    lock.py         the one run lock, shared by the daily job and the code sweep
-  shift/            SHiFT code alerts (design.md §12); separate from the digest
+    lock.py         the collection pass's lock
+  guilds/           per-server state (design.md §15)
+    importer.py     the one-time import of a v2 single-server config
+    schedule.py     pure: which servers are due, DST-safe, item windows
+    lifecycle.py    pure: join, removal and startup reconciliation plans
+    notify.py       who hears about what: owner channel vs. a server's own
+  shift/            SHiFT code alerts (design.md §12, §15)
     match.py        pure code/Golden Key text matcher, no ReDoS surface
     decide.py       pure planner: what's new, fresh, worth a ping, worth seeding
-    sweep.py        the I/O side: sweep collectors, claim/post/record, run lock
+    fanout.py       release a code once, then deliver it per server
+    sweep.py        the poster protocol and the retry-without-a-second-ping rule
+  lounge/           welcomes and the daily quote (design.md §14), for one server
   store/
-    migrations/     numbered .sql files
-    db.py           connection, WAL, migration runner
+    migrations/     numbered .sql files (001 to 008)
+    db.py           connection, WAL, migration runner (incl. foreign-keys-off rebuilds)
     repo.py         all queries (no SQL anywhere else)
   bot/
-    client.py       discord client, scheduler wiring, heartbeat, code alert poster
-    commands.py     /news, /news search, /newsbot status|run-now|preview|test-alert, /shift codes
+    client.py       discord client, scheduler wiring, heartbeat, lifecycle handlers
+    commands.py     /news, /shift codes, /newsbot, /lounge
+    setup_views.py  the /newsbot setup wizard
+    owner_commands.py  /owner servers
+    registration.py which commands exist where, synced only when they changed
     format.py       digest + result embeds + code alerts, paging, UTF-16-aware limits
-    permissions.py  startup check: does the bot have what it needs in every configured channel
-  alerts.py         admin-channel notifications
+    permissions.py  per-server permission checks
+  alerts.py         low-level channel sends
   healthcheck.py    Docker HEALTHCHECK entry point (checks the heartbeat file)
 ```
 
@@ -274,23 +360,34 @@ The gate (lint, format check, tests) that has to stay green:
 ruff check . && ruff format --check . && pytest -q
 ```
 
+The suite is about 7,900 tests and takes around three minutes. It never touches
+the real network: every hostname resolves to a test address and any attempt to
+open a real connection fails the test (a test that needs one is marked
+`real_network`), so a slow DNS lookup can't masquerade as a hung test run.
+
 Exercise the whole pipeline with no Discord and no network at all:
 
 ```bash
-python -m newsbot.pipeline.run --dry-run --config config.example.yaml \
+python -m newsbot.pipeline.run --dry-run --config tests/fixtures/config_v2_example.yaml \
   --db /tmp/nb.db --fixtures tests/fixtures/integration --stub-llm tests/fixtures/integration/llm.json \
   --now 2026-09-23T09:00:00+00:00
 ```
 
-This runs against `config.example.yaml` rather than a `config.yaml` you may
-or may not have yet, since it's the one config this repo commits and every
-fixture item's topic keys (`borderlands4`, `palworld`) match; `--now` pins
-the clock to the fixture data's own frozen date (2026-09-23) so this stays
-deterministic no matter when you happen to run it: see `docs/self-host.md`
-step 6 for why. Drop `--fixtures`/`--stub-llm`/`--now` to hit real sources
-and Claude with a real config; that's how the source list and the summary
-prompt get tuned in practice; see `docs/sources-research.md` for how the
-seed sources here were verified.
+This runs against the pre-v3 single-server example (a v2-shaped config, kept
+as a fixture) rather than `config.example.yaml`, because a dry run previews one
+server's digest and the v3 example has no server in it; the file's server is
+imported into the scratch database first. Its game keys (`borderlands4`, `palworld`) match the fixture items, and
+`--now` pins the clock to the fixture data's own frozen date (2026-09-23) so
+this stays deterministic no matter when you happen to run it: see
+`docs/self-host.md` step 6 for why. Drop `--fixtures`/`--stub-llm`/`--now` to
+hit real sources and Claude. `--check-sources [--game KEY]` runs the real
+sources and reports per source with no database, Claude key or Discord token,
+and that's how the source list and the summary prompt get tuned in practice;
+see `docs/sources-research.md` for how the seed sources were verified.
+`--dry-run` works on a throwaway copy of `--db`, so it can't write; but
+`--collect`, `--fixtures` and `--post-to-stdout` do write, and none of them
+belongs near a live database. The full list of modes is in
+`docs/self-host.md` §14.
 
 ### Running the dev bot
 
@@ -298,8 +395,11 @@ seed sources here were verified.
    (a separate application from prod, never run two processes on the same
    token; they'll race each other and the loser logs `Unknown interaction
    (10062)`).
-2. Copy `config.example.yaml` to `config.dev.yaml` and point it at a private
-   test guild and channel IDs.
+2. Copy `config.example.yaml` to `config.dev.yaml` and set `home_guild_id` and
+   `owner_channel_id` to your private test guild, and `command_guild_ids` to
+   the test guild (so commands show up instantly instead of taking up to an
+   hour). Add `comped_guild_ids` to try AI summaries. Everything else is set
+   from Discord with `/newsbot setup`.
 3. Run directly:
    ```bash
    set -a && . ./.env.dev && set +a
@@ -323,81 +423,102 @@ command existing.
 
 `config.yaml` (git-ignored; `config.example.yaml` is the committed template)
 is mounted read-only into the container. Secrets live in `.env`, which is
-also git-ignored.
+also git-ignored. Since v3 it holds the bot's global settings and the game
+catalog, and nothing about any one server: channels, digest times, time
+zones and SHiFT settings live in the database and are set with `/newsbot`
+commands.
 
 Highlights of the schema: see `config.example.yaml` for a complete, real
-example, and [`docs/design.md` section 3](docs/design.md#3-configuration) for the full spec:
+example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
+§15 for v3) for the spec:
 
-- **`topics`**: each has a `key`, display `name`, its own `channel_id` (as
-  of v2.0, every game posts to its own channel, no shared fallback),
-  `aliases`, `entities` (looser, "uncertain" matches), and optional
-  `search_queries` used for that topic's Brave News queries instead of the
-  global templates.
-- **`sources`**: `rss`, `steam_news`, `bluesky_search`, and `web_search`.
-  Each has a `trust` level (`official`, `press`, or `community`), which
-  affects labeling and which items survive the per-topic cap.
-- **Dedicated sources**: a source whose `topics` list names exactly one
-  topic is a confident match for that topic even if the item's text never
-  mentions the game by name: this is how, say, a Steam patch-notes post
-  titled "v0.6.2 Update" still reaches the Palworld digest.
-- **`alerts.channel_id`**: required once `alerts.enabled: true`; SHiFT
-  code alerts post to this dedicated channel, not a game channel or the
-  admin channel.
-- There is no more `digest.channel_id` or a shared `alerts.channel_id`
-  fallback to it; that field was removed in v2.0 along with the combined
-  digest channel. An old v1 `config.yaml` still setting it fails config
-  validation with a message saying where each setting moved.
+- **`catalog`**: up to 25 games, each with a `key`, display `name`,
+  `aliases`, `entities` (looser, "uncertain" matches), `search_queries` for
+  that game's Brave News queries, `match_name` (false for names that are
+  ordinary words, like Rust), and its own `sources`. No channels: those are
+  per server. Keep Borderlands 4, Palworld and Diablo IV first and in that
+  order, because the AI prompt lists a comped server's games in catalog order.
+- **`sources`** (under a game, or in **`shared_sources`** for feeds that cover
+  many games): `rss`, `steam_news` and `bluesky_search`, each with a `trust`
+  level (`official`, `press`, or `community`), which affects ordering and
+  which items survive the per-game cap. A source listed under a game is a
+  *dedicated source*: every item it returns is a confident match for that
+  game even if the text never names it, which is how a Steam post titled
+  "v0.6.2 Update" still reaches Palworld's digest. A shared source is
+  keyword-matched against every game (or just the ones in its `games:`).
+- **`web_search`**: Brave News, once a day, for games a comped server follows.
+- **`shift`**, **`collection`**, **`ai`**, **`owner_report`**: SHiFT
+  detection, the hourly pass, the summarizer's subject, and the owner's daily
+  report. All have working defaults.
+- **`home_guild_id`**, **`owner_channel_id`**: the owner's server and the
+  channel in it for bot-wide alerts. **`comped_guild_ids`**: servers that get AI
+  summaries. **`command_guild_ids`**: copy the commands into just these
+  servers (instant, for dev and self-hosting) instead of registering them
+  globally (up to an hour to show a change).
+- **The single-server keys** (`guild_id`, `digest`, `topics` with a
+  `channel_id`, `alerts`, `lounge`): only the lounge needs them, since it has
+  no command. See the last block of `config.example.yaml` and
+  `docs/self-host.md` §13.
 - **Secrets** (`.env`): `DISCORD_TOKEN`, `ANTHROPIC_API_KEY`, `BRAVE_API_KEY`,
   and optionally `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` for authenticated
   Bluesky search (see Limitations below).
 
 ## Costs
 
-Rough running cost against `config.example.yaml`'s source list:
+Rough running cost against `config.example.yaml`'s source list, for one
+comped server following three games:
 
-- **Claude (Haiku 4.5)**: about 3 summarization calls per run (one per
-  topic with items), roughly **2 cents per run**.
-- **Brave Search**: 2 queries per topic × 3 topics = about **6 requests per
-  run**, roughly **180 requests a month** (comfortably inside Brave's free
-  tier as configured).
-- **SHiFT code alerts**: no extra Claude or Brave cost at all: the hourly
-  sweep deliberately excludes `web_search` (see
-  [SHiFT code alerts](#shift-code-alerts)) and never calls the LLM. The
-  only added cost is source fetches (one `GET`/sweep per RSS/Steam/
-  Bluesky source, same as the digest already makes; these are requests to
-  each source's own site, not to Discord's API) and, on Bluesky, about
-  24 extra logins a day from rebuilding the collector fresh each sweep.
+- **Claude (Haiku 4.5)**: about 3 summarization calls per day (one per
+  game with items), roughly **2 cents per day**. Summaries are made once per
+  game per cycle and shared, so a second comped server on the same schedule
+  costs next to nothing extra; servers on different schedules get their own.
+  Free servers cost nothing here.
+- **Brave Search**: 2 queries per game per day, only for games a comped server
+  follows, so about **6 requests a day** and roughly **180 a month** for
+  three games (comfortably inside Brave's free tier). It doesn't grow with the
+  number of servers, and there's no local monthly budget guard on it yet.
+- **Collection and SHiFT**: no Claude or Brave cost at all. The hourly pass
+  makes one `GET` per RSS/Steam/Bluesky source, whichever servers follow them
+  (these are requests to each source's own site, not to Discord's API) and, on
+  Bluesky, a login per pass. Reddit is the slow part: feeds are spaced 35
+  seconds apart, so 15 subreddits add about 9 minutes to every pass.
 
 ## Limitations and known issues
 
 - **Reddit may block datacenter IPs.** The subreddit sources were verified
   from a residential connection; Reddit rate-limits aggressively even there,
   and may reject requests outright from a hosting provider's IP range in
-  production. If it happens, it shows up in `/newsbot status` as a source
-  health failure, not a crash.
+  production. If it happens, it shows up in `/newsbot status` ("N of M sources
+  ok") and in the owner's alerts as a source health failure, not a crash.
 - **YouTube channel feeds are out, for now.** They're plain RSS reads
   (`youtube.com/feeds/videos.xml?channel_id=...`) with no official
   guarantee of stability, and in late September 2026 every one of them
   started returning 404, so the example config no longer includes any.
 - **Running `/newsbot run-now` a second time after today's digest already
-  posted usually produces a mostly empty digest.** It re-runs the full
-  pipeline; most items are already deduped against the store, and the model
-  is told to mark stories that add nothing new as `relevant: false`.
+  posted usually produces a mostly empty digest.** The window starts where
+  the last digest ended, so there's little new, and the model is told to mark
+  stories that add nothing new as `relevant: false`. A confirmed re-run does
+  repost every game.
 - **Bluesky search needs an app password.** Unauthenticated
   `bluesky_search` requests currently get a 403 with an HTML body (not even
   a JSON error) from Bluesky's public API. Without `BLUESKY_HANDLE` and
   `BLUESKY_APP_PASSWORD` set, those sources are skipped with a coverage
-  note, not treated as a failure. The three official-account RSS feeds work
+  note, not treated as a failure. The official-account RSS feeds work
   regardless: no auth needed for those.
+- **Free headlines include web search results.** Brave's results are stored
+  for everyone, so a free server's headlines can include them even though only
+  comped servers cause the search to run. Left that way on purpose.
+- **A big SHiFT drop drains slowly at hundreds of servers.** Delivery runs
+  inside the collection pass's 120-second budget, so at about 170 or more
+  SHiFT-enabled servers a code drop finishes over several hourly passes. If
+  the bot ever gets that big, delivery should move into a job of its own.
 - **SHiFT code alerts can miss or delay a code.** Reddit's `/top?t=day`
   sort can take a while to surface a brand new post, so a code posted to a
   subreddit first might not alert until it's climbed the day's top posts
   (or shown up on an official feed instead). A code embedded only in an
   image (a screenshot, a stream overlay) is invisible to this; the
-  matcher only reads text. Brave News is excluded from the sweep entirely
-  (see Costs above), so a code that only ever appears in a press article
-  Brave indexes won't alert until the *daily* digest run's own check, if
-  at all. A code split across an en dash or similar look-alike dash
+  matcher only reads text. Gearbox mostly posts codes on X, which isn't a
+  source. A code split across an en dash or similar look-alike dash
   instead of a plain hyphen won't match the pattern (deliberately, see
   [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25)'s clarifications on the regex). A code with no
   digits anywhere in its 25 characters won't be detected either: real
@@ -421,20 +542,26 @@ Rough running cost against `config.example.yaml`'s source list:
   stripped before rendering, so scraped or generated text can't grow a fake
   markdown link next to a real one.
 - Every send is `allowed_mentions=none`: scraped text can't ping
-  `@everyone`, a role, or a user, **except** a SHiFT code alert message,
-  which is the one deliberate exception: it's allowed to set
-  `AllowedMentions(everyone=True)`, and only when the alert pipeline
-  itself (not scraped text) has decided to ping. That's a fixed module
-  constant used in exactly one place, pinned by a test that scans
-  `newsbot/`'s source for any other `AllowedMentions(everyone=True, ...)`
-  call; see [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25) and `newsbot/bot/client.py`.
+  `@everyone`, a role, or a user, **except** a SHiFT code alert (or its
+  "confirmed" follow-up), which is the one deliberate exception: it's allowed
+  to ping `@everyone` or a role, and only when the alert pipeline itself (not
+  scraped text) has decided to, from that server's own setting. The
+  `@everyone` case is a fixed module constant used in exactly one place,
+  pinned by a test that scans `newsbot/`'s source for any other
+  `AllowedMentions(everyone=True, ...)` call; see
+  [`docs/design.md` §12](docs/design.md#12-shift-code-alerts-v12-approved-2026-09-25) and `newsbot/bot/client.py`.
+- A server's data is its own. Every query takes the server's id from the
+  interaction, never from an option; a channel from another server is refused
+  when it's written and again when it's posted to; autocomplete values are
+  validated on the server side. When the bot is removed from a server, that
+  server's rows are deleted.
 
 ## Maintainer notes
 
 This section is about running *this* deployment (the maintainer's own
-Droplet, for the maintainer's own server), not a general "how to self-host"
-guide. If you're setting up your own copy, [Run your own
-copy](#run-your-own-copy) above is the right starting point instead.
+Droplet), not a general "how to self-host" guide. If you're setting up
+your own copy, [Run your own copy](#run-your-own-copy) above is the right
+starting point instead.
 
 ### Releasing
 
@@ -443,7 +570,8 @@ The standard path from a change to a running production bot:
 1. **Feature branch, PR.** CI (`.github/workflows/ci.yml`) runs the gate
    (lint, format check, tests) on every push and PR.
 2. **Merge to `main`.** CI publishes `ghcr.io/someclown/discord-newsbot:latest`
-   and a `sha-<short>` tag for that specific build.
+   and a `sha-<short>` tag for that specific build. GitHub Pages publishes
+   `site/` (the privacy policy and terms) from `main` too.
 3. **Try the published image against the test guild**, with the dev bot,
    before trusting it anywhere near prod:
    ```bash

@@ -12,11 +12,14 @@ import httpx
 import pytest
 
 from newsbot.config import (
+    _SHARED_BY_TYPE,
     AppConfig,
-    DigestCfg,
+    CollectionCfg,
+    GameCfg,
     RssSource,
     SteamSource,
     Topic,
+    WebSearchCfg,
     WebSearchSource,
     count_configured_web_search_sources,
     load_check_sources_secrets,
@@ -34,16 +37,40 @@ RSS_FIXTURE = (Path(__file__).parent / "fixtures" / "feeds" / "rss20_sample.xml"
 
 
 def _cfg(sources: list, topics: list[Topic] | None = None) -> AppConfig:
+    """A catalog of one game (or `topics`, as games) with `sources` as shared, unscoped sources.
+
+    Web search is its own block now, not a source in the list; everything else is shared, so
+    items match by keyword exactly as the v2 test's unscoped sources did.
+    """
+    games = [
+        GameCfg(key=t.key, name=t.name, aliases=t.aliases, entities=t.entities)
+        for t in (
+            topics
+            or [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])]
+        )
+    ]
+    shared = [
+        _SHARED_BY_TYPE[s.type](**s.model_dump(exclude={"topics"}))
+        for s in sources
+        if s.type != "web_search"
+    ]
+    web_search = next(
+        (
+            WebSearchCfg(queries_per_game=s.queries_per_topic, trust=s.trust)
+            for s in sources
+            if s.type == "web_search"
+        ),
+        None,
+    )
     return AppConfig(
-        guild_id=1,
+        catalog=games,
+        shared_sources=shared,
+        web_search=web_search,
         # A big lookback, not the 24h default: the RSS fixture below is
         # dated to whenever it was written, not "whenever this test
         # happens to run", and normalize() drops anything older than
-        # lookback_hours regardless of how relevant it otherwise is.
-        digest=DigestCfg(time="09:00", timezone="UTC", lookback_hours=87600),
-        topics=topics
-        or [Topic(key="palworld", name="Palworld", channel_id=1, aliases=[], entities=[])],
-        sources=sources,
+        # the lookback regardless of how relevant it otherwise is.
+        collection=CollectionCfg(lookback_hours=87600),
     )
 
 

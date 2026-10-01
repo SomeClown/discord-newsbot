@@ -50,11 +50,11 @@ digest:
 alerts: {{}}
 """
     cfg = _load_with(tmp_path, text)
-    assert cfg.alerts.enabled is False
-    assert cfg.alerts.interval_minutes == 60
-    assert cfg.alerts.max_item_age_hours == 48
-    assert cfg.alerts.max_pings_per_day == 3
-    assert cfg.alerts.allow_test_command is False
+    assert cfg.legacy.shift_enabled is False
+    assert cfg.collection.interval_minutes == 60
+    assert cfg.shift.max_item_age_hours == 48
+    assert cfg.shift.max_pings_per_day == 3
+    assert cfg.shift.allow_test_command is False
 
 
 def test_alerts_explicit_null_is_rejected_not_silently_defaulted(tmp_path):

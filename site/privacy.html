@@ -11,37 +11,58 @@
 <p class="nav"><a href="index.html">discord-newsbot</a> · <a href="terms.html">Terms of Service</a></p>
 
 <h1>Privacy Policy</h1>
-<p class="meta">Effective September 29, 2026</p>
+<p class="meta">Effective October 1, 2026</p>
 
-<p>This page exists because Discord asks bots to have one, and I'm nothing if not compliant with forms. The honest summary: this bot reads the gaming news so you don't have to, and it is remarkably uninterested in you.</p>
+<p>This page exists because Discord asks bots to have one, and I'm nothing if not compliant with forms. The honest summary: this bot reads the gaming news so you don't have to, and it is remarkably uninterested in you. It used to serve one server. It now serves any server that installs it, so this page has grown a section about what it remembers per server.</p>
 
 <h2>What it collects about you</h2>
-<p>Almost nothing, and not for lack of opportunity. The bot doesn't have Discord's "Message Content" permission, so it can't read your messages. It doesn't read your status or what you're playing.</p>
-<p>One thing does change if a server turns on the bot's welcome messages: the bot then notices when someone joins (and when they accept the server's rules) so it can welcome them. It keeps its own record of recent welcomes only in memory, for up to 24 hours, so it doesn't welcome the same person twice. With that permission on, Discord's library also holds the server's member list in the bot's memory while it runs, because it needs that to notice rule acceptance. None of it is written to disk or to the logs, and the bot still doesn't read messages, statuses or activity.</p>
-<p>The one exception: if you try an admin-only <code>/newsbot</code> command without the permissions for it, the bot writes your Discord user ID into its log, next to the command you tried. That's so I can tell a curious member from a bug. It's never posted anywhere, and the log rotates itself out after roughly 30 MB of other, equally riveting entries.</p>
+<p>Almost nothing, and not for lack of opportunity. The bot doesn't have Discord's "Message Content" permission, so it can't read your messages. It doesn't read your status or what you're playing, and it keeps no list of members anywhere.</p>
+<p>One thing is different on one server. The welcome messages (see "Lounge" below) run on a single server, and for that the bot asks Discord for join events, which means it notices when someone joins (and when they accept the server's rules). It keeps its own record of recent welcomes only in memory, for up to 24 hours, so it doesn't welcome the same person twice. Discord's join events are application-wide, so while that is switched on the bot is told about joins in every server it's in; it ignores all of them except the one with welcomes, and Discord's library may hold those members in memory while the bot runs. None of it is written to disk or to the logs, and the bot still doesn't read messages, statuses or activity.</p>
+<p>The bot's own log lines carry server ids (so I can tell which server a problem belongs to) and no user ids. If someone without permission tries an admin-only <code>/newsbot</code> command, the log notes the server and the command, not who tried it. The logs rotate themselves out after roughly 30 MB of other, equally riveting entries.</p>
 <p>When you run <code>/news recent</code> or <code>/news search</code>, the bot answers you and forgets you. It doesn't keep a record of who searched for what. (Your search for "Palworld lawsuit" is between you and your conscience.)</p>
 
+<h2>What it stores about each server</h2>
+<p>When a server adds the bot, the bot keeps a small record for that server so it knows what to post and where. Specifically:</p>
+<ul>
+<li>the server's id, its digest time and time zone, and whether it has finished setup;</li>
+<li>the games the server follows and the id of the channel each one posts to;</li>
+<li>the id of the server's admin channel, if one was picked;</li>
+<li>the SHiFT code settings: on or off, the channel id, and the ping choice (nobody, everyone, or a role id);</li>
+<li>which tier the server is on (free, or one I cover myself);</li>
+<li>a record of each digest the bot posted (the day, the status, the ids of the messages it sent, a short note if something went wrong, and for the servers with AI summaries, how many tokens the summary used);</li>
+<li>a record of each SHiFT code it posted there (the code, the message id, whether it pinged);</li>
+<li>short plain-text notes about problems, such as a channel it couldn't post in (the newest 20 per server, at most 90 days old).</li>
+</ul>
+<p>That's channel ids and settings. There are no member names, no member ids, and no message text from anyone.</p>
+
+<h2>Lounge</h2>
+<p>The lounge (a welcome message for new members, and one quote a day) runs on exactly one server, a friend's. If you're not on that server, none of this applies to you. For that server the bot also keeps the channel id, the welcome text the owner wrote, the quote settings and a hash of each quote's text (so a quote isn't repeated until the rest have had a turn). It holds nothing about people.</p>
+
 <h2>What it does collect</h2>
-<p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, a few subreddits, Bluesky, and a web search. It keeps those items and their AI-written summaries for 90 days, then deletes them. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice. The database gets backed up nightly; backups are kept for a week.</p>
-<p>If the daily quote is on, the database also keeps a small table for it: the name of each quote source and a hash of each quote's text, so a quote isn't repeated until the rest have had a turn. It holds nothing about people. Quotes from Wikiquote are fetched with the bot's user agent and nothing about any member.</p>
+<p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, a few subreddits, Bluesky, and a web search. It keeps those items, and the AI-written summaries made from them, for 90 days, then deletes them. They're shared by every server, since they're public news and not about any server. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice. The database gets backed up nightly; backups are kept for a week.</p>
+
+<h2>When the bot is removed from a server</h2>
+<p>Everything in "What it stores about each server" and "Lounge" is deleted right away when the bot is removed from the server, and again at the next startup for any server it finds it has left. The shared public news and the SHiFT code list stay, because they were never about a server.</p>
+<p>There is one exception, and I'd rather say it than have you find it. When the bot became a public app, I moved the one server it already served over to the new design, once, and the bot kept a record of that move: that server's id, the ids of the channels it was using, and a few counts (how many games, and so on). That record isn't deleted when the bot is removed, because it's what stops the move from happening twice. It holds no member data. Also, a deleted server's data can sit in the nightly backups for up to a week before the oldest copy rotates out.</p>
 
 <h2>Who else sees what</h2>
 <ul>
-<li><strong>Anthropic</strong> receives the public news text so Claude can summarize it. No information about you is included, because the bot doesn't have any.</li>
-<li><strong>Brave Search</strong> receives a handful of search phrases a day, like "Borderlands 4 news."</li>
+<li><strong>Anthropic</strong> receives the public news text so Claude can summarize it, and only for the servers I cover myself (the free tier gets plain headlines, with no AI in the loop). No information about you or any server is included, because the bot doesn't send any.</li>
+<li><strong>Brave Search</strong> receives a handful of search phrases a day, like "Borderlands 4 news", for the games those same servers follow. The results are public news and can show up in any server's headlines.</li>
+<li><strong>The news sources</strong> (studio feeds, Steam, Reddit, Bluesky, gaming sites and Wikiquote) get ordinary requests from the bot, identified by a contact address so they can reach me. They learn nothing about any server or member.</li>
 <li><strong>Discord</strong> handles everything the bot posts and every command you run, under <a href="https://discord.com/privacy">Discord's own privacy policy</a>.</li>
-<li><strong>DigitalOcean</strong> hosts the server it all runs on.</li>
+<li><strong>DigitalOcean</strong> hosts the server it all runs on, and <strong>GitHub</strong> hosts this page.</li>
 </ul>
 <p>Nothing is sold, shared for advertising, or used to build a profile of anyone. I couldn't monetize this if I tried, and believe me, I've got the unfinished side projects to prove it.</p>
 
 <h2>Your choices</h2>
-<p>Don't want the bot anywhere near you? Mute its channel, ignore its commands, or ask a server admin to remove it. If you'd like that one possible log line with your ID deleted, open an issue at the link below and I'll delete it by hand, feeling slightly silly the whole time.</p>
+<p>Don't want the bot anywhere near you? Mute its channel, ignore its commands, or ask a server admin to remove it. Removing it deletes that server's record, as above. If you're an admin and want something deleted without removing the bot, or you just have a question, write to me at the address below.</p>
 
 <h2>Kids</h2>
 <p>The bot isn't aimed at anyone under 13, which is also Discord's minimum age.</p>
 
 <h2>Changes and contact</h2>
-<p>If this changes, the new version goes on this page with a new date at the top. The code is public, so you can check my homework: <a href="https://github.com/SomeClown/discord-newsbot">github.com/SomeClown/discord-newsbot</a>. Questions or requests go to <a href="https://github.com/SomeClown/discord-newsbot/issues">its issue tracker</a>.</p>
+<p>If this changes, the new version goes on this page with a new date at the top. The code is public, so you can check my homework: <a href="https://github.com/SomeClown/discord-newsbot">github.com/SomeClown/discord-newsbot</a>. Questions, requests and problems go to <a href="mailto:justsomeclown@gmail.com">justsomeclown@gmail.com</a>. I read it myself, which is both a promise and a warning about response times.</p>
 
 <p class="sig">— Teren Bryson, sole proprietor of one (1) news bot</p>
 </main>

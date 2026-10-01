@@ -1,6 +1,6 @@
 [project]
 name = "newsbot"
-version = "2.2.0"
+version = "3.0.0"
 description = "Daily AI-summarized Discord news digest for a small gaming server."
 requires-python = ">=3.14,<3.15"
 dependencies = [
@@ -38,6 +38,9 @@ select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "real_network: skip tests/network_guard.py's network guard (real DNS, real sockets)",
+]
 filterwarnings = [
   # discord.py calls re.sub with a positional `count` arg, which is fine on
   # the Python versions it was written against and merely deprecated on

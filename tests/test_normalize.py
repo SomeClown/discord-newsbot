@@ -401,6 +401,18 @@ def test_canonicalize_items_in_batch_dedupe_prefers_higher_trust():
     assert result[0].trust == "official"
 
 
+def test_canonicalize_items_reports_every_losing_copy_when_asked():
+    items = [
+        _item("https://example.com/a", trust="community", title="first"),
+        _item("https://example.com/a", trust="official", title="second"),
+        _item("https://example.com/a", trust="press", title="third"),
+    ]
+    losers: list = []
+    result = canonicalize_items(items, losers=losers)
+    assert [i.title for i in result] == ["second"]
+    assert sorted(i.title for i in losers) == ["first", "third"]
+
+
 def test_canonicalize_items_does_not_touch_the_store_or_apply_a_lookback():
     # Unlike normalize(), canonicalize_items has no known_urls callback and
     # no lookback window: a stale, previously-seen URL survives here.

@@ -1,11 +1,15 @@
 """End-to-end (but gateway-free) tests for the `/shift codes` handler.
 
-Same spirit as `test_commands_test_alert_handler.py`: a hand-written
-`FakeInteraction`/`FakeFollowup` drives `newsbot.bot.commands.make_shift_group`'s
-`codes` callback against a real temp-file sqlite DB, rather than mocking
-discord.py's `Interaction`. `test_command_registration.py` already covers
-registration and option bounds; this file is what's missing -- the handler
-actually run against rows in `alerted_codes`.
+A hand-written `FakeInteraction`/`FakeFollowup` drives
+`newsbot.bot.commands.make_member_shift_group`'s `codes` callback against a
+real temp-file sqlite DB, rather than mocking discord.py's `Interaction`.
+`test_command_registration_v3.py` already covers registration and option
+bounds; this file is the handler actually run against rows in `alerted_codes`.
+
+These were the v2 `/shift codes` tests (one server, config-driven). They moved
+to the per-server handler when v2 retired: the same rows, windows, paging,
+DST and mention-safety assertions, now asked of a server that follows
+Borderlands 4 and keeps its dates in its own time zone.
 """
 
 from __future__ import annotations
@@ -20,12 +24,14 @@ import discord
 import pytest
 
 import newsbot.bot.commands as commands_module
-from newsbot.bot.commands import make_shift_group
+from newsbot.bot.commands import make_member_shift_group
 from newsbot.config import load_config
+from newsbot.store import repo
 from newsbot.store.db import connect, migrate
 
-CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
+CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_v3.yaml"
 LA = ZoneInfo("America/Los_Angeles")
+GUILD = 300000000000000001
 
 
 class FakeResponse:
@@ -59,6 +65,7 @@ class FakeFollowup:
 class FakeInteraction:
     def __init__(self, *, user_id: int = 1) -> None:
         self.user = SimpleNamespace(id=user_id)
+        self.guild_id = GUILD
         self.response = FakeResponse()
         self.followup = FakeFollowup()
 
@@ -68,17 +75,18 @@ def db_path(tmp_path):
     path = str(tmp_path / "newsbot.db")
     with closing(connect(path)) as conn:
         migrate(conn)
+        # A set-up server that follows Borderlands 4 and keeps Los Angeles time.
+        repo.create_guild(conn, GUILD, set_up=True, timezone="America/Los_Angeles")
+        repo.follow_game(conn, GUILD, "borderlands4", 11)
     return path
 
 
 def _cfg():
-    cfg = load_config(CONFIG_PATH)
-    alerts = cfg.alerts.model_copy(update={"enabled": True, "channel_id": 1})
-    return cfg.model_copy(update={"alerts": alerts})
+    return load_config(CONFIG_PATH)
 
 
 def _codes_command(cfg, db_path):
-    group = make_shift_group(cfg, db_path)
+    group = make_member_shift_group(cfg, db_path)
     return next(c for c in group.commands if c.name == "codes")
 
 

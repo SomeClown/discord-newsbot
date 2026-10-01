@@ -1,0 +1,125 @@
+# A v2.2-shaped config in the same shape as the production one: three games
+# with their own channels, dedicated and shared sources, Brave web search,
+# SHiFT alerts on, and the lounge on. The guild and admin ids are fake; the
+# channel ids are the real prod ones (they're not secrets, and using them
+# means the import tests read like the real thing). The lounge message is
+# synthetic text, not the owner's.
+guild_id: 100000000000000001
+admin_channel_id: 100000000000000002
+admin_permission: manage_guild
+
+digest:
+  time: "09:00"
+  timezone: "America/Los_Angeles"
+  lookback_hours: 24
+  max_items_per_topic: 60
+  report_to_admin: true
+  subject: "video games"
+
+topics:
+  - key: borderlands4
+    name: "Borderlands 4"
+    channel_id: 1452017235274240221
+    aliases: ["BL4", "Borderlands4"]
+    entities: ["Gearbox"]
+    search_queries:
+      - "Borderlands 4 news"
+      - "Borderlands 4 update OR DLC OR patch"
+  - key: palworld
+    name: "Palworld"
+    channel_id: 1542581309845799013
+    aliases: []
+    entities: ["Pocketpair"]
+    search_queries:
+      - "Palworld news"
+      - "Palworld update OR patch OR DLC"
+  - key: diablo4
+    name: "Diablo IV"
+    channel_id: 1531681353681211524
+    aliases: ["Diablo 4", "Lord of Hatred", "Vessel of Hatred", "Diablo V", "Diablo 5"]
+    entities: ["Blizzard"]
+    search_queries:
+      - "\"Diablo 4\" OR \"Diablo IV\""
+      - "Diablo 4 season OR patch OR hotfix"
+
+sources:
+  - type: steam_news
+    name: "Borderlands 4 Steam"
+    app_id: 1285190
+    topics: [borderlands4]
+    trust: official
+  - type: steam_news
+    name: "Palworld Steam"
+    app_id: 1623730
+    topics: [palworld]
+    trust: official
+  - type: steam_news
+    name: "Diablo IV Steam"
+    app_id: 2344520
+    topics: [diablo4]
+    trust: official
+  - type: rss
+    name: "Diablo IV Blizzard Tracker"
+    url: "https://us.forums.blizzard.com/en/d4/groups/blizzard-tracker/posts.rss"
+    topics: [diablo4]
+    trust: official
+  - type: rss
+    name: "2K Newsroom"
+    url: "https://newsroom.2k.com/feed/rss"
+    trust: official
+  - type: rss
+    name: "r/Borderlands4"
+    url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day"
+    topics: [borderlands4]
+    trust: community
+  # Two topics on one source: not dedicated to either, so it's shared, with
+  # the restriction kept.
+  - type: rss
+    name: "Pocketpair and Gearbox Wire"
+    url: "https://example.com/wire.rss"
+    topics: [borderlands4, palworld]
+    trust: press
+  - type: rss
+    name: "PC Gamer"
+    url: "https://www.pcgamer.com/rss/"
+    trust: press
+  - type: rss
+    name: "Eurogamer"
+    url: "https://www.eurogamer.net/feed"
+    trust: press
+  - type: bluesky_search
+    query: "\"Borderlands 4\""
+    topics: [borderlands4]
+    trust: community
+  - type: web_search
+    queries_per_topic: 2
+    trust: press
+
+alerts:
+  enabled: true
+  channel_id: 1553597251933438122
+  topics: [borderlands4]
+  interval_minutes: 60
+  max_item_age_hours: 48
+  max_pings_per_day: 3
+  ping_trust: [official, press]
+  max_codes_per_item: 5
+  allow_test_command: false
+
+lounge:
+  channel_id: 1401806745898061826
+  welcome:
+    enabled: true
+    message: "Welcome to {server}, {member}. Pull up a stool; the lighting is questionable."
+  daily_quote:
+    enabled: true
+    time: "08:00"
+    sources:
+      - wikiquote: "Divine Comedy"
+      - wikiquote: "Fight Club (film)"
+      - wikiquote: "Hunter S. Thompson"
+      - wikiquote: "H. L. Mencken"
+      - wikiquote: "F. Scott Fitzgerald"
+      - wikiquote: "The Curious Case of Benjamin Button (film)"
+      - wikiquote: "Oscar Wilde"
+      - wikiquote: "Mark Twain"

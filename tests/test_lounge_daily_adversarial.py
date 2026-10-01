@@ -309,7 +309,7 @@ async def test_the_racing_loser_drops_its_source_notes_on_the_floor(tmp_path, db
     first = await run_daily_quote(_deps(db_path, [bad, good], spy, rng=_Ordered()))
     assert first.status == "posted"
     spy.alerts.clear()
-    monkeypatch.setattr(daily, "_already_posted", lambda db, day: False)
+    monkeypatch.setattr(daily, "_already_posted", lambda db, day, guild_id=None: False)
     second = await run_daily_quote(_deps(db_path, [bad, good], spy, rng=_Ordered()))
     assert second.status == "already_posted"
     assert second.notes == ()

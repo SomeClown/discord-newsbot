@@ -1,4 +1,4 @@
-"""Adversarial tests for the lounge half of the startup permission check (plan task 9).
+"""Adversarial tests for the lounge half of the permission check (plan task 9).
 
 The happy path (lounge channel needs View and Send, merges with admin) lives
 in `test_permissions.py`. This file is the awkward seating chart: a lounge
@@ -13,6 +13,13 @@ purpose and every missing permission?
 Where the check does something the owner might want different, the test says
 so in a comment, so changing it later is a decision and not a surprise.
 
+These were the v2 tests (ported at the cutover), written against a config (`required_channels` and
+`check_channels`). The small `Setup` class below stands in for that config: it
+holds the same facts (games, the admin channel, SHiFT, the lounge) and hands
+them to the per-server builder, so each test body asks the same question it
+always did of the code that exists now. One v2 case, a lounge with no channel
+id, is gone: the table won't hold such a row.
+
 Same hand-written fakes as `test_permissions.py` (copied, because tests here
 aren't a package and I'm not going to make them one for four small classes).
 No gateway, no network.
@@ -20,37 +27,68 @@ No gateway, no network.
 
 from __future__ import annotations
 
-from pathlib import Path
+import dataclasses
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import discord
 import pytest
 
-from newsbot.bot.permissions import check_channels, required_channels
-from newsbot.config import DailyQuoteCfg, LoungeCfg, QuoteSourceCfg, WelcomeCfg, load_config
+from newsbot.bot.permissions import check_guild_channels, required_channels_for_guild
+from newsbot.store.models import GuildGame, GuildSettings, LoungeSettings, ShiftSettings
 
-CONFIG_PATH = Path(__file__).parent / "fixtures" / "config_valid.yaml"
 LOUNGE_ID = 555000000000000001
 SHIFT_ID = 777000000000000001
+ADMIN_ID = 123456789012345679
 ALL = discord.Permissions.all()
+_NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+
+
+def _topics():
+    return [
+        SimpleNamespace(key="borderlands4", name="Borderlands 4", channel_id=123456789012345690),
+        SimpleNamespace(key="palworld", name="Palworld", channel_id=123456789012345691),
+        SimpleNamespace(key="diablo4", name="Diablo IV", channel_id=123456789012345692),
+    ]
+
+
+@dataclass(frozen=True)
+class Setup:
+    """One server's settings, shaped like the v2 config these tests used to load."""
+
+    guild_id: int = 123456789012345678
+    topics: list = field(default_factory=_topics)
+    admin_channel_id: int = ADMIN_ID
+    shift_channel_id: int | None = None
+    lounge: LoungeSettings | None = None
 
 
 def _cfg(*, welcome=False, quote=False, channel_id=LOUNGE_ID, shift=False):
-    cfg = load_config(CONFIG_PATH)
-    alerts = cfg.alerts.model_copy(
-        update={
-            "enabled": shift,
-            "channel_id": SHIFT_ID if shift else None,
-            "max_pings_per_day": 3,
-        }
+    lounge = LoungeSettings(
+        123456789012345678, channel_id, welcome, "Hi {member}", quote, "08:00", [], None
     )
-    lounge = LoungeCfg(
-        channel_id=channel_id,
-        welcome=WelcomeCfg(enabled=welcome, message="Hi {member}"),
-        daily_quote=DailyQuoteCfg(
-            enabled=quote, sources=[QuoteSourceCfg(kind="wikiquote", value="Oscar Wilde")]
-        ),
+    return Setup(shift_channel_id=SHIFT_ID if shift else None, lounge=lounge)
+
+
+def required_channels(setup: Setup):
+    guild = GuildSettings(
+        setup.guild_id, "09:00", "UTC", setup.admin_channel_id, "free", True, _NOW, None, None, _NOW
     )
-    return cfg.model_copy(update={"alerts": alerts, "lounge": lounge})
+    shift = (
+        ShiftSettings(setup.guild_id, True, setup.shift_channel_id, "everyone", None, None, 0)
+        if setup.shift_channel_id is not None
+        else None
+    )
+    games = [GuildGame(setup.guild_id, t.key, t.channel_id) for t in setup.topics]
+    return required_channels_for_guild(
+        guild, games, shift, setup.lounge, game_names={t.key: t.name for t in setup.topics}
+    )
+
+
+async def check_channels(client, setup: Setup) -> list[str]:
+    result = await check_guild_channels(client, setup.guild_id, required_channels(setup))
+    return result.lines()
 
 
 def _by_id(cfg):
@@ -145,8 +183,8 @@ def _clean(cfg) -> dict[int, object]:
     guild = FakeGuild(cfg.guild_id)
     channels = {t.channel_id: FakeTextChannel(guild, ALL) for t in cfg.topics}
     channels[cfg.admin_channel_id] = FakeTextChannel(guild, ALL)
-    if cfg.alerts.channel_id is not None:
-        channels[cfg.alerts.channel_id] = FakeTextChannel(guild, ALL)
+    if cfg.shift_channel_id is not None:
+        channels[cfg.shift_channel_id] = FakeTextChannel(guild, ALL)
     channels[LOUNGE_ID] = FakeTextChannel(guild, ALL)
     return channels
 
@@ -177,7 +215,7 @@ def test_lounge_sharing_the_shift_channel_keeps_mention_everyone():
 
 
 def test_lounge_sharing_the_admin_channel_labels_admin_first():
-    cfg = _cfg(welcome=True, channel_id=load_config(CONFIG_PATH).admin_channel_id)
+    cfg = _cfg(welcome=True, channel_id=ADMIN_ID)
 
     req = _by_id(cfg)[cfg.admin_channel_id]
 
@@ -188,13 +226,11 @@ def test_lounge_sharing_a_channel_with_everyone_merges_all_the_labels_once():
     # Admin and SHiFT and a game channel all on the lounge's id: one line, all
     # four names, the union of needs. (Config validation might refuse this
     # seating; the permission check shouldn't care.)
-    base = load_config(CONFIG_PATH)
-    topic = base.topics[0]
-    alerts = base.alerts.model_copy(
-        update={"enabled": True, "channel_id": topic.channel_id, "max_pings_per_day": 3}
-    )
-    cfg = _cfg(quote=True, channel_id=topic.channel_id).model_copy(
-        update={"alerts": alerts, "admin_channel_id": topic.channel_id}
+    topic = _topics()[0]
+    cfg = dataclasses.replace(
+        _cfg(quote=True, channel_id=topic.channel_id),
+        shift_channel_id=topic.channel_id,
+        admin_channel_id=topic.channel_id,
     )
 
     reqs = [r for r in required_channels(cfg) if r.channel_id == topic.channel_id]
@@ -218,7 +254,7 @@ def test_any_lounge_feature_yields_the_same_single_requirement(welcome, quote):
     ]
 
 
-async def test_shared_topic_lounge_missing_embed_links_is_one_line_naming_both():
+async def test_shared_topic_lounge_missing_embed_links_names_only_the_topic():
     base = _cfg(quote=True)
     topic = base.topics[0]
     cfg = _cfg(quote=True, channel_id=topic.channel_id)
@@ -228,7 +264,8 @@ async def test_shared_topic_lounge_missing_embed_links_is_one_line_naming_both()
     problems = await check_channels(FakeClient(channels), cfg)
 
     assert len(problems) == 1
-    assert "lounge" in problems[0] and topic.name in problems[0]
+    # The lounge only needs View and Send, so it isn't blamed for the missing Embed Links.
+    assert topic.name in problems[0] and "lounge" not in problems[0]
     assert problems[0].endswith("missing Embed Links")
 
 
@@ -306,7 +343,7 @@ async def test_lounge_missing_view_or_send_is_named_exactly(perms, named):
 
     problems = await check_channels(FakeClient(channels), cfg)
 
-    assert problems == [f"lounge channel <#{LOUNGE_ID}>: {named}"]
+    assert problems == [f"lounge in <#{LOUNGE_ID}>: {named}"]
 
 
 async def test_lounge_needs_no_embed_links_or_mention_everyone():

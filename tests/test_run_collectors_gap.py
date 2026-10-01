@@ -1,9 +1,10 @@
-"""Tests for `run_collectors`' cross-call rate-limit gap and `build_collectors`'
+"""Tests for `run_collectors`' cross-call rate-limit gap and `build_catalog_collectors`'
 `include_web_search` flag (plan step 7).
 
-The SHiFT alert sweep (design.md §12) shares both of these with the daily
-job: the Reddit gap has to survive across separate `run_collectors` calls
-an hour apart, and the sweep never wants `web_search` collectors at all.
+The hourly collection pass (which took over the SHiFT sweep's job) relies on both:
+the Reddit gap has to survive across separate `run_collectors` calls an hour apart,
+and the pass never wants `web_search` collectors at all. (The `include_web_search`
+tests are v2's `build_collectors` tests, ported to the catalog builder that replaced it.)
 Everything here uses a fake clock and a fake sleep, never a real one --
 these tests would otherwise take as long as the gaps they're testing.
 """
@@ -13,15 +14,19 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from newsbot.collectors.base import RateLimitState, RawItem, build_collectors, run_collectors
+from newsbot.collectors.base import (
+    RateLimitState,
+    RawItem,
+    build_catalog_collectors,
+    run_collectors,
+)
 from newsbot.config import (
     AppConfig,
-    DigestCfg,
-    RssSource,
+    GameCfg,
     Secrets,
+    SharedRssSource,
     SteamSource,
-    Topic,
-    WebSearchSource,
+    WebSearchCfg,
 )
 
 
@@ -175,15 +180,20 @@ async def test_keyed_and_unkeyed_run_concurrently_state_only_affects_keyed(http_
     assert clock.slept == []
 
 
-# --- build_collectors(include_web_search=...) ---
+# --- build_catalog_collectors(include_web_search=...) ---
 
 
-def _cfg(sources) -> AppConfig:
+def _cfg(*, steam: bool = False, web_search: bool = True) -> AppConfig:
+    """A catalog with one shared feed, optionally one Steam source, optionally Brave search."""
+    game_sources = (
+        [SteamSource(type="steam_news", name="Steam", app_id=1, trust="official")] if steam else []
+    )
     return AppConfig(
-        guild_id=1,
-        digest=DigestCfg(time="09:00", timezone="UTC"),
-        topics=[Topic(key="borderlands4", name="Borderlands 4", channel_id=1)],
-        sources=sources,
+        catalog=[GameCfg(key="borderlands4", name="Borderlands 4", sources=game_sources)],
+        shared_sources=[
+            SharedRssSource(type="rss", name="Feed", url="https://e.com/rss", trust="press")
+        ],
+        web_search=WebSearchCfg() if web_search else None,
     )
 
 
@@ -200,34 +210,15 @@ def _secrets(**kwargs) -> Secrets:
 
 
 def test_build_collectors_includes_web_search_by_default():
-    cfg = _cfg(
-        [
-            RssSource(type="rss", name="Feed", url="https://e.com/rss", trust="press"),
-            WebSearchSource(type="web_search", trust="press"),
-        ]
-    )
-    collectors = build_collectors(cfg, _secrets())
+    collectors = build_catalog_collectors(_cfg(), _secrets())
     assert {c.source_type for c in collectors} == {"rss", "web_search"}
 
 
 def test_build_collectors_excludes_web_search_when_asked():
-    cfg = _cfg(
-        [
-            RssSource(type="rss", name="Feed", url="https://e.com/rss", trust="press"),
-            WebSearchSource(type="web_search", trust="press"),
-        ]
-    )
-    collectors = build_collectors(cfg, _secrets(), include_web_search=False)
+    collectors = build_catalog_collectors(_cfg(), _secrets(), include_web_search=False)
     assert {c.source_type for c in collectors} == {"rss"}
 
 
 def test_build_collectors_exclude_web_search_still_builds_everything_else():
-    cfg = _cfg(
-        [
-            RssSource(type="rss", name="Feed", url="https://e.com/rss", trust="press"),
-            SteamSource(type="steam_news", name="Steam", app_id=1, trust="official"),
-            WebSearchSource(type="web_search", trust="press"),
-        ]
-    )
-    collectors = build_collectors(cfg, _secrets(), include_web_search=False)
+    collectors = build_catalog_collectors(_cfg(steam=True), _secrets(), include_web_search=False)
     assert {c.source_type for c in collectors} == {"rss", "steam_news"}

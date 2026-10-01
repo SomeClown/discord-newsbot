@@ -20,6 +20,7 @@ dragging the gateway in behind it would be a poor way to start the morning.
 from __future__ import annotations
 
 import re
+from collections.abc import Hashable
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -104,10 +105,15 @@ class RecentWelcomes:
 
     def __init__(self, window: timedelta = timedelta(hours=24)) -> None:
         self._window = window
-        self._seen: dict[int, datetime] = {}
+        self._seen: dict[Hashable, datetime] = {}
 
-    def check_and_record(self, user_id: int, now: datetime) -> bool:
-        """Return True (and record `now`) if `user_id` wasn't welcomed within the window.
+    def check_and_record(self, key: Hashable, now: datetime) -> bool:
+        """Return True (and record `now`) if `key` wasn't welcomed within the window.
+
+        `key` is whoever the caller means by "the same person": a user id in
+        v2.2's single lounge, a `(guild_id, user_id)` pair in the public app,
+        where greeting someone in one server must not use up their welcome in
+        another.
 
         The boundary is inclusive: at exactly one window later, it's True.
         Every call first drops entries a full window old or older, so the
@@ -118,8 +124,8 @@ class RecentWelcomes:
         record is kept. Such entries are pruned once the clock catches up.
         """
         cutoff = now - self._window
-        self._seen = {uid: t for uid, t in self._seen.items() if t > cutoff}
-        if user_id in self._seen:
+        self._seen = {k: t for k, t in self._seen.items() if t > cutoff}
+        if key in self._seen:
             return False
-        self._seen[user_id] = now
+        self._seen[key] = now
         return True

@@ -16,6 +16,12 @@ Droplet. Differences for other distros are called out where they matter
 Droplet turns out to be something else entirely, the Docker and sqlite3
 commands below are the same everywhere; only the install step changes.
 
+**Since v3.0 this is a public bot's runbook.** Sections 3 to 18 are still
+accurate for what they describe, with the notes inline where v3 changed
+something. Sections 17 and 18 (the v2.0 and v2.2 rollouts) are kept as
+history. Anything below that says "the guild" means one server; once the bot
+is public it's in many.
+
 By the time a change reaches this document, it should already have gone
 through the standard release flow (feature branch, PR, merge to
 `main`, tried against the test guild with the dev bot using the
@@ -191,7 +197,8 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
 1. In the [Discord Developer Portal](https://discord.com/developers/applications),
    create a new application for prod. Do not reuse the dev application.
 2. Bot settings:
-   - **Public Bot: OFF** (nobody outside this server should be able to add it).
+   - **Public Bot: OFF** (nobody outside this server should be able to add
+     it). Turn it on only when you're ready for other servers to find the bot.
    - No privileged intents, unless you turn on lounge welcomes (§18); then
      enable **Server Members Intent** in the portal *before* starting the
      bot. Without it the bot prints a message and exits after a 10-minute
@@ -221,13 +228,13 @@ the loser logs `Unknown interaction (10062)` (see `CLAUDE.md`).
 cp config.example.yaml /opt/newsbot/config.yaml
 ```
 
-Edit `config.yaml`: replace every placeholder ID (`guild_id`, each topic's
-`channel_id`, `admin_channel_id` if used, and `alerts.channel_id` if
-SHiFT alerts are enabled) with the real ones from the prod guild. There is
-no `digest.channel_id` as of v2.0; see §13 of `docs/design.md` and the
-"Upgrading to v2.0" section near the end of this document if you're
-coming from a v1 config. The example file's comments explain what each
-placeholder is for.
+Edit `config.yaml`: replace the placeholder IDs (`home_guild_id`, your own
+server, and `owner_channel_id`, a channel in it for the bot's health alerts)
+with real ones. The v3 example holds only global settings and the game
+catalog; each server's channels, digest time and SHiFT settings are set from
+Discord with `/newsbot setup` afterwards, so there's nothing per-server to put
+in the file. The example file's comments explain what each
+setting is for.
 
 ```bash
 cp .env.example /opt/newsbot/.env
@@ -356,10 +363,15 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail 50
 ```
 
 **Don't deploy between 09:00 and roughly 09:15 America/Los_Angeles.** The
-scheduled digest fires at 09:00; recreating the container in the middle of
-a run risks an interrupted post. Everything before 09:00 or after about
-09:15 is fine. `scripts/deploy.sh` enforces this itself (see above); doing
-it by hand, just check a clock.
+friend's digest posts at 09:00; recreating the container in the middle of
+a run risks an interrupted post (v3 resumes it once the row has been quiet
+for 10 minutes, which beats losing it, but it's still a delay you chose).
+**Also avoid about 07:55 to 08:05**, around the lounge quote at 08:00: a
+restart there can skip that day's quote, since a missed one is never caught
+up. Everything else is fine, and once other servers have set their own times
+there is no perfectly quiet moment anymore, only a quieter one.
+`scripts/deploy.sh` enforces the 09:00 window itself (see above) and knows
+nothing about 08:00; doing it by hand, just check a clock.
 
 **Never test against prod with the dev token, or vice versa.** If you need
 to poke at the prod deployment by hand (e.g. testing a permission change),
@@ -581,24 +593,55 @@ underlying rollback, just visible in a different table.
 
 ## 10. Recovering a stuck or failed digest
 
-If `/newsbot status` shows today's digest as `failed`, `partial`, or
-missing after 09:15:
+Digests are per server now, and each server has its own row for its own local
+day. Start with what the server's own admin sees:
+
+```
+/newsbot status
+```
+
+It shows the last digest (its date and status, with a jump link for each game
+that posted), the next due time, source health for the games it follows, and
+the newest problem notes. A digest that never came, or came as `failed` or
+`partial`, is recoverable by an admin of that server with:
 
 ```
 /newsbot run-now
 ```
 
-This re-runs the pipeline and posts. It asks for confirmation if today's
-digest already posted, so it's safe to try even if you're not sure of the
-exact state. That confirmation is about *asking before it does anything*,
-not about avoiding duplicates: per-topic progress from a partial failure
-lives in memory on the publisher that hit it, not in the database, so a
-confirmed run-now after a partial failure reposts **every** game today,
-including the ones that already went out; there's no "only repost what
-didn't post" mode yet (a known limitation, not a bug). If the failure was
-a transient upstream issue (a source timing out, a Claude API hiccup),
-this is usually all that's needed anyway. If it fails again, check the
-logs (§11) for what's actually going wrong before retrying further.
+The bot retries on its own first. A `failed` row with nothing posted is
+retried every 10 minutes, at most 3 attempts. A `pending` row left by a
+process that died is picked up again once it has been quiet for 10 minutes
+(so a deploy mid-digest can delay a resume by that long), and only the games
+that hadn't landed are posted, because progress is written to the row as each
+game posts. A row that has used all its attempts is marked `failed` and that
+server is told once, in its admin channel (or in `/newsbot status`, if it has
+none); nothing retries it after that.
+
+`run-now` asks for confirmation if today's digest already posted, or is
+`pending`, or `failed` with something posted. **A confirmed `run-now` reposts
+every game,** including the ones that already went out (there's no "only what's
+missing" mode for a forced run; the automatic resume is the one that skips
+what landed), and it can be used once per server per 10 minutes. If the
+failure was a transient upstream issue (a source timing out, a Claude API
+hiccup), this is usually all that's needed anyway. If it fails again, check
+the logs (§12) for what's going wrong before retrying further.
+
+You, as the bot's owner, don't see anyone's channels. `/owner servers` in your
+home server shows counts only (servers, set up, free and comped, today's
+digests by status, SHiFT servers, servers with permission problems, month
+spend), and the daily owner report carries the same one-liner. To look at one
+server's rows, read the database without writing to it:
+
+```bash
+cd /opt/newsbot
+sudo sqlite3 -readonly data/newsbot.db \
+  "SELECT guild_id, run_date, status, attempts, error_notes FROM digests ORDER BY id DESC LIMIT 20;"
+```
+
+Don't edit rows by hand to "fix" a digest. The claim guard is the thing that
+keeps a server from getting two posts in a day, and it's built to trust those
+rows.
 
 ## 11. Rotating secrets
 
@@ -665,11 +708,16 @@ the bot.
 **Reddit returns 403 or 429.** Expected from datacenter IPs and generic
 user agents; Reddit does this to a lot of cloud providers, not just this
 one. The collector already sends a descriptive User-Agent and prefers
-`/new/.rss`. Check `/newsbot status`: after 3 consecutive daily
-failures it's flagged there as a source health issue, which is the
-designed behavior, not a fresh problem each time it happens. If it
-persists, that's an owner decision (drop Reddit as a source, or accept the
-gap) per `docs/design.md` §4, not something to patch around here.
+`/new/.rss`. Collection runs hourly now, so a source that fails 12
+collections in a row (half a day) sends one alert to your admin channel,
+and the daily owner report lists every failing source; `/newsbot status`
+in a server shows "N of M sources ok" for its games. That's the designed
+behavior, not a fresh problem each time it happens. If it persists, that's an
+owner decision (drop Reddit as a source, or accept the gap) per
+`docs/design.md` §4, not something to patch around here. The collector spaces
+Reddit feeds 35 seconds apart, so 15 subreddits add about 9 minutes to every
+hourly pass; a pass that takes more than half the interval is logged
+as a warning.
 
 **A YouTube feed 404s.** YouTube's channel RSS feeds occasionally 404
 upstream for reasons outside this bot's control (a channel's video ID
@@ -697,6 +745,15 @@ likely cause of an otherwise-inexplicable startup crash on a brand new
 New in v1.2.0 (`design.md` §12). Off by default; nothing below changes
 existing behavior until you do it.
 
+**As of v3.0 this is per server, and an admin does it from Discord:**
+`/newsbot shift channel:<#channel> enabled:true ping:<none|everyone|role>`.
+The bot's role needs the mention permission below only if the ping is
+`everyone`, or a role that isn't mentionable, and the command's reply says
+what's still missing. Steps 1 and 2 below are still how you set up your own
+server's channel. Steps 3 to 5 describe the old `alerts:` config route; on v3
+that block is read only by the one-time import of a v2-shaped config, and a
+config that enables it for a server that's already been imported does nothing.
+
 1. **Create the SHiFT codes channel** (as of v2.0, alerts no longer share
    a channel with any game's digest; see "Upgrading to v2.0" below if
    you're moving from a v1 config that still had alerts on the digest
@@ -722,10 +779,9 @@ existing behavior until you do it.
      topics: [borderlands4]   # scope to the game(s) that actually use SHiFT codes
    ```
    Everything else (`interval_minutes`, `max_item_age_hours`,
-   `max_pings_per_day`) is fine at its default; see
-   `config.example.yaml`'s commented block for what each one does. Leave
-   `allow_test_command` out (or `false`) in prod; it registers
-   `/newsbot test-alert`, which is meant for the private test guild only.
+   `max_pings_per_day`) is fine at its default. (`allow_test_command` used to
+   register a dev-only `/newsbot test-alert`. That command was removed in v3
+   and the key is ignored, with a startup warning if it's true.)
 4. **Redeploy** the normal way (`./scripts/deploy.sh` or the by-hand
    steps in §7); migration 002 (`alerted_codes`, `alert_state`) applies
    itself at startup the same way every other migration does; nothing
@@ -760,9 +816,10 @@ time: the upgrader switches off third-party apt repositories (Docker's
 included), and it can take Docker down with it until they're back.
 
 **When:** start well after 09:15 Pacific. If the bot is down at 09:00,
-it catches up and posts the digest when it comes back; SHiFT codes that
-appear while it's down are picked up by the first sweep afterward, as long
-as their posts are under 48 hours old.
+the first minute after it's back and ready posts whatever digests came due
+meanwhile; SHiFT codes that appear while it's down are picked up by the
+first collection pass afterward, as long as their posts are under 48 hours
+old.
 
 ### Before you start
 
@@ -1067,6 +1124,14 @@ and nothing else about the running bot changes. The order below matters:
 the portal switch has to come first, and Discord's own welcome has to stay
 on until the bot's works.
 
+**As of v3.0 the lounge settings live in the database** (a `guild_lounge`
+row, written by the one-time import of a v2 config), for the friend's server only.
+There's still no command to edit them. While a `lounge:` block stays in
+`config.yaml`, v3 re-applies it to that row at every startup and logs when
+something changed, so editing the block and restarting still works the way
+it did. Delete the block and the row stands alone. The steps below were the
+v2.2 rollout and are kept as the record of it.
+
 1. **Developer Portal, prod app: Bot, Privileged Gateway Intents, Server
    Members Intent ON.** Do this before anything else. The bot asks for the
    intent whenever `lounge.welcome.enabled` is true; if the switch is off,
@@ -1106,9 +1171,10 @@ on until the bot's works.
    admin channel. Doing this last means there's never a gap with no
    welcome.
 10. **The next morning,** confirm the quote posted with its `From
-    Wikiquote:` link (for Wikiquote sources). `/newsbot quote-now` posts
-    one on demand if you'd rather not wait; the scheduled run then skips
-    that day.
+    Wikiquote:` link (for Wikiquote sources). `/lounge quote-now` (it was
+    `/newsbot quote-now` before v3, and exists only in a server whose lounge
+    has the quote on) posts one on demand if you'd rather not wait; the
+    scheduled run then skips that day.
 
 **Rollback.** Set `TAG=2.1.1` in `.env` and deploy again (§8). Switch
 Discord's built-in welcome back on (and the System Messages Channel back to

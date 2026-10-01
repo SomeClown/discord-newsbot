@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from v2_seed import load_v22_repo
 
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
@@ -30,10 +31,10 @@ def _build_v3(conn):
         conn.execute("PRAGMA user_version = 3")
 
 
-def test_fresh_db_reaches_user_version_four(db_path):
+def test_fresh_db_reaches_the_latest_user_version(db_path):
     with closing(connect(db_path)) as conn:
-        assert migrate(conn) == 4
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert migrate(conn) == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
 
 
 def test_lounge_tables_exist(db_path):
@@ -80,7 +81,7 @@ def test_migrate_is_idempotent_and_keeps_lounge_rows(db_path):
             (HASH,),
         )
         conn.commit()
-        assert migrate(conn) == migrate(conn) == 4
+        assert migrate(conn) == migrate(conn) == 8
         assert conn.execute("SELECT COUNT(*) FROM lounge_quotes_used").fetchone()[0] == 1
 
 
@@ -99,7 +100,7 @@ def test_002_and_003_data_survive_the_upgrade_from_3_to_4(db_path):
         )
         conn.commit()
 
-        assert migrate(conn) == 4
+        assert migrate(conn) == 8
 
         row = conn.execute("SELECT status, from_roundup FROM alerted_codes").fetchone()
         assert (row["status"], row["from_roundup"]) == ("roundup", 1)
@@ -116,9 +117,10 @@ def test_v3_shaped_workflow_still_works_on_a_v4_database(db_path):
     with closing(connect(db_path)) as conn:
         migrate(conn)
         now = lambda: datetime(2026, 9, 29, 12, 0, tzinfo=UTC)  # noqa: E731
-        digest_id = repo.claim_digest(conn, date(2026, 9, 29), force=False, now=now)
+        v22 = load_v22_repo()
+        digest_id = v22.claim_digest(conn, date(2026, 9, 29), force=False, now=now)
         assert digest_id is not None
-        pinged = repo.claim_codes(
+        pinged = v22.claim_codes(
             conn,
             [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
             pinged=True,

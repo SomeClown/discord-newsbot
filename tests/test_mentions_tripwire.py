@@ -192,3 +192,53 @@ def test_detector_does_not_flag_an_ordinary_allowed_mentions_call():
     assert _allowed_mentions_star_kwargs_calls_in_tree(tree) == []
     assert _everyone_non_constant_calls_in_tree(tree) == []
     assert _allowed_mentions_all_calls_in_tree(tree) == []
+
+
+# --- task 5: `mentions_for` is the one door to `_PING_EVERYONE` ---
+#
+# Adding `mentions_for` (per-server ping choices) didn't add a second
+# `everyone=True`; it made the one existing constant reachable from a
+# function. This pins that the constant is only ever *read* inside
+# `mentions_for`, so a second route to a live @everyone would have to go
+# through code this test is looking at.
+
+
+def _ping_everyone_reads(tree: ast.AST) -> list[tuple[str, int]]:
+    reads: list[tuple[str, int]] = []
+
+    def visit(node: ast.AST, enclosing: str) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            enclosing = node.name
+        if (
+            isinstance(node, ast.Name)
+            and node.id == "_PING_EVERYONE"
+            and isinstance(node.ctx, ast.Load)
+        ):
+            reads.append((enclosing, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            visit(child, enclosing)
+
+    visit(tree, "<module>")
+    return reads
+
+
+def test_ping_everyone_is_only_read_inside_mentions_for():
+    hits = [
+        (path, name, lineno)
+        for path in sorted(_SRC_ROOT.rglob("*.py"))
+        for name, lineno in _ping_everyone_reads(ast.parse(path.read_text()))
+    ]
+    assert hits, "mentions_for should return _PING_EVERYONE somewhere"
+    assert all(path.name == "client.py" and name == "mentions_for" for path, name, _ in hits), hits
+
+
+def test_reads_detector_catches_a_read_outside_a_function():
+    tree = ast.parse("def f():\n    return _PING_EVERYONE\nx = _PING_EVERYONE\n")
+    assert _ping_everyone_reads(tree) == [("f", 2), ("<module>", 3)]
+
+
+def test_no_allowed_mentions_call_outside_client_constructs_a_role_ping_with_everyone():
+    # A role ping must say everyone=False out loud; the existing scans already
+    # reject a variable or **kwargs there, this pins the literal for mentions_for.
+    source = (_SRC_ROOT / "bot" / "client.py").read_text()
+    assert "everyone=False, users=False, roles=[discord.Object" in source

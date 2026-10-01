@@ -10,8 +10,9 @@ plumbing.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
-from newsbot.config import Topic
+from newsbot.config import GameInfo
 from newsbot.pipeline.filter import TopicItem
 from newsbot.store.models import PriorStory
 
@@ -57,7 +58,7 @@ _PRIOR_HEADER = (
 )
 
 
-def _format_games_list(topics: list[Topic], subject: str) -> str:
+def _format_games_list(topics: Sequence[GameInfo], subject: str) -> str:
     """ "A, B and C" from a list of topics, matching the old hardcoded string's shape.
 
     No Oxford comma, "and" before the last name, plain "A and B" for
@@ -88,11 +89,11 @@ def _item_payload(n: int, topic_item: TopicItem) -> dict:
 
 
 def build_prompt(
-    topic: Topic,
+    topic: GameInfo,
     items: list[TopicItem],
     prior: list[PriorStory],
     *,
-    all_topics: list[Topic] | None = None,
+    all_topics: Sequence[GameInfo] | None = None,
     subject: str = "video games",
 ) -> tuple[str, str]:
     """Build the (system, user) prompt pair for one topic's summarize call.

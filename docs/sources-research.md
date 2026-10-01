@@ -145,3 +145,127 @@ sources:
 ### Decided 2026-09-27
 
 - **YouTube channel feeds removed.** All four (`Borderlands YouTube`, `Gearbox YouTube`, `Pocketpair YouTube`, `Diablo YouTube`) returned 404 on every run for days, as did unrelated channels' feeds, with no reported YouTube outage. Removed from `config.example.yaml`, the dev config, and production (owner decision), after confirming with `--check-sources`.
+
+## v3 catalog (2026-10)
+
+Plan task 17: sources, aliases and search queries for the 12 games joining the public app's catalog. Verified 2026-09-30 from the same residential macOS connection as the first round. The proposed entries are in `docs/plans/2026-09-30-public-app-catalog.yaml`; the owner approved them on 2026-09-30 (D11), and they're in `config.example.yaml`'s catalog.
+
+### How this was checked
+
+- Discovery: web search for each game's official channels, a look for RSS autodiscovery links on each official news page (one request per page), and DNS lookups of `_atproto.<domain>` to find domain-verified Bluesky accounts without calling the Bluesky API at all.
+- Verification: every candidate went through the project's own collectors (the same RSS and Steam collector code the bot runs), driven by a small scratch script that ran them one at a time, 2 seconds apart, and 35 seconds apart for Reddit. The User-Agent was the bot's own, with `NEWSBOT_CONTACT` set to the repo URL. I used a script instead of `--check-sources` because the CLI runs non-Reddit sources concurrently and I wanted each feed fetched once and saved, so the alias noise could be checked offline afterwards without fetching anything twice.
+- Each source was fetched once. Reddit's 429 came back for 3 of the 12 subreddits (r/VALORANT, r/Warframe, r/WarDogs) even at 35 seconds apart; each retry 60 seconds later worked.
+- "Items" below is what the source returned. "24h" and "7d" count how many of those were published in the last day and week. Steam and Bluesky return their newest 20 to 30 posts however old they are, so a quiet game still shows 20 items.
+
+### Findings
+
+**Official sources are thinner than for the first three games.** Four of the twelve (Fortnite, VALORANT, Marvel Rivals, Aniimo) have no working official RSS or Bluesky, and two of those (Fortnite and VALORANT) aren't on Steam either. For Fortnite and VALORANT the only dedicated source is the subreddit, so their free digests will lean on community posts plus whatever the shared press feeds say.
+
+**Free servers see uncertain matches as headlines.** In v2, entity matches were `uncertain` and the LLM threw most of the noise away. In v3's free tier there's no LLM, so an entity match goes straight into a headline list. That's why the entities below are much shorter than they'd be for a comped server: publisher names like Activision, NetEase, Riot Games, Valve, Square Enix, Epic Games and Team17 are all left out, because in testing each one matched more unrelated stories than relevant ones.
+
+**Common-word names.**
+- **Rust** gets `match_name: false`, with aliases `Rust Console Edition` and `playrust` plus the entity `Facepunch`. None of the shared press feeds happened to say "rust" on the test day, but the word is also a metal, a programming language, a 2024 film and an idiom, and the plan already calls for it. The cost is that a press story that says only "Rust" and never "Facepunch" is missed; the dedicated Steam, Facepunch and Reddit feeds carry the game regardless.
+- **Destiny 2** and **Apex Legends** keep `match_name: true`, because the full names are specific. The rule is that the short forms never become aliases. The test data backs that up: bare "Destiny" matched an r/ffxiv post ("It will tell me your destiny"), and bare "Apex" matched a Witcher 3 article, a Warframe hotfix and a Call of Duty post.
+- **Call of Duty** keeps `match_name: true`. The short forms `CoD` and `COD` aren't aliases (case-insensitive matching makes them the fish and cash on delivery). `Warzone` is an alias with a small risk ("turned into a warzone"); every hit in testing was the game. `Respawn` isn't an entity for Apex, because it's also an everyday gaming verb.
+- **WARDOGS** matches the single word "Wardogs", so the 2016 film "War Dogs" doesn't collide. Every press hit (5 across four feeds) was about the game.
+
+**Destiny 2 has gone quiet.** Its Steam announcements and Bluesky account both stop in late June 2026, and Eurogamer reports that regular updates aren't coming back. The sources are still worth keeping (cheap, official, and they'll wake up if anything ships), but expect "0 items" in source health most days, the way Palworld's Bluesky was.
+
+**Reddit load.** This adds 12 subreddits, one per game, to the 3 already configured. At the collector's 35 second Reddit gap, 15 feeds take about 9 minutes of every hourly pass. That still fits in an hour, but 3 of 12 got a 429 at that spacing in testing, and none of this has been tried from the Droplet's datacenter IP. If Reddit starts failing in prod, the first candidates to drop are the games that have good official sources anyway (Warframe, Final Fantasy XIV, Counter-Strike 2).
+
+### Per game
+
+**Fortnite** (`fortnite`). Name matching only; no entities (Epic Games mostly brings Epic Games Store freebie stories).
+- r/FortNiteBR: 25 items, 25 in 24h.
+- Shared press: 4 Fortnite stories in the week's items (Eurogamer 1, PCGamesN 3), 1 in the last 24h.
+- Rejected: fortnite.com/news (403 to the research User-Agent, so no autodiscovery check was possible); Fortnite Insider `/feed/` (403); no domain-verified Fortnite or Epic Games Bluesky account (the `fortniteofficial.bsky.social` style accounts aren't domain-verified, so they're out, the same rule as `gearboxofficial` in the first round). Fortnite isn't on Steam.
+
+**Call of Duty** (`callofduty`, current game plus Warzone). Aliases `Warzone`, `Modern Warfare 4`, `MW4`, `Black Ops 7`, `BO7`; entities `Infinity Ward`, `Treyarch`. The aliases need updating each autumn when a new game ships.
+- Call of Duty Steam (app 1938090, the umbrella app): 20 items, 2 in 24h, 3 in 7d. Carries Black Ops 7, Warzone and MW4 announcements.
+- Call of Duty Bluesky (callofduty.com, domain-verified): 25 items, 1 in 24h.
+- r/CallOfDuty: 24 items, 24 in 24h.
+- Shared press: 8 matches across the week, all about the game.
+- Rejected: the Modern Warfare 4 Steam app (4435490) and the Warzone Steam app (1962663) both returned 0 announcements; their posts go to the umbrella app. Recheck MW4 after it launches on 2026-10-23. Charlie Intel's feed returns 50 items, but the newest is from 2025-01, so it's stale. `Activision` dropped as an entity (Halo and Xbox layoff stories). callofduty.com/blog timed out, so its RSS is unverified.
+
+**Marvel Rivals** (`marvelrivals`). Alias `MarvelRivals`; no entities (`NetEase` matched unrelated NetEase business news).
+- Marvel Rivals Steam (2767030): 20 items, 0 in 24h, 1 in 7d. Weekly patch notes.
+- r/marvelrivals: 25 items, 25 in 24h.
+- No official RSS on marvelrivals.com and no domain-verified Bluesky.
+
+**VALORANT** (`valorant`). Alias `VCT`; no entities (`Riot Games` would mostly be League of Legends).
+- r/VALORANT: 25 items (after one 429 and a retry).
+- Rejected: the domain-verified VALORANT (valorant.riotgames.com) and Riot Games (riotgames.com) Bluesky accounts both returned 0 items. playvalorant.com has no RSS. Not on Steam.
+- Noise note: the one press "match" in testing was a Dexerto story that mentioned VALORANT in passing. A name this distinctive is fine; the problem is Dexerto (see shared sources).
+
+**Counter-Strike 2** (`cs2`). Aliases `CS2`, `Counter-Strike`; no entities (`Valve` matched Steam store and hardware stories).
+- Counter-Strike 2 Steam (730): 20 items, 0 in 24h, 4 in 7d.
+- HLTV News (press, dedicated): 10 items, 4 in 24h, 10 in 7d. Esports news only, but that's a big part of CS2 news.
+- r/GlobalOffensive: 25 items. (Still the main CS subreddit despite the name.)
+- Rejected: Counter-Strike Bluesky (counter-strike.net) returns 9 items, newest 2025-02, so it's abandoned. Valve's Bluesky is all Steam hardware.
+
+**Apex Legends** (`apexlegends`). Alias `ApexLegends`; no entities. Never alias bare `Apex`.
+- Apex Legends Steam (1172470): 20 items, 1 in 24h, 6 in 7d.
+- r/apexlegends: 25 items.
+- No official RSS on ea.com and no domain-verified Bluesky.
+
+**Rust** (`rust`, `match_name: false`). Aliases `Rust Console Edition`, `playrust`; entity `Facepunch`.
+- Rust Steam (252490): 20 items, newest 2026-09-03. Monthly update posts on the first Thursday, so 0 on most days is normal.
+- Rust Facepunch News (`https://rust.facepunch.com/rss/news`, found by autodiscovery): 20 items, newest 2026-09-03. Same monthly posts as Steam; clustering merges them.
+- r/playrust: 21 items.
+
+**Destiny 2** (`destiny2`). Aliases `Destiny2`, `This Week in Destiny`; no entities (`Bungie` matched Marathon news 19 times in a week).
+- Destiny 2 Steam (1085660): 20 items, newest 2026-06-18.
+- Destiny 2 Bluesky (destinythegame.bungie.net): 29 items, newest 2026-06-24.
+- r/DestinyTheGame: 25 items.
+- Bungie News RSS (`https://www.bungie.net/en/Rss/News`): 25 items, newest 2026-09-24, but mostly Marathon. Proposed as a shared source restricted to `destiny2`, so only posts that name Destiny 2 get through (6 of the 25).
+- Rejected: Bungie's own Bluesky (5 items, mostly studio announcements), and as a dedicated source the Bungie RSS above.
+
+**Warframe** (`warframe`). No aliases needed; entity `Digital Extremes`.
+- Warframe Steam (230410): 20 items, 2 in 24h, 5 in 7d.
+- Warframe PC Update Notes (`https://forums.warframe.com/forum/3-pc-update-notes.xml/`): 25 items, 3 in 7d. Updates and hotfixes.
+- Warframe Bluesky (warframe.com): 24 items, 5 in 24h, 24 in 7d. The busiest official account in the set.
+- r/Warframe: 25 items (after one 429 and a retry).
+- Rejected: the forum's News section feed (`166-news.xml`) doesn't parse (invalid XML at line 149).
+
+**Final Fantasy XIV** (`ffxiv`). Aliases `FFXIV`, `FF14`, `Final Fantasy 14`, `Dawntrail`; entity `Naoki Yoshida`. `Evercold` (from one PCGamesN headline, possibly the next expansion) was proposed and dropped on 2026-09-30, since nobody could confirm it. `Square Enix` is left out.
+- Final Fantasy XIV Steam (39210): 20 items, 0 in 7d. Mostly event and patch note posts.
+- FFXIV Lodestone Topics (`https://na.finalfantasyxiv.com/lodestone/news/topics.xml`): 20 items, 1 in 7d. Announcements and events.
+- FFXIV Lodestone News (`.../lodestone/news/news.xml`): 20 items, 5 in 7d. Maintenance, server issues and update notices; more housekeeping, but that's what players check.
+- r/ffxiv: 25 items.
+- Both Lodestone feeds were found by autodiscovery on the Lodestone front page.
+
+**Aniimo** (`aniimo`): **include.** Entity `Pawprint Studio`.
+- Aniimo Steam (4126040): 12 items, newest 2026-09-29. Real patch notes and maintenance posts since the 2026-09-15 launch, so the official-source bar is met.
+- r/Aniimo: 25 items, on topic (the studio recognizes it as the official fan subreddit).
+- Noise: none. The name matched nothing outside Aniimo's own sources. The flip side is that none of the four press feeds mentioned it in the test window, so its digest will be Steam plus Reddit.
+- No domain-verified Bluesky; the studio posts on X.
+
+**WARDOGS** (`wardogs`): **include.** Entity `Bulkhead` (the studio; 1 hit, relevant).
+- WARDOGS Steam (1867240): 20 items, 1 in 24h, 2 in 7d. Patches, maintenance and sales milestones since the 2026-09-10 early access launch.
+- r/WarDogs: 25 items (after one 429 and a retry). Not studio-run, but active and on topic.
+- Noise: none found. All 5 press matches were about the game.
+- Rejected: Bulkhead's Bluesky (bulkhead.com) returns 7 items, newest 2025-03, so it's dormant. Team17's Bluesky is almost all Worms, and `Team17` as an entity would bring the same.
+
+### Shared sources
+
+- **Add:** Bungie News, restricted to `destiny2` (above).
+- **HLTV News** goes under `cs2`, not shared: it's Counter-Strike only.
+- **Rejected:** Dexerto (`/feed/` works, 50 items, but it's mostly viral and general news; only 2 of 50 matched a catalog game, one of them a false positive), Dot Esports (`/feed` doesn't parse), Charlie Intel (stale since 2025-01), Fortnite Insider (403), Valve Bluesky (hardware), Team17 Bluesky (Worms), Riot Games Bluesky (0 items).
+- Today's five shared feeds stay as they are. Over the week of items they returned, they matched Call of Duty 8 times, WARDOGS 5, Fortnite 4, Counter-Strike 2 3, Destiny 2 2, Warframe 2 (one a false positive: a fashion game's article that mentioned Warframe in passing) and Final Fantasy XIV 1. Marvel Rivals, VALORANT, Apex Legends, Rust and Aniimo got nothing from them, so those games depend on their own sources.
+
+### Unverified, worth a look later
+
+- A Call of Duty blog RSS (the page timed out).
+- vlr.gg for VALORANT esports news (not fetched).
+- Dexerto's per-game category feeds, which might be cleaner than the main feed (not fetched).
+- The Modern Warfare 4 Steam app after launch.
+
+### Owner decisions (D11)
+
+Approved 2026-09-30 as proposed (all 12 games, with `Evercold` dropped); the questions are kept here as the record.
+
+1. Approve the 12 entries as proposed, including Aniimo and WARDOGS (both met the bar: official Steam posts, no match noise).
+2. Accept Fortnite and VALORANT going out with only a subreddit as their dedicated source.
+3. Accept the short entity lists, trading some press recall for clean free-tier headlines.
+4. ~~Confirm `Evercold`~~: dropped (owner, 2026-09-30).
+5. Accept 12 more subreddits (15 in all, about 9 minutes of each hourly pass), or pick some to drop now.

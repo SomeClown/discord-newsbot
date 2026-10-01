@@ -119,156 +119,21 @@ def test_record_silent_codes_conflict_keeps_first_recorded_status(conn):
     assert row["status"] == "seeded"
 
 
-# --- claim_codes: atomicity and the daily ping budget ---
+# --- fail_pending_codes ---
 
 
-def test_claim_codes_inserts_pending_rows_and_spends_ping(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    row = conn.execute(
-        "SELECT status, pinged FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
-    ).fetchone()
-    assert row["status"] == "pending"
-    assert row["pinged"] == 1
-    state = repo.get_alert_state(conn)
-    assert state.ping_day == "2026-09-25"
-    assert state.ping_count == 1
-
-
-def test_claim_codes_unpinged_does_not_spend_budget(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=False,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    state = repo.get_alert_state(conn)
-    assert state.ping_day == "2026-09-25"
-    assert state.ping_count == 0
-
-
-def test_claim_codes_accumulates_ping_count_same_day(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.claim_codes(
-        conn,
-        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    assert repo.get_alert_state(conn).ping_count == 2
-
-
-def test_claim_codes_resets_count_on_a_new_local_day(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.claim_codes(
-        conn,
-        [("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b")],
-        pinged=True,
-        local_day="2026-09-26",
-        now=_now,
-    )
-    state = repo.get_alert_state(conn)
-    assert state.ping_day == "2026-09-26"
-    assert state.ping_count == 1
-
-
-def test_claim_codes_duplicate_code_rolls_back_rows_and_ping_count(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    with pytest.raises(sqlite3.IntegrityError):
-        repo.claim_codes(
-            conn,
-            [
-                ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
-                ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),  # dup, aborts the txn
-            ],
-            pinged=True,
-            local_day="2026-09-25",
-            now=_now,
-        )
-    # Neither the new code nor the extra ping spend survived the rollback.
-    assert (
+def _insert_code(conn, code, status, *, pinged=0, message_id=None):
+    """A code row written by hand: v2's `claim_codes` is gone and this is all the test needs."""
+    with conn:
         conn.execute(
-            "SELECT COUNT(*) FROM alerted_codes WHERE code = 'BBBB2-BBBBB-BBBBB-BBBBB-BBBBB'"
-        ).fetchone()[0]
-        == 0
-    )
-    assert repo.get_alert_state(conn).ping_count == 1
-
-
-# --- mark_codes_posted / mark_codes_failed / fail_pending_codes ---
-
-
-def test_mark_codes_posted_sets_status_and_shared_message_id(conn):
-    repo.claim_codes(
-        conn,
-        [
-            ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a"),
-            ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "Src", "https://e/b"),
-        ],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.mark_codes_posted(
-        conn,
-        ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"],
-        message_id=42,
-    )
-    rows = conn.execute("SELECT code, status, message_id FROM alerted_codes").fetchall()
-    assert {(r["code"], r["status"], r["message_id"]) for r in rows} == {
-        ("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "posted", 42),
-        ("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB", "posted", 42),
-    }
-
-
-def test_mark_codes_failed_sets_status(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=False,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.mark_codes_failed(conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"])
-    row = conn.execute(
-        "SELECT status FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
-    ).fetchone()
-    assert row["status"] == "failed"
+            "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, pinged, "
+            "status, message_id) VALUES (?, ?, 'Src', ?, ?, ?, ?)",
+            (code, NOW.isoformat(), f"https://e/{code[:1]}", pinged, status, message_id),
+        )
 
 
 def test_fail_pending_codes_flips_only_pending_rows(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=False,
-        local_day="2026-09-25",
-        now=_now,
-    )
+    _insert_code(conn, "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "pending")
     repo.record_silent_codes(
         conn,
         [
@@ -278,14 +143,7 @@ def test_fail_pending_codes_flips_only_pending_rows(conn):
         now=_now,
         mark_seeded=True,
     )
-    repo.claim_codes(
-        conn,
-        [("DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "Src", "https://e/d")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.mark_codes_posted(conn, ["DDDD4-DDDDD-DDDDD-DDDDD-DDDDD"], message_id=1)
+    _insert_code(conn, "DDDD4-DDDDD-DDDDD-DDDDD-DDDDD", "posted", pinged=1, message_id=1)
 
     flipped = repo.fail_pending_codes(conn)
 
@@ -305,7 +163,7 @@ def test_fail_pending_codes_on_empty_table_returns_empty_list(conn):
     assert repo.fail_pending_codes(conn) == []
 
 
-# --- record_sweep / alert_status ---
+# --- record_sweep ---
 
 
 def test_record_sweep_updates_state(conn):
@@ -313,48 +171,6 @@ def test_record_sweep_updates_state(conn):
     state = repo.get_alert_state(conn)
     assert state.last_sweep_at == NOW
     assert state.last_sweep_summary == "17/19 sources ok, 1 new code"
-
-
-def test_alert_status_reports_seeded_sweep_and_pings(conn):
-    repo.record_silent_codes(conn, [], now=_now, mark_seeded=True)
-    repo.record_sweep(conn, _now, "17/19 sources ok, 1 new code")
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    repo.mark_codes_posted(conn, ["AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"], message_id=1)
-
-    status = repo.alert_status(conn, "2026-09-25", enabled=True, max_pings=3)
-
-    assert status.enabled is True
-    assert status.seeded is True
-    assert status.last_sweep_summary == "17/19 sources ok, 1 new code"
-    assert status.codes_alerted == 1
-    assert status.pings_today == 1
-    assert status.max_pings == 3
-
-
-def test_alert_status_pings_today_is_zero_on_a_new_day(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    status = repo.alert_status(conn, "2026-09-26", enabled=True, max_pings=3)
-    assert status.pings_today == 0
-
-
-def test_alert_status_unseeded_and_disabled(conn):
-    status = repo.alert_status(conn, "2026-09-25", enabled=False, max_pings=3)
-    assert status.enabled is False
-    assert status.seeded is False
-    assert status.codes_alerted == 0
-    assert status.pings_today == 0
 
 
 # --- CHECK constraints ---
@@ -411,32 +227,3 @@ def test_record_silent_codes_stores_from_roundup_flag(conn):
         "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA": 0,
         "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB": 1,
     }
-
-
-def test_claim_codes_defaults_from_roundup_to_false(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=True,
-        local_day="2026-09-25",
-        now=_now,
-    )
-    row = conn.execute(
-        "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
-    ).fetchone()
-    assert row["from_roundup"] == 0
-
-
-def test_claim_codes_stores_from_roundup_true_when_asked(conn):
-    repo.claim_codes(
-        conn,
-        [("AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "Src", "https://e/a")],
-        pinged=False,
-        local_day="2026-09-25",
-        now=_now,
-        from_roundup=True,
-    )
-    row = conn.execute(
-        "SELECT from_roundup FROM alerted_codes WHERE code = 'AAAA1-AAAAA-AAAAA-AAAAA-AAAAA'"
-    ).fetchone()
-    assert row["from_roundup"] == 1

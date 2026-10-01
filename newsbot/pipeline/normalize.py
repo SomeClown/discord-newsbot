@@ -138,7 +138,9 @@ def canonicalize(url: str) -> str | None:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
-def canonicalize_items(items: list[RawItem]) -> list[RawItem]:
+def canonicalize_items(
+    items: list[RawItem], *, losers: list[RawItem] | None = None
+) -> list[RawItem]:
     """Canonicalize URLs and dedupe within the batch: the two phases `normalize`
     and the SHiFT code sweep (design.md §12) both need.
 
@@ -149,6 +151,11 @@ def canonicalize_items(items: list[RawItem]) -> list[RawItem]:
     those two shared phases split out on their own: canonicalize every URL
     (dropping anything that isn't http(s)), then dedupe within the batch,
     keeping the first-seen item unless a later duplicate has higher trust.
+
+    Pass a list as `losers` and every copy that didn't make the cut is
+    appended to it (canonical URL, original content), for a caller that
+    wants to salvage something from them. Nobody passing nothing sees any
+    difference.
     """
     canonical_items = []
     for item in items:
@@ -162,6 +169,10 @@ def canonicalize_items(items: list[RawItem]) -> list[RawItem]:
         existing = deduped.get(item.url)
         if existing is None or _TRUST_RANK[item.trust] < _TRUST_RANK[existing.trust]:
             deduped[item.url] = item
+            if existing is not None and losers is not None:
+                losers.append(existing)
+        elif losers is not None:
+            losers.append(item)
     return list(deduped.values())
 
 

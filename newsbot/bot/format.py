@@ -20,22 +20,28 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 import discord
 
-from newsbot.collectors.base import CollectorResult
-from newsbot.config import Topic
-from newsbot.pipeline.filter import TopicItem
+from newsbot.config import GameInfo, Topic
 from newsbot.pipeline.normalize import canonicalize
-from newsbot.pipeline.summarize import StoryDraft, TopicSummary, estimate_spend_usd
+from newsbot.pipeline.summarize import StoryDraft
 from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
-from newsbot.store.models import AlertStatus, CodeView, StatusSnapshot, StoryView, Usage
+from newsbot.store.models import (
+    CodeView,
+    HeadlineItem,
+    ItemView,
+    Notice,
+    SourceHealthRow,
+    StoryView,
+)
+from newsbot.text import plain_line, shown_url
 
 _DESCRIPTION_LIMIT = 4096
 _TITLE_LIMIT = 256
@@ -214,12 +220,12 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
     return _truncate_utf16(text, limit, suffix="…")
 
 
-def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
-    # By the time this is called, render_digest has already decided this
+def _topic_embed(topic: GameInfo, stories: list[StoryDraft]) -> discord.Embed:
+    # By the time this is called, render_guild_digest has already decided this
     # topic has something to say (design.md §13: a topic with nothing posts
     # nothing, rather than an embed reading "No new stories today."): this
     # still handles an empty list defensively, since a caller outside
-    # render_digest (a future one, or a test) shouldn't get a crash instead
+    # render_guild_digest (a future one, or a test) shouldn't get a crash instead
     # of a sane-looking embed for the case that's genuinely rare now.
     color = _topic_color(topic.key)
     title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
@@ -242,44 +248,13 @@ def _topic_embed(topic: Topic, stories: list[StoryDraft]) -> discord.Embed:
             break
         kept -= 1
     else:
-        # Not even the single most important story fits on its own --
+        # Not even the single most important story fits on its own:
         # a pathologically long summary, in practice never (summaries are
         # capped at 400 chars by the schema). Hard-truncate rather than
         # emit an empty embed.
         description = _truncate_description(blocks[0])
 
     return discord.Embed(title=title, description=description, color=color)
-
-
-def _fallback_embed(topic: Topic, items: list[TopicItem], note: str | None) -> discord.Embed:
-    color = _topic_color(topic.key)
-    title = _truncate_utf16(esc(topic.name), _TITLE_LIMIT)
-    if not items:
-        # No items at all makes the *reason* we have no stories moot --
-        # "the model failed" and "there was nothing to summarize" look
-        # identical to a reader either way.
-        return discord.Embed(title=title, description="No new stories today.", color=color)
-
-    lines = [esc(note)] if note else []
-    for topic_item in items:
-        safe_url = _safe_link(topic_item.item.url)
-        if safe_url is None:
-            continue
-        lines.append(f"• {esc(topic_item.item.title)} — <{safe_url}>")
-    return discord.Embed(
-        title=title, description=_truncate_description("\n".join(lines)), color=color
-    )
-
-
-def _story_count(
-    topic: Topic, summaries: dict[str, TopicSummary], fallback_items: dict[str, list[TopicItem]]
-) -> int:
-    summary = summaries.get(topic.key)
-    if summary is None:
-        return 0
-    if summary.fallback:
-        return len(fallback_items.get(topic.key, []))
-    return len(summary.stories)
 
 
 def _coverage_footer(coverage_notes: list[str]) -> str | None:
@@ -319,45 +294,6 @@ class RenderedDigest:
     run_date: date
     messages: list[TopicMessage]
     coverage_notes: list[str]
-
-
-def render_digest(
-    run_date: date,
-    topics: list[Topic],
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    coverage_notes: list[str],
-) -> RenderedDigest:
-    """Render one day's digest: one `TopicMessage` per topic that actually has something to say.
-
-    A topic with no `TopicSummary` at all (nothing was collected for it
-    today), an empty stories list, or a fallback with no items to list
-    gets no message at all: design.md §13's "nothing posted for a game
-    with no news" (owner decision A). Topics post in config order,
-    matching the order `topics` was handed in.
-    """
-    footer = _coverage_footer(coverage_notes)
-    messages = []
-    for topic in topics:
-        summary = summaries.get(topic.key)
-        if summary is not None and summary.fallback:
-            items = fallback_items.get(topic.key, [])
-            if not items:
-                continue
-            embed = _fallback_embed(topic, items, summary.note)
-        else:
-            stories = summary.stories if summary else []
-            if not stories:
-                continue
-            embed = _topic_embed(topic, stories)
-        if footer:
-            embed.set_footer(text=footer)
-        messages.append(
-            TopicMessage(
-                topic_key=topic.key, topic_name=topic.name, channel_id=topic.channel_id, embed=embed
-            )
-        )
-    return RenderedDigest(run_date=run_date, messages=messages, coverage_notes=coverage_notes)
 
 
 def render_story_page(
@@ -488,125 +424,6 @@ def render_code_page(
     return embed
 
 
-def _local_timestamp(moment: datetime, timezone: str) -> str:
-    """`moment` as "Sep 26, 8:52 PM PDT" in the digest's own time zone.
-
-    `/newsbot status` used to print the raw ISO string, which is precise
-    and also exactly the kind of thing nobody reads at a glance, least of
-    all the person who wrote it. Hand-built instead of strftime's `%-I`/
-    `%-d` for the same reason as `_report_date`: no betting a status line
-    on a platform's strftime quirks. A naive `moment` is taken as UTC,
-    since that's what every timestamp in the database is.
-    """
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    local = moment.astimezone(ZoneInfo(timezone))
-    hour = local.hour % 12 or 12
-    meridiem = "AM" if local.hour < 12 else "PM"
-    return (
-        f"{local.strftime('%b')} {local.day}, {hour}:{local.minute:02d} {meridiem} {local.tzname()}"
-    )
-
-
-def _alerts_field_value(alerts: AlertStatus, timezone: str = "UTC") -> str:
-    """The `/newsbot status` "SHiFT alerts" field's value (plan step 10).
-
-    `disabled` when the config block's off; otherwise the last sweep's
-    time and summary (or "no sweep yet" before the first one has run),
-    how many codes have ever posted, and today's ping spend against the
-    cap: with `(seeding)` appended while the marker's still unset, since
-    "0 codes alerted, pings 0 of 3" reads very differently depending on
-    whether that's "nothing's happened yet" or "we're deliberately
-    staying quiet on purpose" (A1).
-    """
-    if not alerts.enabled:
-        return "disabled"
-    if alerts.last_sweep_at is not None:
-        sweep_part = f"last sweep {_local_timestamp(alerts.last_sweep_at, timezone)}"
-        if alerts.last_sweep_summary:
-            sweep_part += f" · {esc(alerts.last_sweep_summary)}"
-    else:
-        sweep_part = "no sweep yet"
-    value = (
-        f"{sweep_part} · {alerts.codes_alerted} codes alerted · "
-        f"pings today {alerts.pings_today} of {alerts.max_pings}"
-    )
-    if not alerts.seeded:
-        value += " (seeding)"
-    if alerts.test_command_enabled:
-        value += " · test command ENABLED"
-    return _truncate_utf16(value, _MAX_FIELD_VALUE, suffix="…")
-
-
-def render_status(
-    snap: StatusSnapshot,
-    spend_usd: float,
-    alerts: AlertStatus | None = None,
-    *,
-    timezone: str = "UTC",
-) -> discord.Embed:
-    """Render `/newsbot status`: last run, source health, and the running spend estimate.
-
-    `alerts` is optional so every existing caller (and every test that
-    predates the SHiFT alert sweep) keeps seeing exactly the same embed --
-    the "SHiFT alerts" field only appears when a caller actually has an
-    `AlertStatus` to show, which `/newsbot status`'s handler always does
-    in practice (design.md §12 wants this field shown even when the
-    feature is off, so it computes one regardless of `cfg.alerts.enabled`).
-    `timezone` is `cfg.digest.timezone`, so the last sweep reads in the
-    same local clock as everything else the bot says; it defaults to UTC
-    for callers (mostly tests) that don't care.
-    """
-    embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
-
-    if snap.last_digest is not None:
-        embed.add_field(
-            name="Last digest",
-            value=_truncate_utf16(
-                esc(f"{snap.last_digest.run_date.isoformat()} — {snap.last_digest.status}"),
-                _MAX_FIELD_VALUE,
-            ),
-            inline=False,
-        )
-    else:
-        embed.add_field(name="Last digest", value="none yet", inline=False)
-
-    embed.add_field(name="Items (24h)", value=str(snap.items_last_24h))
-    embed.add_field(name="Stories (24h)", value=str(snap.stories_last_24h))
-    embed.add_field(name="Est. spend this month", value=f"${spend_usd:.2f}")
-
-    if alerts is not None:
-        embed.add_field(
-            name="SHiFT alerts", value=_alerts_field_value(alerts, timezone), inline=False
-        )
-
-    # One line per source in the description, not one field per source.
-    # Discord caps an embed at 25 fields, and the first real config had 24
-    # sources plus four summary fields; you can guess how that went.
-    healthy = sum(1 for s in snap.source_health if s.consecutive_failures == 0 and not s.never_run)
-    never_run = sum(1 for s in snap.source_health if s.never_run)
-    healthy_value = f"{healthy} of {len(snap.source_health)}"
-    if never_run:
-        healthy_value += f" ({never_run} not run yet)"
-    embed.add_field(name="Sources healthy", value=healthy_value)
-
-    problems = sorted(
-        (s for s in snap.source_health if s.consecutive_failures > 0),
-        key=lambda s: (-s.consecutive_failures, s.source_name.casefold()),
-    )
-    if problems:
-        lines = ["**Sources with recent failures**"]
-        for source in problems:
-            flag = "⚠️ " if source.consecutive_failures >= 3 else ""
-            error = f": {source.last_error.splitlines()[0][:120]}" if source.last_error else ""
-            lines.append(esc(f"{flag}{source.source_name} ({source.consecutive_failures}){error}"))
-        embed.description = _truncate_description("\n".join(lines))
-    else:
-        embed.description = "Every source answered on its last run."
-
-    return embed
-
-
 @dataclass
 class RenderedAlert:
     """One Discord message's worth of a SHiFT code alert batch.
@@ -632,6 +449,11 @@ class RenderedAlert:
     # retry of *this* message reuse the *same* nonce instead of minting a
     # fresh one that Discord has never seen before.
     nonce: str = ""
+    # The exact text a ping put in front of the header ("@everyone " or
+    # "<@&123> "), empty when nothing pinged. `shift/sweep.py`'s retry strips
+    # precisely this, so a role ping comes off as cleanly as @everyone does
+    # (a retry must never risk a second live ping of either kind).
+    ping_prefix: str = ""
 
 
 def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
@@ -681,8 +503,18 @@ def _alert_block(
     return f"{code_block}\n{prefix}{truncated_name}"
 
 
+def _nonce_salt(scope: str) -> str:
+    """The text a nonce hash starts with: nothing for no scope, else the scope and a bar."""
+    return f"{scope}|" if scope else ""
+
+
 def render_code_alerts(
-    candidates: list[CodeCandidate], *, ping: bool, test: bool = False
+    candidates: list[CodeCandidate],
+    *,
+    ping: bool,
+    ping_mention: str | None = None,
+    test: bool = False,
+    nonce_scope: str = "",
 ) -> list[RenderedAlert]:
     """Render a batch of new SHiFT codes into one or more alert messages.
 
@@ -693,14 +525,25 @@ def render_code_alerts(
     golden/non-golden batches (A3) keep the plain "New SHiFT code(s)"
     title but prefix each golden entry with "Golden Key:" so it doesn't
     read as an ordinary code.
+
+    `ping_mention` is the text a ping starts with: `"@everyone"` (the
+    default, which is all v2 ever used) or a role mention like `"<@&123>"`
+    for a server that picked a role. It only matters when `ping` is true.
+
+    `nonce_scope` salts every message's nonce (the fan-out passes the server
+    and channel ids). Without it, two servers getting the same batch would
+    send the same nonce, and Discord may hand the second one the first one's
+    message back instead of posting. Same scope, same nonces: a retry to the
+    same channel still reuses its own.
     """
     if not candidates:
         return []
 
+    ping_prefix = f"{ping_mention or '@everyone'} " if ping else ""
     mixed = any(c.golden for c in candidates) and not all(c.golden for c in candidates)
     title = _alert_title(candidates, plural=len(candidates) > 1)
     test_prefix = "[TEST] " if test else ""
-    first_header = ("@everyone " if ping else "") + f"**{test_prefix}{title}**"
+    first_header = ping_prefix + f"**{test_prefix}{title}**"
 
     # The most room any one entry can ever count on: alone in its own
     # message, under whichever header is longer (always the first
@@ -753,9 +596,17 @@ def render_code_alerts(
                 f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
             )
         batch_codes = [code for code, _ in batch]
-        nonce = hashlib.sha256(f"{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+        nonce = hashlib.sha256(
+            f"{_nonce_salt(nonce_scope)}{'|'.join(batch_codes)}|{i}".encode()
+        ).hexdigest()[:25]
         rendered.append(
-            RenderedAlert(content=content, codes=batch_codes, ping=ping and i == 0, nonce=nonce)
+            RenderedAlert(
+                content=content,
+                codes=batch_codes,
+                ping=ping and i == 0,
+                nonce=nonce,
+                ping_prefix=ping_prefix if i == 0 else "",
+            )
         )
     return rendered
 
@@ -773,7 +624,7 @@ def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = No
     # Same shedding order as `_alert_block`: the link is the first thing
     # to go (it's redundant with "click the code" anyway), and if a
     # hostile or just very long source name still doesn't fit, hard-
-    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks --
+    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks;
     # it's what tells a reader this code didn't come with a ping.
     header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}"
     if discord_len(header) <= max_len:
@@ -795,7 +646,9 @@ def _roundup_code_block(candidate: CodeCandidate) -> str:
     return f"```\n{candidate.code}\n```"
 
 
-def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert]:
+def render_roundup_alerts(
+    candidates: list[CodeCandidate], *, nonce_scope: str = ""
+) -> list[RenderedAlert]:
     """Render fresh roundup-only codes into unpinged "from a roundup" messages (design.md §13).
 
     v1 recorded every roundup-only code silently, forever; v2.0 posts the
@@ -815,6 +668,8 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
     `_CONTINUATION_HEADER`, and no group's codes ever share a message with
     another group's (a header names one specific roundup post; mixing two
     posts' codes under one header would misattribute them).
+
+    `nonce_scope` salts the nonces per server and channel; see `render_code_alerts`.
     """
     if not candidates:
         return []
@@ -877,11 +732,52 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
             # so a normal and a roundup message for the same code (which
             # can't actually happen, once-per-code, but nonces are cheap
             # insurance) could never collide.
-            nonce = hashlib.sha256(f"roundup|{'|'.join(batch_codes)}|{i}".encode()).hexdigest()[:25]
+            nonce = hashlib.sha256(
+                f"{_nonce_salt(nonce_scope)}roundup|{'|'.join(batch_codes)}|{i}".encode()
+            ).hexdigest()[:25]
             rendered.append(
                 RenderedAlert(content=content, codes=batch_codes, ping=False, nonce=nonce)
             )
     return rendered
+
+
+# One follow-up message names at most this many codes; the rest wait for the
+# next pass. A confirmation burst that big has never happened, and 20 keeps
+# the whole message a short line instead of a wall.
+FOLLOWUP_MAX_CODES = 20
+
+
+def render_followup_alert(
+    codes: list[str], *, ping_mention: str, nonce_scope: str = ""
+) -> RenderedAlert:
+    """The "confirmed by a second source" follow-up (plan D14): one short, pinged message.
+
+    A community code that already posted unpinged just got a second,
+    independent source. This is the nudge: the ping first, then the codes in
+    backticks (the original alert already has the copy-able block; this one
+    only needs to say which). `ping_mention` is the text a server's ping choice
+    turns into (`@everyone` or a role mention), and the allowed-mentions that
+    make it actually notify come from `mentions_for` at send time, as for every
+    other alert. The nonce is salted with a `followup|` marker as well as the
+    server scope, so Discord can't mistake this for the original alert's send.
+    """
+    if not codes or len(codes) > FOLLOWUP_MAX_CODES:
+        raise ValueError(f"a follow-up names 1 to {FOLLOWUP_MAX_CODES} codes, got {len(codes)}")
+    for code in codes:
+        if not is_code(code):
+            raise ValueError(f"not a SHiFT code: {code!r}")
+    ping_prefix = f"{ping_mention} "
+    named = ", ".join(f"`{code}`" for code in codes)
+    nonce = hashlib.sha256(
+        f"{_nonce_salt(nonce_scope)}followup|{'|'.join(codes)}".encode()
+    ).hexdigest()[:25]
+    return RenderedAlert(
+        content=f"{ping_prefix}Confirmed by a second source: {named}",
+        codes=list(codes),
+        ping=True,
+        nonce=nonce,
+        ping_prefix=ping_prefix,
+    )
 
 
 # --- Admin-channel run reports (design.md §6, §8) ---
@@ -893,23 +789,137 @@ def render_roundup_alerts(candidates: list[CodeCandidate]) -> list[RenderedAlert
 # for the same reason the header is plain text: nobody needs a colored
 # sidebar to read "it worked."
 
+_HEADLINE_TRUST_RANK = {"official": 0, "press": 1, "community": 2}
+_OFFICIAL_MARKER = "🟢 OFFICIAL"
+
+
+def _headline_sort_key(item: HeadlineItem) -> tuple[int, int, float]:
+    # design.md §15, owner decision D4: official, then press, then community;
+    # within a trust level, confident matches before entity-only ones; then
+    # newest first. (The published time if the source gave one, else when we
+    # collected it: an undated item is as new as the day we found it.)
+    moment = item.published_at or item.collected_at
+    return (
+        _HEADLINE_TRUST_RANK.get(item.trust, len(_HEADLINE_TRUST_RANK)),
+        int(item.uncertain),
+        -moment.timestamp(),
+    )
+
+
+# One headline is one line, and one line is allowed only so much of the embed. A
+# title is flattened and cut to `_MAX_HEADLINE_TITLE` UTF-16 units (before
+# escaping, which can nearly double it); a URL longer than `_MAX_HEADLINE_URL` is
+# dropped rather than cut, since half a URL is a link to somewhere else. (The URL
+# cap is generous on purpose: a non-ASCII path is percent-encoded at up to twelve
+# characters per character.) With both caps one line tops out under 1,700 units, so
+# no single item can crowd the other headlines, or the "+N more" line, out of 4096.
+_MAX_HEADLINE_TITLE = 300
+_MAX_HEADLINE_URL = 1000
+
+
+def _headline_line(item: HeadlineItem) -> str | None:
+    safe_url = _safe_link(item.url)
+    if safe_url is None or discord_len(safe_url) > _MAX_HEADLINE_URL:
+        return None
+    # Titles come from feeds and social posts, and a Bluesky post has line
+    # breaks. Left alone, one could start its own line in this list and pose as
+    # an official headline, or as the renderer's own "+N more". split() with no
+    # argument breaks on every kind of whitespace, so this flattens all of it.
+    title = _truncate_utf16(" ".join(item.title.split()), _MAX_HEADLINE_TITLE, suffix="…")
+    marker = f"{_OFFICIAL_MARKER} · " if item.trust == "official" else ""
+    return f"• {marker}{esc(title)} — <{safe_url}>"
+
+
+def render_headlines_embed(
+    game: GameInfo, items: Sequence[HeadlineItem], note: str | None = None
+) -> discord.Embed | None:
+    """One game's headline list, for a free server (and for a comped one's fallback).
+
+    Ordered by D4 (see `_headline_sort_key`), with a `🟢 OFFICIAL` marker on official
+    items only; a community item gets no "rumor" label, since a headline list makes no
+    claim about whether it's true. Titles are flattened to one line and capped, then go
+    through `esc()`; URLs go through `_safe_link` and a URL that's too long is dropped
+    like an unusable one (see `_headline_line`). When the list doesn't fit under the
+    4096-unit description limit, whole lines are shed from the bottom and the last line
+    says `+N more, use /news`. Returns `None` when there's nothing to list (no items, or
+    none with a usable URL): a game with nothing posts nothing (design.md §13), so the
+    caller skips it rather than posting "No new stories today."
+
+    `note` (the comped fallback's "Summary unavailable" line) goes on top and isn't
+    counted in the "+N more".
+    """
+    lines = [
+        line for item in sorted(items, key=_headline_sort_key) if (line := _headline_line(item))
+    ]
+    if not lines:
+        return None
+    head = [esc(note)] if note else []
+    kept = len(lines)
+    while kept > 0:
+        cut = len(lines) - kept
+        description = "\n".join([*head, *lines[:kept]])
+        if cut:
+            description += f"\n\n+{cut} more, use /news"
+        if discord_len(description) <= _DESCRIPTION_LIMIT:
+            break
+        kept -= 1
+    else:
+        # One line longer than the whole embed is allowed to be: a title the
+        # size of a short story. Hard-truncate rather than post nothing.
+        description = _truncate_description("\n".join([*head, lines[0]]))
+    return discord.Embed(
+        title=_truncate_utf16(esc(game.name), _TITLE_LIMIT),
+        description=description,
+        color=_topic_color(game.key),
+    )
+
+
+def render_guild_digest(
+    run_date: date,
+    games: Sequence[GameInfo],
+    channels: Mapping[str, int],
+    *,
+    stories_by_game: Mapping[str, list[StoryDraft]],
+    items_by_game: Mapping[str, Sequence[HeadlineItem]],
+    notes_by_game: Mapping[str, str | None],
+    coverage_notes: list[str],
+) -> RenderedDigest:
+    """One server's digest: a `TopicMessage` for each followed game that has something to say.
+
+    `games` are the server's followed games in catalog order and `channels` maps each
+    game key to its channel. A game whose key is in `stories_by_game` has a stored
+    summary (comped): its stories are rendered as v2's embed, and an empty list means
+    the summary found nothing, so nothing posts. Every other game gets its headlines
+    from `items_by_game`, with `notes_by_game[key]` on top if there is one. A game with
+    nothing to show is left out.
+    """
+    footer = _coverage_footer(coverage_notes)
+    messages = []
+    for game in games:
+        if game.key in stories_by_game:
+            stories = stories_by_game[game.key]
+            embed = _topic_embed(game, stories) if stories else None
+        else:
+            embed = render_headlines_embed(
+                game, items_by_game.get(game.key, []), notes_by_game.get(game.key)
+            )
+        if embed is None:
+            continue
+        if footer:
+            embed.set_footer(text=footer)
+        messages.append(
+            TopicMessage(
+                topic_key=game.key,
+                topic_name=game.name,
+                channel_id=channels[game.key],
+                embed=embed,
+            )
+        )
+    return RenderedDigest(run_date=run_date, messages=messages, coverage_notes=coverage_notes)
+
+
 _REPORT_HEADER_EMOJI = {"ok": "✅", "partial": "⚠️"}
 _REPORT_HEADER_VERB = {"ok": "Digest posted", "partial": "Digest posted with gaps"}
-# How many failed/skipped sources get spelled out by name before the report
-# just says "+N more": three was picked as "enough to see a pattern
-# (every Reddit source timed out) without the report turning into its own
-# source_health dump."
-_MAX_REPORT_SOURCES_SHOWN = 3
-# Each failed/skipped source's own first-error-line snippet, so one source
-# with a paragraph-long traceback in `error` can't eat the whole report.
-# This was 60, which sounded generous right up until the first real
-# failure: httpx's "Client error '429 Too Many Requests' for url '...'"
-# spends 50 of those before the URL even starts, so the one part you'd
-# actually want for troubleshooting was the part that got cut. 250 fits a
-# long feed URL with room to spare; three of them still leave the report
-# well under Discord's 2000-unit cap, and the shedding in
-# `render_run_report` covers anything stranger than that.
-_MAX_REPORT_ERROR_SNIPPET = 250
 
 
 def _report_date(run_date: date) -> str:
@@ -923,67 +933,6 @@ def _report_jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
-def _report_story_counts_line(
-    topics: list[Topic],
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    guild_id: int,
-    posted_by_topic: Mapping[str, int],
-    *,
-    with_links: bool = True,
-) -> str:
-    """The run report's "N stories: ..." line, with a `[jump]` link per topic that posted.
-
-    design.md §13: each game now has its own channel and its own message,
-    so the one jump link v1's header carried becomes one *per topic* --
-    `posted_by_topic` (topic_key -> the message id `DiscordPublisher.publish`
-    actually got back) is empty for a topic that had nothing to post, and
-    `with_links=False` is `render_run_report`'s own shedding step when the
-    whole report doesn't fit under the cap otherwise.
-    """
-    parts = []
-    total = 0
-    for topic in topics:
-        count = _story_count(topic, summaries, fallback_items)
-        total += count
-        part = f"{esc(topic.name)} {count}"
-        message_id = posted_by_topic.get(topic.key) if with_links else None
-        if message_id is not None:
-            link = _report_jump_link(guild_id, topic.channel_id, message_id)
-            part += f" [jump](<{link}>)"
-        parts.append(part)
-    return f"{total} stories: " + " · ".join(parts)
-
-
-def _report_sources_line(results: list[CollectorResult]) -> str:
-    total = len(results)
-    bad = [(r.source_name, r.error or r.skipped or "") for r in results if r.error or r.skipped]
-    ok = total - len(bad)
-    line = f"Sources: {ok} of {total} ok"
-    if not bad:
-        return line
-
-    shown = bad[:_MAX_REPORT_SOURCES_SHOWN]
-    parts = []
-    for name, message in shown:
-        first_line = message.splitlines()[0] if message else "unknown error"
-        snippet = _truncate_utf16(esc(first_line), _MAX_REPORT_ERROR_SNIPPET, suffix="…")
-        parts.append(f"{esc(name)}: {snippet}")
-    extra = len(bad) - len(shown)
-    if extra > 0:
-        parts.append(f"+{extra} more")
-    return line + " (" + "; ".join(parts) + ")"
-
-
-def _report_cost_str(spend_usd: float) -> str:
-    # "<$0.01" for anything that'd otherwise round to "$0.00": a
-    # summarization call that costs half a cent still cost something, and
-    # "$0.00" reads as free, which it isn't.
-    if spend_usd < 0.01:
-        return "<$0.01"
-    return f"~${spend_usd:.2f}"
-
-
 def _report_duration_str(duration: timedelta) -> str:
     total_seconds = max(int(round(duration.total_seconds())), 0)
     minutes, seconds = divmod(total_seconds, 60)
@@ -992,87 +941,74 @@ def _report_duration_str(duration: timedelta) -> str:
     return f"{seconds}s"
 
 
-def _report_cost_line(usage: Usage, duration: timedelta) -> str:
-    spend = estimate_spend_usd(usage.input_tokens, usage.output_tokens)
-    return f"Claude: {_report_cost_str(spend)} · took {_report_duration_str(duration)}"
-
-
-def render_run_report(
+def render_guild_run_report(
     *,
     status: Literal["ok", "partial"],
     run_date: date,
     run_kind: Literal["scheduled", "catch-up", "run-now"],
-    topics: list[Topic],
-    summaries: dict[str, TopicSummary],
-    fallback_items: dict[str, list[TopicItem]],
-    results: list[CollectorResult],
-    usage: Usage,
+    games: Sequence[GameInfo],
+    counts: Mapping[str, int],
+    channels: Mapping[str, int],
+    posted_by_game: Mapping[str, int],
+    skipped: Mapping[str, str],
     duration: timedelta,
     notes: list[str],
     guild_id: int,
-    posted_by_topic: Mapping[str, int],
 ) -> str:
-    """Render the admin-channel run report (design.md §6, §13): one plain-text message.
+    """The per-server run report, for that server's admin channel (plan §3.5): one plain message.
 
-    `results` is *this run's* collector results, not the cumulative
-    `source_health` table: an admin reading this wants to know what just
-    happened, not the all-time record. `notes` is the same coverage-note
-    list `render_digest`'s footer and `save_run`'s `error_notes` already
-    use; it only shows up here as a "Notes: ..." line when `status` is
-    `partial` and there's actually something to say. `posted_by_topic` is
-    `DiscordPublisher.publish`'s own return value: topic key -> the message
-    id that topic's embed actually landed with, missing for any topic that
-    had nothing to post: that's what lets the stories line's `[jump]`
-    links point at the right message in the right channel per game
-    (design.md §13), instead of v1's one link to a header that no longer
-    exists.
-
-    Kept under `_ALERT_CONTENT_LIMIT` (Discord's plain-message cap, the
-    same 2000 UTF-16 units the SHiFT alert messages respect) by shedding
-    detail in priority order if it doesn't fit: the notes line first, then
-    the per-source failure detail, then the per-topic jump links, then
-    (a case that shouldn't be reachable given how short every other line
-    is) a flat truncation of the whole thing.
+    Like the owner's report, minus everything a server has no business seeing: no
+    source health (that's the owner's) and no spend. It has a per-game count with a
+    `[jump]` link for each game that posted, any skipped game with its reason, and how
+    long the digest took. Kept under `_ALERT_CONTENT_LIMIT` by shedding the reasons,
+    then the links, then a flat truncation.
     """
+
+    def stories_line(with_links: bool) -> str:
+        parts = []
+        for game in games:
+            part = f"{esc(game.name)} {counts.get(game.key, 0)}"
+            message_id = posted_by_game.get(game.key) if with_links else None
+            if message_id is not None:
+                link = _report_jump_link(guild_id, channels[game.key], message_id)
+                part += f" [jump](<{link}>)"
+            parts.append(part)
+        return f"{sum(counts.get(g.key, 0) for g in games)} items: " + " · ".join(parts)
+
+    def skipped_line(with_reasons: bool) -> str | None:
+        if not skipped:
+            return None
+        names = {g.key: g.name for g in games}
+        parts = [
+            f"{esc(names.get(key, key))}"
+            + (f" ({esc(friendly_skip_reason(reason))})" if with_reasons else "")
+            for key, reason in skipped.items()
+        ]
+        return "Skipped: " + "; ".join(parts)
+
     header_line = (
         f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
         f"{_report_date(run_date)} ({run_kind})"
     )
-    story_line = _report_story_counts_line(
-        topics, summaries, fallback_items, guild_id, posted_by_topic
-    )
-    sources_line = _report_sources_line(results)
-    cost_line = _report_cost_line(usage, duration)
+    took_line = f"Took {_report_duration_str(duration)}"
+    notes_line = "Notes: " + esc("; ".join(notes)) if status == "partial" and notes else None
 
-    notes_line = None
-    if status == "partial" and notes:
-        notes_line = "Notes: " + esc("; ".join(notes))
+    def build(with_links: bool, with_reasons: bool, with_notes: bool) -> str:
+        lines = [header_line, stories_line(with_links), skipped_line(with_reasons)]
+        if with_notes:
+            lines.append(notes_line)
+        lines.append(took_line)
+        return "\n".join(line for line in lines if line)
 
-    lines = [header_line, story_line, sources_line]
-    if notes_line:
-        lines.append(notes_line)
-    lines.append(cost_line)
-    content = "\n".join(lines)
-    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
-        return content
-
-    if notes_line:
-        content = "\n".join([header_line, story_line, sources_line, cost_line])
+    for with_links, with_reasons, with_notes in (
+        (True, True, True),
+        (True, True, False),
+        (True, False, False),
+        (False, False, False),
+    ):
+        content = build(with_links, with_reasons, with_notes)
         if discord_len(content) <= _ALERT_CONTENT_LIMIT:
             return content
-
-    bare_sources_line = sources_line.split(" (", 1)[0]
-    content = "\n".join([header_line, story_line, bare_sources_line, cost_line])
-    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
-        return content
-
-    story_line_no_links = _report_story_counts_line(
-        topics, summaries, fallback_items, guild_id, posted_by_topic, with_links=False
-    )
-    content = "\n".join([header_line, story_line_no_links, bare_sources_line, cost_line])
-    if discord_len(content) <= _ALERT_CONTENT_LIMIT:
-        return content
-
     return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
 
 
@@ -1100,17 +1036,262 @@ def to_text(r: RenderedDigest) -> str:
     return "\n".join(parts).rstrip()
 
 
+# --- Owner report and server status (design.md §15, plan task 8) ---
+
+_MAX_FAILING_SOURCES_SHOWN = 10
+
+
+@dataclass(frozen=True)
+class DigestOutcome:
+    """One server's digest for the day, boiled down for the owner's one-liner.
+
+    `reason` is a short category for a failure ("missing permissions",
+    "Claude error"), not the raw error; it's ignored when `posted` is True.
+    """
+
+    posted: bool
+    reason: str = ""
+
+
+# What a failed digest's notes look like is whatever the exception said, so the
+# categories are a handful of pattern checks, most specific first. Anything
+# unrecognized is "other", which is honest. The status codes and error codes
+# are matched on word boundaries: a channel id is eighteen digits, and about one
+# in twenty of them contains a 403 or a 404 without having any opinion about HTTP.
+_REASON_PATTERNS = (
+    ("missing permissions", re.compile(r"\b403\b|forbidden|missing permissions|\b50013\b")),
+    ("channel gone", re.compile(r"\b404\b|unknown channel|not found|\b10003\b")),
+    ("rate limited", re.compile(r"\b429\b|rate limit")),
+    ("timed out", re.compile(r"timed out|timeout")),
+    ("couldn't build", re.compile(r"build failed")),
+)
+
+
+# What a skipped game's reason says in a server's run report, by the same categories as
+# above. The raw error stays in the logs and in the stored notes; a server's admin gets
+# a sentence, not "404 Not Found (error code: 10003)". Anything else is trimmed raw text.
+_SKIP_REASON_TEXT = {
+    "missing permissions": "I'm missing permissions there",
+    "channel gone": "its channel was deleted",
+    "rate limited": "Discord rate limited me",
+    "timed out": "Discord took too long to answer",
+}
+_SKIP_OTHER_MAX = 60
+
+
+def friendly_skip_reason(raw: str) -> str:
+    """A plain-English reason for a skipped game, from its raw error. Not escaped."""
+    text = raw.casefold()
+    for reason, pattern in _REASON_PATTERNS:
+        if pattern.search(text) and reason in _SKIP_REASON_TEXT:
+            return _SKIP_REASON_TEXT[reason]
+    return plain_line(raw, _SKIP_OTHER_MAX) or "unknown error"
+
+
+def outcome_from_digest(status: str, notes: str | None) -> DigestOutcome:
+    """One digest row, as the owner's report counts it.
+
+    `ok` and `partial` posted (a `partial` posted with something degraded or
+    skipped, which is the server's business and its notices', not the owner's
+    one-liner). `pending` means a run was interrupted and never finished.
+    Everything else is a failure, filed under the first reason category the
+    notes match.
+    """
+    if status in ("ok", "partial"):
+        return DigestOutcome(True)
+    if status == "pending":
+        return DigestOutcome(False, "interrupted")
+    text = (notes or "").casefold()
+    for reason, pattern in _REASON_PATTERNS:
+        if pattern.search(text):
+            return DigestOutcome(False, reason)
+    return DigestOutcome(False, "other")
+
+
+# Five reasons of at most 40 characters each, plus counts and the lead-in,
+# comes to roughly 300 characters: still a one-liner.
+_MAX_SUMMARY_REASONS = 5
+
+
+def render_digest_summary_line(outcomes: Sequence[DigestOutcome]) -> str:
+    """The owner's daily one-liner.
+
+    For example: `digests posted to 37 of 38 servers; 1 failed (missing permissions)`.
+
+    Failures are grouped by reason; with more than one reason each gets its
+    count, most common first ("3 failed (2 missing permissions, 1 Claude
+    error)"). Only the top few reasons by count are shown, then "+N more
+    reasons", so the one-liner stays one line. No digests due at all reads
+    as such instead of "0 of 0".
+    """
+    total = len(outcomes)
+    if total == 0:
+        return "no server digests were due today"
+    posted = sum(1 for o in outcomes if o.posted)
+    noun = "server" if total == 1 else "servers"
+    line = f"digests posted to {posted} of {total} {noun}"
+    failed = [o for o in outcomes if not o.posted]
+    if not failed:
+        return line
+    counts: dict[str, int] = {}
+    for o in failed:
+        reason = esc(plain_line(o.reason, 40)) or "unknown reason"
+        counts[reason] = counts.get(reason, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ranked) == 1:
+        detail = ranked[0][0]
+    else:
+        shown = ", ".join(f"{n} {reason}" for reason, n in ranked[:_MAX_SUMMARY_REASONS])
+        more = len(ranked) - _MAX_SUMMARY_REASONS
+        detail = f"{shown}, +{more} more reasons" if more > 0 else shown
+    return f"{line}; {len(failed)} failed ({detail})"
+
+
+_URL_IN_TEXT = re.compile(r"https?://\S+")
+
+
+def _redact_urls(text: str) -> str:
+    """`text` with each http(s) URL cut down to scheme, host and path (see `shown_url`).
+
+    Trailing quotes and brackets belong to the sentence, not the address
+    (httpx wraps the URL in single quotes), so they're kept outside it.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        url = match.group(0)
+        tail = len(url) - len(url.rstrip("'\")>]}.,;"))
+        shown = shown_url(url[: len(url) - tail] if tail else url)
+        return shown + (url[len(url) - tail :] if tail else "")
+
+    return _URL_IN_TEXT.sub(one, text)
+
+
+def render_owner_report(
+    outcomes: Sequence[DigestOutcome], failing: Sequence[SourceHealthRow]
+) -> str:
+    """The owner's daily report: the summary line, then every source that's currently failing (D8).
+
+    Capped at Discord's message limit; the source list is cut at 10 with a
+    "+N more" line so the summary line at the top always survives. Every URL
+    in an error goes through `shown_url` first: httpx puts the whole address
+    in its messages, credentials and token query strings included.
+    """
+    lines = [f"newsbot daily: {render_digest_summary_line(outcomes)}"]
+    if not failing:
+        lines.append("All sources are healthy.")
+    else:
+        lines.append(f"{len(failing)} failing source{'s' if len(failing) != 1 else ''}:")
+        for row in failing[:_MAX_FAILING_SOURCES_SHOWN]:
+            error = (
+                f": {esc(_redact_urls(plain_line(row.last_error, 120)))}" if row.last_error else ""
+            )
+            lines.append(
+                f"- {esc(plain_line(row.source_name, 60))} "
+                f"({row.consecutive_failures} in a row){error}"
+            )
+        extra = len(failing) - _MAX_FAILING_SOURCES_SHOWN
+        if extra > 0:
+            lines.append(f"+{extra} more")
+    return _truncate_utf16("\n".join(lines), _ALERT_CONTENT_LIMIT, suffix="…")
+
+
+def render_guild_status(notices: Sequence[Notice], *, limit: int = 5) -> str:
+    """A server's recent problem notes for `/newsbot status`, newest first."""
+    if not notices:
+        return "No problems recorded lately."
+    lines = [
+        f"- {n.created_at:%Y-%m-%d %H:%M} UTC: {plain_line(n.text, 300)}" for n in notices[:limit]
+    ]
+    return _truncate_utf16("\n".join(lines), _MAX_FIELD_VALUE, suffix="…")
+
+
+def render_item_page(
+    items: Sequence[ItemView],
+    names_by_key: Mapping[str, str],
+    title: str,
+    page: int,
+    pages: int,
+) -> discord.Embed:
+    """One page of a free server's `/news recent` or `/news search`: stored item headlines.
+
+    Free servers get headlines, not stories (owner decision D2), so this is
+    `_headline_line`'s one-line format (official marker, flattened title, `<url>`) under
+    a bold game name. An item whose URL won't survive `_safe_link` is dropped, same as in
+    the digest. `ItemView.topic_keys` is already limited to games this server follows.
+    """
+    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
+    blocks = []
+    for item in items:
+        line = _headline_line(item)
+        if line is None:
+            continue
+        names = ", ".join(names_by_key.get(key, key) for key in item.topic_keys)
+        blocks.append(f"**{esc(names)}**\n{line}" if names else line)
+    if not blocks:
+        embed.description = "No headlines found."
+        return embed
+    embed.description = _truncate_description("\n\n".join(blocks))
+    embed.set_footer(text=f"Page {page} of {pages}")
+    return embed
+
+
+def render_guild_overview(
+    *,
+    tier: str,
+    schedule_line: str,
+    digest_lines: Sequence[str],
+    game_lines: Sequence[str],
+    shift_line: str,
+    notices: Sequence[Notice],
+    lounge_lines: Sequence[str] | None = None,
+) -> discord.Embed:
+    """`/newsbot status` for one server: its own settings, last digest, games and notices.
+
+    `lounge_lines` is None for a server with no lounge, and then the section isn't shown.
+
+    Callers pass lines that are already safe (their own `esc()`ed names, `<#id>` channel
+    mentions, jump links); every field is cut to Discord's field limit regardless. There's
+    no spend in here on purpose: money is the owner's business, not a server's.
+    """
+    embed = discord.Embed(title="newsbot status", color=_PALETTE[0])
+
+    def field(name: str, lines: Sequence[str]) -> None:
+        text = "\n".join(lines) or "Nothing yet."
+        embed.add_field(
+            name=name, value=_truncate_utf16(text, _MAX_FIELD_VALUE, suffix="…"), inline=False
+        )
+
+    field("Server", [f"Tier: {tier}", schedule_line])
+    field("Last digest", digest_lines)
+    field("Games", game_lines)
+    field("SHiFT codes", [shift_line])
+    if lounge_lines is not None:
+        field("Lounge", lounge_lines)
+    field("Recent notices", [render_guild_status(notices)])
+    return embed
+
+
 __all__ = [
+    "FOLLOWUP_MAX_CODES",
+    "DigestOutcome",
     "RenderedAlert",
     "RenderedDigest",
     "TopicMessage",
     "esc",
+    "outcome_from_digest",
     "render_code_alerts",
     "render_code_page",
-    "render_digest",
+    "render_digest_summary_line",
+    "render_followup_alert",
+    "render_guild_digest",
+    "friendly_skip_reason",
+    "render_guild_run_report",
+    "render_guild_overview",
+    "render_guild_status",
+    "render_headlines_embed",
+    "render_item_page",
+    "render_owner_report",
     "render_roundup_alerts",
-    "render_run_report",
-    "render_status",
     "render_story_page",
     "to_text",
 ]
