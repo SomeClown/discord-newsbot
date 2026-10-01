@@ -12,7 +12,7 @@ import socket
 
 import httpx
 import pytest
-from conftest import PUBLIC_TEST_ADDRESS, NetworkBlockedError
+from network_guard import PUBLIC_TEST_ADDRESS, NetworkBlockedError
 
 from newsbot.collectors import rss as rss_module
 from newsbot.collectors.rss import _reject_private_redirect
@@ -28,14 +28,16 @@ def test_socket_getaddrinfo_is_stubbed_too():
 
 
 @pytest.mark.parametrize("address", ["93.184.215.14", "10.0.0.1", "example.com"])
-def test_connecting_to_a_non_loopback_address_fails_fast(address):
+def test_connecting_to_a_non_loopback_address_fails_fast(address, blocked_attempts):
     with socket.socket() as sock, pytest.raises(NetworkBlockedError, match="fake the transport"):
         sock.connect((address, 80))
+    assert blocked_attempts.acknowledge() == [address]
 
 
-def test_connect_ex_is_guarded_too():
+def test_connect_ex_is_guarded_too(blocked_attempts):
     with socket.socket() as sock, pytest.raises(NetworkBlockedError):
         sock.connect_ex(("93.184.215.14", 80))
+    assert blocked_attempts.acknowledge() == ["93.184.215.14"]
 
 
 def test_loopback_is_still_allowed():

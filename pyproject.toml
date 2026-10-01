@@ -39,7 +39,7 @@ select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-  "real_network: skip tests/conftest.py's network guard (real DNS, real sockets)",
+  "real_network: skip tests/network_guard.py's network guard (real DNS, real sockets)",
 ]
 filterwarnings = [
   # discord.py calls re.sub with a positional `count` arg, which is fine on

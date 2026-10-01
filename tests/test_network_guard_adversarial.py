@@ -1,12 +1,13 @@
 """Adversarial tests for the suite's network guard and the RSS collector's DNS time box.
 
-The guard is `conftest._no_real_network`: every lookup answers with a public test address, and
-connecting to anything but loopback raises on the spot. A guard that only works against the
-caller who politely uses `socket.connect` isn't one, so these go through the doors people really
-use: `httpx` with no transport, `asyncio.open_connection`, `socket.create_connection`, an IPv6
-literal, a name that resolves to loopback. They also check the opt-out (`real_network`) really
-opts out, and that the RSS redirect check refuses a source whose lookup stalls, whole path
-included, and still waves through the cases it always did.
+The guard is `network_guard._no_real_network`: every lookup answers with a public test address,
+connecting to anything but loopback raises on the spot, and every blocked attempt is recorded, so
+a test that ends with one fails at teardown even if the error was swallowed. A guard that only
+works against the caller who politely uses `socket.connect` isn't one, so these go through the
+doors people really use: `httpx` with no transport, `asyncio.open_connection`,
+`socket.create_connection`, an IPv6 literal, a name that resolves to loopback. They also check
+the opt-out (`real_network`) really opts out, and that the RSS redirect check refuses a source
+whose lookup stalls, whole path included, and still waves through the cases it always did.
 
 Nothing here reaches a real network: a blocked connection is the thing under test, and the
 opt-out test only compares function identities.
@@ -20,14 +21,14 @@ import time
 
 import httpx
 import pytest
-from conftest import PUBLIC_TEST_ADDRESS, NetworkBlockedError
+from network_guard import PUBLIC_TEST_ADDRESS, NetworkBlockedError
 
 from newsbot.collectors import rss as rss_module
 from newsbot.collectors.rss import RssCollector, _reject_private_redirect
 from newsbot.config import RssSource
 
 
-async def test_an_httpx_client_with_no_transport_cannot_reach_out():
+async def test_an_httpx_client_with_no_transport_cannot_reach_out(blocked_attempts):
     """It fails, fast, but not as a bare `NetworkBlockedError`: anyio's task group wraps it."""
     started = time.monotonic()
     async with httpx.AsyncClient() as client:
@@ -35,59 +36,125 @@ async def test_an_httpx_client_with_no_transport_cannot_reach_out():
             await client.get("http://definitely-real.example/feed")
     assert raised.group_contains(NetworkBlockedError)
     assert time.monotonic() - started < 2  # no waiting on a timeout
+    assert blocked_attempts.acknowledge() == [PUBLIC_TEST_ADDRESS]
 
 
-async def test_an_except_exception_in_the_code_under_test_swallows_the_guards_error():
-    """Pinned: the guard's error is a `RuntimeError`, so app code that catches `Exception`
-    (the collectors do, so one dead source can't sink a pass) turns a blocked connection into
-    an ordinary 'source failed' and the test goes on to pass. The guard keeps no record of
-    attempts, so nothing fails the test afterwards. A test that cares has to assert on the
-    outcome it expects (the fake transport was used), not rely on the guard to shout."""
+async def test_an_except_exception_still_swallows_the_error_at_the_call_site(blocked_attempts):
+    """The error is a `RuntimeError`, so app code that catches `Exception` (the collectors do,
+    so one dead source can't sink a pass) turns a blocked connection into an ordinary 'source
+    failed'. That's fine for the app. The guard doesn't depend on the error getting through:
+    it recorded the attempt, and the test below shows that a test which swallowed one fails."""
     try:
         async with httpx.AsyncClient() as client:
             await client.get("http://definitely-real.example/feed")
     except Exception as exc:  # the app's habit
         swallowed = exc
     assert isinstance(swallowed, BaseExceptionGroup) and isinstance(swallowed, Exception)
+    assert blocked_attempts.acknowledge() == [PUBLIC_TEST_ADDRESS]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "NetworkBlockedError derives from RuntimeError, so an `except Exception` in the code "
-        "under test hides a real connection attempt from the test. Deriving from BaseException "
-        "(or recording attempts and failing at teardown) would make the guard unswallowable."
-    ),
-)
-def test_the_guards_error_cannot_be_swallowed_by_an_except_exception():
-    assert not issubclass(NetworkBlockedError, Exception)
+_INI = """
+[pytest]
+markers =
+    real_network: opt out
+asyncio_default_fixture_loop_scope = function
+"""
+
+_ARGS = ("-p", "no:cacheprovider", "-W", "ignore::pytest.PytestAssertRewriteWarning")
+
+_SWALLOWER = """
+import socket
+
+def test_swallows_the_error():
+    try:
+        with socket.socket() as sock:
+            sock.connect(("93.184.215.14", 80))
+    except Exception:
+        pass
+
+def test_leaves_the_error_alone():
+    with socket.socket() as sock:
+        try:
+            sock.connect(("93.184.215.14", 80))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the guard should have raised")
+"""
 
 
-async def test_asyncio_open_connection_cannot_reach_out():
+def test_the_guards_error_cannot_be_swallowed_by_an_except_exception(pytester):
+    """Run the guard in a throwaway session: a test that swallows the error passes its own body
+    and still fails, at teardown, naming the host. Both of these connect, so both are caught
+    (the second one saw the error, but didn't say it expected it)."""
+    pytester.makeini(_INI)
+    pytester.makeconftest('pytest_plugins = ("network_guard",)')
+    pytester.makepyfile(_SWALLOWER)
+    result = pytester.runpytest_inprocess(*_ARGS)
+    result.assert_outcomes(passed=2, errors=2)
+    result.stdout.fnmatch_lines(["*tried 1 real connection(s) (93.184.215.14)*"])
+
+
+def test_a_test_that_takes_its_blocked_attempts_does_not_fail_and_real_network_skips_teardown(
+    pytester,
+):
+    pytester.makeini(_INI)
+    pytester.makeconftest('pytest_plugins = ("network_guard",)')
+    pytester.makepyfile(
+        """
+        import socket
+        import pytest
+
+        def test_expected(blocked_attempts):
+            with socket.socket() as sock:
+                try:
+                    sock.connect(("93.184.215.14", 80))
+                except Exception:
+                    pass
+            assert blocked_attempts.acknowledge() == ["93.184.215.14"]
+
+        @pytest.mark.real_network
+        def test_opted_out():
+            pass  # the guard is off, so there's nothing for teardown to report
+        """
+    )
+    pytester.runpytest_inprocess(*_ARGS).assert_outcomes(passed=2)
+
+
+async def test_asyncio_open_connection_cannot_reach_out(blocked_attempts):
     with pytest.raises(NetworkBlockedError):
         await asyncio.wait_for(asyncio.open_connection("93.184.215.14", 443), timeout=2)
+    assert blocked_attempts.acknowledge() == ["93.184.215.14"]
 
 
-async def test_asyncio_open_connection_by_name_resolves_to_the_blocked_test_address():
+async def test_asyncio_open_connection_by_name_resolves_to_the_blocked_test_address(
+    blocked_attempts,
+):
     with pytest.raises(NetworkBlockedError, match=PUBLIC_TEST_ADDRESS):
         await asyncio.wait_for(asyncio.open_connection("somewhere.example", 443), timeout=2)
+    assert blocked_attempts.acknowledge() == [PUBLIC_TEST_ADDRESS]
 
 
-def test_socket_create_connection_cannot_reach_out():
+def test_socket_create_connection_cannot_reach_out(blocked_attempts):
     with pytest.raises(NetworkBlockedError):
         socket.create_connection(("somewhere.example", 80), timeout=1)
+    assert blocked_attempts.acknowledge() == [PUBLIC_TEST_ADDRESS]
 
 
 @pytest.mark.parametrize("address", ["2001:db8::1", "2606:4700:4700::1111", "fe80::1"])
-def test_a_non_loopback_ipv6_literal_is_blocked_too(address):
+def test_a_non_loopback_ipv6_literal_is_blocked_too(address, blocked_attempts):
     with socket.socket(socket.AF_INET6) as sock, pytest.raises(NetworkBlockedError):
         sock.connect((address, 80, 0, 0))
+    assert blocked_attempts.acknowledge() == [address]
 
 
 @pytest.mark.parametrize("address", ["0.0.0.0", "192.168.1.1", "169.254.169.254"])  # noqa: S104
-def test_private_and_unspecified_addresses_are_not_loopback_so_they_are_blocked(address):
+def test_private_and_unspecified_addresses_are_not_loopback_so_they_are_blocked(
+    address, blocked_attempts
+):
     with socket.socket() as sock, pytest.raises(NetworkBlockedError):
         sock.connect((address, 80))
+    assert blocked_attempts.acknowledge() == [address]
 
 
 def test_a_connection_to_localhost_by_name_gets_through_to_the_real_socket():

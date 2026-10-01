@@ -10,10 +10,7 @@ after migration 005.
 
 from __future__ import annotations
 
-import asyncio
-import ipaddress
 import shutil
-import socket
 from contextlib import closing
 from pathlib import Path
 
@@ -23,69 +20,10 @@ from newsbot.store import db
 from newsbot.store.db import connect, migrate
 
 # The cutover tests' fixtures (a whole v2.2 morning, rebuilt in a temp directory) live in
-# their own module; this is how pytest finds them without every file importing a fixture.
-pytest_plugins = ("cutover_world",)
-
-# What every hostname resolves to during a test (a public address, so the redirect guard sees a
-# perfectly ordinary host). Tests that care about a particular answer patch their own.
-PUBLIC_TEST_ADDRESS = "93.184.215.14"
-
-
-class NetworkBlockedError(RuntimeError):
-    """A test tried to open a real connection. It should have used a fake."""
-
-
-def _fake_addrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    kind = type or socket.SOCK_STREAM
-    return [
-        (socket.AF_INET, kind, proto or socket.IPPROTO_TCP, "", (PUBLIC_TEST_ADDRESS, port or 0))
-    ]
-
-
-@pytest.fixture(autouse=True)
-def _no_real_network(request, monkeypatch):
-    """No real DNS and no real outbound connections from a test (`real_network` marker opts out).
-
-    The suite used to make about 41 real DNS lookups (the RSS redirect check resolves hosts even
-    under `MockTransport`) and at least one real connection to Steam, and an occasional stalled
-    resolver looked like a hung test run. Now every lookup answers with a public test address,
-    and connecting to anything but loopback or a unix socket raises on the spot.
-    """
-    if request.node.get_closest_marker("real_network"):
-        return
-
-    async def fake_loop_getaddrinfo(self, host, port, **kwargs):
-        return _fake_addrinfo(host, port, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", _fake_addrinfo)
-    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", fake_loop_getaddrinfo)
-
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
-
-    def check(address) -> None:
-        if isinstance(address, tuple):
-            host = str(address[0])
-            try:
-                loopback = ipaddress.ip_address(host).is_loopback
-            except ValueError:
-                loopback = host == "localhost"
-            if not loopback:
-                raise NetworkBlockedError(
-                    f"test tried to connect to {host}; fake the transport instead"
-                )
-
-    def guarded_connect(self, address):
-        check(address)
-        return real_connect(self, address)
-
-    def guarded_connect_ex(self, address):
-        check(address)
-        return real_connect_ex(self, address)
-
-    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
-
+# their own module; this is how pytest finds them without every file importing a fixture. The
+# network guard is one too (its own test builds a throwaway session around it), and `pytester`
+# is what lets that test do so.
+pytest_plugins = ("cutover_world", "network_guard", "pytester")
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "newsbot" / "store" / "migrations"
 
