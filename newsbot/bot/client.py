@@ -145,7 +145,7 @@ def _should_alert_two_instances(
 ) -> bool:
     """True if `cooldown` has passed since the last two-instance alert (or there wasn't one).
 
-    A second process on the same token doesn't cause one 10062/40060 --
+    A second process on the same token doesn't cause one 10062/40060;
     it causes a steady stream of them, one per interaction it loses the
     race on. Alerting on every single one would just be a different,
     noisier way of drowning out the channel; this caps it at once an hour
@@ -361,7 +361,7 @@ def _classify_publish_error(
     erase what already landed for the topics before it.
     """
     if isinstance(exc, discord.HTTPException):
-        # 429 is a 4xx by number, but it's Discord's own rate limit --
+        # 429 is a 4xx by number, but it's Discord's own rate limit;
         # exactly the kind of thing backing off and trying again actually
         # fixes, unlike the rest of the 4xx range (a permission that's
         # missing, a channel that's gone). Treating it like every other
@@ -1434,7 +1434,7 @@ class NewsBot(discord.Client):
     # Everything from here to `_retention_job` is the lounge. Settings come
     # from `guild_lounge` rows (the `lounge:` block in config.yaml only feeds
     # the imported server's row, at startup); a server with no row (or
-    # welcomes off) is simply not part of the conversation.
+    # welcomes off) is not part of the conversation.
 
     def _list_lounges_sync(self) -> list[LoungeSettings]:
         with closing(connect(self.db_path)) as conn:

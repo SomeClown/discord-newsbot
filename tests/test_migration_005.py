@@ -53,7 +53,7 @@ OLD_DIGEST_COLUMNS = (
 OLD_STORY_COLUMNS = "id, topic_key, headline, summary, label, is_update_of, digest_id, created_at"
 
 
-def test_fresh_db_reaches_user_version_five(tmp_path):
+def test_fresh_db_reaches_the_latest_user_version(tmp_path):
     with closing(connect(tmp_path / "n.db")) as conn:
         assert migrate(conn) == 7
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
@@ -272,7 +272,7 @@ def test_migrate_is_idempotent_and_changes_nothing_the_second_time(v4_db):
         assert _dump(conn, "SELECT * FROM digests ORDER BY id") == rows
 
 
-def test_several_processes_opening_a_v4_file_at_once_all_end_up_on_v5(v4_db):
+def test_several_processes_opening_a_v4_file_at_once_all_end_up_on_the_latest_version(v4_db):
     versions: list[int] = []
     errors: list[BaseException] = []
     barrier = threading.Barrier(6)

@@ -431,7 +431,7 @@ class AlertsCfg(BaseModel, extra="forbid"):
     # still get recorded and posted, just never with @everyone attached.
     max_pings_per_day: int = Field(3, ge=0)
     allow_test_command: bool = False
-    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics --
+    # A6 (owner decision, 2026-09-25): scope the sweep to specific topics:
     # a Diablo IV patch note has never once contained a Borderlands SHiFT
     # code, and pinging the whole server for every game's codes when the
     # owner only cares about one is a worse default than the sweep quietly
@@ -1053,7 +1053,7 @@ def load_config(path: str | Path) -> AppConfig:
     # ignores fields it doesn't recognize: an old v1 config.yaml that
     # still sets digest.channel_id would otherwise load "successfully"
     # with that value quietly going nowhere, which is a worse outcome
-    # than the field simply not existing. Collected ahead of pydantic's
+    # than the field not existing. Collected ahead of pydantic's
     # own errors so it folds into the same combined ConfigError either way.
     pre_errors: list[str] = []
     digest_raw = raw.get("digest")
@@ -1294,7 +1294,7 @@ def load_check_sources_secrets(env: Mapping[str, str] = os.environ) -> Secrets:
     `config.yaml` before anything talks to Claude or Discord, so it has
     no business demanding either credential. `Secrets` still needs a
     value for `anthropic_api_key` (it isn't optional), so this gives it
-    an obvious placeholder instead of reading the environment for one --
+    an obvious placeholder instead of reading the environment for one;
     the point isn't that the value is empty, it's that this function
     never even looks.
     """

@@ -21,7 +21,7 @@ def db_path(tmp_path):
     return tmp_path / "newsbot.db"
 
 
-def test_fresh_db_reaches_user_version_four(db_path):
+def test_fresh_db_reaches_the_latest_user_version(db_path):
     with closing(connect(db_path)) as conn:
         version = migrate(conn)
     assert version == 7

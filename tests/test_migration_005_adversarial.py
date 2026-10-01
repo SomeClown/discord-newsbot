@@ -434,7 +434,9 @@ def test_a_writer_holding_the_lock_makes_the_migration_wait_and_then_keeps_its_r
         _assert_healthy(conn)
 
 
-def test_six_openers_with_a_writer_active_all_reach_v5_and_the_writers_rows_survive(v4_db):
+def test_six_openers_with_a_writer_active_all_reach_the_latest_version_and_the_writers_rows_survive(
+    v4_db,
+):
     errors: list[BaseException] = []
     versions: list[int] = []
     stop = threading.Event()

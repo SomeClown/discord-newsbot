@@ -41,7 +41,7 @@ _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 _RETRY_BACKOFFS_S = (3.0, 6.0)
 
 # A feed has no business being bigger than this. Protects against a huge
-# or malicious response parking this collector on an unbounded read --
+# or malicious response parking this collector on an unbounded read;
 # the truncated body just fails to parse as valid XML/Atom, which comes
 # back as the same "feed did not parse" error a genuinely broken feed
 # gives.
@@ -205,7 +205,7 @@ class RssCollector:
             title = (entry.get("title") or "").strip()
             if not title:
                 # Official Bluesky accounts come in through their RSS
-                # mirror, and a post doesn't really have a headline --
+                # mirror, and a post doesn't really have a headline;
                 # feedparser gives us a bare description instead.
                 title = text.first_line(raw_excerpt) or "(untitled)"
             raw_full_text = _entry_full_text(entry)

@@ -93,7 +93,7 @@ class AlertPlan:
     `MAX_ROUNDUP_CODES`, design.md §13 D3). `to_post` is already in the
     order an alert message should announce them; `roundup_to_post` is the
     same idea for fresh roundup-only codes (design.md §13: these now post
-    too, just unpinged and in their own "from a roundup" message) --
+    too, just unpinged and in their own "from a roundup" message);
     kept separate from `to_post` because roundup codes never contribute to
     `ping`/`cap_reached` and never spend the ping budget. `mark_seeded`
     tells the caller whether this batch is the one that gets to flip the
@@ -130,7 +130,7 @@ def sightings_from_items(
     different Gearbox game.
 
     An item naming more than `max_codes_per_item` distinct codes is a
-    roundup or megathread, not a genuine single-code announcement --
+    roundup or megathread, not a genuine single-code announcement:
     every sighting it produces is marked `roundup=True` (owner decision,
     2026-09-25); `aggregate` is what actually decides what that means for
     each code.
@@ -300,7 +300,7 @@ def plan_alerts(
 ) -> AlertPlan:
     """Turn this batch's candidates into what to record, post, and post-unpinged.
 
-    Codes already in `known` (any status, ever) are dropped outright --
+    Codes already in `known` (any status, ever) are dropped outright;
     they're not this function's business anymore. What's left splits into
     a roundup-only pipeline and a normal one (`CodeCandidate.roundup`);
     both then split the same way on `seeded`, but only the normal pipeline

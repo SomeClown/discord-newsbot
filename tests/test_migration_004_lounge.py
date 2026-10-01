@@ -31,7 +31,7 @@ def _build_v3(conn):
         conn.execute("PRAGMA user_version = 3")
 
 
-def test_fresh_db_reaches_user_version_four(db_path):
+def test_fresh_db_reaches_the_latest_user_version(db_path):
     with closing(connect(db_path)) as conn:
         assert migrate(conn) == 7
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 7

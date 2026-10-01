@@ -248,7 +248,7 @@ def _topic_embed(topic: GameInfo, stories: list[StoryDraft]) -> discord.Embed:
             break
         kept -= 1
     else:
-        # Not even the single most important story fits on its own --
+        # Not even the single most important story fits on its own:
         # a pathologically long summary, in practice never (summaries are
         # capped at 400 chars by the schema). Hard-truncate rather than
         # emit an empty embed.
@@ -624,7 +624,7 @@ def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = No
     # Same shedding order as `_alert_block`: the link is the first thing
     # to go (it's redundant with "click the code" anyway), and if a
     # hostile or just very long source name still doesn't fit, hard-
-    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks --
+    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks;
     # it's what tells a reader this code didn't come with a ping.
     header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}"
     if discord_len(header) <= max_len:

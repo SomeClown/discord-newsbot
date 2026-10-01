@@ -6,7 +6,7 @@ that drifts: one of them said "contact: owner" and another said
 "+contact", neither of which is a contact anyone could actually reach.
 Reddit in particular is unforgiving about a generic or missing one (see
 docs/sources-research.md), and now that this bot is meant to run on
-someone else's server, "the owner" isn't even a meaningful phrase --
+someone else's server, "the owner" isn't even a meaningful phrase;
 `NEWSBOT_CONTACT` (a URL or an email, an owner's own choice) is what
 fills in the "how do I reach you" part.
 

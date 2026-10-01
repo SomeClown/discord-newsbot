@@ -91,7 +91,7 @@ def test_migrate_twice_on_the_populated_v2_db_is_still_a_noop(db_path):
         assert row["from_roundup"] == 1
 
 
-def test_v1_3_0_migrate_against_a_v2_db_is_a_noop_and_stays_at_version_four(db_path, monkeypatch):
+def test_v1_3_0_migrate_against_a_newer_db_is_a_noop_and_keeps_its_version(db_path, monkeypatch):
     # Build a real v2.0 database first (migrations 001-003 applied), then
     # simulate a v1.3.0 process's migrate() (which only ever globs
     # 001/002 out of its own migrations/ directory) running against it.
