@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import ipaddress
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -28,6 +29,8 @@ from newsbot import text
 from newsbot.collectors.base import RateLimited, RawItem
 from newsbot.config import RssSource
 from newsbot.useragent import user_agent_headers
+
+logger = logging.getLogger(__name__)
 
 _HEADERS = user_agent_headers()
 _REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
@@ -112,12 +115,20 @@ def _retry_after_s(response: httpx.Response) -> float | None:
     return seconds if seconds > 0 else None
 
 
+def _describe_retry_after(response: httpx.Response, seconds: float | None) -> str:
+    """For the log: seconds if it parsed, the raw header if it didn't, else "none"."""
+    if seconds is not None:
+        return f"{seconds:.0f}s"
+    return response.headers.get("retry-after") or "none"
+
+
 async def _fetch_body(
     http: httpx.AsyncClient,
     url: str,
     *,
     sleep: Callable[[float], Awaitable[None]],
     retry_429: bool = True,
+    source_name: str | None = None,
 ) -> bytes:
     """Fetch `url`'s body, streamed and capped at `_MAX_RESPONSE_BYTES`, retrying 429s.
 
@@ -134,7 +145,15 @@ async def _fetch_body(
             if response.status_code == 429 and attempt < attempts - 1:
                 continue
             if response.status_code == 429 and not retry_429:
-                raise RateLimited(_retry_after_s(response))
+                retry_after = _retry_after_s(response)
+                logger.info(
+                    "Reddit 429 for %s (%s), Retry-After: %s",
+                    source_name or url,
+                    url,
+                    _describe_retry_after(response, retry_after),
+                    extra={"source_name": source_name, "retry_after_s": retry_after},
+                )
+                raise RateLimited(retry_after)
             response.raise_for_status()
             chunks = []
             total = 0
@@ -211,6 +230,7 @@ class RssCollector:
             str(self._source.url),
             sleep=self._sleep,
             retry_429=self.rate_limit_key is None,
+            source_name=self.name,
         )
         # feedparser.parse() and clean_text() are both plain synchronous
         # CPU work (XML parsing, regex-based HTML stripping): running

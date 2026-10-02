@@ -21,11 +21,13 @@ So Reddit rotates. The subreddits that need to be fresh (SHiFT games, whose
 codes go stale fast, and games a comped server follows, whose digest reads
 them) go every pass. The rest take turns, a few per pass, stalest first, so
 each lands about every `reddit_rotation_hours`; fifteen games is seven
-requests a pass instead of fifteen. The last-fetch times live in `app_state`
-so a restart doesn't reshuffle the queue. And a 429 ends Reddit for the pass
-(and, if Reddit sent a Retry-After, for the passes that period covers): the
-sources left over were never asked, so they aren't failures, they just stay
-due and go first next time.
+requests a pass instead of fifteen. Within a pass everything goes stalest
+first, priority included, so if Reddit only lets one request through they
+take turns instead of the first in config order eating it every time. The
+last-fetch times live in `app_state` so a restart doesn't reshuffle the queue.
+And a 429 ends Reddit for the pass (and, if Reddit sent a Retry-After, for
+the passes that period covers): the sources left over were never asked, so
+they aren't failures, they just stay due and go first next time.
 
 Source health is global and hourly, which changes what "three failures in a
 row" means: v2's threshold was three days, and three hours is just a
@@ -256,15 +258,18 @@ def plan_reddit(
     priority: frozenset[str],
     fetched: dict[str, datetime],
 ) -> RedditPlan:
-    """Pick this pass's Reddit sources; everything not on Reddit comes along untouched.
+    """Pick this pass's Reddit sources and put them in the order they'll be asked.
 
     Priority sources always go. The rest are ranked stalest first (never
     fetched counts as stalest; ties keep config order) and the top
     `ceil(n / passes per rotation)` go. A never-fetched source gets no
     special pass around that cap: after a deploy the whole rotating pile is
     "never fetched", and letting them all through is the burst this exists to
-    prevent. Order within the result follows `collectors`, so the run is
-    deterministic.
+    prevent. Then everything that's going, priority included, is ordered by
+    that same staleness. This matters when Reddit lets one request through
+    per pass: with priority sources in config order, the first one always
+    got the request and the others waited at the back of a line that never
+    moved. Now they take turns. Non-Reddit sources come first, untouched.
     """
     games = _reddit_games(cfg)
     reddit = [c for c in collectors if getattr(c, "rate_limit_key", None) == _REDDIT_KEY]
@@ -272,16 +277,18 @@ def plan_reddit(
     passes = max(1, (cfg.collection.reddit_rotation_hours * 60) // cfg.collection.interval_minutes)
     quota = math.ceil(len(rotating) / passes)
     oldest = datetime.min.replace(tzinfo=UTC)
-    ranked = sorted(
-        range(len(rotating)),
-        key=lambda i: (
-            fetched.get(rotating[i].name, oldest).astimezone(UTC),
-            i,
-        ),
-    )
-    chosen = {id(rotating[i]) for i in ranked[:quota]}
+
+    def stalest_first(pool: list[Collector]) -> list[Collector]:
+        return sorted(
+            pool,
+            key=lambda c: (fetched.get(c.name, oldest).astimezone(UTC), reddit.index(c)),
+        )
+
+    chosen = stalest_first(rotating)[:quota]
     rotating_ids = {id(c) for c in rotating}
-    selected = [c for c in collectors if id(c) not in rotating_ids or id(c) in chosen]
+    going = [c for c in reddit if id(c) not in rotating_ids] + chosen
+    others = [c for c in collectors if getattr(c, "rate_limit_key", None) != _REDDIT_KEY]
+    selected = others + stalest_first(going)
     return RedditPlan(selected=selected, rotated_out=len(rotating) - len(chosen))
 
 
@@ -428,7 +435,10 @@ async def _note_reddit(
 
     A source that was backed off or 429'd isn't stamped: it stays the stalest
     and goes first next pass. One that ran and failed is stamped, or a dead
-    feed would sit at the front of the queue forever.
+    feed would sit at the front of the queue forever. (I tried stamping the
+    429'd one too. Whoever is second in line gets the 429 every pass, so it
+    was stamped fresh every pass and never fetched once. Unstamped, it just
+    moves up the line until it's first, and the first one always gets through.)
     """
     reddit_names = {
         c.name for c in plan.selected if getattr(c, "rate_limit_key", None) == _REDDIT_KEY
@@ -442,16 +452,22 @@ async def _note_reddit(
         await asyncio.to_thread(_write_fetch_times, deps.db_path, asked, now)
     except Exception:
         logger.exception("couldn't record the Reddit fetch times")
+    retry_after_s = next((r.retry_after_s for r in mine if r.retry_after_s), None)
+    suffix = "" if retry_after_s is None else f", reddit_retry_after_s {retry_after_s:.0f}"
+    extra: dict[str, object] = {
+        "reddit_fetched": len(asked),
+        "reddit_rotated_out": plan.rotated_out,
+        "reddit_backed_off": backed_off,
+    }
+    if retry_after_s is not None:
+        extra["reddit_retry_after_s"] = retry_after_s
     logger.info(
-        "Reddit fetched %d, rotated out %d, backed off %d",
+        "Reddit fetched %d, rotated out %d, backed off %d%s",
         len(asked),
         plan.rotated_out,
         backed_off,
-        extra={
-            "reddit_fetched": len(asked),
-            "reddit_rotated_out": plan.rotated_out,
-            "reddit_backed_off": backed_off,
-        },
+        suffix,
+        extra=extra,
     )
 
 
