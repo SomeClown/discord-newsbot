@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -21,7 +21,8 @@ import pytest
 from v3_fakes import make_guild
 
 from newsbot.collectors.base import MAX_BACKOFF_S, RateLimited, RateLimitState, run_collectors
-from newsbot.config import GameCfg, Secrets, load_config
+from newsbot.collectors.rss import RssCollector
+from newsbot.config import GameCfg, RssSource, Secrets, load_config
 from newsbot.pipeline.collect import (
     SOURCE_FAILURE_ALERT_THRESHOLD,
     CollectionDeps,
@@ -391,6 +392,99 @@ async def test_one_info_line_per_pass_with_the_three_counts(db_path, alerts, cap
     assert len(lines) == 1 and lines[0].levelno == logging.INFO
     # g0 and g1 ran; g2 got the 429; the other four weren't picked.
     assert lines[0].getMessage() == "Reddit fetched 2, rotated out 4, backed off 1"
+
+
+async def test_priority_subreddits_take_turns_when_reddit_lets_one_request_through(db_path, alerts):
+    """The 2026-10-02 production pattern: one request a pass, the next one 429s."""
+    cfg = world_cfg(3, hours=1)
+    cfg = cfg.model_copy(
+        update={"shift": cfg.shift.model_copy(update={"games": ["g0", "g1", "g2"]})}
+    )
+    asked_this_pass: list[str] = []
+    fetched: list[str] = []
+
+    def make(i):
+        def behave(_n):
+            asked_this_pass.append(f"r/g{i}")
+            if len(asked_this_pass) > 1:
+                raise RateLimited(None)
+            fetched.append(f"r/g{i}")
+
+        return behave
+
+    subs = [Sub(f"r/g{i}", make(i)) for i in range(3)]
+    clock = Clock()
+    pass_no = {"n": 0}
+
+    async def alert(message: str) -> None:
+        alerts.append(message)
+
+    deps = CollectionDeps(
+        cfg=cfg,
+        db_path=db_path,
+        http=None,
+        collectors=subs,
+        now=lambda: NOW + timedelta(hours=pass_no["n"]),
+        alert=alert,
+        sleep=clock.sleep,
+        clock=clock,
+        rate_limit_state=RateLimitState(),
+    )
+    for n in range(6):
+        pass_no["n"] = n
+        asked_this_pass.clear()
+        clock.now += 3600
+        await run_collection(deps)
+    # Pass 1: g0 gets through, g1 is 429'd, g2 is never asked. The unstamped two
+    # lead from then on, so the line moves and each of them gets through twice.
+    assert fetched == ["r/g0", "r/g1", "r/g2", "r/g0", "r/g1", "r/g2"]
+    assert all(fetched.count(s.name) >= 2 for s in subs)
+
+
+async def test_the_429d_and_the_never_asked_stay_unstamped(db_path, alerts):
+    cfg = world_cfg(3, hours=1)
+    subs = [Sub("r/g0"), Sub("r/g1", limited()), Sub("r/g2")]
+    await run_collection(make_deps(cfg, db_path, subs, alerts, Clock()))
+    with closing(connect(db_path)) as conn:
+        stamps = {s.name: repo.app_state_get(conn, f"reddit_fetched:{s.name}") for s in subs}
+    assert stamps["r/g0"] and stamps["r/g1"] is None and stamps["r/g2"] is None
+
+
+async def test_a_429_says_what_reddit_said_in_the_summary(db_path, alerts, caplog):
+    cfg = world_cfg(3, hours=1)
+    subs = [Sub("r/g0"), Sub("r/g1", limited(1800.0)), Sub("r/g2")]
+    with caplog.at_level(logging.INFO, logger="newsbot.pipeline.collect"):
+        await run_collection(make_deps(cfg, db_path, subs, alerts, Clock()))
+    (line,) = [r for r in caplog.records if r.getMessage().startswith("Reddit fetched")]
+    assert (
+        line.getMessage()
+        == "Reddit fetched 1, rotated out 0, backed off 2, reddit_retry_after_s 1800"
+    )
+    assert line.reddit_retry_after_s == 1800.0
+
+
+@pytest.mark.parametrize(
+    ("headers", "said"),
+    [({"Retry-After": "120"}, "120s"), ({"Retry-After": "soon"}, "soon"), ({}, "none")],
+)
+async def test_a_reddit_429_logs_the_subreddit_and_the_retry_after(headers, said, caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers=headers)
+
+    source = RssSource(
+        type="rss",
+        name="r/Palworld",
+        url="https://www.reddit.com/r/Palworld/.rss",
+        trust="community",
+    )
+    collector = RssCollector(source)
+    with caplog.at_level(logging.INFO, logger="newsbot.collectors.rss"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with pytest.raises(RateLimited):
+                await collector.collect(http)
+    (line,) = [r for r in caplog.records if "429" in r.getMessage()]
+    assert line.levelno == logging.INFO
+    assert "r/Palworld" in line.getMessage() and line.getMessage().endswith(f"Retry-After: {said}")
 
 
 # --- the real example catalog ---
