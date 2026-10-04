@@ -22,8 +22,9 @@ from newsbot.store.db import connect, migrate
 # The cutover tests' fixtures (a whole v2.2 morning, rebuilt in a temp directory) live in
 # their own module; this is how pytest finds them without every file importing a fixture. The
 # network guard is one too (its own test builds a throwaway session around it), and `pytester`
-# is what lets that test do so.
-pytest_plugins = ("cutover_world", "network_guard", "pytester")
+# is what lets that test do so. `async_watchdog` fails an async test that stops making progress,
+# with the stacks of whatever it was waiting on, instead of letting the whole run sit there.
+pytest_plugins = ("async_watchdog", "cutover_world", "network_guard", "pytester")
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "newsbot" / "store" / "migrations"
 
