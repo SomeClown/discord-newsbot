@@ -38,6 +38,10 @@ select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The backstop for tests/async_watchdog.py: a test stuck in synchronous code (where the
+# watchdog's timer on the loop can't fire) at least gets its thread stacks dumped. It
+# doesn't fail the test, it just tells you where to look while you go for the Ctrl-C.
+faulthandler_timeout = 120
 markers = [
   "real_network: skip tests/network_guard.py's network guard (real DNS, real sockets)",
 ]

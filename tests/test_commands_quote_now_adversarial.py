@@ -24,6 +24,7 @@ No gateway, no network; quotes are teapots.
 from __future__ import annotations
 
 import asyncio
+import threading
 import types
 from contextlib import closing
 from datetime import UTC, datetime
@@ -346,10 +347,45 @@ async def test_a_stranger_cannot_cancel_the_owners_dialog_either(db_path, monkey
 # --- two admins, one fresh day ---
 
 
+def _both_past_the_check(monkeypatch) -> threading.Barrier:
+    """Hold each quote-now at its "posted today?" read until the other side has got there too.
+
+    Without this, "at once" meant "whenever the thread pool felt like it". Every so
+    often (about one full macOS run in five, never in CI, never alone) one side got
+    through its whole post before the other had even read the state. The latecomer
+    then did exactly what it should: saw today's quote and asked "Post another one?".
+    The fake interaction has no thumb to press either button with, and `ConfirmView`'s
+    60-second timeout only starts once discord.py has registered the view, which a
+    fake send never does. So the test sat in `view.wait()` forever with nothing
+    scheduled, which is a hang that looks a lot like a deadlock and isn't one.
+
+    The barrier has two parties: two quote-nows, or one quote-now and the scheduled
+    job (which joins with `asyncio.to_thread(barrier.wait)` before it starts). It
+    breaks after 5 seconds rather than waiting forever, and the prompt is swapped for
+    one that fails loudly, so if the pin ever slips the test says so instead of
+    stalling the suite.
+    """
+    barrier = threading.Barrier(2, timeout=5)
+    real_read = commands_module._quote_posted_today_sync
+
+    def read_then_wait(*args, **kwargs):
+        posted = real_read(*args, **kwargs)
+        barrier.wait()
+        return posted
+
+    def no_prompt(*args, **kwargs):
+        raise AssertionError("quote-now prompted: the other side posted before it checked")
+
+    monkeypatch.setattr(commands_module, "_quote_posted_today_sync", read_then_wait)
+    monkeypatch.setattr(commands_module, "ConfirmView", no_prompt)
+    return barrier
+
+
 async def test_two_admins_at_once_post_exactly_one_quote(db_path, tmp_path, monkeypatch):
     _freeze(monkeypatch, NOON_UTC)
     cfg = _lounge_cfg()
     _set_sources(db_path, [_quote_file(tmp_path)])
+    _both_past_the_check(monkeypatch)
     bot = _real_bot(cfg, db_path)
     first = FakeInteraction(_admin(cfg), user_id=1)
     second = FakeInteraction(_admin(cfg), user_id=2)
@@ -373,10 +409,16 @@ async def test_the_scheduled_job_racing_quote_now_still_posts_once(db_path, tmp_
     _freeze(monkeypatch, NOON_UTC)
     cfg = _lounge_cfg()
     _set_sources(db_path, [_quote_file(tmp_path)])
+    barrier = _both_past_the_check(monkeypatch)
     bot = _real_bot(cfg, db_path)
     admin = FakeInteraction(_admin(cfg))
+
+    async def the_job() -> None:
+        await asyncio.to_thread(barrier.wait)
+        await bot._guild_quote_job(GUILD)
+
     try:
-        await asyncio.gather(_handler(cfg, bot).callback(admin), bot._guild_quote_job(GUILD))
+        await asyncio.gather(_handler(cfg, bot).callback(admin), the_job())
     finally:
         await bot.http_client.aclose()
 
