@@ -17,7 +17,9 @@ loop of `asyncio.sleep(0)` inside the posters is what makes walks actually inter
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import timedelta
 from itertools import count
@@ -179,6 +181,62 @@ async def test_walks_racing_a_new_release_strand_nothing_and_send_nothing_twice(
     flat = sorted(code for _, alert in log for code in alert.codes)
     assert flat == sorted(_code(i) for i in range(5))
     assert set(post_status(db_path, 1).values()) == {"posted"}
+
+
+async def test_a_walk_holding_a_stale_list_still_sends_the_code_nobody_else_saw(
+    db_path, cfg, monkeypatch
+):
+    # The exact interleaving that used to flake the overlapping-passes cap test about one
+    # full run in three: walk one reads [A], B is released, walk two reads [A, B], walk
+    # one claims A, then walk two claims [A, B]. The all-or-nothing claim lost A, rolled
+    # back B with it, and B sat `queued` until the next pass because walk two assumed
+    # whoever beat it would send the lot. Walk one never saw B. The test above can't
+    # catch that: its walks race on `sleep(0)` luck and a cleanup pass mops up the
+    # straggler. Here the order is forced with thread events, and nobody mops.
+    cfg = _with_shift(cfg, max_pings_per_day=1)
+    seed(db_path)
+    add_guild(db_path, 1, ping="everyone")
+    await queue_codes(db_path, cfg, [[item(CODE_A)]])
+    one, two = walkers(db_path, cfg, 2, log := [])
+    walker = contextvars.ContextVar("walker")
+    one_loaded, two_loaded, one_claimed = threading.Event(), threading.Event(), threading.Event()
+    two_claims: list[tuple[list[str], list[str]]] = []
+    real_queued, real_claim = fanout.queued_guild_codes, fanout.claim_guild_codes
+
+    def queued(conn, guild_id):
+        got = real_queued(conn, guild_id)
+        (one_loaded if walker.get() == "one" else two_loaded).set()
+        return got
+
+    def claim(conn, guild_id, codes, **kwargs):
+        if walker.get() == "one":
+            assert two_loaded.wait(5), "walk two never read the queue"
+            try:
+                return real_claim(conn, guild_id, codes, **kwargs)
+            finally:
+                one_claimed.set()
+        assert one_claimed.wait(5), "walk one never claimed"
+        got = real_claim(conn, guild_id, codes, **kwargs)
+        two_claims.append((list(codes), got.codes))
+        return got
+
+    monkeypatch.setattr(fanout, "queued_guild_codes", queued)
+    monkeypatch.setattr(fanout, "claim_guild_codes", claim)
+
+    async def walk(deps, name):
+        walker.set(name)
+        return await deliver_queued_codes(deps)
+
+    first = asyncio.create_task(walk(one, "one"))
+    assert await asyncio.to_thread(one_loaded.wait, 5), "walk one never read the queue"
+    await _release(Harness(db_path, cfg, NOW).deps(), [item(CODE_B)], seeding_ok=True)
+    second = asyncio.create_task(walk(two, "two"))
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
+
+    assert two_claims == [([CODE_A, CODE_B], [CODE_B])]  # the stale list, and what it won
+    assert post_status(db_path, 1) == {CODE_A: "posted", CODE_B: "posted"}
+    assert sorted(code for _, alert in log for code in alert.codes) == [CODE_A, CODE_B]
+    assert sum(1 for _, alert in log if alert.ping) == 1 == shift_row(db_path, 1).ping_count
 
 
 # --- the deadline, at its edges ---
