@@ -51,7 +51,27 @@ def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order()
     # three would change the friend's prompt (and need an owner-reviewed /newsbot preview).
     cfg = load_config(EXAMPLE)
     assert [g.key for g in cfg.catalog][:3] == ["borderlands4", "palworld", "diablo4"]
-    assert len(cfg.catalog) == 15
+    assert len(cfg.catalog) == 16
+
+
+def test_arc_raiders_is_the_last_catalog_entry_with_steam_as_its_only_source():
+    # Added 2026-10-04 at the end so the first three keep their order. Steam is its only
+    # source (no official feed or Bluesky exists, and Reddit is codes only), and the studio
+    # isn't an entity because Embark's other game is THE FINALS.
+    game = load_config(EXAMPLE).catalog[-1]
+    assert (game.key, game.name) == ("arcraiders", "ARC Raiders")
+    assert game.aliases == ["ArcRaiders"] and game.entities == []
+    assert game.match_name is True
+    assert [(s.type, s.name, s.app_id, s.trust) for s in game.sources] == [
+        ("steam_news", "ARC Raiders Steam", 1808500, "official")
+    ]
+    assert len(game.search_queries) == 2
+
+
+def test_the_catalog_fits_under_every_discord_cap():
+    # 25 options in the setup wizard's select menu; 25 autocomplete choices, one of them "All".
+    games = len(load_config(EXAMPLE).catalog)
+    assert games + 1 <= 25
 
 
 def test_the_example_shift_games_exist_in_the_catalog():

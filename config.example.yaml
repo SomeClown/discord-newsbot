@@ -1,7 +1,7 @@
 # Example config.yaml for the v3 (public app) shape. The game sources were
 # seeded from the research in docs/sources-research.md (the first three games
-# verified 2026-09-23, the other twelve 2026-09-30) and the owner decisions at
-# the bottom of that file. Copy this to config.yaml, swap the placeholder
+# verified 2026-09-23, the next twelve 2026-09-30, ARC Raiders 2026-10-04) and
+# the owner decisions at the bottom of that file. Copy this to config.yaml, swap the placeholder
 # Discord IDs for real ones, and you have a bot that starts up and actually
 # has something to say. The source list won't stay perfect forever (press
 # feeds die, subreddits get rate-limited, Blizzard will probably ship an
@@ -72,6 +72,12 @@ comped_guild_ids: []
 owner_report:
   time: "21:00"
   timezone: "America/Los_Angeles"
+
+# >>> catalog-step: start
+# Production's runbook copies everything from this line to the "catalog-step:
+# end" line into a v2-shaped config.yaml, and that copy is the whole v3 catalog
+# step. Keep both marker lines, and keep home_guild_id and the other keys about
+# whose bot this is above them, so the copy never carries a placeholder ID along.
 
 # --- Collection, summaries, reports ---
 
@@ -469,6 +475,32 @@ catalog:
       - "WARDOGS Bulkhead update OR patch OR season"
     sources:
       - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
+
+  # Added 2026-10-04 at the owner's request (docs/sources-research.md, "ARC
+  # Raiders (2026-10-04)"). It's the 16th game and goes last, so the first
+  # three keep their order.
+  - key: arcraiders
+    name: "ARC Raiders"
+    # Bare "Arc" is a word, a geometry term and a browser, and bare "Raiders" is
+    # an NFL team, so neither is an alias. The one-word spelling is how the game
+    # turns up in hashtags and URLs.
+    aliases: ["ArcRaiders"]
+    # Embark Studios is left out on purpose, the way Bungie is for Destiny 2:
+    # its other game is THE FINALS, so an entity match would hand free servers
+    # a headline list full of a game they didn't pick.
+    entities: []
+    search_queries:
+      - "\"ARC Raiders\" news"
+      - "\"ARC Raiders\" update OR patch OR expedition"
+    # Steam is the only dedicated source. arcraiders.com/news has no RSS (it's a
+    # Next.js page with no feed link), @arcraiders.bsky.social is a fan account
+    # by its own bio, and Embark's domain-verified Bluesky has never posted.
+    # Steam carries the patch notes and announcements about weekly, and the
+    # shared press feeds cover the rest by keyword.
+    sources:
+      - {type: steam_news, name: "ARC Raiders Steam", app_id: 1808500, trust: official}
+
+# <<< catalog-step: end
 
 # --- Single-server keys (needed only for the lounge) ---
 #

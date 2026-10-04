@@ -12,6 +12,10 @@
 # in the research doc. Shape follows plan section 3.1: sources under a game
 # carry no `topics` (the game is implied), and shared sources use `games:`.
 #
+# ADDED 2026-10-04 (owner request): arcraiders, the 16th game, at the end of this list. It is
+# Steam only (no Reddit, per the v3.0.3 decision); its research is in docs/sources-research.md,
+# "ARC Raiders (2026-10-04)". The approved 15 entries above it are unchanged.
+#
 # The existing three games (borderlands4, palworld, diablo4) and today's
 # shared sources (PC Gamer, Eurogamer, GamesRadar+, PCGamesN, 2K Newsroom)
 # are unchanged and not repeated here.
@@ -198,6 +202,20 @@ catalog:
     sources:
       - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
       - {type: rss, name: "r/WarDogs", url: "https://www.reddit.com/r/WarDogs/top/.rss?t=day", trust: community}
+
+  # Added 2026-10-04, after the owner's approval of the 15 above (see the note at the top).
+  - key: arcraiders
+    name: "ARC Raiders"
+    # Bare "Arc" and bare "Raiders" are too generic. Embark Studios is left out as an entity
+    # because its other game is THE FINALS.
+    aliases: ["ArcRaiders"]
+    entities: []
+    search_queries:
+      - "\"ARC Raiders\" news"
+      - "\"ARC Raiders\" update OR patch OR expedition"
+    match_name: true
+    sources:
+      - {type: steam_news, name: "ARC Raiders Steam", app_id: 1808500, trust: official}
 
 # Additional shared sources (on top of today's five).
 shared_sources:

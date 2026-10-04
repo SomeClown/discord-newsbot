@@ -3,8 +3,8 @@
 A Discord bot that reads the internet every morning so your server doesn't
 have to. Pick the games you follow from a catalog (Borderlands 4, Palworld,
 Diablo IV, Fortnite, Call of Duty, Marvel Rivals, VALORANT, Counter-Strike 2,
-Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo and
-WARDOGS), and at the time you choose it posts a digest of the day's news for
+Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo,
+WARDOGS and ARC Raiders), and at the time you choose it posts a digest of the day's news for
 each one, in the channel you pick. It can also announce new Borderlands SHiFT
 codes, and members can ask it for recent news or search it on demand.
 

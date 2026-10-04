@@ -269,3 +269,16 @@ Approved 2026-09-30 as proposed (all 12 games, with `Evercold` dropped); the que
 3. Accept the short entity lists, trading some press recall for clean free-tier headlines.
 4. ~~Confirm `Evercold`~~: dropped (owner, 2026-09-30).
 5. Accept 12 more subreddits (15 in all, about 9 minutes of each hourly pass), or pick some to drop now.
+
+## ARC Raiders (2026-10-04)
+
+The owner asked for ARC Raiders as the 16th game (it goes last in the catalog, so the first three keep their order). Checked 2026-10-04 from a residential macOS connection with curl and the bot's User-Agent format, one request per URL. Nothing from Reddit (owner decision, v3.0.3).
+
+- **Steam:** app id 1808500; the Steam store API (`appdetails`) names it "ARC Raiders". The announcements feed (`GetNewsForApp`, `feeds=steam_community_announcements`, the same call the collector makes) returned 30 items: 3 in the last 7 days and 7 in the last 30, newest 2026-10-02 ("Play ARC Raiders for FREE from Oct 8 to Oct 12"), before that "An Update on Anti-Cheat" (2026-09-30) and "Store Update 1.48.0" (2026-09-29). Weekly store and live updates go back to May. Accepted as `ARC Raiders Steam`, official.
+- **Bluesky:** nothing usable. `@arcraiders.bsky.social` says in its own bio "Fan-made ARC Raiders account, not affiliated with Embark Studios" (4 posts, the one in its RSS is a Telegram spam line), so it's out, the same rule as the other non-domain-verified accounts. `embark-studios.com` is domain-verified (its `_atproto` TXT record resolves to `did:plc:tiprbeunmu6gcdmp6pqe4xhl`) but has 0 posts and an empty RSS. `arcraiders.com` has no `_atproto` record.
+- **Official site:** `arcraiders.com/news` is a Next.js page with no RSS autodiscovery link, and `/rss`, `/feed`, `/news/rss` and `/news/feed.xml` all return 404. No feed, so no source.
+- **Shared press feeds:** in the same fetch, PC Gamer's feed had 4 mentions of ARC Raiders, Eurogamer's 3, GamesRadar+ and PCGamesN none. Not one mentioned THE FINALS, so the lack of an Embark entity costs nothing visible.
+
+Aliases and entities: alias `ArcRaiders` only. Bare "Arc" and bare "Raiders" (an NFL team) are too generic. Embark Studios is not an entity because its other game is THE FINALS, and a free server would see those stories as ARC Raiders headlines. The name itself is distinctive, so `match_name` stays true.
+
+Because Steam is the only dedicated source, the game's digest depends on weekly patch notes plus press matches; that's thin but real.
