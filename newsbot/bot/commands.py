@@ -706,13 +706,7 @@ def make_member_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
 
 def _game_source_names(cfg: AppConfig, game_key: str) -> list[str]:
     """Names of the sources that feed `game_key`: its own, plus shared ones that cover it."""
-    game = next((g for g in cfg.catalog if g.key == game_key), None)
-    names = [s.name for s in game.sources if s.name] if game else []
-    for shared in cfg.shared_sources:
-        covers = getattr(shared, "games", None)
-        if shared.type != "web_search" and shared.name and (covers is None or game_key in covers):
-            names.append(shared.name)
-    return names
+    return cfg.game_source_names(game_key)
 
 
 def _next_due_line(guild: GuildSettings, now: datetime) -> str:

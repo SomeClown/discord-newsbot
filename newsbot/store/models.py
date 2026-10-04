@@ -298,6 +298,8 @@ class GameSummaryRow:
     # saved before migration 007 and for `items_after` when nothing came before.
     items_after: int | None = None
     items_upto: int | None = None
+    # When the row was written (UTC); a run-now retry rewrites it in place and re-stamps it.
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True)

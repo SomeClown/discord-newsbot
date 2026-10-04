@@ -20,17 +20,17 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 
 from newsbot.config import GameInfo, Topic
 from newsbot.pipeline.normalize import canonicalize
-from newsbot.pipeline.summarize import StoryDraft
+from newsbot.pipeline.summarize import StoryDraft, estimate_spend_usd
 from newsbot.shift.decide import CodeCandidate, group_roundups
 from newsbot.shift.match import is_code
 from newsbot.store.models import (
@@ -941,6 +941,140 @@ def _report_duration_str(duration: timedelta) -> str:
     return f"{seconds}s"
 
 
+# The Sources line names one failing source and says how many more there are, since a
+# server's admin can do nothing about the others anyway; the owner's report has the lot.
+_REPORT_ERROR_SNIPPET = 150
+
+
+@dataclass(frozen=True)
+class ReportSources:
+    """The health of the distinct sources behind one server's games, as of report time.
+
+    `total` counts each source once, however many games it feeds. `failing` is the
+    sources with `consecutive_failures > 0`, worst first, as `(name, last error)`;
+    `unchecked` is how many have no health row yet (never collected, which isn't the
+    same as being fine). Same arithmetic as `/newsbot status`'s per-game clause.
+    """
+
+    total: int
+    unchecked: int
+    failing: Sequence[tuple[str, str | None]]
+
+
+@dataclass(frozen=True)
+class ReportClaude:
+    """What a comped digest's summaries cost and when they were made.
+
+    `cost_usd` is `None` when no row had token counts (a row from before they were
+    recorded reads as zero, which is "unknown", not "free"). `prepared_at` has one
+    entry per stored summary the digest showed; `shared` means another server could
+    have used the same rows, and the cost is the rows' whole cost either way, not a split.
+    """
+
+    cost_usd: float | None
+    prepared_at: Sequence[datetime]
+    shared: bool
+
+
+def _report_cost_str(spend_usd: float) -> str:
+    # "<$0.01" for anything that'd otherwise round to "$0.00": a summary that costs
+    # half a cent still cost something, and "$0.00" reads as free, which it isn't.
+    if spend_usd < 0.01:
+        return "<$0.01"
+    return f"~${spend_usd:.2f}"
+
+
+def report_claude_from_rows(
+    rows: Sequence[tuple[int, int, datetime | None]], shared: bool
+) -> ReportClaude | None:
+    """Fold stored summary rows `(input tokens, output tokens, written at)` into a `ReportClaude`.
+
+    `None` for no rows at all. A row with no tokens at all contributes no cost.
+    """
+    if not rows:
+        return None
+    priced = [(i, o) for i, o, _ in rows if i or o]
+    cost = sum(estimate_spend_usd(i, o) for i, o in priced) if priced else None
+    return ReportClaude(cost, [at for _, _, at in rows if at is not None], shared)
+
+
+def _report_prepared_text(prepared_at: Sequence[datetime], timezone: str) -> str | None:
+    """The "summaries prepared at 08:30" text in the server's clock, or None with nothing to say."""
+    if not prepared_at:
+        return None
+    try:
+        zone = ZoneInfo(timezone)
+        suffix = ""
+    except ZoneInfoNotFoundError, ValueError, OSError:
+        # A report that can't name the time zone still beats no report.
+        zone, suffix = UTC, " UTC"
+    local = sorted(
+        (at if at.tzinfo else at.replace(tzinfo=UTC)).astimezone(zone) for at in prepared_at
+    )
+    first, last = local[0].strftime("%H:%M"), local[-1].strftime("%H:%M")
+    when = first if first == last else f"{first} to {last}"
+    noun = "summary" if len(prepared_at) == 1 else "summaries"
+    return f"{noun} prepared at {when}{suffix}"
+
+
+def _report_claude_line(claude: ReportClaude, timezone: str, took: str) -> str:
+    head = _report_cost_str(claude.cost_usd) if claude.cost_usd is not None else ""
+    if claude.shared:
+        head = f"{head}, shared" if head else "shared"
+    prepared = _report_prepared_text(claude.prepared_at, timezone)
+    if head and prepared:
+        return f"Claude: {head} ({prepared}) · took {took}"
+    if head or prepared:
+        return f"Claude: {head or prepared} · took {took}"
+    return f"Took {took}"
+
+
+def _report_sources_line(sources: ReportSources, *, with_detail: bool) -> str | None:
+    total = sources.total
+    if total <= 0:
+        return None
+    if sources.unchecked >= total:
+        return f"Sources: {total} {'source' if total == 1 else 'sources'} not checked yet"
+    ok = total - sources.unchecked - len(sources.failing)
+    line = f"Sources: {ok} of {total} ok"
+    if sources.unchecked:
+        line += f", {sources.unchecked} not checked yet"
+    if not with_detail or not sources.failing:
+        return line
+    name, error = sources.failing[0]
+    first = next((ln for ln in (error or "").splitlines() if ln.strip()), "")
+    # Cut to one line, then shorten each URL, then cap, then escape: the escaping goes
+    # last so a backslash it adds can't be cut in half, and so a `[text](url)` in an
+    # error can't come out as a live link. The URL itself stays readable.
+    text = plain_line(_redact_urls(plain_line(first, 400)), _REPORT_ERROR_SNIPPET)
+    # Markdown's `[text](target)` needs the two brackets to touch; a zero-width space
+    # between them leaves the text readable and the link dead.
+    text = text.replace("](", "]\u200b(")
+    parts = [f"{esc(plain_line(name, 60))}: {esc(text) if text else 'unknown error'}"]
+    extra = len(sources.failing) - 1
+    if extra > 0:
+        parts.append(f"+{extra} more")
+    return f"{line} ({'; '.join(parts)})"
+
+
+def _count_noun(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _report_stories_label(story_total: int, headline_total: int, comped: bool) -> str:
+    """The count's label: "8 stories", "8 items" (a free server's headlines), or both."""
+    if not comped:
+        return _count_noun(story_total + headline_total, "item", "items")
+    if story_total and headline_total:
+        return (
+            f"{_count_noun(story_total, 'story', 'stories')}, "
+            f"{_count_noun(headline_total, 'headline', 'headlines')}"
+        )
+    if headline_total:
+        return _count_noun(headline_total, "headline", "headlines")
+    return _count_noun(story_total, "story", "stories")
+
+
 def render_guild_run_report(
     *,
     status: Literal["ok", "partial"],
@@ -954,14 +1088,22 @@ def render_guild_run_report(
     duration: timedelta,
     notes: list[str],
     guild_id: int,
+    story_games: Collection[str] | None = None,
+    sources: ReportSources | None = None,
+    claude: ReportClaude | None = None,
+    timezone: str = "UTC",
 ) -> str:
     """The per-server run report, for that server's admin channel (plan §3.5): one plain message.
 
-    Like the owner's report, minus everything a server has no business seeing: no
-    source health (that's the owner's) and no spend. It has a per-game count with a
-    `[jump]` link for each game that posted, any skipped game with its reason, and how
-    long the digest took. Kept under `_ALERT_CONTENT_LIMIT` by shedding the reasons,
-    then the links, then a flat truncation.
+    A per-game count with a `[jump]` link for each game that posted, any skipped game
+    with its reason, the health of the sources behind its games, and how long the
+    digest took. `story_games` is `None` for a free server (its counts are headlines,
+    "items"); for a comped one it names the games whose count is AI stories, and the
+    rest are headline fallbacks. `claude` (comped only, when summaries were used) puts
+    the summaries' cost and prepare time on the last line; without it that line is just
+    "Took Xs". `sources` is `None` to leave the Sources line out. Kept under
+    `_ALERT_CONTENT_LIMIT` by shedding the notes, then the failing source's detail,
+    then the reasons, then the links, then a flat truncation.
     """
 
     def stories_line(with_links: bool) -> str:
@@ -973,7 +1115,10 @@ def render_guild_run_report(
                 link = _report_jump_link(guild_id, channels[game.key], message_id)
                 part += f" [jump](<{link}>)"
             parts.append(part)
-        return f"{sum(counts.get(g.key, 0) for g in games)} items: " + " · ".join(parts)
+        story_total = sum(counts.get(g.key, 0) for g in games if g.key in (story_games or ()))
+        headline_total = sum(counts.get(g.key, 0) for g in games) - story_total
+        label = _report_stories_label(story_total, headline_total, story_games is not None)
+        return f"{label}: " + " · ".join(parts)
 
     def skipped_line(with_reasons: bool) -> str | None:
         if not skipped:
@@ -990,23 +1135,30 @@ def render_guild_run_report(
         f"{_REPORT_HEADER_EMOJI[status]} **{_REPORT_HEADER_VERB[status]}** · "
         f"{_report_date(run_date)} ({run_kind})"
     )
-    took_line = f"Took {_report_duration_str(duration)}"
+    took = _report_duration_str(duration)
+    took_line = _report_claude_line(claude, timezone, took) if claude else f"Took {took}"
     notes_line = "Notes: " + esc("; ".join(notes)) if status == "partial" and notes else None
 
-    def build(with_links: bool, with_reasons: bool, with_notes: bool) -> str:
-        lines = [header_line, stories_line(with_links), skipped_line(with_reasons)]
+    def build(with_links: bool, with_reasons: bool, with_notes: bool, with_detail: bool) -> str:
+        lines = [
+            header_line,
+            stories_line(with_links),
+            _report_sources_line(sources, with_detail=with_detail) if sources else None,
+            skipped_line(with_reasons),
+        ]
         if with_notes:
             lines.append(notes_line)
         lines.append(took_line)
         return "\n".join(line for line in lines if line)
 
-    for with_links, with_reasons, with_notes in (
-        (True, True, True),
-        (True, True, False),
-        (True, False, False),
-        (False, False, False),
+    for with_links, with_reasons, with_notes, with_detail in (
+        (True, True, True, True),
+        (True, True, False, True),
+        (True, True, False, False),
+        (True, False, False, False),
+        (False, False, False, False),
     ):
-        content = build(with_links, with_reasons, with_notes)
+        content = build(with_links, with_reasons, with_notes, with_detail)
         if discord_len(content) <= _ALERT_CONTENT_LIMIT:
             return content
     return _truncate_utf16(content, _ALERT_CONTENT_LIMIT, suffix="…")
@@ -1274,6 +1426,8 @@ def render_guild_overview(
 __all__ = [
     "FOLLOWUP_MAX_CODES",
     "DigestOutcome",
+    "ReportClaude",
+    "ReportSources",
     "RenderedAlert",
     "RenderedDigest",
     "TopicMessage",
@@ -1293,5 +1447,6 @@ __all__ = [
     "render_owner_report",
     "render_roundup_alerts",
     "render_story_page",
+    "report_claude_from_rows",
     "to_text",
 ]
