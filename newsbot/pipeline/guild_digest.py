@@ -53,9 +53,12 @@ from zoneinfo import ZoneInfoNotFoundError
 
 from newsbot.bot.format import (
     RenderedDigest,
+    ReportClaude,
+    ReportSources,
     esc,
     render_guild_digest,
     render_guild_run_report,
+    report_claude_from_rows,
 )
 from newsbot.config import AppConfig, GameCfg
 from newsbot.guilds.schedule import (
@@ -144,6 +147,13 @@ class GameSummary:
     # The newest item id the summary covers, which is where this server's next summary
     # for the game must start. `None` for a summary that doesn't know (a stub, an old row).
     items_upto: int | None = None
+    # Which stored row this came from, when it came from one, and what the row says it
+    # cost and when it was written: the run report's Claude line reads these. All empty
+    # for a summary that was only ever made in memory (a preview's).
+    summary_id: int | None = None
+    prepared_at: datetime | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class SummaryLookup(Protocol):
@@ -345,6 +355,9 @@ class _Built:
     degraded: bool
     # Per game, the newest item id this digest covers for it (see `repo.record_game_coverage`).
     game_upto: dict[str, int] = field(default_factory=dict)
+    # The stored summaries whose stories this digest shows (`ok` ones), by game.
+    summaries: dict[str, GameSummary] = field(default_factory=dict)
+    comped: bool = False
 
 
 def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
@@ -359,7 +372,17 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
         )
         for v in repo.summary_stories(conn, row.id)
     ]
-    return GameSummary(row.status, stories, list(row.coverage_notes), row.note, row.items_upto)
+    return GameSummary(
+        row.status,
+        stories,
+        list(row.coverage_notes),
+        row.note,
+        row.items_upto,
+        row.id,
+        row.created_at,
+        row.input_tokens,
+        row.output_tokens,
+    )
 
 
 async def _stored_summary(
@@ -436,6 +459,7 @@ async def _build(
     notes_by_game: dict[str, str | None] = {}
     coverage: list[str] = []
     game_upto: dict[str, int] = {}
+    used: dict[str, GameSummary] = {}
     degraded = bool(notes)
     if guild.tier == "comped":
         lookup = (
@@ -480,6 +504,7 @@ async def _build(
                 summary = None
             if summary is not None and summary.status == "ok":
                 stories_by_game[game.key] = summary.stories
+                used[game.key] = summary
                 coverage.extend(n for n in summary.coverage_notes if n not in coverage)
                 if summary.items_upto is not None:
                     game_upto[game.key] = summary.items_upto
@@ -514,7 +539,17 @@ async def _build(
         )
         for game in games
     }
-    return _Built(rendered, counts, games, channels, notes, degraded, game_upto)
+    return _Built(
+        rendered,
+        counts,
+        games,
+        channels,
+        notes,
+        degraded,
+        game_upto,
+        used,
+        guild.tier == "comped",
+    )
 
 
 def _window_sync(
@@ -953,6 +988,43 @@ async def _publish_claimed(
     )
 
 
+def _report_extras_sync(
+    cfg: AppConfig, db_path: str, guild: GuildSettings, built: _Built, run_date: date
+) -> tuple[ReportSources, ReportClaude | None]:
+    """What the run report's Sources and Claude lines need, read at report time.
+
+    Sources are the distinct names behind the server's followed games (a press feed
+    that serves three games counts once), judged the way `/newsbot status` judges them:
+    failing means `consecutive_failures > 0`, and a name with no health row is "not
+    checked yet" (which is also all a rotated-out or backed-off Reddit source ever is:
+    those passes write nothing). The Claude half is comped only, over the stored rows
+    whose stories this digest showed.
+    """
+    names = list(dict.fromkeys(n for g in built.games for n in cfg.game_source_names(g.key)))
+    with closing(connect(db_path)) as conn:
+        failing_rows = {row.source_name: row for row in repo.failing_sources(conn)}
+        checked = repo.checked_source_names(conn)
+        failing = [
+            (row.source_name, row.last_error)
+            for row in failing_rows.values()
+            if row.source_name in names
+        ]
+        claude = None
+        used = [s for s in built.summaries.values() if s.summary_id is not None]
+        if built.comped and used:
+            rows = []
+            shared = False
+            for summary in used:
+                row = repo.game_summary_by_id(conn, summary.summary_id)
+                if row is None:
+                    continue
+                rows.append((row.input_tokens, row.output_tokens, row.created_at))
+                shared = shared or repo.summary_is_shared(conn, row, guild.guild_id, run_date)
+            claude = report_claude_from_rows(rows, shared)
+    unchecked = sum(1 for n in names if n not in checked)
+    return ReportSources(len(names), unchecked, failing), claude
+
+
 async def _send_report(
     deps: GuildDigestDeps,
     guild: GuildSettings,
@@ -973,6 +1045,9 @@ async def _send_report(
     if deps.send_report is None or guild.admin_channel_id is None or not deps.cfg.run_report:
         return
     try:
+        sources, claude = await asyncio.to_thread(
+            _report_extras_sync, deps.cfg, deps.db_path, guild, built, run_date
+        )
         text = render_guild_run_report(
             status=status,
             run_date=run_date,
@@ -985,6 +1060,10 @@ async def _send_report(
             duration=duration,
             notes=notes,
             guild_id=guild.guild_id,
+            story_games=set(built.summaries) if built.comped else None,
+            sources=sources,
+            claude=claude,
+            timezone=guild.timezone,
         )
         await deps.send_report(guild.guild_id, guild.admin_channel_id, text)
     except Exception:

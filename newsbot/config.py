@@ -634,6 +634,26 @@ class AppConfig(BaseModel):
             return self.owner_channel_id
         return self.admin_channel_id
 
+    def game_source_names(self, game_key: str) -> list[str]:
+        """Names of the sources that feed `game_key`: its own, plus shared ones that cover it.
+
+        `/newsbot status` and a server's run report both count sources this way, so
+        they live in one place and can't drift apart. Web search is left out (it has
+        no health row of its own to count). A name shared by several games repeats
+        per game here; a caller that wants distinct sources dedupes across games.
+        """
+        game = next((g for g in self.catalog if g.key == game_key), None)
+        names = [s.name for s in game.sources if s.name] if game else []
+        for shared in self.shared_sources:
+            covers = getattr(shared, "games", None)
+            if (
+                shared.type != "web_search"
+                and shared.name
+                and (covers is None or game_key in covers)
+            ):
+                names.append(shared.name)
+        return names
+
     @field_validator("command_guild_ids", "comped_guild_ids", mode="before")
     @classmethod
     def _validate_guild_id_list(cls, v: object) -> object:

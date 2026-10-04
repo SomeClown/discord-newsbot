@@ -2988,7 +2988,7 @@ def comped_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
 def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummaryRow | None:
     row = conn.execute(
         "SELECT id, game_key, run_date, status, window_start, window_end, coverage_notes, "
-        "note, input_tokens, output_tokens, items_after, items_upto "
+        "note, input_tokens, output_tokens, items_after, items_upto, created_at "
         "FROM game_summaries WHERE id = ?",
         (summary_id,),
     ).fetchone()
@@ -3007,7 +3007,39 @@ def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummary
         output_tokens=row["output_tokens"],
         items_after=row["items_after"],
         items_upto=row["items_upto"],
+        created_at=_parse_dt_or_none(row["created_at"]),
     )
+
+
+def summary_is_shared(
+    conn: sqlite3.Connection, summary: GameSummaryRow, guild_id: int, run_date: date
+) -> bool:
+    """True if some other set-up comped server follows the summary's game and could reuse it.
+
+    Nothing records which digests a summary served, so this asks `get_game_summary`'s own
+    question from the other side: would another server's coverage of the game (as it stood
+    before `run_date`) line up with this row? That is, the row starts exactly where that
+    server left off and ends after its last window, or the server has no history for the
+    game and takes any row. It doesn't depend on who posted first, so both servers' reports
+    say "shared" instead of only the later one's. (Close enough for a report line: it
+    doesn't check the six-hour age rule, since two servers that line up on item ids are on
+    the same cycle anyway.)
+    """
+    others = conn.execute(
+        "SELECT g.guild_id FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
+        "WHERE g.tier = 'comped' AND g.set_up = 1 AND gg.game_key = ? AND g.guild_id != ?",
+        (summary.game_key, guild_id),
+    ).fetchall()
+    for other in others:
+        coverage = last_coverage(
+            conn, other["guild_id"], exclude_run_date=run_date, games=[summary.game_key]
+        )
+        after = coverage.for_game(summary.game_key) if coverage else None
+        if after is None:
+            return True
+        if summary.items_after == after.item_id and summary.window_end > after.end:
+            return True
+    return False
 
 
 def summary_items(

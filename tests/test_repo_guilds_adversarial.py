@@ -302,6 +302,10 @@ _OTHER_COVERAGE = {
     # The lounge deck and date guard: tests/test_repo_lounge_guilds.py (task 12).
     "claim_quote",
     "quote_deck_state",
+    # Reads the *other* comped servers' coverage on purpose (that's the question: could
+    # someone else have used this summary?) and returns a bool, never their rows; its
+    # own tests are in tests/test_run_report_lines.py.
+    "summary_is_shared",
 }
 
 
