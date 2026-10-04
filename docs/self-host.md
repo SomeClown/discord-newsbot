@@ -172,7 +172,7 @@ cp config.minimal.yaml config.yaml
 
 `config.minimal.yaml` is one game, a couple of sources, and nothing else:
 enough to see a real digest without wading through the maintainer's own
-fifteen-game catalog first. `config.example.yaml` is that fuller config,
+sixteen-game catalog first. `config.example.yaml` is that fuller config,
 useful as a reference once you're adding a second game or want to see
 what a `shared_sources:` list, a `web_search:` block or the `shift:` settings
 actually look like. [`docs/finding-sources.md`](finding-sources.md) has recipes for

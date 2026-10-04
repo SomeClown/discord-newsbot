@@ -1,5 +1,5 @@
 # The smallest config.yaml that actually does something: one game, a couple
-# of sources, no SHiFT alerts. config.example.yaml is the full, fifteen-game
+# of sources, no SHiFT alerts. config.example.yaml is the full, sixteen-game
 # catalog this bot actually runs in production, which is a great reference
 # and a slightly overwhelming place to start. This is the other end: copy it
 # to config.yaml and start replacing placeholders.
