@@ -33,6 +33,7 @@ from newsbot.config import (
     WebSearchSource,
     _RawConfig,
     _with_default_name,
+    is_reddit_source,
     load_config,
 )
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
@@ -105,6 +106,17 @@ def _raw(path) -> _RawConfig:
     return _RawConfig.model_validate(yaml.safe_load(Path(path).read_text()))
 
 
+def _skipped_since_v303(raw, source) -> bool:
+    """v3.0.3's one deliberate difference from v2: a Reddit feed for a game that has no SHiFT codes.
+
+    Reddit is only read to spot codes now, so a subreddit whose game isn't in `alerts.topics`
+    (when that list is non-empty; empty means every game) is warned about and not fetched.
+    """
+    if not is_reddit_source(source) or not raw.alerts.topics:
+        return False
+    return not set(source.topics or []).intersection(raw.alerts.topics) and bool(source.topics)
+
+
 def _old_build_collectors(path, secrets, *, include_web_search=True):
     """v2's `build_collectors`, as it was, reading the old keys straight from the file.
 
@@ -125,6 +137,8 @@ def _old_build_collectors(path, secrets, *, include_web_search=True):
         )
     collectors = []
     for source in (_with_default_name(src) for src in raw.sources):
+        if _skipped_since_v303(raw, source):
+            continue
         if isinstance(source, RssSource):
             collectors.append(RssCollector(source))
         elif isinstance(source, SteamSource):
@@ -288,7 +302,12 @@ def test_derived_games_carry_topic_fields_verbatim(v2_path):
 def test_every_v2_source_lands_in_exactly_one_place(v2_path, brave):
     cfg = load_config(v2_path)
     placed = [s.name for g in cfg.catalog for s in g.sources] + [s.name for s in cfg.shared_sources]
-    v2_names = [_with_default_name(s).name for s in _raw(v2_path).sources if s.type != "web_search"]
+    raw = _raw(v2_path)
+    v2_names = [
+        _with_default_name(s).name
+        for s in raw.sources
+        if s.type != "web_search" and not _skipped_since_v303(raw, s)
+    ]
     assert sorted(placed) == sorted(v2_names)
 
 

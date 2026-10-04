@@ -189,7 +189,7 @@ def reddit_feeds(clock, n, *, cost=0.0):
     return [
         Scripted(
             f"r/game{i}",
-            [item(f"https://reddit.com/r/game{i}/1", "post", topics=("palworld",))],
+            [item(f"https://example.com/r/game{i}/1", "post", topics=("palworld",))],
             key="reddit",
             cost=cost,
             clock=clock,

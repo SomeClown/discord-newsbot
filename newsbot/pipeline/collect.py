@@ -29,6 +29,11 @@ And a 429 ends Reddit for the pass (and, if Reddit sent a Retry-After, for
 the passes that period covers): the sources left over were never asked, so
 they aren't failures, they just stay due and go first next time.
 
+Reddit is also codes-only since v3.0.3 (Reddit denied the bot's API request,
+and its terms bar sharing its content): `r/Borderlands4` is still fetched and
+its items still go to the SHiFT hook, but `storable_items` keeps them out of the
+store, so no digest, summary, search or prompt can ever contain one.
+
 Source health is global and hourly, which changes what "three failures in a
 row" means: v2's threshold was three days, and three hours is just a
 Tuesday. The owner hears about a source once, at twelve in a row, and the
@@ -68,6 +73,7 @@ from newsbot.config import AppConfig, Secrets, WebSearchSource
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import run_lock_or_skip
 from newsbot.pipeline.normalize import canonicalize_items, normalize
+from newsbot.reddit import is_reddit_url
 from newsbot.store.db import connect
 from newsbot.store.models import StoredItem
 from newsbot.store.repo import (
@@ -388,8 +394,28 @@ def _merge_loser_tags(
     return list(by_url.values())
 
 
+def storable_items(collected: list[RawItem], cfg: AppConfig) -> list[RawItem]:
+    """What may be stored: everything except codes-only sources' items and Reddit links.
+
+    A codes-only source's items exist to be searched for SHiFT codes (the hook
+    gets them straight from the collector results, with their URLs for the
+    alert's link) and then forgotten. The URL check is the net under the net:
+    web search can hand back a reddit.com thread under Brave's name, and Reddit's
+    content doesn't get to ride in on a different source's ticket.
+    """
+    codes_only = cfg.codes_only_source_names()
+    return [
+        item
+        for item in collected
+        if item.source_name not in codes_only and not is_reddit_url(item.url)
+    ]
+
+
 def _store_sync(db_path: str, collected: list[RawItem], cfg: AppConfig, now: datetime) -> int:
     """Normalize, filter against the whole catalog, and store. Returns the new item count.
+
+    Codes-only items are dropped first (`storable_items`), so nothing below, and
+    nothing that reads the store, ever sees them.
 
     When several sources carry one URL, dedupe keeps the most trusted copy's
     content, but the stored item gets the game tags of every copy (a
@@ -397,6 +423,7 @@ def _store_sync(db_path: str, collected: list[RawItem], cfg: AppConfig, now: dat
     Borderlands 4 make one item tagged both). Across passes it stays
     first-come: a stored URL is dropped before any of this happens.
     """
+    collected = storable_items(collected, cfg)
     lookback = timedelta(hours=cfg.collection.lookback_hours)
     with closing(connect(db_path)) as conn:
         losers: list[RawItem] = []

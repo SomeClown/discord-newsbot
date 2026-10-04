@@ -44,6 +44,7 @@ from pydantic import (
 
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
+from newsbot.reddit import is_reddit_host
 from newsbot.text import shown_url
 
 Trust = Literal["official", "press", "community"]
@@ -233,12 +234,18 @@ class DigestCfg(BaseModel):
         return v
 
 
+# `codes_only` (v3.0.3): a codes-only source is fetched like any other and its
+# items are searched for SHiFT codes, but they're never stored, so they can't
+# reach a digest, a summary, `/news` or the AI prompt. Left out, it means false,
+# except for a Reddit feed, which is codes-only whether it says so or not
+# (`effective_codes_only`). See `newsbot.reddit` for why.
 class RssSource(BaseModel):
     type: Literal["rss"]
     name: str
     url: HttpUrl
     topics: list[str] | None = None
     trust: Trust
+    codes_only: bool | None = None
 
 
 class SteamSource(BaseModel):
@@ -247,6 +254,7 @@ class SteamSource(BaseModel):
     app_id: int
     topics: list[str] | None = None
     trust: Trust
+    codes_only: bool | None = None
 
 
 class BlueskySource(BaseModel):
@@ -255,6 +263,7 @@ class BlueskySource(BaseModel):
     query: str
     topics: list[str] | None = None
     trust: Trust
+    codes_only: bool | None = None
 
 
 class WebSearchSource(BaseModel):
@@ -263,6 +272,23 @@ class WebSearchSource(BaseModel):
     queries_per_topic: int = 2
     query_templates: list[str] = ["{name} news", "{name} update OR patch OR leak"]
     trust: Trust
+    # Only here so a stray `codes_only: true` gets a message instead of being
+    # ignored; load_config rejects it (Brave never feeds SHiFT detection).
+    codes_only: bool | None = None
+
+
+def is_reddit_source(source: object) -> bool:
+    """True for an RSS source whose host is reddit.com (or a subdomain of it)."""
+    url = getattr(source, "url", None)
+    return url is not None and is_reddit_host(urlsplit(str(url)).hostname)
+
+
+def effective_codes_only(source: object) -> bool:
+    """Whether `source` is codes-only: what it says, or true for a Reddit feed that's silent."""
+    explicit = getattr(source, "codes_only", None)
+    if explicit is not None:
+        return explicit
+    return is_reddit_source(source)
 
 
 Source = Annotated[
@@ -634,6 +660,11 @@ class AppConfig(BaseModel):
             return self.owner_channel_id
         return self.admin_channel_id
 
+    def codes_only_source_names(self) -> frozenset[str]:
+        """Names of the codes-only sources: collected for SHiFT detection, never stored."""
+        sources = [s for g in self.catalog for s in g.sources] + list(self.shared_sources)
+        return frozenset(s.name for s in sources if s.name and effective_codes_only(s))
+
     def game_source_names(self, game_key: str) -> list[str]:
         """Names of the sources that feed `game_key`: its own, plus shared ones that cover it.
 
@@ -977,6 +1008,87 @@ def _v3_shift_games(cfg: AppConfig, raw: dict) -> tuple[AppConfig, list[str]]:
     return cfg.model_copy(update={"shift": shift}), []
 
 
+def _codes_only_problems(cfg: AppConfig) -> list[str]:
+    """Mistakes in `codes_only`: a Reddit feed that opts out, or a web search that opts in.
+
+    A Reddit feed can't be `codes_only: false`: Reddit's terms bar sharing its
+    content, and the Data API request that would have allowed it was denied,
+    so a Reddit post that reaches a digest is the one thing this release exists
+    to prevent. Web search can't be `codes_only: true` because it never goes
+    through SHiFT detection, so the flag would just throw its results away.
+    """
+    labelled: list[tuple[str, object]] = []
+    labelled += [(f"sources[{i}]", s) for i, s in enumerate(cfg.sources)]
+    for i, game in enumerate(cfg.catalog):
+        labelled += [
+            (f"catalog[{i}] ({game.key}).sources[{j}]", s) for j, s in enumerate(game.sources)
+        ]
+    labelled += [(f"shared_sources[{j}]", s) for j, s in enumerate(cfg.shared_sources)]
+
+    problems = []
+    for where, source in labelled:
+        explicit = getattr(source, "codes_only", None)
+        name = getattr(source, "name", None)
+        if isinstance(source, WebSearchSource):
+            if explicit:
+                problems.append(
+                    f"{where} ({name}): codes_only does nothing on web_search "
+                    "(its results never go through SHiFT detection); remove it"
+                )
+        elif explicit is False and is_reddit_source(source):
+            problems.append(
+                f"{where} ({name}): codes_only can't be false for a Reddit source. Reddit "
+                "denied this bot's Data API request and forbids sharing its content, so Reddit "
+                "feeds are only read to spot SHiFT codes; remove the setting or set it to true"
+            )
+    return problems
+
+
+def _skip_pointless_reddit(cfg: AppConfig) -> AppConfig:
+    """Drop Reddit feeds for games that aren't SHiFT games, with a warning.
+
+    Reddit is only read to spot SHiFT codes, so a subreddit for a game with no
+    codes would be fetched hourly (and 429'd, and rotated) for nothing. An empty
+    `shift.games` means every game, the v2 reading, so nothing is dropped then.
+    """
+    log = logging.getLogger(__name__)
+    shift_games = set(cfg.shift.games)
+
+    def skip(source: object, why: str) -> bool:
+        if not is_reddit_source(source) or not effective_codes_only(source):
+            return False
+        log.warning(
+            "Reddit source %r is %s, and Reddit is only used to spot SHiFT codes; "
+            "it will be skipped",
+            getattr(source, "name", None),
+            why,
+        )
+        return True
+
+    if not shift_games:
+        return cfg
+    catalog = [
+        game.model_copy(
+            update={
+                "sources": [
+                    s
+                    for s in game.sources
+                    if game.key in shift_games or not skip(s, f"for {game.key}, not in shift.games")
+                ]
+            }
+        )
+        for game in cfg.catalog
+    ]
+    shared = [
+        s
+        for s in cfg.shared_sources
+        if getattr(s, "games", None) is None
+        or shift_games.intersection(s.games)
+        or not skip(s, "limited to games that aren't in shift.games")
+    ]
+    return cfg.model_copy(update={"catalog": catalog, "shared_sources": shared})
+
+
 def _v3_problems(cfg: AppConfig) -> list[str]:
     """Cross-checks on a v3 catalog: keys, sources, and everything that names a game."""
     errors: list[str] = []
@@ -1194,6 +1306,8 @@ def load_config(path: str | Path) -> AppConfig:
         }
     )
 
+    errors += _codes_only_problems(cfg)
+
     if is_v3:
         errors += _v3_problems(cfg)
         cfg, shift_errors = _v3_shift_games(cfg, raw)
@@ -1239,6 +1353,8 @@ def load_config(path: str | Path) -> AppConfig:
             for g in cfg.shift.games:
                 if g not in known_keys:
                     errors.append(f"shift.games names unknown game {g!r}")
+
+    cfg = _skip_pointless_reddit(cfg)
 
     warned_brave = False
     seen_names: set[str] = set()

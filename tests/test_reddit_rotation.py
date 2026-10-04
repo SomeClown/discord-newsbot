@@ -493,7 +493,6 @@ RSS = (
     b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
     b"<item><title>x</title><link>https://www.reddit.com/r/x/1</link></item></channel></rss>"
 )
-FRIENDS_GAMES = [("borderlands4", 1), ("palworld", 2), ("diablo4", 3)]
 
 
 def example_world(monkeypatch):
@@ -516,10 +515,11 @@ def example_world(monkeypatch):
     return cfg, reddit
 
 
-async def test_the_example_catalog_is_seven_requests_a_pass(monkeypatch, db_path, alerts):
+async def test_the_example_catalog_is_one_reddit_request_a_pass(monkeypatch, db_path, alerts):
     cfg, reddit = example_world(monkeypatch)
-    assert len(reddit) == 15
-    make_guild(db_path, 1001, tier="comped", games=FRIENDS_GAMES)
+    # v3.0.3: Reddit is r/Borderlands4 and nothing else, read only for SHiFT codes.
+    assert [c.name for c in reddit] == ["r/Borderlands4"]
+    assert cfg.codes_only_source_names() == {"r/Borderlands4"}
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -530,28 +530,29 @@ async def test_the_example_catalog_is_seven_requests_a_pass(monkeypatch, db_path
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         deps = make_deps(cfg, db_path, reddit, alerts, clock, http=http)
         counts = []
-        everyone: set[str] = set()
         for _ in range(3):
             requested.clear()
             await run_collection(deps)
             counts.append(len(requested))
-            assert {"borderlands4", "palworld", "diablo4"} <= set(requested)
-            everyone |= set(requested)
-    # 3 priority plus ceil(12 / 3) = 4 rotating, and three passes reach all fifteen.
-    assert counts == [7, 7, 7]
-    assert len(everyone) == 15
-    assert clock.now <= 3 * 7 * 35  # about four minutes a pass, not nine
+            assert requested == ["borderlands4"]
+    # One subreddit, so nothing rotates: it goes every pass.
+    assert counts == [1, 1, 1]
 
 
-async def test_the_friends_three_subreddits_stay_hourly_whatever_else_is_stale(
-    monkeypatch, db_path
-):
+async def test_the_one_codes_only_subreddit_is_priority_with_no_comped_server(monkeypatch, db_path):
     cfg, reddit = example_world(monkeypatch)
-    make_guild(db_path, 1001, tier="comped", games=FRIENDS_GAMES)
+    # Borderlands 4 is a SHiFT game, so its subreddit is hourly whoever follows what.
+    assert "borderlands4" in cfg.shift.games
     plan = plan_reddit(reddit, cfg, priority_games(cfg, db_path), {})
-    chosen = {c.name for c in plan.selected}
-    assert {"r/Borderlands4", "r/Palworld", "r/diablo4"} <= chosen
-    assert len(chosen) == 7 and plan.rotated_out == 8
+    assert [c.name for c in plan.selected] == ["r/Borderlands4"]
+    assert plan.rotated_out == 0
+    # Even asked to rotate only once a day, and fetched a minute ago, it still goes.
+    slow = cfg.model_copy(
+        update={"collection": cfg.collection.model_copy(update={"reddit_rotation_hours": 24})}
+    )
+    just_now = {"r/Borderlands4": NOW}
+    plan = plan_reddit(reddit, slow, priority_games(slow, db_path), just_now)
+    assert [c.name for c in plan.selected] == ["r/Borderlands4"]
 
 
 def test_the_rotation_knob_is_validated():
