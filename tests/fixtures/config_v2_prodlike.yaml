@@ -72,6 +72,18 @@ sources:
     url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day"
     topics: [borderlands4]
     trust: community
+  # Prod has these two as well. Since v3.0.3 they're warned about and skipped
+  # (Palworld and Diablo IV aren't SHiFT games, and Reddit is codes only).
+  - type: rss
+    name: "r/Palworld"
+    url: "https://www.reddit.com/r/Palworld/top/.rss?t=day"
+    topics: [palworld]
+    trust: community
+  - type: rss
+    name: "r/diablo4"
+    url: "https://www.reddit.com/r/diablo4/top/.rss?t=day"
+    topics: [diablo4]
+    trust: community
   # Two topics on one source: not dedicated to either, so it's shared, with
   # the restriction kept.
   - type: rss

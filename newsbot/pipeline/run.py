@@ -784,7 +784,11 @@ async def run_check_sources(
             timeout_s, _web_search_timeout(len(sub.catalog), sub.web_search.queries_per_game)
         )
     results = await run_collectors(collectors, http, timeout_s=timeout_s)
-    collected = [item for result in results for item in result.items]
+    from newsbot.pipeline.collect import storable_items
+
+    # The per-game counts are what a digest could have drawn on, so codes-only
+    # items (Reddit's) don't count toward them; their sources still show above.
+    collected = storable_items([item for result in results for item in result.items], sub)
     lookback = timedelta(hours=sub.collection.lookback_hours)
     normalized = normalize(collected, lambda _urls: set(), datetime.now(UTC), lookback)
     grouped = filter_items(normalized, sub.catalog, sub.collection.max_items_per_game)

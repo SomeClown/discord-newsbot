@@ -439,7 +439,7 @@ def fifteen_subreddits(cfg, clock):
     collectors = [
         FakeCollector(
             f"r/game{i}",
-            [item(f"https://reddit.com/r/game{i}/1", "post", topics=(f"game{i}",))],
+            [item(f"https://example.com/r/game{i}/1", "post", topics=(f"game{i}",))],
             key="reddit",
             clock=clock,
         )

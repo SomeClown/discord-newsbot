@@ -79,15 +79,12 @@ owner_report:
 # servers follow them. Servers' digests are built from what's stored, so
 # nothing is fetched when a digest posts. Shortening the interval buys fresher
 # SHiFT codes and costs more requests to people who didn't ask for them.
-# Reddit is the slow part: the collector spaces Reddit feeds 35 seconds apart,
-# and Reddit still answers 429 to a burst of fifteen from a datacenter address.
-# So most subreddits take turns. The ones that must stay fresh go every pass
-# (the SHiFT games' subreddits, and the subreddits of any game a comped server
-# follows); the rest rotate, stalest first, a few per pass, so each is fetched
-# about every reddit_rotation_hours. With the 15 below that is about 7 Reddit
-# requests a pass (about 4 minutes) instead of 15. A 429 stops Reddit for the
-# rest of that pass, and for longer if Reddit says so (Retry-After); that's a
-# skip, never a source failure.
+# Reddit is down to one feed (r/Borderlands4, codes only; see its entry), so
+# it's one request a pass. If you add more, the collector spaces Reddit feeds
+# 35 seconds apart and a 429 stops Reddit for the rest of that pass, and for
+# longer if Reddit says so (Retry-After); that's a skip, never a source
+# failure. The SHiFT games' subreddits go every pass, and any others rotate,
+# stalest first, about every reddit_rotation_hours.
 collection:
   interval_minutes: 60      # 15 to 1440
   lookback_hours: 24
@@ -241,16 +238,21 @@ catalog:
       # quiet: Palworld's account hasn't posted since June, and that's fine,
       # it'll just show "0 items" on the source health report.
       - {type: rss, name: "Borderlands Bluesky", url: "https://bsky.app/profile/did:plc:sxmjis6jypsib2k7rk6pjoau/rss", trust: official}
-      # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest
-      # posts, and on a subreddit that gets bug reports and help threads all
-      # day, an hourly look would see whatever happened to post in the last
-      # hour rather than what people actually cared about. Reddit
-      # rate-limits hard, even from a residential IP (five feeds fired at
-      # once got one 200 and four 429s), so the collector spaces them out. It
-      # also might just block the production box's IP outright. If that
-      # happens, the source health report will show it, not a crash. One
-      # subreddit per game keeps the hourly pass short.
-      - {type: rss, name: "r/Borderlands4", url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", trust: community}
+      # The only Reddit feed, and it's here only to spot SHiFT codes. Reddit
+      # denied this bot's Data API access (2026-10-04, Responsible Builder
+      # Policy) and forbids sharing its content, so `codes_only: true` means
+      # the feed is read for codes and never stored: its posts can't reach a
+      # digest, a summary, /news or the AI. (Any Reddit feed is codes-only
+      # whether it says so or not, and one for a game that isn't in
+      # shift.games is skipped with a warning.) A code alert may still link
+      # back to the post it came from.
+      #
+      # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest posts,
+      # and an hourly look at a busy subreddit would see whatever happened to
+      # post in the last hour. Reddit rate-limits hard, so the collector
+      # spaces its requests out, and it might block the production box's IP
+      # outright; the source health report will show it, not a crash.
+      - {type: rss, name: "r/Borderlands4", url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", trust: community, codes_only: true}
       # Community: Bluesky search. These are here so the config is ready the
       # day you're willing to make a Bluesky app password; until
       # BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are both set, every one of
@@ -271,7 +273,6 @@ catalog:
     sources:
       - {type: steam_news, name: "Palworld Steam", app_id: 1623730, trust: official}
       - {type: rss, name: "Palworld Bluesky", url: "https://bsky.app/profile/did:plc:g3nrnn7t2tvoekp5flrexiby/rss", trust: official}
-      - {type: rss, name: "r/Palworld", url: "https://www.reddit.com/r/Palworld/top/.rss?t=day", trust: community}
       - {type: bluesky_search, query: "Palworld", trust: community}
 
   - key: diablo4
@@ -301,7 +302,6 @@ catalog:
       # where Diablo IV's official posts land about once a month.
       - {type: rss, name: "Diablo IV Blizzard Tracker", url: "https://us.forums.blizzard.com/en/d4/groups/blizzard-tracker/posts.rss", trust: official}
       - {type: rss, name: "Diablo Bluesky", url: "https://bsky.app/profile/did:plc:wxfwmaqg4kgiwzxcygdt2myj/rss", trust: official}
-      - {type: rss, name: "r/diablo4", url: "https://www.reddit.com/r/diablo4/top/.rss?t=day", trust: community}
       - {type: bluesky_search, query: "\"Diablo 4\"", trust: community}
 
   # The next twelve were researched on 2026-09-30 (docs/sources-research.md,
@@ -321,10 +321,9 @@ catalog:
       - "Fortnite news"
       - "Fortnite update OR season OR patch notes"
     # No official source could be verified (fortnite.com/news returns 403; no
-    # domain-verified Bluesky account; not on Steam). Coverage is the
-    # subreddit plus keyword matches from the shared press feeds.
-    sources:
-      - {type: rss, name: "r/FortNiteBR", url: "https://www.reddit.com/r/FortNiteBR/top/.rss?t=day", trust: community}
+    # domain-verified Bluesky account; not on Steam), and its subreddit is no
+    # longer a source (see r/Borderlands4 above). Coverage is keyword matches
+    # from the shared press feeds.
 
   - key: callofduty
     name: "Call of Duty"
@@ -344,7 +343,6 @@ catalog:
       # 2026-10-23 launch.
       - {type: steam_news, name: "Call of Duty Steam", app_id: 1938090, trust: official}
       - {type: rss, name: "Call of Duty Bluesky", url: "https://bsky.app/profile/did:plc:7jjrye4uusbxcpmenc7bw4uh/rss", trust: official}
-      - {type: rss, name: "r/CallOfDuty", url: "https://www.reddit.com/r/CallOfDuty/top/.rss?t=day", trust: community}
 
   - key: marvelrivals
     name: "Marvel Rivals"
@@ -355,7 +353,6 @@ catalog:
       - "Marvel Rivals season OR patch OR balance"
     sources:
       - {type: steam_news, name: "Marvel Rivals Steam", app_id: 2767030, trust: official}
-      - {type: rss, name: "r/marvelrivals", url: "https://www.reddit.com/r/marvelrivals/top/.rss?t=day", trust: community}
 
   - key: valorant
     name: "VALORANT"
@@ -365,9 +362,8 @@ catalog:
       - "VALORANT news"
       - "VALORANT patch notes OR agent OR VCT"
     # The domain-verified VALORANT and Riot Games Bluesky accounts both
-    # returned 0 items, and playvalorant.com has no RSS. Subreddit only.
-    sources:
-      - {type: rss, name: "r/VALORANT", url: "https://www.reddit.com/r/VALORANT/top/.rss?t=day", trust: community}
+    # returned 0 items, and playvalorant.com has no RSS, so there is no
+    # source of its own; keyword matches from the shared press feeds only.
 
   - key: cs2
     name: "Counter-Strike 2"
@@ -379,7 +375,6 @@ catalog:
     sources:
       - {type: steam_news, name: "Counter-Strike 2 Steam", app_id: 730, trust: official}
       - {type: rss, name: "HLTV News", url: "https://www.hltv.org/rss/news", trust: press}
-      - {type: rss, name: "r/GlobalOffensive", url: "https://www.reddit.com/r/GlobalOffensive/top/.rss?t=day", trust: community}
 
   - key: apexlegends
     name: "Apex Legends"
@@ -394,7 +389,6 @@ catalog:
       - "Apex Legends season OR patch OR update"
     sources:
       - {type: steam_news, name: "Apex Legends Steam", app_id: 1172470, trust: official}
-      - {type: rss, name: "r/apexlegends", url: "https://www.reddit.com/r/apexlegends/top/.rss?t=day", trust: community}
 
   - key: rust
     name: "Rust"
@@ -410,7 +404,6 @@ catalog:
     sources:
       - {type: steam_news, name: "Rust Steam", app_id: 252490, trust: official}
       - {type: rss, name: "Rust Facepunch News", url: "https://rust.facepunch.com/rss/news", trust: official}
-      - {type: rss, name: "r/playrust", url: "https://www.reddit.com/r/playrust/top/.rss?t=day", trust: community}
 
   - key: destiny2
     name: "Destiny 2"
@@ -428,7 +421,6 @@ catalog:
     sources:
       - {type: steam_news, name: "Destiny 2 Steam", app_id: 1085660, trust: official}
       - {type: rss, name: "Destiny 2 Bluesky", url: "https://bsky.app/profile/did:plc:lakwqi74b3kcqzk6mpk4kqvy/rss", trust: official}
-      - {type: rss, name: "r/DestinyTheGame", url: "https://www.reddit.com/r/DestinyTheGame/top/.rss?t=day", trust: community}
 
   - key: warframe
     name: "Warframe"
@@ -441,7 +433,6 @@ catalog:
       - {type: steam_news, name: "Warframe Steam", app_id: 230410, trust: official}
       - {type: rss, name: "Warframe PC Update Notes", url: "https://forums.warframe.com/forum/3-pc-update-notes.xml/", trust: official}
       - {type: rss, name: "Warframe Bluesky", url: "https://bsky.app/profile/did:plc:24m2xjetjmjfdbgo752skciu/rss", trust: official}
-      - {type: rss, name: "r/Warframe", url: "https://www.reddit.com/r/Warframe/top/.rss?t=day", trust: community}
 
   - key: ffxiv
     name: "Final Fantasy XIV"
@@ -456,7 +447,6 @@ catalog:
       - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
       - {type: rss, name: "FFXIV Lodestone Topics", url: "https://na.finalfantasyxiv.com/lodestone/news/topics.xml", trust: official}
       - {type: rss, name: "FFXIV Lodestone News", url: "https://na.finalfantasyxiv.com/lodestone/news/news.xml", trust: official}
-      - {type: rss, name: "r/ffxiv", url: "https://www.reddit.com/r/ffxiv/top/.rss?t=day", trust: community}
 
   - key: aniimo
     name: "Aniimo"
@@ -467,7 +457,6 @@ catalog:
       - "Aniimo update OR patch OR event"
     sources:
       - {type: steam_news, name: "Aniimo Steam", app_id: 4126040, trust: official}
-      - {type: rss, name: "r/Aniimo", url: "https://www.reddit.com/r/Aniimo/top/.rss?t=day", trust: community}
 
   - key: wardogs
     name: "WARDOGS"
@@ -480,7 +469,6 @@ catalog:
       - "WARDOGS Bulkhead update OR patch OR season"
     sources:
       - {type: steam_news, name: "WARDOGS Steam", app_id: 1867240, trust: official}
-      - {type: rss, name: "r/WarDogs", url: "https://www.reddit.com/r/WarDogs/top/.rss?t=day", trust: community}
 
 # --- Single-server keys (needed only for the lounge) ---
 #

@@ -23,8 +23,8 @@ Two tiers, and only one of them costs the maintainer money.
 
 - **Free (every server):** a headline digest for each game you follow, plus
   SHiFT code alerts if you turn them on. No AI is involved. The headlines come
-  from the shared collection (official blogs, Steam announcements, subreddits,
-  Bluesky, gaming sites, and web search results), sorted official first, then
+  from the shared collection (official blogs, Steam announcements, Bluesky,
+  gaming sites, and web search results), sorted official first, then
   press, then community. `/news recent` and `/news search` show those same
   stored headlines.
 - **Comped (a few servers the maintainer covers on his own keys):** the same,
@@ -238,6 +238,7 @@ take back:
   seen from a source whose trust is in `shift.ping_trust` (default:
   `official`, `press`) makes its batch carry the server's ping. A
   community-only code (a Reddit thread guessing at one, say) posts quietly.
+  (Reddit is only read to spot codes; see "Reddit is codes only" below.)
 - **A second source can earn the ping.** If a community-only code is then seen
   by a second, independent source (a different source name, compared without
   regard to case) or an official or press one within 24 hours of its first
@@ -480,12 +481,20 @@ comped server following three games:
 - **Collection and SHiFT**: no Claude or Brave cost at all. The hourly pass
   makes one `GET` per RSS/Steam/Bluesky source, whichever servers follow them
   (these are requests to each source's own site, not to Discord's API) and, on
-  Bluesky, a login per pass. Reddit is the slow part: feeds are spaced 35
-  seconds apart, so 15 subreddits add about 9 minutes to every pass.
+  Bluesky, a login per pass. Reddit feeds are spaced 35 seconds apart, which
+  matters only if you configure several (the example has one).
 
 ## Limitations and known issues
 
-- **Reddit may block datacenter IPs.** The subreddit sources were verified
+- **Reddit is codes only.** Reddit denied this bot's Data API access request
+  (2026-10-04) and its Responsible Builder Policy bars sharing Reddit content,
+  so the one subreddit in the example, r/Borderlands4, is read only to spot
+  SHiFT codes (`codes_only: true`). Its posts are never stored, so they can't
+  show up in a digest, a summary, `/news`, or the AI's input. Any source on
+  reddit.com is treated that way, and one for a game that isn't in
+  `shift.games` is skipped with a warning. A code alert can still link to the
+  post it came from.
+- **Reddit may block datacenter IPs.** The subreddit source was verified
   from a residential connection; Reddit rate-limits aggressively even there,
   and may reject requests outright from a hosting provider's IP range in
   production. If it happens, it shows up in `/newsbot status` ("N of M sources

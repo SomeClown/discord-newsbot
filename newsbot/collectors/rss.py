@@ -28,12 +28,12 @@ import httpx
 from newsbot import text
 from newsbot.collectors.base import RateLimited, RawItem
 from newsbot.config import RssSource
+from newsbot.reddit import is_reddit_host
 from newsbot.useragent import user_agent_headers
 
 logger = logging.getLogger(__name__)
 
 _HEADERS = user_agent_headers()
-_REDDIT_HOSTS = frozenset({"www.reddit.com", "reddit.com", "old.reddit.com"})
 
 # A non-Reddit host's 429 usually clears after a short pause; a couple of
 # retries here is cheap insurance. (Reddit's retries used to live here too;
@@ -222,7 +222,7 @@ class RssCollector:
         self.name = source.name
         self._sleep = sleep or asyncio.sleep
         host = httpx.URL(str(source.url)).host
-        self.rate_limit_key = "reddit" if host in _REDDIT_HOSTS else None
+        self.rate_limit_key = "reddit" if is_reddit_host(host) else None
 
     async def collect(self, http: httpx.AsyncClient) -> list[RawItem]:
         body = await _fetch_body(

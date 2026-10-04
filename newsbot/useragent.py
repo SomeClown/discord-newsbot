@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # this comment claimed nothing could catch it drifting, which was true only
 # because nobody had written the three-line test that does; see
 # test_fallback_version_matches_pyproject.
-_FALLBACK_VERSION = "3.0.2"
+_FALLBACK_VERSION = "3.0.3"
 
 _REPO_URL = "https://github.com/someclown/discord-newsbot"
 _UNSET_CONTACT = f"{_REPO_URL}, contact unset"
