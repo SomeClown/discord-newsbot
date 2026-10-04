@@ -714,10 +714,11 @@ and the daily owner report lists every failing source; `/newsbot status`
 in a server shows "N of M sources ok" for its games. That's the designed
 behavior, not a fresh problem each time it happens. If it persists, that's an
 owner decision (drop Reddit as a source, or accept the gap) per
-`docs/design.md` §4, not something to patch around here. The collector spaces
-Reddit feeds 35 seconds apart, so 15 subreddits add about 9 minutes to every
-hourly pass; a pass that takes more than half the interval is logged
-as a warning.
+`docs/design.md` §4, not something to patch around here. Since v3.0.3 the only
+Reddit feed is `r/Borderlands4`, read just to spot SHiFT codes, so a Reddit
+failure costs code alerts and nothing else. The collector still spaces any
+Reddit feeds 35 seconds apart; a pass that takes more than half the interval
+is logged as a warning.
 
 **A YouTube feed 404s.** YouTube's channel RSS feeds occasionally 404
 upstream for reasons outside this bot's control (a channel's video ID

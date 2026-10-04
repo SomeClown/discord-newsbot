@@ -65,8 +65,8 @@ catalog:
         trust: official
 
 shared_sources:
-  # A general games-press RSS feed (a developer blog, a subreddit's
-  # /top/.rss?t=day, a site's own /feed): shared, on purpose. A shared source
+  # A general games-press RSS feed (a developer blog, a site's own /feed):
+  # shared, on purpose. A shared source
   # is fetched once and keyword-matched against every game in the catalog
   # (the game's `name` and `aliases`), which is right for a wide-coverage feed
   # that covers other games too. A dedicated source (one listed under a game)
