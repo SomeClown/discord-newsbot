@@ -233,6 +233,7 @@ Plan task 17: sources, aliases and search queries for the 12 games joining the p
 - FFXIV Lodestone News (`.../lodestone/news/news.xml`): 20 items, 5 in 7d. Maintenance, server issues and update notices; more housekeeping, but that's what players check.
 - r/ffxiv: 25 items.
 - Both Lodestone feeds were found by autodiscovery on the Lodestone front page.
+- **Dropped 2026-10-04:** in production both feeds returned `403 Forbidden` on every pass from the Droplet (8 in a row by the first owner report), while loading fine from a home connection. A check from the Droplet got 403 over IPv4, and IPv6 didn't connect at all, so it's a block on the datacenter range, not something a setting can fix. FFXIV keeps its Steam feed and the shared press feeds.
 
 **Aniimo** (`aniimo`): **include.** Entity `Pawprint Studio`.
 - Aniimo Steam (4126040): 12 items, newest 2026-09-29. Real patch notes and maintenance posts since the 2026-09-15 launch, so the official-source bar is met.

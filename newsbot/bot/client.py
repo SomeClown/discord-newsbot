@@ -1484,7 +1484,8 @@ class NewsBot(discord.Client):
             if repo.app_state_get(conn, _OWNER_REPORT_KEY) == today:
                 return None
             rows = repo.recent_guild_digests(conn, now - timedelta(hours=24))
-            failing = repo.failing_sources(conn)
+            configured = self.cfg.configured_source_names()
+            failing = [r for r in repo.failing_sources(conn) if r.source_name in configured]
             repo.app_state_set(conn, _OWNER_REPORT_KEY, today)
         outcomes = [outcome_from_digest(status, notes) for status, notes in rows]
         return render_owner_report(outcomes, failing)

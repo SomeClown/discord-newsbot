@@ -1,6 +1,6 @@
 [project]
 name = "newsbot"
-version = "3.0.4"
+version = "3.0.5"
 description = "Daily AI-summarized Discord news digest for a small gaming server."
 requires-python = ">=3.14,<3.15"
 dependencies = [

@@ -173,8 +173,6 @@ catalog:
     match_name: true
     sources:
       - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
-      - {type: rss, name: "FFXIV Lodestone Topics", url: "https://na.finalfantasyxiv.com/lodestone/news/topics.xml", trust: official}
-      - {type: rss, name: "FFXIV Lodestone News", url: "https://na.finalfantasyxiv.com/lodestone/news/news.xml", trust: official}
       - {type: rss, name: "r/ffxiv", url: "https://www.reddit.com/r/ffxiv/top/.rss?t=day", trust: community}
 
   - key: aniimo
