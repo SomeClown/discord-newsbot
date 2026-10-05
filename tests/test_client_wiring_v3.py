@@ -936,13 +936,15 @@ async def test_the_owner_report_goes_out_again_the_next_day(bot, monkeypatch):
 async def test_the_owner_report_lists_failing_sources(bot, monkeypatch):
     alerts = _alerts(bot, monkeypatch)
     now = datetime.now(UTC)
+    # The report only lists sources still in the config, so use a real one.
+    name = sorted(bot.cfg.configured_source_names())[0]
     with closing(connect(bot.db_path)) as conn:
         for _ in range(3):
-            repo.record_source_result(conn, "Broken Feed", now, "503 from host")
+            repo.record_source_result(conn, name, now, "503 from host")
 
     await bot._owner_report_job()
 
-    assert "1 failing source:" in alerts[0] and "Broken Feed (3 in a row)" in alerts[0]
+    assert "1 failing source:" in alerts[0] and f"{name} (3 in a row)" in alerts[0]
 
 
 async def test_a_crashing_owner_report_alerts_and_does_not_raise(bot, monkeypatch):

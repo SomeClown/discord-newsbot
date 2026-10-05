@@ -665,6 +665,17 @@ class AppConfig(BaseModel):
         sources = [s for g in self.catalog for s in g.sources] + list(self.shared_sources)
         return frozenset(s.name for s in sources if s.name and effective_codes_only(s))
 
+    def configured_source_names(self) -> frozenset[str]:
+        """Every source name the current config would collect from, shared ones included.
+
+        `source_health` keeps a row for every name it ever saw, so a source dropped
+        from the config (the Lodestone feeds that only ever 403'd from the Droplet,
+        say) would otherwise sit in the owner's daily report forever, frozen at its
+        last failure count.
+        """
+        sources = [s for g in self.catalog for s in g.sources] + list(self.shared_sources)
+        return frozenset(s.name for s in sources if s.name)
+
     def game_source_names(self, game_key: str) -> list[str]:
         """Names of the sources that feed `game_key`: its own, plus shared ones that cover it.
 

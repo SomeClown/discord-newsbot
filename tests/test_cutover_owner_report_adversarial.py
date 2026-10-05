@@ -283,3 +283,23 @@ async def test_the_report_goes_to_the_owner_channel_and_not_to_the_friend(make_w
 
     assert len(reports(world)) == 1
     assert [m for m in world.sent(FRIEND_ADMIN_CH) if "newsbot daily" in m.content] == []
+
+
+async def test_a_source_dropped_from_the_config_leaves_the_failing_list(make_world, clock):
+    # `source_health` keeps every name it ever saw. The Lodestone feeds were dropped
+    # from the catalog after a week of 403s from the Droplet; without the filter they'd
+    # sit in every nightly report forever, frozen at their last count.
+    world = await make_world(now=DUE, owner_channel=True)
+    digest(world, 61, "ok")
+    configured = sorted(world.bot.cfg.configured_source_names())
+    assert configured, "the prod-like config should have sources"
+    with closing(connect(world.db_path)) as conn:
+        for _ in range(3):
+            repo.record_source_result(conn, "FFXIV Lodestone News", DUE, "403 Forbidden")
+            repo.record_source_result(conn, configured[0], DUE, "500 Server Error")
+
+    await world.bot._owner_report_job()
+
+    (text,) = reports(world)
+    assert configured[0] in text
+    assert "Lodestone" not in text

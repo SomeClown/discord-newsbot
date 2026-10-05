@@ -449,10 +449,12 @@ catalog:
     search_queries:
       - "\"Final Fantasy XIV\" OR FFXIV news"
       - "FFXIV patch OR update OR \"Live Letter\""
+    # The Lodestone's own feeds (news.xml and topics.xml) were dropped on
+    # 2026-10-04: they load fine from a home connection but return 403 to the
+    # Droplet's datacenter address, every pass. Steam plus the press feeds
+    # carry the patches and Live Letters well enough.
     sources:
       - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
-      - {type: rss, name: "FFXIV Lodestone Topics", url: "https://na.finalfantasyxiv.com/lodestone/news/topics.xml", trust: official}
-      - {type: rss, name: "FFXIV Lodestone News", url: "https://na.finalfantasyxiv.com/lodestone/news/news.xml", trust: official}
 
   - key: aniimo
     name: "Aniimo"
