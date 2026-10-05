@@ -26,6 +26,7 @@ from newsbot.lounge.quotes import (
 from newsbot.lounge.sources import MAX_SOURCE_BYTES, _parse_fortune
 
 QUOTES_FILE = Path(__file__).parent.parent / "quotes" / "rage-quit-tavern.txt"
+REVIEW_FILE = QUOTES_FILE.with_name("rage-quit-tavern-review.md")
 
 
 @pytest.fixture(scope="module")
@@ -137,3 +138,20 @@ def test_attributions_are_short_and_plain(quotes: list[Quote]):
         assert "*" not in attribution, attribution
         for noise in ("ISBN", "Chapter ", "Ch. ", " p. ", "Letter to"):
             assert noise not in attribution, attribution
+
+
+def test_no_attribution_carries_a_year_the_review_file_marks_as_dropped(quotes: list[Quote]):
+    # A year only stays if the Wikiquote page gives it. The review file lists the
+    # "Work (year)" forms whose years came from memory instead, and they stay gone.
+    review = REVIEW_FILE.read_text(encoding="utf-8")
+    section = review.split("## Years dropped", 1)[1].split("## Revisions used", 1)[0]
+    dropped = [line[2:].strip() for line in section.splitlines() if line.startswith("- ")]
+    assert len(dropped) >= 10
+    for q in quotes:
+        attribution = q.text.split("\n")[-1][len(ATTRIBUTION_PREFIX) :]
+        assert not any(attribution == d for d in dropped), attribution
+
+
+def test_the_count_matches_the_review_file(quotes: list[Quote]):
+    review = REVIEW_FILE.read_text(encoding="utf-8")
+    assert f"Total: **{len(quotes)}** quotes" in review

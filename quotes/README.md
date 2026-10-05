@@ -2,7 +2,7 @@
 
 `rage-quit-tavern.txt` is Rage Quit Tavern's own list for the lounge's daily quote ("Today's pour", 08:00 Pacific). It replaces the eight Wikiquote pages the lounge started with. It's not the bot's default list and nothing in the code or `config.example.yaml` points at it; it's one server's bar playlist, kept in the repo so it has a history.
 
-It holds 362 quotes. The brief said about 400. Everything is filled except Jack Handey, who has 12 of his 50: Wikiquote has no Deep Thoughts page, and his sourced quotes are spread thin across a handful of topic pages. I'd rather ship a short list than a padded one. The numbers and the reasoning are at the top of `rage-quit-tavern-review.md`, which is also where to skim every quote with its page, its full original citation and its tags.
+It holds 361 quotes. The brief said about 400, and the owner is happy at about 360. Everything is filled except Jack Handey, who has 12 of his 50: Wikiquote has no Deep Thoughts page, and his sourced quotes are spread thin across a handful of topic pages. I'd rather ship a short list than a padded one. The numbers and the reasoning are at the top of `rage-quit-tavern-review.md`, which is also where to skim every quote with its page, its full original citation and its tags.
 
 ## The rules
 
@@ -23,12 +23,12 @@ Space is big. Really big.
 ```
 
 - The attribution line starts with `~ ` (the lounge's `ATTRIBUTION_PREFIX`), so the post looks the way a Wikiquote quote does. Without it the attribution would just be more quote.
-- Keep the attribution short: author or speaker, then the work, then the year if the source gives one (`~ Hunter S. Thompson, The Proud Highway (1997)`). No chapters, page numbers or ISBNs. Don't name a work the quote didn't come from; if all you know is the author, the author alone is correct.
+- Keep the attribution short: author or speaker, then the work, then the year only if the Wikiquote page gives one (never from memory) (`~ Hunter S. Thompson, The Proud Highway (1997)`). No chapters, page numbers or ISBNs. Don't name a work the quote didn't come from; if all you know is the author, the author alone is correct.
 - Plain titles, no asterisks for italics. The bot escapes asterisks, so `*Title*` would post with the asterisks showing.
 - Multi-line dialogue is fine if it's short and the exchange is the joke. Keep each speaker's name at the start of their line.
 - There are no comments in the file. The fortune format doesn't have any, so a comment would be posted as a quote, which is a lot of ways to ruin a Tuesday.
 - To remove one, delete the entry (its lines and the `%` after it).
-- A rendered message has to fit in 2,000 UTF-16 units (header, escaped text and attribution); the bot drops an entry that doesn't. There is no shorter limit for a file entry, and the longest quotes here (a few Python sketches) run to about 1,750. `tests/test_curated_quotes.py` fails if one is too long, if two are the same, or if one is missing its attribution line, so run `pytest -q tests/test_curated_quotes.py` after editing.
+- A rendered message has to fit in 2,000 UTF-16 units (header, escaped text and attribution); the bot drops an entry that doesn't. There is no shorter limit for a file entry, and the longest quotes here (a few Python sketches) run to about 1,450. `tests/test_curated_quotes.py` fails if one is too long, if two are the same, or if one is missing its attribution line, so run `pytest -q tests/test_curated_quotes.py` after editing.
 - Anything new has to pass the rules above. If it came from Wikiquote, run it through the parser first.
 
 Two quirks of a plain file, neither worth a code change:

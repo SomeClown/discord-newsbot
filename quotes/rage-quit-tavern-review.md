@@ -1,13 +1,13 @@
 # Rage Quit Tavern quotes: review sheet
 
-Total: **362** quotes in `quotes/rage-quit-tavern.txt` (the brief asked for about 400). **13** are flagged "owner check". The attribution under each quote is the short form that posts in the lounge; the parser's full original citation sits next to it.
+Total: **361** quotes in `quotes/rage-quit-tavern.txt` (the brief asked for about 400; the owner is happy at about 360, so Jack Handey and the rest are not topped up). **13** are flagged "owner check". The attribution under each quote is the short form that posts in the lounge; the parser's full original citation sits next to it.
 
 ## Counts and shortfalls
 
 | Source | Target | Taken | Shortfall |
 |---|---|---|---|
 | Douglas Adams (the Hitchhiker's books) | 65 | 65 |  |
-| Monty Python | 55 | 55 |  |
+| Monty Python | 55 | 54 | 1 |
 | Jack Handey (Deep Thoughts) | 50 | 12 | 38 |
 | Hunter S. Thompson | 35 | 35 |  |
 | H. L. Mencken | 35 | 35 |  |
@@ -23,13 +23,13 @@ Total: **362** quotes in `quotes/rage-quit-tavern.txt` (the brief asked for abou
 | Red Dwarf | 10 | 10 |  |
 | Futurama | 10 | 10 |  |
 | Office Space | 10 | 10 |  |
-| **Total** | 400 | 362 | 38 |
+| **Total** | 400 | 361 | 39 |
 
 **The one shortfall: Jack Handey, 12 of 50.** Wikiquote has no Deep Thoughts page, and the "Jack Handey" page holds 9 sourced quotes. The topic pages the owner approved (Boxing, Key, War, Embarrassment) plus Sand, which turned up in a Wikiquote search, add three more that the parser accepts as Handey's: one each from Boxing, Sand and Embarrassment. The "Key" and "War" Handey quotes are the same lines already on the Handey page (the War one differs by a comma), so I counted them once. I searched Wikiquote for his name, "Deep Thoughts" and his book titles; those five topic pages were the only other hits. I didn't backfill from anywhere else.
 
 Three of the twelve have a citation that isn't a clean Deep Thoughts one (Boxing: "Jack Handey view on boxing"; Sand: "as quoted in Quotes about Wisdom, Quotations Book"; Embarrassment: "in The History of the Snowman, p. 145"), so those post as just "Jack Handey" with no work named, because I won't name a work the page doesn't clearly give.
 
-**Monty Python, 55 of 55.** Filled by treating *The Meaning of Life* and *Flying Circus* as works in the extraction script (see below). Split: Holy Grail 8 (all the page offers), Life of Brian 12 (of 21), Meaning of Life 10 (of 30), Flying Circus 25 (of 154).
+**Monty Python, 55 of 55.** Filled by treating *The Meaning of Life* and *Flying Circus* as works in the extraction script (see below). Split: Holy Grail 8 (all the page offers), Life of Brian 11 (of 21; I removed the Latin lesson, the longest entry, at the owner's request and did not replace it), Meaning of Life 10 (of 30), Flying Circus 25 (of 154).
 
 ## How the selection was made
 
@@ -42,9 +42,9 @@ Three of the twelve have a citation that isn't a clean Deep Thoughts one (Boxing
 **One-off extraction settings (in my scratch script, not in `newsbot/`).** The bot's parser is untouched; I changed two things in the throwaway script before calling it, and only for the pages named here.
 
 - *Page kind.* `_page_kind` was told to treat *Monty Python's The Meaning of Life*, *Monty Python's Flying Circus* and the `Futurama/Season N` pages as works, so their dialogue sections count. Without that the parser sees "author" pages and discards every dialogue block. Season 6 and 7 then yielded quotes (217 and 127); seasons 1 to 5 and 8 still yield none (their markup isn't dialogue lists the parser reads). Season 6 gave 6 of Futurama's 10; the other 4 come from the *Bender's Big Score* page.
-- *Length.* The parser's 400-character cutoff (`MAX_WIKIQUOTE_CHARS`) exists for whole Wikiquote pages, and a file source has no such cutoff. What applies to a file entry is `fits()`: the rendered message (header, escaped entry) must be at most 2,000 UTF-16 units. I used that as the limit. The longest entry in the file renders at **1777** units, and only five entries run past 1,300 (the Bring Out Your Dead scene, the Holy Hand Grenade, Brian's Latin lesson, the Messiah crowd, and the blancmange tennis sketch).
+- *Length.* The parser's 400-character cutoff (`MAX_WIKIQUOTE_CHARS`) exists for whole Wikiquote pages, and a file source has no such cutoff. What applies to a file entry is `fits()`: the rendered message (header, escaped entry) must be at most 2,000 UTF-16 units. I used that as the limit. The longest entry in the file renders at **1476** units, and only four entries run past 1,300 (the Bring Out Your Dead scene, the Holy Hand Grenade, the Messiah crowd and the blancmange tennis sketch).
 
-**Attributions.** Short form: author or speaker, then work, then year where the page gives one: "Hunter S. Thompson, The Proud Highway (1997)". No chapters, pages, ISBNs, letter recipients or dates beyond the year. Where a citation is only "as quoted in" somewhere, or names no work (Usenet, a speech, a toast), the attribution is just the author (or "Terry Pratchett, Usenet"), because naming the secondhand source as if it were the work would be wrong. Years for TV and film are the release or first-air year (Flying Circus uses the series' first-air year: 1969, 1970, 1972, 1974); those are not all on the Wikiquote pages. The Hitchhiker's page's own attributions don't name the author, so "Douglas Adams, " is put in front of the book and year.
+**Attributions.** Short form: author or speaker, then work, then a year only where the Wikiquote page itself gives one: "Hunter S. Thompson, The Proud Highway (1997)". No chapters, pages, ISBNs, letter recipients or dates beyond the year. Where a citation is only "as quoted in" somewhere, or names no work (Usenet, a speech, a toast), the attribution is just the author (or "Terry Pratchett, Usenet"), because naming the secondhand source as if it were the work would be wrong. A year I couldn't point to on the source page is dropped (see "Years dropped" below). The Hitchhiker's page's own attributions don't name the author, so "Douglas Adams, " is put in front of the book and year.
 
 **Titles are plain, not in asterisks.** The bot's `esc()` escapes every asterisk, so `*Title*` would post as `\*Title\*` and Discord would show the asterisks literally. I checked the escaped output, and plain titles it is.
 
@@ -701,7 +701,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 - Tags: humor, irreverent
 
 
-## Monty Python (55)
+## Monty Python (54)
 
 **1.**
 
@@ -739,7 +739,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Dead Collector: Not at all. See you on Thursday.
 > Large Man: Right.
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: Bring out your dead, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -752,7 +752,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Large Man: Why?
 > Dead Collector: He hasn't got shit all over him.
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: Must be a king, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -782,7 +782,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Peasant: I got better.
 > Peasant Crowd: Burn her anyway!
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: Turned me into a newt, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -801,7 +801,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > God: Well don't! It's like those miserable psalms. They're so depressing. Now knock it off!
 > King Arthur: Yes, Lord!
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: The quest for the holy grail!, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -815,7 +815,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Sir Galahad: Is there someone else up there we could talk to?
 > Frenchman: No, now go away or I shall taunt you a second time!
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: French taunts, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -831,7 +831,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > King Arthur: Well, what do you want?
 > Head Knight: We want... a shrubbery!! [jarring chord]
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: Knights who say Ni, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -850,7 +850,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > [Cut back to Arthur]
 > King Arthur: On second thought, let's not go to Camelot. It is a silly place.
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: It's a silly place, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -870,7 +870,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Galahad: Three, sir.
 > King Arthur: Three! [throws the grenade]
 
-- Posts as: Monty Python and the Holy Grail (1975)
+- Posts as: Monty Python and the Holy Grail
 - Full citation on the page: Holy hand grenade, Monty Python and the Holy Grail
 - Wikiquote page: [Monty Python and the Holy Grail](https://en.wikiquote.org/wiki/Monty_Python_and_the_Holy_Grail)
 - Tags: irreverent
@@ -879,7 +879,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > What Jesus blatantly fails to appreciate is that it's the meek who are the problem.
 
-- Posts as: Reg, Monty Python's Life of Brian (1979)
+- Posts as: Reg, Monty Python's Life of Brian
 - Full citation on the page: Reg, Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -888,7 +888,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Now, you listen here: 'e's not the Messiah, 'e's a very naughty boy! Now go away!
 
-- Posts as: Mandy, Monty Python's Life of Brian (1979)
+- Posts as: Mandy, Monty Python's Life of Brian
 - Full citation on the page: Mandy, Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -897,7 +897,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Oh, what I wouldn't give to be spat at in the face. I sometimes hang awake at night dreaming of being spat at in the face.
 
-- Posts as: Prisoner, Monty Python's Life of Brian (1979)
+- Posts as: Prisoner, Monty Python's Life of Brian
 - Full citation on the page: Prisoner, Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -906,7 +906,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > You lucky bastards! You lucky, jammy bastards!
 
-- Posts as: Prisoner, Monty Python's Life of Brian (1979)
+- Posts as: Prisoner, Monty Python's Life of Brian
 - Full citation on the page: Prisoner, Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -923,7 +923,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Wise man: No, no, no. That's just him.
 > Mandy: Ohh, I was going to say, 'Otherwise, there'd be a lot of them.'
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -935,7 +935,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Gregory's wife: What's so special about the cheesemakers?
 > Gregory: Well, obviously it's not meant to be taken literally. It refers to any manufacturer of...dairy products.
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
@@ -945,68 +945,23 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Brian: There's no pleasing some people.
 > Ex-leper: That's just what Jesus said, sir.
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
 
 **16.**
 
-> [Brian is caught defacing a wall at night]
-> Centurion: What's this then? "Romanes eunt domus"? "People called Romanes, they go the 'ouse"?
-> Brian: It–it says "Romans go home".
-> Centurion: No it doesn't. What's Latin for "Roman"? Come on. Come on!
-> Brian: "Romanus"?
-> Centurion: Goes like?
-> Brian: "Annus"?
-> Centurion: Vocative plural of "annus" is...?
-> Brian: "Anni."
-> Centurion: [writing] "Romani". "Eunt"? What is "eunt"?
-> Brian: "Go".
-> Centurion: Conjugate the verb "to go".
-> Brian: Ire, eo, is, it, imus, itis, eunt.
-> Centurion: So "eunt" is?
-> Brian: Third person plural, present indicative. "They go".
-> Centurion: But "Romans go home" is an order, so you must use the? [tugs on Brian's ear]
-> Brian: Ah, imperative?
-> Centurion: Which is?
-> Brian: Uh, uhm, "I"! "I"!
-> Centurion: How many Romans?
-> Brian: Aah! Plural, plural! "Ite"! "Ite"!
-> Centurion: [writing] "Ite". "Domus"? Nominative? "Go home", this is motion towards, isn't it, boy?
-> Brian: Dative? [centurion angrily draws his sword to Brian's throat] Ah! Not dative! Not the dative, sir! Ah! Ah! Oh! Accusative, accusative! "Domum", sir. "Ad domum".
-> Centurion: Except that "domus" takes the?
-> Brian: The locative, sir?
-> Centurion: Which is?
-> Brian: "Domum"!
-> Centurion: "Domum". [writing] "Um". Understand?
-> Brian: Yes, sir.
-> Centurion: Now write it out a hundred times.
-> Brian: Yes sir. Thank you, sir. Hail Caesar sir.
-> Centurion: Hail Caesar. If it's not done by sunrise, I'll cut your balls off!
-> Brian: Oh, thank you sir. Thank you, sir. Hail Caesar and everything, sir!
-> [At sunrise, the wall is covered in writing]
-> Brian: Finished!
-> Centurion: Right. Now don't do it again. [leaves]
-> [Brian climbs down the ladder and looks at the wall, then sees the morning guards approach and runs.]
+> Reg: All right, but apart from the sanitation, the medicine, education, wine, public order, irrigation, roads, the fresh-water system, and public health, what have the Romans ever done for us?
+> PFJ Member: Brought peace?
+> Reg: Oh, peace? SHUT UP!
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
 
 **17.**
-
-> Reg: All right, but apart from the sanitation, the medicine, education, wine, public order, irrigation, roads, the fresh-water system, and public health, what have the Romans ever done for us?
-> PFJ Member: Brought peace?
-> Reg: Oh, peace? SHUT UP!
-
-- Posts as: Monty Python's Life of Brian (1979)
-- Full citation on the page: Monty Python's Life of Brian
-- Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
-- Tags: irreverent
-
-**18.**
 
 > Simon: Tell them to stop it. I hadn't said a word for eighteen years till he came along.
 > Crowd: A miracle! He is the Messiah!
@@ -1037,13 +992,13 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Judith: Brian.
 > Brian: Judith.
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
 - **owner check**: F-word and a mob lynching; the joke is the crowd, check
 
-**19.**
+**18.**
 
 > Brian: Look, you've got it all wrong! You don't need to follow me. You don't need to follow anybody! You've got to think for yourselves! You're all individuals!
 > Crowd: [in unison] Yes! We're all individuals!
@@ -1052,12 +1007,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Man in crowd: I'm not...
 > Crowd: Shhh!
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
 
-**20.**
+**19.**
 
 > Nisus Wettus: Crucifixion?
 > Mr. Cheeky: Ah, no. Freedom.
@@ -1068,35 +1023,35 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Nisus Wettus: [laughing] Oh, I see, very good. Well...
 > Mr. Cheeky: Yes I know, out the door, one cross each, line on the left.
 
-- Posts as: Monty Python's Life of Brian (1979)
+- Posts as: Monty Python's Life of Brian
 - Full citation on the page: Monty Python's Life of Brian
 - Wikiquote page: [Monty Python's Life of Brian](https://en.wikiquote.org/wiki/Monty_Python's_Life_of_Brian)
 - Tags: irreverent
 
-**21.**
+**20.**
 
 > Obstetrician 1: Get the EEG, the BP monitor, and the AVV.
 > Obstetrician 2: And get the machine that goes "Ping!".
 > Obstetrician 1: And get the most expensive machine - in case the Administrator comes.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part I: The Miracle of Birth, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**22.**
+**21.**
 
 > [As the doctors drop the baby into an incubator, the mother looks up]
 > Patient: Is it a boy or a girl?
 > Obstetrician 1: Now, I think it's a little early to start imposing roles on it, don't you? Now, a word of advice. You may find that you suffer for some time a totally irrational feeling of depression. PND is what we doctors call it. So it's lots of happy pills for you, and you can find out all about the birth when you get home. It's available on Betamax, VHS, and Super 8.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part I: The Miracle of Birth, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 - **owner check**: a doctor's joke about imposing roles on a baby; mild, check
 
-**23.**
+**22.**
 
 > Mr Blackitt: When Martin Luther nailed his protest up to the church door in 1517, he may not have realised the full significance of what he was doing, but four hundred years later, thanks to him, my dear, I can wear whatever I want on my John Thomas. And Protestantism doesn't stop at the simple condom. Oh, no! I can wear French Ticklers if I want.
 > Mrs Blackitt: You what?
@@ -1106,32 +1061,32 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mrs Blackitt: Well, why don't you?
 > Mr Blackitt: But they! They cannot. Because their Church never made the great leap out of the Middle Ages, and the domination of alien episcopal supremacy.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part I: The Miracle of Birth, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 - **owner check**: Protestant condom sermon; adult-only joke, check
 
-**24.**
+**23.**
 
 > Headmaster: [supposedly reading from The Bible] And spotteth twice they the camels before the third hour. And so the Midianites went forth to Ram Gilead in Kadesh Bilgemath by Shor Ethra Regalion, to the house of Gash-Bil-Betheul-Bazda, he who brought the butter dish to Balshazar and the tent peg to the house of Rashomon, and there slew they the goats, yea, and placed they the bits in little pots. Here endeth the lesson.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
+- Full citation on the page: Part II: Growth and Learning, Monty Python's The Meaning of Life
+- Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
+- Tags: irreverent
+
+**24.**
+
+> Chaplain and students: [singing a hymn]
+> O Lord, please don't burn us. Don't grill or toast your flock. Don't put us on the barbecue Or simmer us in stock. Don't braise or bake or boil us, Or stir-fry us in a wok.
+
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part II: Growth and Learning, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
 **25.**
-
-> Chaplain and students: [singing a hymn]
-> O Lord, please don't burn us. Don't grill or toast your flock. Don't put us on the barbecue Or simmer us in stock. Don't braise or bake or boil us, Or stir-fry us in a wok.
-
-- Posts as: Monty Python's The Meaning of Life (1983)
-- Full citation on the page: Part II: Growth and Learning, Monty Python's The Meaning of Life
-- Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
-- Tags: irreverent
-
-**26.**
 
 > Ainsworth: During the night old Perkins got his leg bitten sort of...off.
 > Dr. Livingstone: Eh? Been in the wars, have we? Well, let's take a look at this one leg of yours. Yes...Yes, well, this is nothing to worry about.
@@ -1145,12 +1100,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Pakenham-Walsh: A tiger in Africa?
 > Ainsworth: Erm, well, it's probably escaped from the zoo.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part III: Fighting Each Other, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**27.**
+**26.**
 
 > Mrs. Hendy: Oh! I never knew that Schopenhauer was a philosopher!
 > Mr. Hendy: Oh, yeah! He's the one that begins with an s, like Nietzsche.
@@ -1170,24 +1125,24 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > [Pause]
 > Mr. Hendy: Waiter! This conversation isn't very good!
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part IV: Middle Age, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**28.**
+**27.**
 
 > Chairman: Item six on the agenda, the Meaning of Life. Now Harry, you've had some thoughts on this.
 > Harry: That's right, yeah. I've had a team working on this over the past few weeks, and what we've come up with can be reduced to two fundamental concepts. One, people are not wearing enough hats. Two, matter is energy. In the Universe there are many energy fields which we cannot normally perceive. Some energies have a spiritual source which act upon a person’s soul. However, this soul does not exist ab initio as orthodox Christianity teaches; it has to be brought into existence by a process of guided self-observation. However, this is rarely achieved owing to man's unique ability to be distracted from spiritual matters by everyday trivia.
 > [Pause]
 > Max: What was that about hats again?
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part V: Live Organ Transplants, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**29.**
+**28.**
 
 > [Maître-D offers Mr Creosote an after-dinner mint]
 > Maître-D: It's only wafer thin.
@@ -1196,12 +1151,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mr Creosote: All right. Just one.
 > Maître-D: Just the one, monsieur. Voilà. [places the mint in his mouth] Bon appétit! [dives behind a cordon as Mr Creosote swells up and explodes] Thank you, sir, and now here's the check.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part VI: The Autumn Years, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**30.**
+**29.**
 
 > Geoffrey: Now look here. You barge in here quite uninvited, break glasses and announce quite casually that we're all dead. Well, I would remind you that you are a guest in this house, and-
 > Grim Reaper: [pokes Geoffrey in the eye] Be quiet! You Englishmen! You're all so fucking pompous. None of you have got any balls!
@@ -1217,12 +1172,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Geoffrey: [sheepishly] Just testing...sorry
 > Grim Reaper: Follow me...now.
 
-- Posts as: Monty Python's The Meaning of Life (1983)
+- Posts as: Monty Python's The Meaning of Life
 - Full citation on the page: Part VII: Death, Monty Python's The Meaning of Life
 - Wikiquote page: [Monty Python's The Meaning of Life](https://en.wikiquote.org/wiki/Monty_Python's_The_Meaning_of_Life)
 - Tags: irreverent
 
-**31.**
+**30.**
 
 > Pepperpot 1: I can't tell the difference between Whizzo butter and this dead crab.
 > Interviewer: Yes, we find that 9 out of 10 British housewives can't tell the difference between Whizzo Butter and a dead crab.
@@ -1234,33 +1189,33 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Pepperpot 3: You try that around here, young man, and we'll slit your face.
 > Pepperpot 4: [quietly] Yeah, with a razor.
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, Whither Canada? [1.01], Whizzo Butter, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**32.**
+**31.**
 
 > Reporter: This morning, shortly after 11:00, comedy struck this little house on Dibley Road. Sudden...violent...comedy.
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, Whither Canada? [1.01], The Funniest Joke in the World, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**33.**
+**32.**
 
 > Superman One: Oh look...is it a stockbroker?
 > Superman Two: Is it a quantity Surveyor?
 > Superman Three: Is it a church warden?
 > All Supermen: NO! It's Bicycle Repair Man!
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, How to Recognise Different Types of Trees From Quite a Long Way Away [1.03], Bicycle Repair Man, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**34.**
+**33.**
 
 > Arthur Nudge: Eh? Know what I mean? Know what I mean? Nudge, nudge! Know what I mean? Say no more! A nod's as good as a wink to a blind bat, say no more, say no more!
 > Man: Look, are you insinuating something?
@@ -1272,12 +1227,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Man: Yes.
 > Arthur Nudge: What's it like?
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, How to Recognise Different Types of Trees From Quite a Long Way Away [1.03], Nudge, Nudge, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**35.**
+**34.**
 
 > Superintendant Praline: Next we have number four - "Crunchy Frog". Am I right in thinking there's a real frog in here?
 > Mr. Milton: Yes, a little one.
@@ -1292,12 +1247,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Superintendant Praline: Don't you even take the bones out?
 > Mr. Milton: If we took the bones out, it wouldn't be crunchy, would it?
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, It's the Arts [1.06], Crunchy Frog sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**36.**
+**35.**
 
 > [Mr. Salzburg has just fired two of his writers for his new film, and is closing in on another one]
 > Mr. Salzburg: You!
@@ -1309,12 +1264,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mr. Salzburg: ARE YOU BEING INDECISIVE?
 > Writer 4: Yo! Nes! Perhaps! [runs out the door]
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, It's the Arts [1.06], 20th Century Vole, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**37.**
+**36.**
 
 > Police officer: A blancmange, eh?
 > Woman: That's right. I was just playing a game of doubles with Sandra, Jocasta, Alec and David, when...
@@ -1330,129 +1285,129 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Woman: Well, what about the blancmange?
 > Police Officer: That could play Ann Haydon-Jones and her husband, Pip!
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, You're No Fun Anymore [1.07], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**38.**
+**37.**
 
 > Colonel: Watkins, why did you join the army?
 > Watkins: For the water-skiing and the travel, sir. Not for the killing, sir. I asked them to put it on my form, sir: "no killing".
 > Colonel: Watkins, are you a pacifist?
 > Watkins: No, sir. I'm not a pacifist, sir: I'm a coward.
 
-- Posts as: Monty Python's Flying Circus (1969)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 1, Full Frontal Nudity [1.08], Monty Python's Flying Circus
+- Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
+- Tags: irreverent
+
+**38.**
+
+> Mr. Praline: It's not pining, it's passed on! This parrot is no more! It has ceased to be! It's expired and gone to meet its maker! This is a late parrot! It's a stiff! Bereft of life, it rests in peace! If you hadn't nailed it to the perch, it would be pushing up the daisies! It's run down the curtain and joined the choir invisible! This is an ex-parrot!
+
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 1, Full Frontal Nudity [1.08], Dead Parrot Sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **39.**
 
-> Mr. Praline: It's not pining, it's passed on! This parrot is no more! It has ceased to be! It's expired and gone to meet its maker! This is a late parrot! It's a stiff! Bereft of life, it rests in peace! If you hadn't nailed it to the perch, it would be pushing up the daisies! It's run down the curtain and joined the choir invisible! This is an ex-parrot!
+> Woman: Well, I object to all this sex on the television. I mean, I keep falling off.
 
-- Posts as: Monty Python's Flying Circus (1969)
-- Full citation on the page: Series 1, Full Frontal Nudity [1.08], Dead Parrot Sketch, Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 1, The Ant, an Introduction [1.09], Mt. Kilimanjaro sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **40.**
 
-> Woman: Well, I object to all this sex on the television. I mean, I keep falling off.
+> Interviewer: Minister, I'll put the first question to you. In your plan, "A Better Britain For Us", you promised to build 88 thousand million billion houses a year in the greater London area alone. In fact, you've built only three in the last 15 years. Are you a bit disappointed in this result?
+> Minister: No, no. I'd like to answer this question, if I may, in two ways: Firstly, in my normal voice; and then in a kind of silly, high-pitched whine.
 
-- Posts as: Monty Python's Flying Circus (1969)
-- Full citation on the page: Series 1, The Ant, an Introduction [1.09], Mt. Kilimanjaro sketch, Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 2, Face the Press [2.01], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **41.**
 
-> Interviewer: Minister, I'll put the first question to you. In your plan, "A Better Britain For Us", you promised to build 88 thousand million billion houses a year in the greater London area alone. In fact, you've built only three in the last 15 years. Are you a bit disappointed in this result?
-> Minister: No, no. I'd like to answer this question, if I may, in two ways: Firstly, in my normal voice; and then in a kind of silly, high-pitched whine.
+> Reg: I don't know! Mr. Wentworth just told me to come in here and say that there was trouble at the mill, that's all! I didn't expect a kind of Spanish Inquisition!
+> [Three men in red uniforms burst through the door]
+> Cardinal Ximinez: Nobody expects the Spanish Inquisition!
 
-- Posts as: Monty Python's Flying Circus (1970)
-- Full citation on the page: Series 2, Face the Press [2.01], Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 2, The Spanish Inquisition [2.02], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **42.**
 
-> Reg: I don't know! Mr. Wentworth just told me to come in here and say that there was trouble at the mill, that's all! I didn't expect a kind of Spanish Inquisition!
-> [Three men in red uniforms burst through the door]
-> Cardinal Ximinez: Nobody expects the Spanish Inquisition!
+> Doctor: [emerging from under a Scotsman's kilt] Look, would you please go away? I'm trying to examine this man! It's all right, I'm a doctor...actually I'm a gynecologist, but this is my lunch hour.
 
-- Posts as: Monty Python's Flying Circus (1970)
-- Full citation on the page: Series 2, The Spanish Inquisition [2.02], Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 2, Déjà Vu [2.03], The Poet McTeagle, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **43.**
 
-> Doctor: [emerging from under a Scotsman's kilt] Look, would you please go away? I'm trying to examine this man! It's all right, I'm a doctor...actually I'm a gynecologist, but this is my lunch hour.
+> Man at Less Naughty Chemist's: I'd like some aftershave.
+> Less Naughty Chemist: Certainly sir, walk this way please...
+> Man at Less Naughty Chemist's: If I could walk that way I wouldn't need aftershave.
 
-- Posts as: Monty Python's Flying Circus (1970)
-- Full citation on the page: Series 2, Déjà Vu [2.03], The Poet McTeagle, Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 2, The Buzz Aldrin Show [2.04], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **44.**
 
-> Man at Less Naughty Chemist's: I'd like some aftershave.
-> Less Naughty Chemist: Certainly sir, walk this way please...
-> Man at Less Naughty Chemist's: If I could walk that way I wouldn't need aftershave.
+> Announcer #1: Well, it's five past nine and nearly time for six past nine. On BBC 2 now, it'll shortly be six and a half minutes past nine. Later on this evening, it'll be ten o'clock and at 10:30 we'll be joining BBC 2 in time for 10:33, and don't forget tomorrow when it'll be 9:20. Those of you who missed 8:45 on Friday will be able to see it again this Friday at a quarter to nine. Now, here is a time check. It's six and a half minutes to the big green thing.
+> Announcer #2: You're a looney.
+> Announcer #1: I get so bored. I get so bloody bored.
 
-- Posts as: Monty Python's Flying Circus (1970)
-- Full citation on the page: Series 2, The Buzz Aldrin Show [2.04], Monty Python's Flying Circus
+- Posts as: Monty Python's Flying Circus
+- Full citation on the page: Series 2, It's A Living [2.06], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
 **45.**
 
-> Announcer #1: Well, it's five past nine and nearly time for six past nine. On BBC 2 now, it'll shortly be six and a half minutes past nine. Later on this evening, it'll be ten o'clock and at 10:30 we'll be joining BBC 2 in time for 10:33, and don't forget tomorrow when it'll be 9:20. Those of you who missed 8:45 on Friday will be able to see it again this Friday at a quarter to nine. Now, here is a time check. It's six and a half minutes to the big green thing.
-> Announcer #2: You're a looney.
-> Announcer #1: I get so bored. I get so bloody bored.
-
-- Posts as: Monty Python's Flying Circus (1970)
-- Full citation on the page: Series 2, It's A Living [2.06], Monty Python's Flying Circus
-- Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
-- Tags: irreverent
-
-**46.**
-
 > Mr. Brando: Yes, we have quite a number of idiots banking here.
 > Interviewer: What kind of money is there in idioting?
 > Mr. Brando: Well, nowadays the really blithering idiot can make anything up to 10,000 pounds a year if he's the head of some big industrial combine. But of course the more old fashion idiot still refuses to take money. He takes bits of string, wood, dead budgerigars, sparrows, anything. But it does make the cashier's job very difficult.
 
-- Posts as: Monty Python's Flying Circus (1970)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 2, The Attila the Hun Show [2.07], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**47.**
+**46.**
 
 > TV Announcer: It's just gone eight o'clock and time for the penguin on top of your television set to explode.
 > [The penguin explodes]
 > Pepperpot 1: How did he know that was going to happen?
 > TV Announcer: It was an inspired guess. And now...
 
-- Posts as: Monty Python's Flying Circus (1970)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 2, How to Recognise Different Parts of the Body [2.09], Exploding Penguin sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**48.**
+**47.**
 
 > Mr. Last: You've got a pet halibut?
 > Mr. Praline: Yes. I chose him out of a thousand. I didn't like the others; they were all too flat.
 > Mr. Last: You're a loony!
 > Mr. Praline: I AM NOT A LOONY! Why should I be tarred with the epithet "loony" merely because I have a pet halibut? I've heard tell that Sir Gerald Nabarro has a pet prawn called Simon, and you wouldn't call Sir Gerald a loony, would you? Furthermore, Dawn Pelforth, the lady show jumper, had a clam called Sir Stefford after the late Chancellor, Allen Bullock has two pikes, both called Norman, and the late, great Marcel Proust had a haddock! If you're calling the author of À la recherche du temps perdu a loony, I shall have to ask you to step outside!
 
-- Posts as: Monty Python's Flying Circus (1970)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 2, Scott of the Antarctic [2.10], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**49.**
+**48.**
 
 > Mr. Vibrating: I'm very sorry, but I'm not allowed to argue unless you've paid.
 > Man: Aha! If I didn't pay, then why are you arguing? Got you!
@@ -1463,12 +1418,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mr. Vibrating: No, you haven't.
 > Man: Oh, shut up!
 
-- Posts as: Monty Python's Flying Circus (1972)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 3, The Money Programme [3.03], The Argument Clinic, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**50.**
+**49.**
 
 > Mrs Bun: Have you got anything without Spam in it?
 > Waitress: Well, Spam, egg, sausage, and Spam; that's not got much Spam in it.
@@ -1491,12 +1446,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mr. Bun: Yes!
 > Waitress: Bleurgh!
 
-- Posts as: Monty Python's Flying Circus (1970)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 2, Spam [2.12], Spam, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**51.**
+**50.**
 
 > Sailor 1: Still no sign of land. How long is it?
 > Sailor 2: That's a rather personal question, sir.
@@ -1515,12 +1470,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Sailor 2: 33 days, sir.
 > Sailor 4: Have we started again?
 
-- Posts as: Monty Python's Flying Circus (1970)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 2, Royal Episode 13 (or The Queen Will Be Watching) [2.13], Lifeboat Sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**52.**
+**51.**
 
 > Mrs. Conclusion: Hello, Mrs Premise.
 > Mrs. Premise: Hello, Mrs Conclusion.
@@ -1536,12 +1491,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Mrs. Premise: Really? Is it very old?
 > Mrs. Conclusion: No. We just don't like it.
 
-- Posts as: Monty Python's Flying Circus (1972)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 3, Whicker's World [3.01], Mrs. Premise and Mrs. Conclusion Visit Jean-Paul Sartre, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**53.**
+**52.**
 
 > Mr. Barnard: What do you want?
 > Man: Well I was told outside...
@@ -1553,12 +1508,12 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Man: I see, sorry!
 > Mr. Barnard: Not at all. [the man exits] Stupid git.
 
-- Posts as: Monty Python's Flying Circus (1972)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 3, The Money Programme [3.03], The Argument Clinic, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**54.**
+**53.**
 
 > Mr. Gumby: ARE YOU THE BRAIN SPECIALIST?
 > Dr. Gumby: HELLO!
@@ -1573,16 +1528,16 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Nurse: Yes, doctor.
 > Dr. Gumby: WHERE'S THE LANCET? WHERE'S THE BLOODY LANCET! [rubs his head] MY BRAIN HURTS TOO!
 
-- Posts as: Monty Python's Flying Circus (1972)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 3, The War Against Pornography [3.06], Gumby Brain Specialist sketch, Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
 
-**55.**
+**54.**
 
 > Roger Last: Good evening. Tonight on 'Is There' we examine the question, 'Is there a life after death?' And here to discuss it are three dead people.
 
-- Posts as: Monty Python's Flying Circus (1972)
+- Posts as: Monty Python's Flying Circus
 - Full citation on the page: Series 3, E. Henry Thripshaw's Disease [3.10], Monty Python's Flying Circus
 - Wikiquote page: [Monty Python's Flying Circus](https://en.wikiquote.org/wiki/Monty_Python's_Flying_Circus)
 - Tags: irreverent
@@ -2574,7 +2529,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > I am Jack's... complete lack of surprise.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2583,7 +2538,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > On a long enough time line, the survival rate for everyone drops to zero.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2592,7 +2547,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > I am Jack's wasted life.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2601,7 +2556,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > When you have insomnia, you're never really asleep... and you're never really awake.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2610,7 +2565,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > With insomnia, nothing's real. Everything's far away. Everything's a copy of a copy of a copy.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2619,7 +2574,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > When you have a gun in your mouth, you can only speak in vowels.
 
-- Posts as: The Narrator, Fight Club (1999)
+- Posts as: The Narrator, Fight Club
 - Full citation on the page: The Narrator, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2628,7 +2583,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Self-improvement is masturbation. Now, self-destruction...
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2637,7 +2592,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > It's only after we've lost everything that we're free to do anything.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2646,7 +2601,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > You are not your job. You're not how much money you have in the bank. You're not the car you drive. You're not the contents of your wallet. You're not your fucking khakis. You're the all-singing, all-dancing crap of the world.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2655,7 +2610,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > The things you own end up owning you.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2664,7 +2619,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > You have to consider the possibility that God does not like you, never wanted you, in all probability he hates you. It's not the worst thing that could happen.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2674,7 +2629,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Sticking feathers up your butt does not make you a chicken.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2683,7 +2638,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > First you've gotta know - not fear, know - that someday you're gonna die.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2692,7 +2647,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > We're consumers. We are the byproducts of a lifestyle obsession. Murder, crime, poverty, these things don't concern me. What concerns me are celebrity magazines, television with 500 channels, some guy's name on my underwear. Rogaine, Viagra, Olestra.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2701,7 +2656,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Listen up, maggots! You are not special. You are not a beautiful or unique snowflake. You are the same decaying organic matter as everything else. We are the all-singing, all-dancing crap of the world.
 
-- Posts as: Tyler Durden, Fight Club (1999)
+- Posts as: Tyler Durden, Fight Club
 - Full citation on the page: Tyler Durden, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2710,7 +2665,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > A condom is the glass slipper of our generation. You slip one on when you meet a stranger. You dance all night, and then you throw it away. The condom, I mean, not the stranger.
 
-- Posts as: Marla Singer, Fight Club (1999)
+- Posts as: Marla Singer, Fight Club
 - Full citation on the page: Marla Singer, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2720,7 +2675,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > It's a bridesmaid's dress. I got it at a second-hand store. It was loved intensely for one night.. then cast aside.
 
-- Posts as: Marla Singer, Fight Club (1999)
+- Posts as: Marla Singer, Fight Club
 - Full citation on the page: Marla Singer, Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2731,7 +2686,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Marla Singer: … instead of just waiting for their turn to speak?
 > Narrator: Yeah. Yeah.
 
-- Posts as: Fight Club (1999)
+- Posts as: Fight Club
 - Full citation on the page: Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2742,7 +2697,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Narrator: I will! I want to know certain things first.
 > Everyone: The first rule of Project-- (Narrator: SHUT. UP.)
 
-- Posts as: Fight Club (1999)
+- Posts as: Fight Club
 - Full citation on the page: Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -2752,7 +2707,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Narrator: I know it seems like I have more than one side sometimes...
 > Marla Singer: More than one side? You're Dr. Jekyll and Mr. Jackass!
 
-- Posts as: Fight Club (1999)
+- Posts as: Fight Club
 - Full citation on the page: Fight Club (film)
 - Wikiquote page: [Fight Club (film)](https://en.wikiquote.org/wiki/Fight_Club_(film))
 - Tags: pop-culture, irreverent
@@ -3370,7 +3325,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Blackadder: Right. Good morning, team. My name is Lord Blackadder. And I'm the new minister in charge of religious genocide. If you play fair by me, you'll find me a considerate employer. But cross me and you'll soon discover that under this playful, boyish exterior beats the heart of a ruthless, sadistic maniac.
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Head, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3383,7 +3338,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Blackadder: Yes, don't get clever with me. I just thought you might've lopped off a leg or something by mistake.
 > Baldrick: No, the thing I chopped off had a nose.
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Head, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3393,7 +3348,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Melchett: Potato?
 > Blackadder: Thanks, I don't.
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Potato, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3404,7 +3359,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Blackadder: I see. And the fact that this secret has eluded the most intelligent of men since the dawn of time doesn't dampen your spirits?
 > Percy: Oh no. I like a challenge!
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Money, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3414,7 +3369,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Messenger: [enters again] My lord, the Queen does demand your urgent presence, on pain of death.
 > Blackadder: You're not making any friends here. You do know that, don't you?
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Money, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3424,7 +3379,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Messenger: [enters] My lord-
 > Blackadder: [sarcastic] Ah, messenger, thank God you came. Percy and I could not have waited another second without you.
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Money, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3436,7 +3391,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Percy: Ma'am, it is brilliant! Your father is born again!
 > Queen: [normal voice] Let's bally well hope not, or else I won't be queen anymore.
 
-- Posts as: Blackadder II (1986)
+- Posts as: Blackadder II
 - Full citation on the page: Blackadder II, Chains, Blackadder II (series 2)
 - Wikiquote page: [Blackadder II (series 2)](https://en.wikiquote.org/wiki/Blackadder_II_(series_2))
 - Tags: humor, snark
@@ -3448,7 +3403,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Baldrick: Thank you very much.
 > Blackadder: As a reward, Baldrick, take a short holiday. Did you enjoy it? Right. Back to work.
 
-- Posts as: Blackadder the Third (1987)
+- Posts as: Blackadder the Third
 - Full citation on the page: Blackadder the Third, Dish and Dishonesty, Blackadder the Third (series 3)
 - Wikiquote page: [Blackadder the Third (series 3)](https://en.wikiquote.org/wiki/Blackadder_the_Third_(series_3))
 - Tags: humor, snark
@@ -3459,7 +3414,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Baldrick: Oh, I didn't think it was that bad.
 > Blackadder: [checks the dictionary] I think you'll find he left 'sausage' out of his dictionary, Baldrick. [checks again] Oh, and 'aardvark'.
 
-- Posts as: Blackadder the Third (1987)
+- Posts as: Blackadder the Third
 - Full citation on the page: Blackadder the Third, Ink and Incapability, Blackadder the Third (series 3)
 - Wikiquote page: [Blackadder the Third (series 3)](https://en.wikiquote.org/wiki/Blackadder_the_Third_(series_3))
 - Tags: humor, snark
@@ -3473,7 +3428,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Blackadder: Baldrick, when I said it begins with 'T', I was talking about a letter.
 > Baldrick: No, it never begins with a letter. The postman don't come 'til ten thirty.
 
-- Posts as: Blackadder Goes Forth (1989)
+- Posts as: Blackadder Goes Forth
 - Full citation on the page: Blackadder Goes Forth, Plan E: General Hospital, Blackadder Goes Forth (series 4)
 - Wikiquote page: [Blackadder Goes Forth (series 4)](https://en.wikiquote.org/wiki/Blackadder_Goes_Forth_(series_4))
 - Tags: humor, snark
@@ -3485,7 +3440,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Well, sir, it's this rug I had. It really tied the room together.
 
-- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski (1998)
+- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Full citation on the page: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3494,7 +3449,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > No I do mind. Uhh, The Dude minds. This will not stand. This aggression will not stand, man.
 
-- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski (1998)
+- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Full citation on the page: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3503,7 +3458,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > You're not wrong Walter. You're just an asshole.
 
-- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski (1998)
+- Posts as: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Full citation on the page: Jeffrey "The Dude" Lebowski, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3512,7 +3467,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Smokey, this is not Nam, this is Bowling, there are rules.
 
-- Posts as: Walter Sobchak, The Big Lebowski (1998)
+- Posts as: Walter Sobchak, The Big Lebowski
 - Full citation on the page: Walter Sobchak, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3521,7 +3476,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Smokey, my friend. [pulls out a Colt M1911A1 from his bag] You're entering a world of pain.
 
-- Posts as: Walter Sobchak, The Big Lebowski (1998)
+- Posts as: Walter Sobchak, The Big Lebowski
 - Full citation on the page: Walter Sobchak, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3530,7 +3485,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Eh, fuck it, Dude. Let's go bowling.
 
-- Posts as: Walter Sobchak, The Big Lebowski (1998)
+- Posts as: Walter Sobchak, The Big Lebowski
 - Full citation on the page: Walter Sobchak, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3539,7 +3494,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > A wiser man than myself once said, "Sometimes you eat the b'ar.… Sometimes the b'ar, well, he eats you."
 
-- Posts as: The Stranger, The Big Lebowski (1998)
+- Posts as: The Stranger, The Big Lebowski
 - Full citation on the page: The Stranger, The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3550,7 +3505,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > The Dude: And, you know, he's got emotional problems, man.
 > Walter Sobchak: You mean beyond pacifism?
 
-- Posts as: The Big Lebowski (1998)
+- Posts as: The Big Lebowski
 - Full citation on the page: The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3560,7 +3515,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Maude Lebowski: What do you do for— for recreation?
 > The Dude: Oh, the usual. I bowl. Drive around. The occasional acid flashback.
 
-- Posts as: The Big Lebowski (1998)
+- Posts as: The Big Lebowski
 - Full citation on the page: The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3574,7 +3529,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > The Dude: Yeah, well, the Dude abides.
 > The Stranger: "The Dude abides." I don't know about you, but I take comfort in that. It's good knowin' he's out there. The Dude. Takin' 'er easy for all us sinners. Shoosh. I sure hope he makes the finals.
 
-- Posts as: The Big Lebowski (1998)
+- Posts as: The Big Lebowski
 - Full citation on the page: The Big Lebowski
 - Wikiquote page: [The Big Lebowski](https://en.wikiquote.org/wiki/The_Big_Lebowski)
 - Tags: humor, pop-culture
@@ -3692,7 +3647,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Fry: But Professor, you time traveled yourself remember? When we went back to Roswell?
 > Professor Farnsworth: That proves nothing! And furthermore, you'd think I could remember a thing like that; plus, who are you anyway?
 
-- Posts as: Futurama: Bender's Big Score (2007)
+- Posts as: Futurama: Bender's Big Score
 - Full citation on the page: Futurama: Bender's Big Score
 - Wikiquote page: [Futurama: Bender's Big Score](https://en.wikiquote.org/wiki/Futurama:_Bender's_Big_Score)
 - Tags: humor, irreverent
@@ -3702,7 +3657,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Fry: I don't get it. How can you say Lars is more mature than me?
 > Leela: Well, for one thing his checkbook doesn't have The Hulk on it.
 
-- Posts as: Futurama: Bender's Big Score (2007)
+- Posts as: Futurama: Bender's Big Score
 - Full citation on the page: Futurama: Bender's Big Score
 - Wikiquote page: [Futurama: Bender's Big Score](https://en.wikiquote.org/wiki/Futurama:_Bender's_Big_Score)
 - Tags: humor, irreverent
@@ -3714,7 +3669,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Bender: You want me to concludify him, like some sort of dispatcherator?
 > Nudar: Yes, and don't forget to terminate him.
 
-- Posts as: Futurama: Bender's Big Score (2007)
+- Posts as: Futurama: Bender's Big Score
 - Full citation on the page: Futurama: Bender's Big Score
 - Wikiquote page: [Futurama: Bender's Big Score](https://en.wikiquote.org/wiki/Futurama:_Bender's_Big_Score)
 - Tags: humor, irreverent
@@ -3724,7 +3679,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Nudar: Faster, faster!
 > Professor Farnsworth: I’m sciencing as fast as I can
 
-- Posts as: Futurama: Bender's Big Score (2007)
+- Posts as: Futurama: Bender's Big Score
 - Full citation on the page: Futurama: Bender's Big Score
 - Wikiquote page: [Futurama: Bender's Big Score](https://en.wikiquote.org/wiki/Futurama:_Bender's_Big_Score)
 - Tags: humor, irreverent
@@ -3734,7 +3689,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > [The Hypnotoad is shown on screen.]
 > Bender: [Voice over.] On the count of three, you will awaken feeling refreshed, as if Futurama had never been cancelled by idiots and then brought back by bigger idiots. One... two... [Snaps fingers.]
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 1, Rebirth, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3745,7 +3700,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Richard Nixon's Head: Options?
 > Zapp Brannigan: My instinct is to hide in this barrel, like the wily fish.
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 1, In-A-Gadda-Da-Leela, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3755,7 +3710,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Clerk: Okay, it's $500, you have no choice of carrier, the battery can't hold the charge and the reception isn't very…
 > Fry: Shut up and take my money!
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 1, Attack of the Killer App, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3767,7 +3722,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Fry: Since when is the Internet about robbing people of their privacy?
 > Bender: August 6, 1991.
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 1, Attack of the Killer App, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3779,7 +3734,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Bender: Does it have an app for kissing my shiny metal ass?
 > Dr. Ben Beeler: Several!
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 1, Attack of the Killer App, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3789,7 +3744,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Prof. Farnsworth: Oh, God. We've opened Pandora's fly. They'll reproduce without limit, consuming all the matter in the world!
 > Fry: Like the Kardashians!
 
-- Posts as: Futurama (2010)
+- Posts as: Futurama
 - Full citation on the page: Part 2, Benderama, Futurama/Season 6
 - Wikiquote page: [Futurama/Season 6](https://en.wikiquote.org/wiki/Futurama/Season_6)
 - Tags: humor, irreverent
@@ -3801,7 +3756,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > Michael, I did nothing. I did absolutely nothing, and it was everything I thought it could be.
 
-- Posts as: Peter Gibbons, Office Space (1999)
+- Posts as: Peter Gibbons, Office Space
 - Full citation on the page: Peter Gibbons, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3810,7 +3765,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > (after asking Peter to come in and work on Saturday) Ah, ah, I almost forgot... I'm also going to need you to go ahead and come in on Sunday, too. We, uhhh, lost some people this week and we sorta need to play catch-up. Thaaaaaanks.
 
-- Posts as: Bill Lumbergh, Office Space (1999)
+- Posts as: Bill Lumbergh, Office Space
 - Full citation on the page: Bill Lumbergh, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3819,7 +3774,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > The ratio of cake to people is too big...
 
-- Posts as: Milton Waddams, Office Space (1999)
+- Posts as: Milton Waddams, Office Space
 - Full citation on the page: Milton Waddams, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3828,7 +3783,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > I could set the building on fire...
 
-- Posts as: Milton Waddams, Office Space (1999)
+- Posts as: Milton Waddams, Office Space
 - Full citation on the page: Milton Waddams, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3837,7 +3792,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > I believe you have my stapler...
 
-- Posts as: Milton Waddams, Office Space (1999)
+- Posts as: Milton Waddams, Office Space
 - Full citation on the page: Milton Waddams, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3846,7 +3801,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > And yes, I won't be leaving a tip, 'cause I could... I could shut this whole resort down. Sir? I'll take my traveler's checks to a competing resort. I could write a letter to your board of tourism and I could have this place condemned. I could put... I could put... strychnine in the guacamole. There was salt on the glass, BIG grains of salt.
 
-- Posts as: Milton Waddams, Office Space (1999)
+- Posts as: Milton Waddams, Office Space
 - Full citation on the page: Milton Waddams, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3855,7 +3810,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > What would ya say... ya do here?
 
-- Posts as: Bob Slydell, Office Space (1999)
+- Posts as: Bob Slydell, Office Space
 - Full citation on the page: Bob Slydell, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3864,7 +3819,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 
 > [frustrated with the malfunctioning printer] Why does it say "Paper Jam" when there is no paper jam?!
 
-- Posts as: Samir Nagheenanajar, Office Space (1999)
+- Posts as: Samir Nagheenanajar, Office Space
 - Full citation on the page: Samir Nagheenanajar, Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3874,7 +3829,7 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Peter Gibbons: Let me ask you something. When you come in on Monday and you're not feeling real well, does anyone ever say to you, "Sounds like someone has a case of the Mondays?"
 > Lawrence: No. No, man. Shit, no, man. I believe you'd get your ass kicked sayin' something like that, man.
 
-- Posts as: Office Space (1999)
+- Posts as: Office Space
 - Full citation on the page: Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
@@ -3884,11 +3839,44 @@ Tags are per source (a few of the Thompson, Carlin and Twain lines are more snar
 > Bob Porter: Looks like you've been missing a lot of work lately.
 > Peter Gibbons: Well, I wouldn't exactly say I've been missing it, Bob.
 
-- Posts as: Office Space (1999)
+- Posts as: Office Space
 - Full citation on the page: Office Space
 - Wikiquote page: [Office Space](https://en.wikiquote.org/wiki/Office_Space)
 - Tags: humor, pop-culture
 
+
+## Years dropped
+
+The owner's rule: an attribution carries a year only if the Wikiquote page gives it. These 28 work-and-year forms had a year from my own knowledge, not the page, so the year was removed from 114 quotes (the attribution is now just the speaker and work). Years that stay are the ones in the page's own citation (book years, Red Dwarf series years and so on). `tests/test_curated_quotes.py` reads this list and fails if any of these forms comes back.
+
+- Monty Python and the Holy Grail (1975)
+- Reg, Monty Python's Life of Brian (1979)
+- Mandy, Monty Python's Life of Brian (1979)
+- Prisoner, Monty Python's Life of Brian (1979)
+- Monty Python's Life of Brian (1979)
+- Monty Python's The Meaning of Life (1983)
+- Monty Python's Flying Circus (1969)
+- Monty Python's Flying Circus (1970)
+- Monty Python's Flying Circus (1972)
+- The Narrator, Fight Club (1999)
+- Tyler Durden, Fight Club (1999)
+- Marla Singer, Fight Club (1999)
+- Fight Club (1999)
+- Blackadder II (1986)
+- Blackadder the Third (1987)
+- Blackadder Goes Forth (1989)
+- Jeffrey "The Dude" Lebowski, The Big Lebowski (1998)
+- Walter Sobchak, The Big Lebowski (1998)
+- The Stranger, The Big Lebowski (1998)
+- The Big Lebowski (1998)
+- Futurama: Bender's Big Score (2007)
+- Futurama (2010)
+- Peter Gibbons, Office Space (1999)
+- Bill Lumbergh, Office Space (1999)
+- Milton Waddams, Office Space (1999)
+- Bob Slydell, Office Space (1999)
+- Samir Nagheenanajar, Office Space (1999)
+- Office Space (1999)
 
 ## Revisions used
 
