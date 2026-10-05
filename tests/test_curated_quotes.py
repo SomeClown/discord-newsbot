@@ -126,3 +126,14 @@ def test_hitchhikers_entries_name_their_author(quotes: list[Quote]):
         if q.text.split("\n")[-1].startswith(ATTRIBUTION_PREFIX + "Douglas Adams, ")
     ]
     assert len(adams) >= 50
+
+
+def test_attributions_are_short_and_plain(quotes: list[Quote]):
+    # Author or speaker, work, year: no chapters, page numbers, ISBNs, or asterisks
+    # (esc() would post them as literal backslash-asterisks).
+    for q in quotes:
+        attribution = q.text.split("\n")[-1][len(ATTRIBUTION_PREFIX) :]
+        assert len(attribution) <= 110, attribution
+        assert "*" not in attribution, attribution
+        for noise in ("ISBN", "Chapter ", "Ch. ", " p. ", "Letter to"):
+            assert noise not in attribution, attribution
