@@ -18,7 +18,7 @@ ENV PATH=/app/.venv/bin:$PATH
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY pyproject.toml .
+COPY pyproject.toml LICENSE NOTICE ./
 COPY newsbot ./newsbot
 RUN pip install --no-cache-dir --no-deps .
 
@@ -34,6 +34,8 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin newsbot \
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
+# The license and its NOTICE travel with every copy of the bot, the image included.
+COPY LICENSE NOTICE ./
 COPY newsbot ./newsbot
 
 ENV PATH=/app/.venv/bin:$PATH \
