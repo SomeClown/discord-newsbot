@@ -3,6 +3,8 @@ name = "newsbot"
 version = "3.0.5"
 description = "Daily AI-summarized Discord news digest for a small gaming server."
 requires-python = ">=3.14,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
   "discord.py>=2.4,<3",
   "apscheduler>=3.10,<4",

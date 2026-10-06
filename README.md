@@ -617,5 +617,8 @@ server, but doubles as a worked example of most of what
 
 ## License
 
-MIT; see [LICENSE](LICENSE). Short version: do what you like with it, keep
-the notice, and don't blame me when a subreddit changes its RSS format.
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Short
+version: do what you like with it, including selling it, but keep the NOTICE
+file with anything you hand on, mark what you changed, and don't blame me when
+a feed changes its format. Versions up to v3.0.5 went out under the MIT
+License, and anyone who has one of those can keep using it on MIT terms.
