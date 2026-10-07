@@ -56,7 +56,9 @@ The owner wants the code documented thoughtfully, in their own voice: plain,
 literate, a little irreverent, and quickest to laugh at itself. Think of a
 senior engineer who has been paged at 3 a.m. by their own clever code and has
 made peace with it. The full voice guide is the owner's `my-writing-style`
-skill; what follows is the code-sized version.
+skill (`references/registers/code-comments.md` and `references/ai-patterns.md`
+there); what follows is the code-sized version. If this section and the skill
+ever disagree, the skill wins.
 
 **Accuracy first, jokes second.** A docstring's job is to tell the next reader
 what the thing does, why it exists, and what will bite them. The humor rides
@@ -74,7 +76,9 @@ to decode a pun.
    odd.
 3. **Inline comments** explain *why*, never *what*. They are where the
    self-deprecation lives: "This retry exists because I assumed the feed would
-   always be valid XML. It is not. It never was."
+   always be valid XML. It is not. It never was." A short sentence-case label
+   over a block of several lines ("# Format and print the digest header") is
+   fine; narrating single obvious lines is not.
 4. **README and runbook** read like a person explaining the project to a peer
    over coffee, not like a product page.
 
@@ -89,6 +93,13 @@ to decode a pun.
   facts be funny on their own.
 - Admit what we don't know: "As far as I can tell, this is fine. I have been
   wrong before; see git log."
+- "We" is the program and its author together: "if the token is stale we
+  re-auth and try once more."
+- Docstrings tell the truth about the code's state: "This needs more work",
+  "prototype; the goal is to fold the three formatters into one." Deprecations
+  are loud and point to the replacement: "DEPRECATED: use `send_digest()`."
+- TODOs read like a status report, not a shrug: what's wrong, what's been
+  tried, what's next.
 - Concrete, slightly absurd analogies from outside tech are the house style
   (dedupe is "the bouncer checking whether you've already been inside
   tonight").
@@ -102,9 +113,20 @@ to decode a pun.
 **Hard nos:** corporate jargon (leverage, robust, best practice, deep dive,
 actionable, synergy), AI-assistant filler ("It's worth noting that",
 "This function simply..."), exclamation points, emoji in code comments, and
-comment-per-line narration of obvious code. Humor density is roughly one
-light touch per module and the occasional aside where something truly earned
-it; a file where every comment is a bit is as tiring as a file with none.
+comment-per-line narration of obvious code. Also out:
+- Tech-slang metaphors: load-bearing, blast radius, footgun, yak shaving,
+  belt-and-suspenders, through-line, escape hatch (literal technical uses
+  excepted).
+- Hype words and inflated verbs: seamless, pivotal, cutting-edge, delve;
+  navigate, harness, foster, streamline, facilitate, spearhead. Say the plain
+  thing ("use", "lead", "help").
+- Dead code and debugger lines left in (`breakpoint()`, commented-out
+  blocks), and empty `:param:` stubs. Delete them or fill them in.
+
+Humor density is roughly one light touch per module, and it lands where
+something earned it: the `except` block that gives up, the genuinely odd
+workaround, a labeled easter egg. A file where every comment is a bit is as
+tiring as a file with none.
 
 **Examples of the target:**
 
