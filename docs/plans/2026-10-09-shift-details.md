@@ -79,16 +79,18 @@ Precedence and the clock live in one pure function (`merge_details`). SQL only s
 DetailRank = Literal["official", "table"]
 Category = Literal["golden", "cosmetic", "permanent", "other"]
 
+
 @dataclass(frozen=True, slots=True)
 class ItemDetails:
-    code: str                       # the one code these details belong to
+    code: str  # the one code these details belong to
     rank: DetailRank
-    reward: str = ""                # already capped: discord_len(esc(reward)) <= 300
+    reward: str = ""  # already capped: discord_len(esc(reward)) <= 300
     category: Category | None = None
     expires_on: date | None = None  # a Pacific calendar date
-    added_on: date | None = None    # table only
-    origin: str = ""                # table only, capped like reward
-    listed: bool = False            # True for shift_table rows (first/last_listed_at)
+    added_on: date | None = None  # table only
+    origin: str = ""  # table only, capped like reward
+    listed: bool = False  # True for shift_table rows (first/last_listed_at)
+
 
 # RawItem gains, after full_text:
 details: ItemDetails | None = field(default=None, compare=False, repr=False)

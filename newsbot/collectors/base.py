@@ -15,8 +15,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Protocol
+from datetime import date, datetime
+from typing import Literal, Protocol
 
 import httpx
 
@@ -72,6 +72,38 @@ class RateLimited(QuotaExceeded):
         self.retry_after_s = retry_after_s
 
 
+# Who vouches for a detail: Gearbox's own words ("official") or a community
+# table such as mentalmars' ("table"). Official outranks table, field by field
+# (design.md §16); the merging itself is a later module's problem.
+DetailRank = Literal["official", "table"]
+Category = Literal["golden", "cosmetic", "permanent", "other"]
+
+
+@dataclass(frozen=True, slots=True)
+class ItemDetails:
+    """What a source knows about one SHiFT code besides its characters (design.md §16).
+
+    Only `shift_table` rows and single-code official posts carry these. An
+    empty `reward`, a `None` category or a `None` date means "this source
+    didn't say", never "there is none", so a later merge can fill the gap
+    without erasing anything. `reward` and `origin` are already cut so their
+    escaped form (`format.esc`, in UTF-16 units) is at most 300; the cut
+    happens where the text is read, because that's the only place that knows
+    the text came from a stranger's web page. `expires_on` and `added_on` are
+    Pacific calendar dates. `listed` is True when the details came from a
+    listing page, which is what `first_listed_at` and `last_listed_at` track.
+    """
+
+    code: str
+    rank: DetailRank
+    reward: str = ""
+    category: Category | None = None
+    expires_on: date | None = None
+    added_on: date | None = None  # table only
+    origin: str = ""  # table only
+    listed: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class RawItem:
     """One collected item, before normalization, dedupe or topic matching.
@@ -87,6 +119,10 @@ class RawItem:
     equality checks and log lines, and `StoredItem` (what actually reaches
     the database) has no field for it at all, so there's no code path that
     could persist it or hand it to the LLM even by accident.
+
+    `details` (design.md §16) rides along the same way, for the same reasons:
+    it's SHiFT-detection business, so it stays out of equality checks and log
+    lines, and `StoredItem` has no field for it either.
     """
 
     url: str
@@ -97,6 +133,7 @@ class RawItem:
     published_at: datetime | None
     topics: tuple[str, ...] | None = None
     full_text: str | None = field(default=None, compare=False, repr=False)
+    details: ItemDetails | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

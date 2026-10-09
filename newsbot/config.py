@@ -277,6 +277,31 @@ class WebSearchSource(BaseModel):
     codes_only: bool | None = None
 
 
+class ShiftTableSource(BaseModel):
+    """A web page of SHiFT code tables, read for codes and their details (design.md §16).
+
+    Not in the `Source` union yet: this task only teaches the collector what
+    one looks like, and the config wiring (the unions, the "codes_only can't be
+    false" rule, the name cap) is the next pass's job. `name` is required and
+    can't be blank because it's what an alert says in "via mentalmars"; an
+    anonymous table would make for a very confusing alert.
+    """
+
+    type: Literal["shift_table"]
+    name: str
+    url: HttpUrl
+    topics: list[str] | None = None
+    trust: Trust
+    codes_only: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("a shift_table source needs a name")
+        return v
+
+
 def is_reddit_source(source: object) -> bool:
     """True for an RSS source whose host is reddit.com (or a subdomain of it)."""
     url = getattr(source, "url", None)

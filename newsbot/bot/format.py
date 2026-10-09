@@ -160,6 +160,36 @@ def esc(s: str) -> str:
     return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}\u200b/", escaped)
 
 
+def cap_shown(text: str, limit: int) -> str:
+    """Trim `text` so that its escaped form is at most `limit` UTF-16 units, adding "…" if it cuts.
+
+    The limit is measured on what Discord is actually sent: `esc()` can nearly
+    double a string full of markdown or mentions, and a reward that's 300
+    characters raw and 590 shown is exactly the kind of thing a limit is
+    supposed to catch. `esc()` isn't strictly additive (it looks ahead for
+    "://", for one), so the cut is a binary search followed by a check on the
+    real candidate, and the loop at the end is there for the day the search's
+    monotonic assumption turns out to be wrong. Text that already fits comes
+    back untouched.
+    """
+    if discord_len(esc(text)) <= limit:
+        return text
+
+    def candidate(n: int) -> str:
+        return text[:n].rstrip() + "…"
+
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if discord_len(esc(candidate(mid))) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    while lo and discord_len(esc(candidate(lo))) > limit:
+        lo -= 1
+    return candidate(lo)
+
+
 def _topic_color(topic_key: str) -> int:
     """A color per topic, stable across restarts.
 
