@@ -159,11 +159,14 @@ def test_bare_www_and_domains_pass_through_documented_gap():
     assert "www.evil.example" in msg
 
 
-def test_timestamps_and_custom_emoji_pass_through_documented_gap():
-    # <t:...> and <:name:id> render as a timestamp / an emoji. Neither pings.
-    # esc() (shared with digests) doesn't touch them; a decision for the owner.
+def test_timestamps_and_custom_emoji_are_defused():
+    # <t:...> and <:name:id> would render as a timestamp / an emoji. Neither pings, but
+    # esc() (shared with digests) now puts a zero-width space after the "<" in both.
+    zw = "\u200b"
     text = f"<t:1700000000:R> <:name:{UID}> <a:name:{UID}>"
-    assert text in render_quote_message(Quote(text))
+    msg = render_quote_message(Quote(text))
+    assert text not in msg
+    assert f"<{zw}t:1700000000:R> <{zw}:name:{UID}> <{zw}a:name:{UID}>" in msg
 
 
 # --- rendering safety: layout -------------------------------------------------
