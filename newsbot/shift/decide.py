@@ -17,13 +17,14 @@ digest itself uses, not a separate keyword check invented for this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from newsbot.collectors.base import CollectorResult, RawItem, Trust
+from newsbot.collectors.base import CollectorResult, ItemDetails, RawItem, Trust
 from newsbot.config import Topic
 from newsbot.pipeline.filter import filter_items
 from newsbot.shift.match import find_codes, mentions_golden_key
+from newsbot.shift.official import read_official_details
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
@@ -46,6 +47,13 @@ class CodeSighting:
     `roundup` (owner decision, 2026-09-25) marks a sighting from an item
     that named more than `cfg.alerts.max_codes_per_item` distinct codes:
     a roundup or megathread post, not a genuine single-code announcement.
+
+    `details` (design.md §16) is what the item said about this one code
+    besides its characters: a table row's reward and expiry, or what the
+    official reader could make of a single-code Gearbox post. It rides along
+    for whoever records it (`shift/details.py` does the merging) and is left
+    out of equality, since two sightings of a code are the same sighting
+    whatever each one happened to know.
     """
 
     code: str
@@ -55,6 +63,7 @@ class CodeSighting:
     trust: Trust
     published_at: datetime | None
     roundup: bool = False
+    details: ItemDetails | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -114,6 +123,7 @@ def sightings_from_items(
     topics: list[Topic],
     alert_topics: list[str],
     max_codes_per_item: int = 5,
+    now: datetime | None = None,
 ) -> list[CodeSighting]:
     """Every code found in `items`, restricted to `alert_topics` (A6).
 
@@ -134,6 +144,15 @@ def sightings_from_items(
     every sighting it produces is marked `roundup=True` (owner decision,
     2026-09-25); `aggregate` is what actually decides what that means for
     each code.
+
+    Details (design.md §16) attach to a sighting of an item's only code, never
+    to a roundup's: an item that carries its own `details` (a table row) keeps
+    them if they're about the code the item names, and an official-trust item
+    holding exactly one code gets whatever `read_official_details` can read
+    out of its text, which is often nothing. A multi-code official post still
+    yields every sighting; it just yields no details. `now` is only the
+    fallback for a year-less expiry date on an official post with no publish
+    time.
     """
     scoped_items = items
     if alert_topics:
@@ -155,8 +174,14 @@ def sightings_from_items(
         codes = find_codes(text)
         if not codes:
             continue
-        golden = mentions_golden_key(text)
         is_roundup = len(codes) > max_codes_per_item
+        details = None
+        if not is_roundup and len(codes) == 1:
+            if item.details is not None and item.details.code == codes[0]:
+                details = item.details
+            elif item.trust == "official":
+                details = read_official_details(text, codes[0], item.published_at, now=now)
+        golden = mentions_golden_key(text) or (details is not None and details.category == "golden")
         for code in codes:
             sightings.append(
                 CodeSighting(
@@ -167,6 +192,7 @@ def sightings_from_items(
                     trust=item.trust,
                     published_at=item.published_at,
                     roundup=is_roundup,
+                    details=details,
                 )
             )
     return sightings
@@ -181,11 +207,18 @@ def _sighting_key(sighting: CodeSighting) -> tuple[int, float]:
     return (_TRUST_RANK.get(sighting.trust, len(_TRUST_RANK)), recency)
 
 
-def _is_fresh(sighting: CodeSighting, now: datetime, max_age: timedelta) -> bool:
+def _is_fresh(
+    sighting: CodeSighting,
+    now: datetime,
+    max_age: timedelta,
+    undated_stale: frozenset[str] = frozenset(),
+) -> bool:
     # Undated items are treated as fresh (SPEC-DEV 4's rule, carried over
-    # here per A11): there's no date to judge them stale by.
+    # here per A11): there's no date to judge them stale by. The exception is
+    # a source on its very first listing (design.md §16, E1): every undated
+    # row of a table we've never read before is "already around", not news.
     if sighting.published_at is None:
-        return True
+        return sighting.source_name.casefold() not in undated_stale
     return sighting.published_at >= now - max_age
 
 
@@ -195,6 +228,7 @@ def aggregate(
     now: datetime,
     max_age: timedelta,
     ping_trust: tuple[str, ...] = ("official", "press"),
+    undated_stale_sources: frozenset[str] = frozenset(),
 ) -> list[CodeCandidate]:
     """Collapse every sighting of the same code into one `CodeCandidate`.
 
@@ -219,7 +253,14 @@ def aggregate(
     code whose *every* sighting is `roundup` gets `roundup=True`; nothing
     else on the candidate matters once that's true, since `plan_alerts`
     never posts one.
+
+    `undated_stale_sources` names the sources (any case) whose *undated*
+    sightings don't count as fresh this time: a table source's first listing
+    in this database, where a row with no "added" date can't be told from one
+    that's been on the page for a year. Dated sightings from them follow the
+    usual age rule, and so do undated ones from every other source.
     """
+    stale_names = frozenset(name.casefold() for name in undated_stale_sources)
     order: list[str] = []
     by_code: dict[str, list[CodeSighting]] = {}
     for sighting in sightings:
@@ -233,7 +274,7 @@ def aggregate(
         group = by_code[code]
         normal = [s for s in group if not s.roundup]
         effective = normal if normal else group
-        fresh = any(_is_fresh(s, now, max_age) for s in effective)
+        fresh = any(_is_fresh(s, now, max_age, stale_names) for s in effective)
         golden = any(s.golden for s in effective)
         trusted = any(s.trust in ping_trust for s in effective) or (
             len({s.source_name.casefold() for s in effective}) >= 2
