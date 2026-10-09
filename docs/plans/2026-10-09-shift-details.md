@@ -739,3 +739,14 @@ About **8.5 agent days**, plus about half a day of the owner's time for the chec
 - Images, graphics and color (v3.2.0).
 - Persisting ETag and Last-Modified across restarts.
 - Tracking codes that drop off mentalmars' list.
+
+## 12. Decisions made during the build (for the docs task and design "As built")
+
+- **Via names count as a displayed change** (owner, 2026-10-09). Agreeing same-rank sources don't swap the name; a higher rank confirming a value takes it.
+- **The first listing is quiet per table kind,** not per source (`shift_table_kind_listed:<kind>:<name>`), so a partial first page or a table added later can't flood.
+- **No pinged follow-up for a code known to be expired,** at queue time and again at send time (skipped, no ping spent).
+- **Permanent codes are never expired on arrival.**
+- **A table's expiry can't silence Gearbox:** expired on arrival is skipped when an official source saw the code this pass, unless the expiry itself is official.
+- **Flood guard:** more than 5 fresh new codes from one table source in one pass go out as a roundup (unpinged, capped at 50, no follow-ups). `TABLE_FLOOD_LIMIT` in `fanout.py`.
+- **Sightings are scoped by item, not URL,** so nothing borrows a table's game match.
+- **Source names:** no control or invisible-only characters, no padding, 100 characters at most; case twins warn. Tables must be community trust.

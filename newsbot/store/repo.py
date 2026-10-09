@@ -31,6 +31,7 @@ from newsbot.shift.details import (
     DetailObservation,
     clean_observation,
     displayed,
+    expired_by_expiry,
     merge_observations,
     sort_observations,
 )
@@ -1927,12 +1928,18 @@ def queue_confirmed_followups(
     queued for every server whose original post of it is `posted` and stamped
     `followup_ok`. A (server, code) that already has a follow-up row, in any
     state, is left alone, so calling this every pass is safe (and is how a
-    second pass that races the first sends nothing extra).
+    second pass that races the first sends nothing extra). A code whose known expiry
+    has passed (Pacific end of day; never a permanent one) is not confirmed at all.
     """
     now_iso = _resolve_now(now)
+    moment = datetime.fromisoformat(now_iso)
     queued = 0
     with conn:
         for code in dict.fromkeys(codes):
+            # A code whose known expiry has already passed isn't worth a pinged "confirmed":
+            # the second source is probably just a table still listing yesterday's news.
+            if expired_by_expiry(code_details_for(conn, [code]).get(code), moment):
+                continue
             first = conn.execute(
                 "SELECT first_seen_at FROM alerted_codes WHERE code = ?", (code,)
             ).fetchone()
@@ -2138,7 +2145,15 @@ def claim_guild_followups(
 # The rollout marker (`app_state['shift_details_since']`) is written by the migration.
 
 DETAILS_SINCE_KEY = "shift_details_since"
+# "This source has listed something", one key per source. It is all the first draft of the
+# first-listing rule knew, so it stays readable: on its own (no kind keys beside it) it means
+# "every kind of table has been read", which is what that draft meant.
 TABLE_LISTED_PREFIX = "shift_table_listed:"
+# The real rule (owner, 2026-10-09): one key per source *and* table kind,
+# `shift_table_kind_listed:<kind>:<source name>`. The kind comes first because it is one of
+# three fixed words and a source name can hold any character, colons included.
+TABLE_KIND_LISTED_PREFIX = "shift_table_kind_listed:"
+TABLE_KINDS = ("main", "cosmetic", "permanent")
 
 _DETAILS_COLUMNS = (
     "code, reward, reward_source, reward_from, category, category_source, category_from, "
@@ -2318,12 +2333,47 @@ def table_listed_sources(conn: sqlite3.Connection, names: Iterable[str]) -> set[
     return found
 
 
-def mark_table_listed(conn: sqlite3.Connection, name: str, now: datetime) -> None:
-    """Remember that the `shift_table` source `name` has listed codes. The first time sticks."""
+def table_kinds_listed(conn: sqlite3.Connection, names: Iterable[str]) -> set[tuple[str, str]]:
+    """Which `(source name, table kind)` pairs among `names` have had a successful listing.
+
+    A source that showed us only its main table once hasn't "listed" its cosmetic or
+    permanent ones, and a site that adds a table later is a table we've never read. Both
+    get a quiet first listing (owner decision E1, per table kind).
+    """
+    by_key = {
+        f"{TABLE_KIND_LISTED_PREFIX}{kind}:{name}": (name, kind)
+        for name in dict.fromkeys(names)
+        for kind in TABLE_KINDS
+    }
+    keys = list(by_key)
+    found: set[tuple[str, str]] = set()
+    for i in range(0, len(keys), _SQLITE_VARIABLE_CHUNK):
+        chunk = keys[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = f"SELECT key FROM app_state WHERE key IN ({placeholders})"  # noqa: S608
+        found.update(by_key[row["key"]] for row in conn.execute(query, chunk))
+    return found
+
+
+def mark_table_listed(
+    conn: sqlite3.Connection, name: str, now: datetime, kinds: Iterable[str] = ()
+) -> None:
+    """Remember that the `shift_table` source `name` has listed codes, in these table `kinds`.
+
+    The kind keys go in first and the per-source key last, in one transaction, so a
+    per-source key never shows up without its kinds (alone, it reads as "every kind has
+    been read"). The first time sticks.
+    """
+    stamp = _utc_iso(now)
     with conn:
+        for kind in dict.fromkeys(kinds):
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                (f"{TABLE_KIND_LISTED_PREFIX}{kind}:{name}", stamp),
+            )
         conn.execute(
             "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
-            (f"{TABLE_LISTED_PREFIX}{name}", _utc_iso(now)),
+            (f"{TABLE_LISTED_PREFIX}{name}", stamp),
         )
 
 

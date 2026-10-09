@@ -29,12 +29,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from html.parser import HTMLParser
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import httpx
 
 from newsbot.bot.format import cap_shown
-from newsbot.collectors.base import Category, ItemDetails, RawItem
+from newsbot.collectors.base import Category, ItemDetails, RawItem, TableKind
 from newsbot.collectors.rss import _fetch
 from newsbot.config import ShiftTableSource
 from newsbot.shift.details import SHIFT_TZ
@@ -70,7 +70,6 @@ _HEADING_TAGS = frozenset({"h2", "h3", "h4"})
 # Tags that end a line of text; a cell with "a<br>b" shouldn't read "ab".
 _BREAK_TAGS = frozenset({"br", "p", "div", "li"})
 
-TableKind = Literal["main", "cosmetic", "permanent"]
 # Higher is more specific: a code listed in two tables takes the more specific one's category.
 _KIND_RANK: dict[TableKind, int] = {"main": 0, "cosmetic": 1, "permanent": 2}
 
@@ -590,6 +589,7 @@ def _merge_rows(code: str, rows: list[_Row]) -> ItemDetails:
         added_on=next((r.added for r in ranked if r.added), None),
         origin=next((r.origin for r in ranked if r.origin), ""),
         listed=True,
+        listed_in=tuple(sorted({r.kind for r in rows}, key=_KIND_RANK.__getitem__)),
     )
 
 

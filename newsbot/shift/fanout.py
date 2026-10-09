@@ -58,23 +58,26 @@ from newsbot.bot.format import (
 )
 from newsbot.collectors.base import CollectorResult, RawItem
 from newsbot.config import AppConfig
-from newsbot.pipeline.normalize import canonicalize_items
+from newsbot.pipeline.normalize import canonicalize, canonicalize_items
 from newsbot.pipeline.run import local_run_date
 from newsbot.shift.decide import (
     MAX_ROUNDUP_CODES,
     CodeCandidate,
+    CodeSighting,
     aggregate,
     plan_alerts,
     seeding_healthy,
     sightings_from_items,
 )
+from newsbot.shift.details import DetailObservation, expired_by_expiry
 from newsbot.shift.sweep import _ROUNDUP_CAP_ALERT, CodeAlertPoster, post_alert_with_retry
 from newsbot.store.db import connect
-from newsbot.store.models import GuildSettings, QueuedCode, ShiftSettings
+from newsbot.store.models import CodeDetailsRow, GuildSettings, QueuedCode, ShiftSettings
 from newsbot.store.repo import (
     ClaimedCodes,
     claim_guild_codes,
     claim_guild_followups,
+    code_details_for,
     current_shift_delivery,
     fail_pending_guild_codes,
     fail_pending_guild_followups,
@@ -86,6 +89,7 @@ from newsbot.store.repo import (
     mark_guild_codes_posted,
     mark_guild_followups_failed,
     mark_guild_followups_posted,
+    mark_table_listed,
     queue_confirmed_followups,
     queued_followup_guild_ids,
     queued_guild_codes,
@@ -96,6 +100,9 @@ from newsbot.store.repo import (
     record_silent_codes,
     skip_queued_guild_codes,
     skip_queued_guild_followups,
+    table_kinds_listed,
+    table_listed_sources,
+    upsert_code_details,
 )
 
 logger = logging.getLogger(__name__)
@@ -499,6 +506,16 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
             queued = queued_guild_followups(conn, guild_id)
             if not queued:
                 return None
+            # A code can die between the confirmation and the send. A pinged "confirmed"
+            # for a dead code is worse than none, so it's skipped, and spends no ping.
+            details = code_details_for(conn, queued)
+            now = deps.now()
+            dead = [code for code in queued if expired_by_expiry(details.get(code), now)]
+            if dead:
+                skip_queued_guild_followups(conn, guild_id, dead)
+                queued = [code for code in queued if code not in dead]
+                if not queued:
+                    return None
             state = current_shift_delivery(conn, guild_id, deps.cfg.shift.games)
             if state is None or state[1].ping == "none" or state[1].channel_id is None:
                 skip_queued_guild_followups(conn, guild_id, queued)
@@ -746,14 +763,119 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
     return released
 
 
+# More than this many fresh, new codes from one table source in one pass is a flood, not news
+# (owner, 2026-10-09): a site that restructures, or a source that suddenly lists a season's
+# worth, shouldn't turn into a wall of messages. They go out the way a roundup does.
+TABLE_FLOOD_LIMIT = 5
+
+
+def _dead_on_arrival(
+    row: CodeDetailsRow | None, code: str, now: datetime, official_codes: set[str]
+) -> bool:
+    """Whether a not-yet-released code has already expired, and the expiry is believable.
+
+    A table's expiry is a stranger's typing. If Gearbox itself named the code in this very
+    pass, a typo in someone else's table doesn't get to silence Gearbox: only an expiry that
+    came from an official source can, and only then does an official mention not help.
+    """
+    if not expired_by_expiry(row, now):
+        return False
+    return code not in official_codes or (row is not None and row.expires_source == "official")
+
+
+def _flag_first_listings(
+    sightings: list[CodeSighting], legacy: set[str], by_kind: set[tuple[str, str]]
+) -> list[CodeSighting]:
+    """Mark table rows from a table kind their source has never listed here before (E1).
+
+    Per source *and* kind, so a first page that only came back with its main table doesn't
+    make the cosmetic and permanent tables a flood the next hour, and a site adding a table
+    later gets the same quiet welcome. A code listed in several tables counts as read before
+    if any of them was. A source with only the old per-source key counts as having read every
+    kind; a row with no kind at all (not from the collector) is judged by the source alone.
+    """
+    with_kinds = {name for name, _ in by_kind}
+
+    def read_before(name: str, kinds: tuple[str, ...]) -> bool:
+        if not kinds:
+            return name in legacy or name in with_kinds
+        return any(
+            (name, kind) in by_kind or (name in legacy and name not in with_kinds) for kind in kinds
+        )
+
+    return [
+        replace(s, first_listing=True)
+        if s.details is not None
+        and s.details.listed
+        and not read_before(s.source_name, s.details.listed_in)
+        else s
+        for s in sightings
+    ]
+
+
+def _flood_to_roundup(
+    candidates: list[CodeCandidate],
+    sightings: list[CodeSighting],
+    known: set[str],
+    table_sources: set[str],
+) -> list[CodeCandidate]:
+    """Turn a table source's flood of fresh new codes into roundup candidates.
+
+    "Introduced by" a table source means every normal sighting of the code is that source's,
+    so a code Reddit also saw keeps its own standing. The existing roundup path then does the
+    rest: unpinged, the cap of 50, and no follow-ups (those only follow `followup_ok` posts,
+    and roundup posts never get the stamp).
+    """
+    sources_of: dict[str, set[str]] = {}
+    for sighting in sightings:
+        if not sighting.roundup:
+            sources_of.setdefault(sighting.code, set()).add(sighting.source_name)
+    introduced: dict[str, list[str]] = {}
+    for c in candidates:
+        names = sources_of.get(c.code, set())
+        if c.fresh and not c.roundup and c.code not in known and len(names) == 1:
+            (name,) = names
+            if name in table_sources:
+                introduced.setdefault(name, []).append(c.code)
+    flood = {
+        code for codes in introduced.values() if len(codes) > TABLE_FLOOD_LIMIT for code in codes
+    }
+    if flood:
+        logger.warning(
+            "a table source introduced a flood of new codes", extra={"codes": len(flood)}
+        )
+    return [replace(c, roundup=True, trusted=False) if c.code in flood else c for c in candidates]
+
+
+def _canonical_batch(items: list[RawItem]) -> list[RawItem]:
+    """Canonicalize every URL, deduping by URL only for items that don't carry details.
+
+    `canonicalize_items` treats "same canonical URL" as "same item", and a fragment doesn't
+    survive canonicalization, so a code table's thirty rows (one page, thirty `RawItem`s)
+    would all be the same item to it and twenty-nine would be shown the door. An item with
+    `details` is its own row of its own table: it gets a canonical URL and nothing else,
+    and keeps its place behind the deduped rest.
+    """
+    plain = [item for item in items if item.details is None]
+    rows: list[RawItem] = []
+    for item in items:
+        if item.details is None:
+            continue
+        url = canonicalize(item.url)
+        if url is not None:
+            rows.append(replace(item, url=url))
+    return canonicalize_items(plain) + rows
+
+
 async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
     now = deps.now()
     shift_cfg = deps.cfg.shift
     sightings = sightings_from_items(
-        canonicalize_items(items),
+        _canonical_batch(items),
         topics=deps.cfg.catalog,
         alert_topics=shift_cfg.games,
         max_codes_per_item=shift_cfg.max_codes_per_item,
+        now=now,
     )
 
     def _mark_seeded_sync() -> None:
@@ -769,12 +891,7 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
         return 0
 
     ping_trust = tuple(shift_cfg.ping_trust)
-    candidates = aggregate(
-        sightings,
-        now=now,
-        max_age=timedelta(hours=shift_cfg.max_item_age_hours),
-        ping_trust=ping_trust,
-    )
+    max_age = timedelta(hours=shift_cfg.max_item_age_hours)
 
     def _plan_and_record_sync() -> tuple[int, int]:
         with closing(connect(deps.db_path)) as conn:
@@ -786,7 +903,51 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 [(s.code, s.source_name, s.trust in ping_trust, s.roundup) for s in sightings],
                 now=lambda: now,
             )
+            # What the sightings said about their codes (a table row's reward, an official
+            # post's expiry) is stored before anything is planned, so the plan can see it.
+            # Known codes included: that is how a listing fills in what an old alert lacked.
+            # A crash after this and before the release redoes both next pass, harmlessly.
+            observations = [
+                DetailObservation(s.code, s.details, s.source_name, s.published_at)
+                for s in sightings
+                if s.details is not None
+            ]
+            changed = upsert_code_details(conn, observations, now=now) if observations else []
+            if changed:
+                logger.info("SHiFT code details changed", extra={"codes": len(changed)})
+
+            # A table's first listing, kind by kind, is a bookshelf and not news: its undated
+            # rows can't be told from ones that have sat there for a year (E1).
+            listed_kinds: dict[str, set[str]] = {}
+            for s in sightings:
+                if s.details is not None and s.details.listed:
+                    listed_kinds.setdefault(s.source_name, set()).update(s.details.listed_in)
+            table_sources = set(listed_kinds)
+            legacy = table_listed_sources(conn, table_sources) if table_sources else set()
+            by_kind = table_kinds_listed(conn, table_sources) if table_sources else set()
+            candidates = aggregate(
+                _flag_first_listings(sightings, legacy, by_kind),
+                now=now,
+                max_age=max_age,
+                ping_trust=ping_trust,
+            )
             known = known_codes(conn, [c.code for c in candidates])
+
+            # A code that's already expired the first time we release it isn't news either.
+            # Recorded as `too_old` like any stale code, which leaves `alerted_codes`' CHECK
+            # alone; `/shift history` reads the expiry itself to say "expired".
+            unknown_details = code_details_for(
+                conn, [c.code for c in candidates if c.code not in known]
+            )
+            official_codes = {s.code for s in sightings if s.trust == "official"}
+            candidates = [
+                replace(c, fresh=False)
+                if _dead_on_arrival(unknown_details.get(c.code), c.code, now, official_codes)
+                else c
+                for c in candidates
+            ]
+            candidates = _flood_to_roundup(candidates, sightings, known, table_sources)
+
             state = get_alert_state(conn)
             # Pings are decided per server, so the global plan only gets to
             # say silent / to_post / roundup; its own ping verdict is unused.
@@ -817,6 +978,10 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
             # trusted one) has now confirmed, inside 24 hours of its first
             # sighting, queues its follow-ups. Idempotent, so every pass can ask.
             queue_confirmed_followups(conn, [c.code for c in candidates], now=lambda: now)
+            # Last of all, so a crash anywhere above makes the next pass a first listing
+            # again, which it can redo safely: whatever it recorded is known by then.
+            for name in sorted(table_sources):
+                mark_table_listed(conn, name, now, sorted(listed_kinds[name]))
             overflow = sum(1 for _, status in plan.silent if status == "roundup")
             return len(released), overflow
 

@@ -348,6 +348,19 @@ def current_until(row: CodeDetailsRow | None, first_seen_at: datetime | None) ->
     return _utc(first_seen_at) + timedelta(days=CLOCK_DAYS)
 
 
+def expired_by_expiry(row: CodeDetailsRow | None, now: datetime) -> bool:
+    """Whether `row` carries an expiry that has already ended at `now` (Pacific end of day).
+
+    Only a *known* expiry counts. A permanent code never expires, whatever date a stray
+    table row left on it, which is how `is_current` already sees it. A code with no
+    expiry, or no row, isn't "expired" here; it just hasn't said (the 180-day clock is
+    `current_until`'s business, and it is not a reason to call anything dead on arrival).
+    """
+    if row is None or row.category == "permanent" or row.expires_on is None:
+        return False
+    return _utc(now) >= end_of_day(row.expires_on)
+
+
 def is_current(
     row: CodeDetailsRow | None, first_seen_at: datetime | None, *, now: datetime
 ) -> bool:

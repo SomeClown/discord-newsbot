@@ -82,6 +82,8 @@ class RateLimited(QuotaExceeded):
 # (design.md §16); the merging itself is a later module's problem.
 DetailRank = Literal["official", "table"]
 Category = Literal["golden", "cosmetic", "permanent", "other"]
+# Which kind of table on a code page a row came from, by its heading.
+TableKind = Literal["main", "cosmetic", "permanent"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,9 @@ class ItemDetails:
     the text came from a stranger's web page. `expires_on` and `added_on` are
     Pacific calendar dates. `listed` is True when the details came from a
     listing page, which is what `first_listed_at` and `last_listed_at` track.
+    `listed_in` names every kind of table the code was listed in on that page
+    (a code can sit in two); detection uses it to tell a table kind it has
+    read before from one it is meeting for the first time.
     """
 
     code: str
@@ -107,6 +112,8 @@ class ItemDetails:
     added_on: date | None = None  # table only
     origin: str = ""  # table only
     listed: bool = False
+    # Bookkeeping for detection, so it stays out of equality like `RawItem.details` does.
+    listed_in: tuple[TableKind, ...] = field(default=(), compare=False)  # table only
 
 
 @dataclass(frozen=True, slots=True)

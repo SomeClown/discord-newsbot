@@ -54,6 +54,11 @@ class CodeSighting:
     for whoever records it (`shift/details.py` does the merging) and is left
     out of equality, since two sightings of a code are the same sighting
     whatever each one happened to know.
+
+    `first_listing` marks a table row whose table kind this database has never
+    seen that source list (design.md §16, E1, per table kind). An undated one
+    can't be told from a code that's sat there for a year, so `aggregate` won't
+    call it fresh.
     """
 
     code: str
@@ -64,6 +69,7 @@ class CodeSighting:
     published_at: datetime | None
     roundup: bool = False
     details: ItemDetails | None = field(default=None, compare=False)
+    first_listing: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,10 @@ def sightings_from_items(
     yields every sighting; it just yields no details. `now` is only the
     fallback for a year-less expiry date on an official post with no publish
     time.
+
+    Scope is decided item by item, not URL by URL: every row of a code table
+    shares the page's URL, and an unrelated item that happens to share it
+    mustn't ride the table's game match into the alert scope.
     """
     scoped_items = items
     if alert_topics:
@@ -160,13 +170,13 @@ def sightings_from_items(
         # which items matched at all, never the cap that trims what the
         # digest shows: a code from item #61 in a busy topic still counts.
         grouped = filter_items(items, topics, max(len(items), 1))
-        matched_urls = {
-            topic_item.item.url
+        matched = {
+            id(topic_item.item)
             for topic_key in alert_topics
             for topic_item in grouped.get(topic_key, [])
             if not topic_item.uncertain
         }
-        scoped_items = [item for item in items if item.url in matched_urls]
+        scoped_items = [item for item in items if id(item) in matched]
 
     sightings: list[CodeSighting] = []
     for item in scoped_items:
@@ -215,10 +225,10 @@ def _is_fresh(
 ) -> bool:
     # Undated items are treated as fresh (SPEC-DEV 4's rule, carried over
     # here per A11): there's no date to judge them stale by. The exception is
-    # a source on its very first listing (design.md §16, E1): every undated
+    # a table on its very first listing (design.md §16, E1): every undated
     # row of a table we've never read before is "already around", not news.
     if sighting.published_at is None:
-        return sighting.source_name.casefold() not in undated_stale
+        return not sighting.first_listing and sighting.source_name.casefold() not in undated_stale
     return sighting.published_at >= now - max_age
 
 
@@ -258,7 +268,10 @@ def aggregate(
     sightings don't count as fresh this time: a table source's first listing
     in this database, where a row with no "added" date can't be told from one
     that's been on the page for a year. Dated sightings from them follow the
-    usual age rule, and so do undated ones from every other source.
+    usual age rule, and so do undated ones from every other source. A sighting
+    flagged `first_listing` says the same thing for one table kind of one source
+    (`fanout` sets it), which is how a source that only showed part of its page
+    the first time doesn't flood when the rest turns up.
     """
     stale_names = frozenset(name.casefold() for name in undated_stale_sources)
     order: list[str] = []
