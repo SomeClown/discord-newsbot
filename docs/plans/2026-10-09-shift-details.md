@@ -59,6 +59,8 @@ Precedence and the clock live in one pure function (`merge_details`). SQL only s
 
 ## 2. Owner decisions (with recommendations)
 
+**Decided 2026-10-09:** E1 to E4 as recommended. Run like v3: implement, an adversarial test-engineer round per task, the gate, then qa and docs.
+
 | # | Question | Recommendation | Blocks |
 |---|---|---|---|
 | E1 | What do undated table rows (cosmetic and permanent tables) do the first time a `shift_table` source lists them? | **A:** on a source's first successful listing in this database, undated rows are recorded quietly (`too_old`); after that, an undated row that's new to the bot is fresh and posts unpinged like any community find. Dated rows always follow the 48-hour rule. (B: undated rows never alert; a new permanent code only shows up in `/shift codes`.) | T5 |
