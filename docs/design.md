@@ -890,7 +890,7 @@ Owner decisions (2026-10-09):
 - a Golden Key count: "3 Golden Keys", "a Golden Key", "five Golden Keys";
 - an expiry: "expires", "expiring", "valid until" or "through", followed by a date with a month name ("October 14", "Oct 14, 2026") or a full numeric date ("10/14/2026").
 
-A Golden Key count also sets the category to golden. A date without a year takes the next occurrence of that date after the post's publish time. When it isn't sure, the reader records nothing and mentalmars fills the gap. A wrong expiry is worse than "unknown".
+When Gearbox releases several codes in one post, every one of them is recorded and alerted as usual; the reader just leaves that post's details alone, and each code's details come from other sources (mentalmars, a later single-code official post) as they turn up, editing the alerts in place. A Golden Key count also sets the category to golden. A date without a year takes the next occurrence of that date after the post's publish time. When it isn't sure, the reader records nothing and mentalmars fills the gap. A wrong expiry is worse than "unknown".
 
 **Data (migration 009, additive).** A new table, `code_details`, one row per code:
 - `code` (primary key, the same 29-character check as `alerted_codes`);
