@@ -911,7 +911,7 @@ How it works:
   - A code the bot first meets anywhere else after this release starts its clock at that first sighting.
   - A code with no `code_details` row (seen before this release, never listed) uses `alerted_codes.first_seen_at`.
 - **Current until:** never, for a permanent code; otherwise the end of `expires_on` in Pacific time if it's known; otherwise `clock_start` plus 180 days.
-- **Changes that show:** `details_changed_at` moves only when something an alert shows changes (reward, category, expiry). That's what triggers the edits below.
+- **Changes that show:** `details_changed_at` moves only when something an alert shows changes: reward, category, expiry, or who supplied one of them (the "via" names; owner, 2026-10-09). That's what triggers the edits below.
 - **What's untouched:** `alerted_codes`, `code_sightings` and the per-server tables keep their meaning. A code still pings at most once, ever, per server, and listing it again changes nothing there.
 - **Rolling back:** v3.0.5 and earlier read a migrated database without trouble (they only ever apply newer files and ignore a table they don't know). That still has to be shown in a test.
 
