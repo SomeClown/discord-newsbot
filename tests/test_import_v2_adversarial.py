@@ -669,7 +669,11 @@ def test_exactly_ten_games_is_fine_and_eleven_writes_no_import_state(v22_db, cfg
 
     with pytest.raises(ImportFailedError, match="nothing was imported"):
         ensure_imported(v22_db, with_games(11), _clock)
-    assert _rows(v22_db, "SELECT COUNT(*) FROM app_state")[0][0] == 0
+    # (Migration 009's rollout marker is the one app_state row that was always going to be there.)
+    assert (
+        _rows(v22_db, "SELECT COUNT(*) FROM app_state WHERE key != 'shift_details_since'")[0][0]
+        == 0
+    )
     assert ensure_imported(v22_db, with_games(10), _clock).games[-1] == ("game9", 2009)
 
 

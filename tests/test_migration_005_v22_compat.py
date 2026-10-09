@@ -8,9 +8,10 @@ doesn't need the tag), loaded as a throwaway module, so what's exercised is
 v2.2's real SQL and not my memory of it.
 
 The populated database comes from the `v22_db` fixture: real migrations 001
-to 004, realistic rows, then 005, 006 and 007 (006 adds the SHiFT follow-up tables,
-D14; 007 adds the nullable item-watermark columns; the tests at the bottom of this file
-are about those).
+to 004, realistic rows, then 005 to 009 (006 adds the SHiFT follow-up tables,
+D14; 007 adds the nullable item-watermark columns; 008 rebuilds `items` with AUTOINCREMENT;
+009 adds the SHiFT details store and alert-message records; the tests at the bottom of this
+file are about those).
 """
 
 import sqlite3
@@ -78,8 +79,8 @@ def test_v22_migrate_would_be_a_noop(v22_db):
     # v2.2's own runner is today's runner minus 005 (it globs the files it ships with,
     # and 005 isn't one of them): it sees user_version 7 >= its newest, and skips.
     with closing(connect(v22_db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
-        assert migrate(conn) == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert migrate(conn) == 9
 
 
 # --- the digest guard ---
@@ -427,7 +428,7 @@ def test_after_v22_writes_v3_adopts_its_orphan_digest_and_the_day_is_not_due_twi
 def test_after_migration_the_v22_pipeline_helpers_survive_a_second_open(v22_db, v22):
     # A brand new process (v2.2 opening the file at boot) sees a consistent database.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
         assert v22.get_digest(conn, TODAY + timedelta(days=0)).id == 12
         _assert_healthy(conn)
 
@@ -564,3 +565,70 @@ def test_v22_purge_then_insert_never_reuses_an_item_id_after_008(v22, conn):
     )
     assert conn.execute("SELECT MIN(id) FROM items").fetchone()[0] == highest + 1
     _assert_healthy(conn)
+
+
+# --- 009: the SHiFT details store and alert-message records ---
+
+
+def test_v22_has_never_heard_of_the_details_tables(v22):
+    source = SNAPSHOT.read_text()
+    for name in (
+        "code_details",
+        "guild_alert_messages",
+        "edits_blocked_at",
+        "shift_details_since",
+    ):
+        assert name not in source
+
+
+def test_v22_shift_paths_work_beside_populated_details_tables(v22, conn, codes):
+    # v3.1.0 state: a server with an alert message on record, and details for two codes.
+    repo.create_guild(conn, 42, tier="comped", set_up=True, imported_at=NOW)
+    posted = codes["posted"]
+    new_code = "ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ-ZZZ77"
+    with conn:
+        conn.execute(
+            "INSERT INTO guild_code_posts (guild_id, code, status, message_id, claimed_at) "
+            "VALUES (42, ?, 'posted', 777, ?)",
+            (posted, NOW.isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO guild_alert_messages (guild_id, message_id, channel_id, header, "
+            "posted_at, rendered_at) VALUES (42, 777, 4200, 'New SHiFT code!', ?, ?)",
+            (NOW.isoformat(), NOW.isoformat()),
+        )
+        for code in (posted, new_code):
+            conn.execute(
+                "INSERT INTO code_details (code, reward, reward_source, reward_from, clock_start, "
+                "updated_at) VALUES (?, '3 Golden Keys', 'table', 'mentalmars', ?, ?)",
+                (code, NOW.isoformat(), NOW.isoformat()),
+            )
+    before = [tuple(r) for r in conn.execute("SELECT * FROM code_details ORDER BY code")]
+
+    # Now v2.2 is rolled back in: every SHiFT read and write it has still works.
+    assert v22.known_codes(conn, [posted, new_code]) == {posted}
+    assert v22.claim_codes(
+        conn,
+        [(new_code, "Feed", "https://example.com/z")],
+        pinged=True,
+        local_day="2026-10-01",
+        now=_clock,
+        max_pings=3,
+    )
+    v22.mark_codes_posted(conn, [new_code], message_id=1)
+    v22.fail_pending_codes(conn)
+    shown, _ = v22.query_codes(conn, SINCE, 20, 0)
+    assert new_code in {c.code for c in shown}
+    v22.purge_older_than(conn, datetime(2026, 9, 29, tzinfo=UTC))
+    # None of it touched 3.1.0's rows.
+    assert [tuple(r) for r in conn.execute("SELECT * FROM code_details ORDER BY code")] == before
+    assert conn.execute("SELECT COUNT(*) FROM guild_alert_messages").fetchone()[0] == 1
+    _assert_healthy(conn)
+
+
+def test_every_009_addition_to_an_old_table_is_optional_for_v22(conn):
+    # The new guild_shift column is nullable with no default, so any older INSERT is fine.
+    info = {r["name"]: r for r in conn.execute("PRAGMA table_info(guild_shift)")}
+    assert (
+        info["edits_blocked_at"]["notnull"] == 0 and info["edits_blocked_at"]["dflt_value"] is None
+    )

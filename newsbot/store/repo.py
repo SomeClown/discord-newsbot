@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -26,9 +27,17 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
+from newsbot.shift.details import (
+    DetailObservation,
+    clean_observation,
+    displayed,
+    merge_observations,
+    sort_observations,
+)
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
     AlertState,
+    CodeDetailsRow,
     CodeView,
     CompedFollow,
     Coverage,
@@ -55,6 +64,8 @@ from newsbot.store.models import (
     Tier,
     Usage,
 )
+
+logger = logging.getLogger(__name__)
 
 # SQLite caps a single statement at 999 (or 32766 on newer builds, but we
 # don't get to pick) bound parameters. Chunking here means callers never
@@ -249,6 +260,10 @@ def record_source_result(
     return consecutive_failures
 
 
+# How long a posted alert's message record is kept (migration 009). Edits stop at 14 days.
+ALERT_MESSAGE_RETENTION = timedelta(days=30)
+
+
 def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, int]:
     """Delete items and stories older than `cutoff`. Returns (items_deleted, stories_deleted).
 
@@ -268,15 +283,29 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
     return items_deleted, stories_deleted
 
 
-def purge_guild_data_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, int]:
+def purge_guild_data_older_than(
+    conn: sqlite3.Connection,
+    cutoff: datetime,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> tuple[int, int]:
     """Delete shared summaries and server notices older than `cutoff`.
 
     Returns (summaries_deleted, notices_deleted). The public app's half of
     retention, next to `purge_older_than`: the stories a summary owns are
     already gone by the same age (they're purged by `created_at` too), and any
     that aren't have their `summary_id` nulled by the foreign key, not orphaned.
+
+    It also drops `guild_alert_messages` rows posted more than
+    `ALERT_MESSAGE_RETENTION` before `now` (30 days, not the cutoff's 90: an alert
+    stops being edited at 14, and the record is only worth keeping a while past
+    that). Those aren't counted in the return value; nobody has needed the number yet.
     """
     cutoff_iso = _utc_iso(cutoff)
+    # To UTC first: subtracting days from a datetime in a named zone is wall-clock arithmetic,
+    # which comes out an hour off across a DST change.
+    moment = datetime.fromisoformat(_utc_iso((now or (lambda: datetime.now(UTC)))()))
+    messages_cutoff = _utc_iso(moment - ALERT_MESSAGE_RETENTION)
     with conn:
         summaries = conn.execute(
             "DELETE FROM game_summaries WHERE created_at < ?", (cutoff_iso,)
@@ -284,6 +313,7 @@ def purge_guild_data_older_than(conn: sqlite3.Connection, cutoff: datetime) -> t
         notices = conn.execute(
             "DELETE FROM guild_notices WHERE created_at < ?", (cutoff_iso,)
         ).rowcount
+        conn.execute("DELETE FROM guild_alert_messages WHERE posted_at < ?", (messages_cutoff,))
     return summaries, notices
 
 
@@ -2097,6 +2127,204 @@ def claim_guild_followups(
     finally:
         conn.isolation_level = old_isolation
     return claimed
+
+
+# --- SHiFT code details (design.md §16, migration 009) ---
+#
+# `code_details` holds what the bot knows about a code besides its characters: reward,
+# category, expiry, and who said so. The precedence rules and the clock are one pure
+# function (`shift/details.py: merge_details`); this section reads the rows, runs the
+# function, and stores what it hands back. It never decides anything itself, on purpose.
+# The rollout marker (`app_state['shift_details_since']`) is written by the migration.
+
+DETAILS_SINCE_KEY = "shift_details_since"
+TABLE_LISTED_PREFIX = "shift_table_listed:"
+
+_DETAILS_COLUMNS = (
+    "code, reward, reward_source, reward_from, category, category_source, category_from, "
+    "expires_on, expires_source, expires_from, added_on, origin, clock_start, "
+    "first_listed_at, last_listed_at, updated_at, details_changed_at"
+)
+
+
+def _date_or_none(value: str | None) -> date | None:
+    return date.fromisoformat(value) if value else None
+
+
+def _details_from_row(row: sqlite3.Row) -> CodeDetailsRow:
+    return CodeDetailsRow(
+        code=row["code"],
+        reward=row["reward"],
+        reward_source=row["reward_source"],
+        reward_from=row["reward_from"],
+        category=row["category"],
+        category_source=row["category_source"],
+        category_from=row["category_from"],
+        expires_on=_date_or_none(row["expires_on"]),
+        expires_source=row["expires_source"],
+        expires_from=row["expires_from"],
+        added_on=_date_or_none(row["added_on"]),
+        origin=row["origin"],
+        clock_start=datetime.fromisoformat(row["clock_start"]),
+        first_listed_at=_parse_dt(row["first_listed_at"]),
+        last_listed_at=_parse_dt(row["last_listed_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        details_changed_at=_parse_dt(row["details_changed_at"]),
+    )
+
+
+def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str, CodeDetailsRow]:
+    """The stored details for whichever of `codes` have a row, keyed by code."""
+    code_list = list(dict.fromkeys(codes))
+    found: dict[str, CodeDetailsRow] = {}
+    for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = code_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # Literal "?"s sized to the chunk and a constant column list; the codes are bound.
+        query = (
+            f"SELECT {_DETAILS_COLUMNS} FROM code_details "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            found[row["code"]] = _details_from_row(row)
+    return found
+
+
+def _first_seen_for(conn: sqlite3.Connection, codes: list[str]) -> dict[str, datetime]:
+    """`alerted_codes.first_seen_at` for whichever of `codes` the bot has released."""
+    found: dict[str, datetime] = {}
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, first_seen_at FROM alerted_codes "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            found[row["code"]] = datetime.fromisoformat(row["first_seen_at"])
+    return found
+
+
+def _write_details(conn: sqlite3.Connection, row: CodeDetailsRow) -> None:
+    def stamp(moment: datetime | None) -> str | None:
+        return _utc_iso(moment) if moment is not None else None
+
+    conn.execute(
+        f"INSERT INTO code_details ({_DETAILS_COLUMNS}) "  # noqa: S608
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(code) DO UPDATE SET "
+        "reward = excluded.reward, reward_source = excluded.reward_source, "
+        "reward_from = excluded.reward_from, category = excluded.category, "
+        "category_source = excluded.category_source, category_from = excluded.category_from, "
+        "expires_on = excluded.expires_on, expires_source = excluded.expires_source, "
+        "expires_from = excluded.expires_from, added_on = excluded.added_on, "
+        "origin = excluded.origin, clock_start = excluded.clock_start, "
+        "first_listed_at = excluded.first_listed_at, last_listed_at = excluded.last_listed_at, "
+        "updated_at = excluded.updated_at, details_changed_at = excluded.details_changed_at",
+        (
+            row.code,
+            row.reward,
+            row.reward_source,
+            row.reward_from,
+            row.category,
+            row.category_source,
+            row.category_from,
+            row.expires_on.isoformat() if row.expires_on else None,
+            row.expires_source,
+            row.expires_from,
+            row.added_on.isoformat() if row.added_on else None,
+            row.origin,
+            _utc_iso(row.clock_start),
+            stamp(row.first_listed_at),
+            stamp(row.last_listed_at),
+            _utc_iso(row.updated_at),
+            stamp(row.details_changed_at),
+        ),
+    )
+
+
+def upsert_code_details(
+    conn: sqlite3.Connection, observations: Iterable[DetailObservation], *, now: datetime
+) -> list[str]:
+    """Fold a pass's detail observations into `code_details`; return the codes that changed.
+
+    One `BEGIN IMMEDIATE`: read the existing rows, each code's `first_seen_at` and the rollout
+    marker, run each code's observations through `merge_observations` (oldest first, so inside a
+    rank the newer reading wins), then write each touched row once. The returned codes are the
+    ones whose shown details (a value, or who supplied it) differ between the stored row and the
+    final one: the net change, however many observations it took to get there, and whatever
+    `now` is. That is what flags an alert for an edit (`details_changed_at`); the list is for
+    the log.
+
+    An observation the store would refuse (a reward over 300 characters as shown, a category
+    outside the four) is skipped with a warning and doesn't sink the rest. A missing or garbled
+    marker (it's a migration's job, but people edit databases) reads as "now", which gives older
+    codes a fresh clock and is the safe direction.
+    """
+    ordered = sort_observations(observations)
+    by_code: dict[str, list[DetailObservation]] = {}
+    for obs in ordered:
+        try:
+            clean = clean_observation(obs)
+        except ValueError as exc:
+            logger.warning("skipped details for a code: %s", exc)
+            continue
+        by_code.setdefault(clean.code, []).append(clean)
+    if not by_code:
+        return []
+    codes = list(by_code)
+    with _immediate(conn):
+        before = code_details_for(conn, codes)
+        first_seen = _first_seen_for(conn, codes)
+        marker = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?", (DETAILS_SINCE_KEY,)
+        ).fetchone()
+        since = _parse_dt_or_none(marker["value"]) if marker else None
+        if marker and since is None:
+            logger.warning("%s isn't a timestamp; reading it as now", DETAILS_SINCE_KEY)
+        changed: list[str] = []
+        for code, group in by_code.items():
+            old = before.get(code)
+            merged = merge_observations(
+                old,
+                group,
+                now=now,
+                first_seen_at=first_seen.get(code),
+                details_since=since or now,
+            )
+            if merged != old:
+                _write_details(conn, merged)
+            if (old is None and (merged.reward or merged.category or merged.expires_on)) or (
+                old is not None and displayed(merged) != displayed(old)
+            ):
+                changed.append(code)
+    return changed
+
+
+def table_listed_sources(conn: sqlite3.Connection, names: Iterable[str]) -> set[str]:
+    """Which of these `shift_table` sources have ever had a successful listing in this database.
+
+    A source's first listing is when its undated rows get recorded quietly instead of alerted
+    (owner decision E1). The marker is an `app_state` key per source name.
+    """
+    by_key = {f"{TABLE_LISTED_PREFIX}{name}": name for name in dict.fromkeys(names)}
+    keys = list(by_key)
+    found: set[str] = set()
+    for i in range(0, len(keys), _SQLITE_VARIABLE_CHUNK):
+        chunk = keys[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = f"SELECT key FROM app_state WHERE key IN ({placeholders})"  # noqa: S608
+        found.update(by_key[row["key"]] for row in conn.execute(query, chunk))
+    return found
+
+
+def mark_table_listed(conn: sqlite3.Connection, name: str, now: datetime) -> None:
+    """Remember that the `shift_table` source `name` has listed codes. The first time sticks."""
+    with conn:
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+            (f"{TABLE_LISTED_PREFIX}{name}", _utc_iso(now)),
+        )
 
 
 # --- Free servers' /news: item headlines (design.md §15, owner decision D2) ---

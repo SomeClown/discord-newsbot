@@ -42,7 +42,7 @@ def v7_path(tmp_path, monkeypatch, migrations_up_to):
 
 def test_the_rebuild_keeps_every_row_its_id_and_its_children(v7_path):
     with closing(connect(v7_path)) as conn:
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
         assert [r["id"] for r in conn.execute("SELECT id FROM items ORDER BY id")] == [3, 5, 9]
         assert conn.execute("SELECT COUNT(*) FROM item_topics").fetchone()[0] == 3
         assert conn.execute("SELECT item_id FROM story_items").fetchone()[0] == 5

@@ -10,11 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from newsbot.collectors.base import Category
 
 Trust = Literal["official", "press", "community"]
 Label = Literal["official", "reported", "rumor"]
 Tier = Literal["free", "comped"]
+# Who vouched for a stored detail: "official" (Gearbox's own words), "table" (a
+# `shift_table` source) or "" (nobody has said). The order is the precedence.
+DetailSource = Literal["", "table", "official"]
 
 
 @dataclass(frozen=True)
@@ -144,6 +150,78 @@ class AlertStatus:
 
 
 @dataclass(frozen=True)
+class CodeDetailsRow:
+    """One `code_details` row (migration 009): what the bot knows about a code besides its text.
+
+    Reward, category and expiry each carry the rank that set them (`*_source`) and the
+    source name that did (`*_from`), because precedence is decided field by field and the
+    alert's "via ..." wants names. `expires_on` and `added_on` are Pacific calendar dates;
+    every timestamp is an aware UTC datetime. The merge rules that produce one of these live
+    in `shift/details.py`, and this class just holds the result (design.md §16).
+
+    `clock_start` is set once, when the row is created, and never moves.
+    `details_changed_at` moves only when something an alert shows (reward, category,
+    expiry) changes, which is what flags an alert for an edit.
+    """
+
+    code: str
+    clock_start: datetime
+    updated_at: datetime
+    reward: str = ""
+    reward_source: DetailSource = ""
+    reward_from: str = ""
+    category: Category | None = None
+    category_source: DetailSource = ""
+    category_from: str = ""
+    expires_on: date | None = None
+    expires_source: DetailSource = ""
+    expires_from: str = ""
+    added_on: date | None = None
+    origin: str = ""
+    first_listed_at: datetime | None = None
+    last_listed_at: datetime | None = None
+    details_changed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AlertMessageRecord:
+    """What a posted SHiFT alert message looked like, so it can be edited later.
+
+    One `guild_alert_messages` row (migration 009), minus the guild and message ids the
+    caller already has. `header` is exactly the first paragraph that went out (ping
+    prefix included, unless Discord made us strip it), and `rendered_at` is when the
+    details in the message were read.
+    """
+
+    channel_id: int
+    header: str
+    golden_prefix: bool
+    posted_at: datetime
+    rendered_at: datetime
+
+
+@dataclass(frozen=True)
+class EditTarget:
+    """A live alert message with a code whose details changed since it was rendered."""
+
+    guild_id: int
+    message_id: int
+    channel_id: int
+    header: str
+    golden_prefix: bool
+    rendered_at: datetime
+
+
+@dataclass(frozen=True)
+class CurrentCode:
+    """A code that should still work, with its details if the bot has any (`/shift codes`)."""
+
+    code: str
+    first_seen_at: datetime
+    details: CodeDetailsRow | None = None
+
+
+@dataclass(frozen=True)
 class CodeView:
     """A code as shown to a member through `/shift codes`.
 
@@ -159,6 +237,9 @@ class CodeView:
     item_url: str
     status: str
     from_roundup: bool
+    # Migration 009's details, when `/shift history` joins them in; v3.0.5's snapshot
+    # builds this class without the argument, so it needs a default.
+    details: CodeDetailsRow | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +482,9 @@ class QueuedCode:
     golden: bool
     trusted: bool
     queued_at: datetime
+    # Migration 009's details for the code; same story as `CodeView.details` (v3.0.5 builds
+    # this class too).
+    details: CodeDetailsRow | None = None
 
 
 # --- Per-guild digests (design.md §15, plan task 6) ---

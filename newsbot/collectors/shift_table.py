@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from html.parser import HTMLParser
 from typing import Literal, NamedTuple
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -38,6 +37,7 @@ from newsbot.bot.format import cap_shown
 from newsbot.collectors.base import Category, ItemDetails, RawItem
 from newsbot.collectors.rss import _fetch
 from newsbot.config import ShiftTableSource
+from newsbot.shift.details import SHIFT_TZ
 from newsbot.shift.match import GOLDEN_RE, find_codes
 
 logger = logging.getLogger(__name__)
@@ -64,10 +64,6 @@ _HEADER_SEARCH_ROWS = 5
 # design.md §16: reward and origin are cut to this many UTF-16 units *as shown*,
 # so no page, honest or not, can make an alert entry too big for a message.
 _SHOWN_LIMIT = 300
-
-# Dates on the page are Pacific calendar days. (details.SHIFT_TZ will own this
-# once that module exists; until then it lives here, and I'll fold them together.)
-_PACIFIC = ZoneInfo("America/Los_Angeles")
 
 _SKIPPED_TAGS = frozenset({"script", "style"})
 _HEADING_TAGS = frozenset({"h2", "h3", "h4"})
@@ -448,7 +444,7 @@ def _is_no_date(text: str) -> bool:
 
 def _start_of_day(d: date) -> datetime:
     """Midnight at the start of `d` in Pacific time, as UTC."""
-    return datetime.combine(d, time.min, tzinfo=_PACIFIC).astimezone(UTC)
+    return datetime.combine(d, time.min, tzinfo=SHIFT_TZ).astimezone(UTC)
 
 
 def _column_map(header: list[str]) -> dict[str, int] | None:
@@ -676,7 +672,7 @@ class ShiftTableCollector:
     def _parse_items(self, body: bytes) -> list[RawItem]:
         tables, truncated = parse_tables(body.decode("utf-8", errors="replace"))
         stats = _Stats()
-        today = self._clock().astimezone(_PACIFIC).date()
+        today = self._clock().astimezone(SHIFT_TZ).date()
         by_code = _read_rows(tables, stats, today)
         if not by_code:
             raise ValueError("no SHiFT code tables found")

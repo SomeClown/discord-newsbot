@@ -1413,7 +1413,8 @@ async def test_free_servers_never_trigger_summaries_search_or_claims(world):
         await world.http.aclose()
     assert world.llm.calls == [] and world.brave == [] and world.sleeps == []
     assert claims(world) == [] and world.summaries() == []
-    assert world.rows("SELECT * FROM app_state") == []
+    # (Migration 009's rollout marker is the one app_state row that was always going to be there.)
+    assert world.rows("SELECT * FROM app_state WHERE key != 'shift_details_since'") == []
 
 
 # --- storage ---
