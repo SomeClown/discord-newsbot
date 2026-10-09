@@ -259,6 +259,14 @@ catalog:
       # spaces its requests out, and it might block the production box's IP
       # outright; the source health report will show it, not a crash.
       - {type: rss, name: "r/Borderlands4", url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", trust: community, codes_only: true}
+      # A community page of Borderlands 4 SHiFT code tables (mentalmars). It's
+      # read once an hour with a conditional request, only for the codes and
+      # what they give (reward, kind, expiry), and nothing on it is ever stored
+      # as news. A shift_table source is always codes-only, so there's no
+      # `codes_only` to set, and it has to live under a game that's in
+      # shift.games. Its name shows up in alerts ("via mentalmars"), which is
+      # why names are capped at 100 characters.
+      - {type: shift_table, name: "mentalmars", url: "https://mentalmars.com/game-news/borderlands-4-shift-codes/", trust: community}
       # Community: Bluesky search. These are here so the config is ready the
       # day you're willing to make a Bluesky app password; until
       # BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are both set, every one of

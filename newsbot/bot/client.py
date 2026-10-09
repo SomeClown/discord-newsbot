@@ -63,6 +63,7 @@ from newsbot.bot.permissions import (
     sweep_guild_permissions,
 )
 from newsbot.collectors.base import RateLimitState
+from newsbot.collectors.shift_table import PageValidators
 from newsbot.config import AppConfig, QuoteSourceCfg, Secrets
 from newsbot.guilds import lifecycle
 from newsbot.guilds.importer import ImportReport
@@ -788,6 +789,9 @@ class NewsBot(discord.Client):
         # Reddit's cross-call gap is honored across every collection pass,
         # not reset fresh each time one happens to run.
         self._rate_limit_state = RateLimitState()
+        # SHiFT table pages' ETag and Last-Modified: here and not on the collectors,
+        # which are rebuilt every pass. A restart forgets them and fetches in full.
+        self._page_validators = PageValidators()
         # `ensure_imported`'s report, if this start did the import; the first
         # `on_ready` tells the owner once and then forgets it.
         self._import_report = import_report
@@ -1023,6 +1027,7 @@ class NewsBot(discord.Client):
             now=_utcnow,
             alert=router.alert_owner,
             rate_limit_state=self._rate_limit_state,
+            page_validators=self._page_validators,
             shift_hook=make_shift_hook(self._fanout_deps),
         )
         brave = self.secrets.brave_api_key
@@ -1373,7 +1378,9 @@ class NewsBot(discord.Client):
             raise RuntimeError("_collection_job() ran before setup_hook() finished")
         pass_over = True
         try:
-            deps.collectors = build_collection_collectors(self.cfg, self.secrets)
+            deps.collectors = build_collection_collectors(
+                self.cfg, self.secrets, validators=self._page_validators
+            )
             outcome = await run_collection(deps)
             if outcome.skipped:
                 # Nothing was collected, so a held digest keeps waiting (for the cap).

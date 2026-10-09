@@ -16,7 +16,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import httpx
 
@@ -26,10 +26,15 @@ from newsbot.config import (
     GameInfo,
     RssSource,
     Secrets,
+    ShiftTableSource,
     SteamSource,
     Trust,
     WebSearchSource,
 )
+
+if TYPE_CHECKING:
+    # The collector imports this module, so the real import waits inside `build_catalog_collectors`.
+    from newsbot.collectors.shift_table import PageValidators
 
 # Default gap between requests that share a `rate_limit_key`. Reddit still
 # 429s a burst of requests from a single well-behaved client even from a
@@ -299,6 +304,7 @@ def build_catalog_collectors(
     *,
     include_web_search: bool = True,
     web_search_games: Sequence[GameInfo] | None = None,
+    validators: PageValidators | None = None,
 ) -> list[Collector]:
     """Build a collector for every catalog and shared source, each tagged with its game.
 
@@ -310,9 +316,15 @@ def build_catalog_collectors(
     Web search is built only if `BRAVE_API_KEY` is set (same second line of
     defense as above), and searches `web_search_games`, which defaults to
     the whole catalog; the daily job narrows it to comped servers' games.
+
+    `validators` is where SHiFT table pages keep their ETag and Last-Modified.
+    Collectors are rebuilt every pass, so whoever calls this every pass owns
+    the one `PageValidators` and hands it in each time; left out, every
+    collector starts with an empty one and the page is fetched in full.
     """
     from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
     from newsbot.collectors.rss import RssCollector
+    from newsbot.collectors.shift_table import ShiftTableCollector
     from newsbot.collectors.steam import SteamCollector
     from newsbot.collectors.web_search import WebSearchCollector
 
@@ -322,11 +334,15 @@ def build_catalog_collectors(
             secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
         )
 
-    def one(source: RssSource | SteamSource | BlueskySource) -> Collector:
+    def one(source: RssSource | SteamSource | BlueskySource | ShiftTableSource) -> Collector:
         if isinstance(source, RssSource):
             return RssCollector(source)
         if isinstance(source, SteamSource):
             return SteamCollector(source)
+        # Explicit, because the `else` below is Bluesky and would happily try
+        # to search for a SHiFT table. It would not go well.
+        if isinstance(source, ShiftTableSource):
+            return ShiftTableCollector(source, validators=validators)
         return BlueskyCollector(source, bluesky_session)
 
     collectors: list[Collector] = []

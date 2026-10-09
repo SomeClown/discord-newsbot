@@ -38,6 +38,7 @@ from pydantic import SecretStr
 import newsbot.bot.client as client_module
 from newsbot.bot.client import DiscordCodeAlertPoster, DiscordPublisher, NewsBot
 from newsbot.collectors.base import RateLimitState
+from newsbot.collectors.shift_table import PageValidators
 from newsbot.config import Secrets, load_config
 from newsbot.guilds.importer import ensure_imported
 from newsbot.guilds.notify import ClientSender, Router
@@ -648,6 +649,31 @@ async def test_collection_shares_one_rate_limit_state_for_the_life_of_the_proces
     assert bot._collection_deps.rate_limit_state is bot._rate_limit_state
 
 
+async def test_the_bot_owns_one_set_of_page_validators_and_hands_it_to_every_pass(bot, monkeypatch):
+    # The collectors are rebuilt every pass, so a validators object that lived on
+    # them would be forgotten every pass; the bot holds it, and both the builder
+    # and the commit step (CollectionDeps) get that same object.
+    assert isinstance(bot._page_validators, PageValidators)
+    assert bot._collection_deps.page_validators is bot._page_validators
+
+    handed: list[object] = []
+
+    def fake_build(cfg, secrets, *, validators=None):
+        handed.append(validators)
+        return []
+
+    async def fake_run_collection(deps):
+        return CollectionOutcome()
+
+    monkeypatch.setattr(client_module, "build_collection_collectors", fake_build)
+    monkeypatch.setattr(client_module, "run_collection", fake_run_collection)
+
+    await bot._collection_job()
+    await bot._collection_job()
+
+    assert handed == [bot._page_validators, bot._page_validators]
+
+
 def test_collection_job_before_setup_hook_is_a_clear_error(v3_cfg, db_path):
     b = NewsBot(v3_cfg, _secrets(), db_path)
     with pytest.raises(RuntimeError):
@@ -1043,7 +1069,9 @@ async def test_a_whole_day_for_the_friends_server(v22_db, tmp_path, monkeypatch)
     monkeypatch.setattr(client_module, "_utcnow", lambda: clock["now"])
     day = _write_day_fixtures(tmp_path / "day")
     monkeypatch.setattr(
-        client_module, "build_collection_collectors", lambda c, s: build_fixture_collectors(day)
+        client_module,
+        "build_collection_collectors",
+        lambda c, s, **_kw: build_fixture_collectors(day),
     )
 
     # The import: the v2.2 database plus the prod-like config, once.

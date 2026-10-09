@@ -378,7 +378,7 @@ async def make_world(v22_db, tmp_path, monkeypatch):
 
 def fixture_collectors(directory: Path):
     """What a collection pass should use instead of the network."""
-    return lambda cfg, secrets_: build_fixture_collectors(directory)
+    return lambda cfg, secrets_, **_kw: build_fixture_collectors(directory)
 
 
 def code_item(

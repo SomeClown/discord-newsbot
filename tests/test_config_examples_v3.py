@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.config import load_config
+from newsbot.config import effective_codes_only, load_config
 
 ROOT = Path(__file__).parent.parent
 EXAMPLE = ROOT / "config.example.yaml"
@@ -72,6 +72,25 @@ def test_the_catalog_fits_under_every_discord_cap():
     # 25 options in the setup wizard's select menu; 25 autocomplete choices, one of them "All".
     games = len(load_config(EXAMPLE).catalog)
     assert games + 1 <= 25
+
+
+def test_borderlands4_reads_mentalmars_for_codes_and_details():
+    # E4 (2026-10-09): the example ships the mentalmars page under Borderlands 4, so a
+    # self-hoster following that game gets the same code list and details production does.
+    cfg = load_config(EXAMPLE)
+    bl4 = next(g for g in cfg.catalog if g.key == "borderlands4")
+    (table,) = [s for s in bl4.sources if s.type == "shift_table"]
+    assert table.name == "mentalmars"
+    assert str(table.url) == "https://mentalmars.com/game-news/borderlands-4-shift-codes/"
+    assert table.trust == "community"
+    assert table.codes_only is None and effective_codes_only(table)  # codes-only by being one
+    assert "mentalmars" in cfg.codes_only_source_names()  # so nothing it reads is stored
+    assert "borderlands4" in cfg.shift.games
+    # Only that one game has a table, and it isn't also sitting in the shared list.
+    assert [s.name for g in cfg.catalog for s in g.sources if s.type == "shift_table"] == [
+        "mentalmars"
+    ]
+    assert all(s.type != "shift_table" for s in cfg.shared_sources)
 
 
 def test_the_example_shift_games_exist_in_the_catalog():
