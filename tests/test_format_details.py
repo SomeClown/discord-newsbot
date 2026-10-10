@@ -355,3 +355,29 @@ def test_no_expiry_phrase_is_longer_than_the_reserve_assumes():
         len(_line(now=datetime(2026, 10, 10, 6, 30, tzinfo=UTC), expires_on=date(2026, 10, 9)))
         == 24
     )
+
+
+# --- an over-long stored "via" name is cut at render time ---
+
+
+def test_a_via_name_stored_under_an_older_longer_limit_is_cut_when_drawn():
+    line = _line(reward="r", reward_from="N" * 6000, expires_on=date(2026, 10, 14))
+    assert discord_len(line) < 500
+    assert line.endswith("…")
+    assert "N" * 99 in line and "N" * 101 not in line
+
+
+def test_a_100_character_via_name_is_drawn_whole():
+    line = _line(reward="r", reward_from="N" * 100)
+    assert line.endswith("via " + "N" * 100)
+
+
+def test_the_reserve_still_covers_the_worst_line_with_cut_names():
+    row = _row(
+        reward="*" * 150,
+        reward_from="*" * 6000,
+        expires_on=date(2026, 10, 14),
+        expires_from="_" * 6000,
+    )
+    names = ["*" * 6000, "_" * 6000, "short"]
+    assert discord_len(details_line(row, now=NOON_UTC)) <= details_reserve(names)

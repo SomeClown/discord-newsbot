@@ -184,7 +184,7 @@ async def test_the_v3_command_set_is_registered_globally_even_with_alerts_off(bo
     # v2 registered `/shift` only when alerts were on (D4). It's global now, whatever any
     # one server does with SHiFT.
     assert {c.name for c in bot.tree.get_commands()} == {"news", "newsbot", "shift"}
-    assert {c.name for c in bot.tree.get_command("shift").commands} == {"codes"}
+    assert {c.name for c in bot.tree.get_command("shift").commands} == {"codes", "history"}
 
 
 # --- the minute job is inert until on_ready is done ---

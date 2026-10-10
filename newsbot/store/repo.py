@@ -28,6 +28,8 @@ from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
 from newsbot.shift.details import (
+    CLOCK_DAYS,
+    SHIFT_TZ,
     DetailObservation,
     clean_observation,
     displayed,
@@ -43,6 +45,7 @@ from newsbot.store.models import (
     CodeView,
     CompedFollow,
     Coverage,
+    CurrentCode,
     DueCandidate,
     EditTarget,
     GameSummaryRow,
@@ -131,6 +134,38 @@ def _immediate(conn: sqlite3.Connection) -> Iterator[None]:
         raise
     finally:
         conn.isolation_level = old_isolation
+
+
+@contextmanager
+def _read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run the body in one read transaction, so several SELECTs see the same moment.
+
+    In WAL mode a deferred `BEGIN` pins the database as of its first read, and writers
+    (the collection hook) carry on without waiting for us. Without it, two statements on an
+    autocommit connection are two snapshots, and a commit between them hands you a code that
+    qualified on its old details drawn with its new ones. If the connection is already in a
+    transaction, that transaction is the snapshot and we leave it alone.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            conn.execute("COMMIT")
+    finally:
+        conn.isolation_level = old_isolation
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """`moment` in UTC; a naive one is taken to already be UTC, like the rest of the store."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -467,7 +502,10 @@ def record_sweep(
 def query_codes(
     conn: sqlite3.Connection, since: datetime, limit: int, offset: int
 ) -> tuple[list[CodeView], int]:
-    """Known SHiFT codes for `/shift codes`, newest first.
+    """Known SHiFT codes, newest first, a page at a time (the v2 and v3.0.5 `/shift codes`).
+
+    `/shift history` uses `history_codes` now. This one stays because tests still call it
+    (and it's the shape v3.0.5's copy is held against); nothing in the bot does.
 
     Excludes `'pending'` (still being claimed/posted, not confirmed yet)
     and `'failed'` (claimed but never actually landed in Discord): a
@@ -504,6 +542,122 @@ def query_codes(
         )
         for row in rows
     ], total
+
+
+def _warn_unreadable(what: str, bad: list[str]) -> None:
+    """One warning per call about the rows a member command skipped, however many there were."""
+    if bad:
+        logger.warning(
+            "%s: skipped %d code(s) with unreadable stored dates (first: %r)",
+            what,
+            len(bad),
+            bad[0],
+        )
+
+
+def history_codes(conn: sqlite3.Connection, since: datetime) -> list[CodeView]:
+    """Every known SHiFT code first seen at or after `since`, newest first, for `/shift history`.
+
+    `query_codes` without the paging: `/shift history` pages by size, which means rendering
+    the whole window first and cutting it into pages afterwards, so there's no LIMIT to
+    pass. Same exclusions (`'pending'` and `'failed'` never show) and the same tie-break on
+    `rowid`. Each code carries its `code_details` row when it has one, which is what lets
+    the page mark a dead code "expired" whatever status it was recorded with. A window is
+    at most 90 days, so "everything" means hundreds of rows, not millions.
+
+    Both reads share one snapshot. A row with a date that won't parse (a hand-edited
+    database, a bug from some other day) is skipped with a single warning for the call, so
+    one bad code can't take the command down for every server.
+    """
+    since_iso = _utc_iso(_as_utc(since))
+    bad: list[str] = []
+    with _read_snapshot(conn):
+        rows = conn.execute(
+            "SELECT code, first_seen_at, source_name, item_url, status, from_roundup "
+            "FROM alerted_codes "
+            "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ? "
+            "ORDER BY first_seen_at DESC, rowid ASC",
+            (since_iso,),
+        ).fetchall()
+        details = _details_or_skip(conn, [row["code"] for row in rows], bad)
+    views = []
+    for row in rows:
+        if row["code"] in bad:
+            continue
+        try:
+            first_seen = datetime.fromisoformat(row["first_seen_at"])
+        except ValueError:
+            bad.append(row["code"])
+            continue
+        views.append(
+            CodeView(
+                code=row["code"],
+                first_seen_at=first_seen,
+                source_name=row["source_name"],
+                item_url=row["item_url"],
+                status=row["status"],
+                from_roundup=bool(row["from_roundup"]),
+                details=details.get(row["code"]),
+            )
+        )
+    _warn_unreadable("history_codes", bad)
+    return views
+
+
+def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCode]:
+    """The codes that should still work at `now`, for `/shift codes` (design.md §16).
+
+    Every released code (not `'pending'`, not `'failed'`) is judged by the same three
+    rules as `shift.details.is_current`, written out in SQL so the database throws the
+    dead ones away before Python ever sees them: a permanent code is current; a known
+    expiry is current through the end of that Pacific day (`expires_on >= today there`);
+    otherwise the clock decides, 180 days from the details row's `clock_start`, or from
+    `first_seen_at` for a code that has no row. A test holds the two spellings to the same
+    answer at every boundary, because two spellings of one rule is exactly the sort of
+    thing that agrees right up until it doesn't.
+
+    `now` is turned into UTC first (a naive one is read as UTC), and only then are 180
+    days taken off it: subtracting days from a zoned datetime is wall-clock arithmetic and
+    lands an hour off across a daylight saving change. The filter and the details come from
+    one snapshot, so a commit in between can't pair a code with details it didn't qualify
+    on. A row with an unreadable date is skipped, with one warning for the call.
+
+    Newest sighting first, ties on `rowid`; the page renderer does the grouping and its
+    own "Added" ordering. The list isn't paged: it's whatever is current, which is a
+    few dozen codes on a busy week.
+    """
+    now = _as_utc(now)
+    today = now.astimezone(SHIFT_TZ).date().isoformat()
+    cutoff = _utc_iso(now - timedelta(days=CLOCK_DAYS))
+    bad: list[str] = []
+    with _read_snapshot(conn):
+        rows = conn.execute(
+            "SELECT a.code, a.first_seen_at "
+            "FROM alerted_codes a LEFT JOIN code_details d ON d.code = a.code "
+            "WHERE a.status NOT IN ('pending', 'failed') "
+            "AND (d.category = 'permanent' "
+            "     OR (d.expires_on IS NOT NULL AND d.expires_on >= ?) "
+            "     OR (d.expires_on IS NULL AND COALESCE(d.clock_start, a.first_seen_at) > ?)) "
+            "ORDER BY a.first_seen_at DESC, a.rowid ASC",
+            (today, cutoff),
+        ).fetchall()
+        details = _details_or_skip(conn, [row["code"] for row in rows], bad)
+    current = []
+    for row in rows:
+        if row["code"] in bad:
+            continue
+        try:
+            first_seen = datetime.fromisoformat(row["first_seen_at"])
+        except ValueError:
+            bad.append(row["code"])
+            continue
+        current.append(
+            CurrentCode(
+                code=row["code"], first_seen_at=first_seen, details=details.get(row["code"])
+            )
+        )
+    _warn_unreadable("current_codes", bad)
+    return current
 
 
 # --- Lounge (design.md §14) ---
@@ -2281,8 +2435,10 @@ def _details_from_row(row: sqlite3.Row) -> CodeDetailsRow:
     )
 
 
-def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str, CodeDetailsRow]:
-    """The stored details for whichever of `codes` have a row, keyed by code."""
+def _read_details(
+    conn: sqlite3.Connection, codes: Iterable[str], unreadable: list[str] | None
+) -> dict[str, CodeDetailsRow]:
+    """`code_details_for`'s loop; with `unreadable`, a row that won't parse is skipped, listed."""
     code_list = list(dict.fromkeys(codes))
     found: dict[str, CodeDetailsRow] = {}
     for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
@@ -2294,8 +2450,36 @@ def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str
             f"WHERE code IN ({placeholders})"
         )
         for row in conn.execute(query, chunk):
-            found[row["code"]] = _details_from_row(row)
+            try:
+                found[row["code"]] = _details_from_row(row)
+            except ValueError:
+                if unreadable is None:
+                    raise
+                unreadable.append(row["code"])
     return found
+
+
+def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str, CodeDetailsRow]:
+    """The stored details for whichever of `codes` have a row, keyed by code.
+
+    A row whose dates won't parse raises ValueError, which is right for delivery: it
+    should hear about damage.
+    """
+    return _read_details(conn, codes, None)
+
+
+def _details_or_skip(
+    conn: sqlite3.Connection, codes: list[str], unreadable: list[str]
+) -> dict[str, CodeDetailsRow]:
+    """`code_details_for` for the member commands, which would rather lose one code than all.
+
+    The strict read goes first (it's the one tests and the hot path share); only if it
+    trips over damage do we read again, skipping the bad rows and listing their codes.
+    """
+    try:
+        return code_details_for(conn, codes)
+    except ValueError:
+        return _read_details(conn, codes, unreadable)
 
 
 def stored_detail_source_names(conn: sqlite3.Connection) -> list[str]:

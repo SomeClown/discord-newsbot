@@ -509,3 +509,16 @@ def test_end_of_day_never_raises():
     assert end_of_day(date.max) == datetime.max.replace(tzinfo=UTC)
     assert end_of_day(date.min).year == 1
     assert is_current(row(expires_on=date.max), None, now=T0)
+
+
+# --- source names are held to 100 characters (design.md §16: they are printed as "via ...") ---
+
+
+def test_a_source_name_of_exactly_100_characters_is_stored():
+    merged = merge(None, obs(name="n" * 100, reward="3 Golden Keys"))
+    assert merged.reward_from == "n" * 100
+
+
+def test_a_source_name_over_100_characters_is_refused():
+    with pytest.raises(ValueError, match="source name over 100"):
+        merge(None, obs(name="n" * 101, reward="3 Golden Keys"))

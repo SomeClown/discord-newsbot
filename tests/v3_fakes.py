@@ -74,6 +74,7 @@ class FakeInteraction:
         permissions: discord.Permissions = ADMIN,
     ) -> None:
         self.guild_id = guild_id
+        self.guild = None  # the resolved server; a test that cares sets one with get_channel
         self.user = SimpleNamespace(id=user_id)
         self.permissions = permissions
         self.command = SimpleNamespace(qualified_name="fake")

@@ -50,6 +50,9 @@ RANK: dict[str, int] = {"": 0, "table": 1, "official": 2}
 # reader promise to stay under them, and a promise is a fine thing to double-check.
 _CODE_LENGTH = 29
 _TEXT_MAX = 300
+# Config holds source names to 100 characters (they're printed in alerts as "via ..."), so a
+# longer one is damage, and the store won't take it.
+_NAME_MAX = 100
 _CATEGORIES = frozenset({"golden", "cosmetic", "permanent", "other"})
 # Dates outside these years are somebody's typo or somebody's joke. They're read as "unknown",
 # which keeps `end_of_day` away from the edges of what a `datetime` can hold.
@@ -138,6 +141,8 @@ def clean_observation(obs: DetailObservation) -> DetailObservation:
         raise ValueError(f"unknown category {d.category!r}")
     _clean_text("code", obs.code)
     _clean_text("source name", obs.source_name)
+    if len(obs.source_name) > _NAME_MAX:
+        raise ValueError(f"source name over {_NAME_MAX} characters for {obs.code!r}")
     for label, text in (("reward", d.reward), ("origin", d.origin)):
         _clean_text(label, text)
         if len(text) > _TEXT_MAX or _shown_length(text) > _TEXT_MAX:

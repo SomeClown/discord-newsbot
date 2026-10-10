@@ -1,15 +1,16 @@
-"""End-to-end (but gateway-free) tests for the `/shift codes` handler.
+"""End-to-end (but gateway-free) tests for the `/shift history` handler.
 
 A hand-written `FakeInteraction`/`FakeFollowup` drives
-`newsbot.bot.commands.make_member_shift_group`'s `codes` callback against a
+`newsbot.bot.commands.make_member_shift_group`'s `history` callback against a
 real temp-file sqlite DB, rather than mocking discord.py's `Interaction`.
 `test_command_registration_v3.py` already covers registration and option
 bounds; this file is the handler actually run against rows in `alerted_codes`.
 
-These were the v2 `/shift codes` tests (one server, config-driven). They moved
-to the per-server handler when v2 retired: the same rows, windows, paging,
-DST and mention-safety assertions, now asked of a server that follows
-Borderlands 4 and keeps its dates in its own time zone.
+These were the v2 `/shift codes` tests (one server, config-driven), and then the
+per-server ones. In v3.1.0 `/shift codes` became the list of current codes and the
+old dated list moved here, to `/shift history` (design.md §16): the same rows,
+windows, DST and mention-safety assertions, with paging by size instead of by
+count. `test_commands_shift_current.py` has the new `/shift codes`.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ class FakeInteraction:
     def __init__(self, *, user_id: int = 1) -> None:
         self.user = SimpleNamespace(id=user_id)
         self.guild_id = GUILD
+        self.guild = None
         self.response = FakeResponse()
         self.followup = FakeFollowup()
 
@@ -87,7 +89,7 @@ def _cfg():
 
 def _codes_command(cfg, db_path):
     group = make_member_shift_group(cfg, db_path)
-    return next(c for c in group.commands if c.name == "codes")
+    return next(c for c in group.commands if c.name == "history")
 
 
 def _insert(
@@ -289,10 +291,17 @@ async def test_first_seen_date_reflects_dst_fall_back_boundary(db_path, monkeypa
     assert expected_date in embed.description
 
 
-# --- paging: 17 codes, page size 8 ---
+# --- paging by size: a page holds what fits in 4,096 units, so it takes a lot of codes ---
+
+MANY = 120  # about 100 units apiece, so a handful of pages
 
 
-async def test_seventeen_codes_page_one_shows_eight_newest_first(db_path):
+def _insert_many(db_path: str, now: datetime) -> None:
+    for i in range(MANY):
+        _insert(db_path, _code(i), first_seen_at=now - timedelta(minutes=i))
+
+
+async def test_a_short_list_is_one_page_not_eight_to_a_page(db_path):
     cfg = _cfg()
     now = datetime.now(UTC)
     for i in range(17):
@@ -302,33 +311,37 @@ async def test_seventeen_codes_page_one_shows_eight_newest_first(db_path):
 
     await command.callback(interaction, days=90, public=False)
 
-    embed = interaction.followup.calls[0]["embed"]
-    assert "Page 1 of 3" in embed.footer.text
-    # Newest first: code 0 (minutes=0 back) is the newest.
-    assert _code(0) in embed.description
-    assert _code(7) in embed.description
-    assert _code(8) not in embed.description
+    call = interaction.followup.calls[0]
+    assert "Page 1 of 1" in call["embed"].footer.text
+    assert call["view"].total_pages == 1
+    assert all(_code(i) in call["embed"].description for i in range(17))
 
 
-async def test_seventeen_codes_paging_to_page_three_shows_the_last_code(db_path):
+async def test_a_long_list_pages_by_size_newest_first_and_never_cuts_a_code(db_path):
     cfg = _cfg()
-    now = datetime.now(UTC)
-    for i in range(17):
-        _insert(db_path, _code(i), first_seen_at=now - timedelta(minutes=i))
+    _insert_many(db_path, datetime.now(UTC))
     command = _codes_command(cfg, db_path)
     interaction = FakeInteraction()
 
     await command.callback(interaction, days=90, public=False)
+
     view = interaction.followup.calls[0]["view"]
-    assert view.total_pages == 3
+    first = interaction.followup.calls[0]["embed"]
+    assert view.total_pages >= 2
+    assert f"Page 1 of {view.total_pages}" in first.footer.text
+    assert _code(0) in first.description  # the newest code leads
+    assert _code(MANY - 1) not in first.description
 
+    seen = set()
     page_interaction = FakeInteraction(user_id=1)
-    await view.next_button.callback(page_interaction)
-    await view.next_button.callback(page_interaction)
-
-    embed = page_interaction.response.edits[-1]["embed"]
-    assert "Page 3 of 3" in embed.footer.text
-    assert _code(16) in embed.description  # oldest code, last page
+    seen.update(c for c in range(MANY) if _code(c) in first.description)
+    for _ in range(view.total_pages - 1):
+        await view.next_button.callback(page_interaction)
+        embed = page_interaction.response.edits[-1]["embed"]
+        assert len(embed.description) <= 4096
+        seen.update(c for c in range(MANY) if _code(c) in embed.description)
+    assert f"Page {view.total_pages} of {view.total_pages}" in embed.footer.text
+    assert seen == set(range(MANY))  # every code lands on exactly one page
 
 
 # --- public vs ephemeral ---
@@ -361,9 +374,7 @@ async def test_public_true_sends_non_ephemeral(db_path):
 
 async def test_a_different_user_cannot_page_the_requesters_result(db_path):
     cfg = _cfg()
-    now = datetime.now(UTC)
-    for i in range(17):
-        _insert(db_path, _code(i), first_seen_at=now - timedelta(minutes=i))
+    _insert_many(db_path, datetime.now(UTC))
     command = _codes_command(cfg, db_path)
     requester = FakeInteraction(user_id=1)
 
@@ -379,9 +390,7 @@ async def test_a_different_user_cannot_page_the_requesters_result(db_path):
 
 async def test_the_requester_can_page_their_own_result(db_path):
     cfg = _cfg()
-    now = datetime.now(UTC)
-    for i in range(17):
-        _insert(db_path, _code(i), first_seen_at=now - timedelta(minutes=i))
+    _insert_many(db_path, datetime.now(UTC))
     command = _codes_command(cfg, db_path)
     requester = FakeInteraction(user_id=1)
 
@@ -411,9 +420,7 @@ async def test_first_page_send_uses_allowed_mentions_none(db_path):
 
 async def test_paged_edit_also_uses_allowed_mentions_none(db_path):
     cfg = _cfg()
-    now = datetime.now(UTC)
-    for i in range(17):
-        _insert(db_path, _code(i), first_seen_at=now - timedelta(minutes=i))
+    _insert_many(db_path, datetime.now(UTC))
     command = _codes_command(cfg, db_path)
     interaction = FakeInteraction()
 

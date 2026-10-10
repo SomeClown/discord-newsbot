@@ -239,9 +239,9 @@ class CurrentCode:
 
 @dataclass(frozen=True)
 class CodeView:
-    """A code as shown to a member through `/shift codes`.
+    """A code as shown to a member through `/shift history`.
 
-    `from_roundup` (migration 003) is the marker `/shift codes` needs to
+    `from_roundup` (migration 003) is the marker `/shift history` needs to
     show "from a roundup" that the `status` column alone can't give it
     once a roundup post's status is just `posted` like everything else
     (design.md §13): see `repo.query_codes`.

@@ -380,6 +380,7 @@ def render_story_page(
 # reader cut to this; `cap_shown` enforces it again below so a hostile row can't
 # stretch a reservation that was sized in good faith).
 _DETAIL_SHOWN_MAX = 300
+_VIA_NAME_MAX = 100
 # The longest expiry phrase: "expires in under an hour" (24). "expires Sep 30, 2026" is 20.
 _EXPIRY_PHRASE_MAX = 24
 _DETAIL_SEP = " · "
@@ -450,6 +451,20 @@ def _expiry_phrase(
     return f"expires {_short_date(due)}"
 
 
+def _via_name(name: str) -> str:
+    """A source name as "via" shows it: at most 100 characters, cut with a "…" if it was longer.
+
+    Config and `clean_observation` both hold names to 100 characters, so this only ever
+    trims a row stored under an older, longer name (or edited by hand). It's here because
+    the alternative is an entry bigger than a page. The cut counts characters, not shown
+    units, on purpose: a 100-character name full of markdown is legal, draws whole, and is
+    what the reserve is sized for (200 units, escapes and all).
+    """
+    if len(name) <= _VIA_NAME_MAX:
+        return name
+    return name[: _VIA_NAME_MAX - 1].rstrip() + "…"
+
+
 def details_line(details: CodeDetailsRow | None, *, now: datetime) -> str | None:
     """The line under an alert's code: `3 Golden Keys · expires Oct 14, 2026 · via mentalmars`.
 
@@ -478,7 +493,7 @@ def details_line(details: CodeDetailsRow | None, *, now: datetime) -> str | None
     line = _DETAIL_SEP.join(parts)
     names = list(dict.fromkeys(name for name in sources if name))
     if names:
-        line += _DETAIL_VIA + _DETAIL_AND.join(esc(name) for name in names)
+        line += _DETAIL_VIA + _DETAIL_AND.join(esc(_via_name(name)) for name in names)
     return line
 
 
@@ -491,7 +506,9 @@ def details_reserve(names: Iterable[str]) -> int:
     details yet, which is what lets an edit land later without the message outgrowing
     Discord's cap. A test pins `details_line` under this for hostile input.
     """
-    longest = max((discord_len(esc(name)) for name in names), default=0)
+    # A name longer than 100 characters is never drawn whole (`_via_name`), so the reserve
+    # sizes it at 100 and a stored legacy monster can't inflate every alert's slot.
+    longest = max((discord_len(esc(name[:_VIA_NAME_MAX])) for name in names), default=0)
     return (
         1  # the newline that puts the line under its code
         + _DETAIL_SHOWN_MAX
@@ -574,7 +591,11 @@ def _code_page_block(
 def render_code_page(
     codes: list[CodeView], *, title: str, page: int, pages: int, timezone: str
 ) -> discord.Embed:
-    """Render one page of `/shift codes`: every known code, newest-first, in copyable blocks.
+    """Render one page of the old `/shift codes`: every known code, newest-first, in blocks.
+
+    SUPERSEDED: `/shift history` uses `render_history_pages`. This stays only because the
+    back-compat tests hold the new renderer to its output, block for block, and goes when
+    they do.
 
     `timezone` is `cfg.digest.timezone`: the same local calendar the
     daily digest and the ping cap already reason in, so "first seen" reads
