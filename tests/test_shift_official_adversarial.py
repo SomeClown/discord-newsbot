@@ -230,8 +230,14 @@ def test_a_year_less_slash_date_at_the_year_end_is_still_refused():
     assert _read("expires 12/31", dec_30) is None
 
 
-def test_an_explicit_year_ignores_the_publish_day_entirely():
-    assert _read("expires Oct 14, 2026", datetime(2031, 1, 1, tzinfo=UTC)).expires_on == OCT_14
+def test_an_explicit_year_is_checked_against_the_publish_day_and_nothing_else():
+    # QA batch 1, fix 1: this used to say the publish day was ignored. It still doesn't change
+    # how a year is read, but a date before the post's own day is a misread, with or without it.
+    assert _read("expires Oct 14, 2026", datetime(2031, 1, 1, tzinfo=UTC)) is None
+    assert _read("expires Oct 14, 2026", datetime(2020, 1, 1, tzinfo=UTC)).expires_on == OCT_14
+    assert (
+        _read("expires Oct 14, 2026", datetime(2026, 10, 14, 20, tzinfo=UTC)).expires_on == OCT_14
+    )
 
 
 # --- markup, entities, urls, emoji ---
@@ -323,8 +329,8 @@ def test_lookalike_characters_are_not_read_as_the_ascii_they_imitate(text):
 
 
 def test_zero_width_characters_inside_the_count_make_it_unreadable_not_wrong():
-    assert _read("3​Golden Keys") is None
-    assert _read("3 G​olden Keys") is None
+    assert _read("3\u200bGolden Keys") is None
+    assert _read("3 G\u200bolden Keys") is None
 
 
 # --- the same code twice, and the same fact twice ---
@@ -445,7 +451,7 @@ _HOSTILE = {
     "golden-then-endless-hyphens": "3 golden" + "-" * _MB,
     "weekday-flood": _fill("expires on Tuesday,  "),
     "through-flood": _fill("through "),
-    "nbsp-flood": _fill("a golden keys "),
+    "nbsp-flood": _fill("a\u00a0golden\u00a0keys\u00a0"),
     "month-word-flood": _fill("Oct "),
     "date-flood": _fill("expires Oct 14th, 2026 "),
 }
@@ -465,7 +471,7 @@ def test_a_megabyte_of_hostile_text_is_read_in_linear_time(name):
 def test_a_megabyte_of_junk_with_one_real_fact_at_the_end_is_still_read():
     text = (
         _fill("expires soon, valid whenever, through the door, a golden ")
-        + "\n3 Golden Keys, expires Oct 14\n"
+        + f"\n3 Golden Keys, expires Oct 14 {CODE}\n"
     )
     details = read_official_details(text, CODE, PUBLISHED)
     assert details is not None
@@ -505,8 +511,8 @@ from newsbot.shift.official import read_official_details
 code = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA"
 when = datetime(2026, 10, 6, 17, 0, tzinfo=UTC)
 # A year-less month-name date and a full numeric one both go through the lazy import.
-one = read_official_details("3 Golden Keys, expires October 14", code, when)
-two = read_official_details("valid through 10/14/2026", code, when)
+one = read_official_details("3 Golden Keys, expires October 14 " + code, code, when)
+two = read_official_details("valid through 10/14/2026 " + code, code, when)
 assert one is not None and one.expires_on == date(2026, 10, 14), one
 assert one.reward == "3 Golden Keys", one
 assert two is not None and two.expires_on == date(2026, 10, 14), two

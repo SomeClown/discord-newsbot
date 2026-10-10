@@ -81,7 +81,7 @@ def test_it_gives_up_on_an_unclear_count(text):
         ("expires: Oct. 14, 2026", date(2026, 10, 14)),
         ("expires on Wednesday, October 14", date(2026, 10, 14)),
         ("expires on Wed, Oct 14", date(2026, 10, 14)),
-        ("expires Sept 30, 2026", date(2026, 9, 30)),
+        ("expires Sept 30, 2027", date(2027, 9, 30)),
         ("redeem it, good through Dec 31, 2027 at the latest", date(2027, 12, 31)),
         ("expires Oct 14, 10:00 AM PT", date(2026, 10, 14)),
     ],
@@ -127,7 +127,10 @@ def test_a_year_less_date_in_the_week_before_the_publish_day_is_not_rolled_over(
     assert _read("expires October 14", recent) is None
     assert _read("expires October 13", recent) is None  # exactly seven days back
     assert _read("expires October 12", recent).expires_on == date(2027, 10, 12)
-    assert _read("expires October 14, 2026", recent).expires_on == date(2026, 10, 14)
+    # With a year, the date is read as written, but not if it falls before the post's own day
+    # (QA batch 1, fix 1: a code announced already dead is a misread).
+    assert _read("expires October 14, 2026", recent) is None
+    assert _read("expires October 25, 2026", recent).expires_on == date(2026, 10, 25)
 
 
 def test_a_year_less_date_just_after_new_year_looks_back_across_the_year_boundary():
@@ -202,7 +205,7 @@ def test_a_post_with_nothing_to_read_gives_none():
 
 def test_the_code_on_the_details_is_the_one_asked_about():
     other = "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"
-    details = read_official_details("a Golden Key", other, PUBLISHED)
+    details = read_official_details(f"a Golden Key {other}", other, PUBLISHED)
     assert details is not None
     assert details.code == other
 

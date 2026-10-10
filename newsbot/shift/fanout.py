@@ -72,7 +72,7 @@ from newsbot.shift.decide import (
     seeding_healthy,
     sightings_from_items,
 )
-from newsbot.shift.details import DetailObservation, expired_by_expiry
+from newsbot.shift.details import DetailObservation, expired_by_expiry, silenced_by_expiry
 from newsbot.shift.edits import edit_changed_alerts
 from newsbot.shift.sweep import (
     _ROUNDUP_CAP_ALERT,
@@ -119,6 +119,7 @@ from newsbot.store.repo import (
     stored_detail_source_names,
     table_kinds_listed,
     table_listed_sources,
+    table_silenced_codes,
     upsert_code_details,
 )
 
@@ -194,10 +195,27 @@ def reserve_for_config(cfg: AppConfig, stored_names: Iterable[str] = ()) -> int:
 
     Only a source that can supply details can put its name in a "via" clause: an
     official source (Gearbox's own posts, read by the official reader) or a
-    `shift_table`. Config caps every source name at 100 characters, so the longest of
-    these is a bounded number and the worst-case line has a worst case.
+    `shift_table`. And only one that detection can ever read for a code: a source under a
+    game in `shift.games` (empty means every game, the v2 reading), or a shared source that
+    isn't limited to other games. A press feed for a game with no SHiFT codes can't put its
+    name in an alert, so it doesn't get to make every alert's slot bigger. Config caps every
+    source name at 100 characters, so the longest of these is a bounded number and the
+    worst-case line has a worst case.
     """
-    sources = [*(s for game in cfg.catalog for s in game.sources), *cfg.shared_sources]
+    shift_games = set(cfg.shift.games)
+    sources = [
+        *(
+            s
+            for game in cfg.catalog
+            if not shift_games or game.key in shift_games
+            for s in game.sources
+        ),
+        *(
+            s
+            for s in cfg.shared_sources
+            if not shift_games or not getattr(s, "games", None) or shift_games.intersection(s.games)
+        ),
+    ]
     return details_reserve(
         [
             *(
@@ -428,6 +446,7 @@ def _alert_record(
     details: dict[str, CodeDetailsRow],
     *,
     posted_at: datetime,
+    ping: str = "none",
 ) -> AlertMessageRecord:
     """What to remember about a posted alert so it can be edited: what went out, not what we meant.
 
@@ -438,18 +457,21 @@ def _alert_record(
     can't leave a change that looks older than a render that never saw it.
 
     A retry that stripped the ping posted a message without the ping prefix, so the
-    stored header loses it too. Re-rendering the old header with the ping on would
-    put `@everyone` back in an edit (harmless, mentions are off, but not what the
-    channel shows).
+    stored header loses it too, and the stored ping choice is "none": an edit sends the
+    choice back as the message's mentions (Discord rebuilds them from the edit), and an edit
+    that put `@everyone` back into a message that never had it would be a new ping.
+    `ping` is the server's choice; it is only kept for a message that actually carried it.
     """
     header = alert.header
     if stripped and alert.ping_prefix and header.startswith(alert.ping_prefix):
         header = header[len(alert.ping_prefix) :]
+    pinged = alert.ping and not stripped and bool(alert.ping_prefix)
     return AlertMessageRecord(
         channel_id=channel_id,
         header=header,
         golden_prefix=alert.golden_prefix,
         posted_at=posted_at,
+        ping=ping if pinged else "none",
         rendered_at=max(
             (
                 row.details_changed_at
@@ -487,19 +509,17 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
             # A code can die between its release and this turn (a queued pass, a busy
             # database). Announcing a code whose known expiry has passed is worse than
             # silence, so it's skipped like a follow-up would be; the live ones go out.
-            # Same believability rule as release (`_dead_on_arrival`): a table's expiry is a
-            # stranger's typing, so it can't silence a code a trusted source announced; an
-            # official expiry always can. Roundups don't get the check: their details live
-            # in /shift codes.
+            # The believability rule is release's, word for word (`silenced_by_expiry`,
+            # fed by what release recorded in `official_seen_at`): a table's expiry is a
+            # stranger's typing, so it can't silence a code an official source named, and
+            # an official expiry always can. An earlier draft used "trusted" here instead,
+            # which let a table silence a press-trusted code at release but not at
+            # delivery. Roundups don't get the check: their details live in /shift codes.
             dead = [
                 q.code
                 for q in queued
                 if not q.from_roundup
-                and expired_by_expiry(q.details, read_at)
-                and (
-                    not q.trusted
-                    or (q.details is not None and q.details.expires_source == "official")
-                )
+                and silenced_by_expiry(q.details, read_at, official_seen=q.official_seen)
             ]
             if dead:
                 if not deps.preview:
@@ -534,7 +554,9 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     details = {q.code: q.details for q in queued if q.details is not None}
 
     def record(alert: RenderedAlert, stripped: bool) -> AlertMessageRecord:
-        return _alert_record(alert, stripped, channel_id, details, posted_at=deps.now())
+        return _alert_record(
+            alert, stripped, channel_id, details, posted_at=deps.now(), ping=shift.ping
+        )
 
     # Two servers sending the same batch must not share nonces (Discord may
     # answer the second with the first's message); a retry to the same channel must.
@@ -993,10 +1015,31 @@ def _dead_on_arrival(
     A table's expiry is a stranger's typing. If Gearbox itself named the code in this very
     pass, a typo in someone else's table doesn't get to silence Gearbox: only an expiry that
     came from an official source can, and only then does an official mention not help.
+    Delivery asks the same question of a queued code (`silenced_by_expiry`, with what this
+    pass recorded in `official_seen_at`), so release and delivery can't disagree.
     """
-    if not expired_by_expiry(row, now):
-        return False
-    return code not in official_codes or (row is not None and row.expires_source == "official")
+    return silenced_by_expiry(row, now, official_seen=code in official_codes)
+
+
+def _table_only_codes(sightings: list[CodeSighting]) -> set[str]:
+    """Codes whose every sighting this pass was a table row, and at least one carried a date.
+
+    These are the codes a table's "Added" date can make stale all by itself: no other source
+    said anything about their age (so nobody else's date is being overruled), and a dated row
+    is how a typo'd date gets in (an undated row on a first listing is E1's business, not
+    this). Judged the way `aggregate` judges a code: a normal sighting beats a roundup one.
+    """
+    by_code: dict[str, list[CodeSighting]] = {}
+    for s in sightings:
+        by_code.setdefault(s.code, []).append(s)
+    only: set[str] = set()
+    for code, group in by_code.items():
+        effective = [s for s in group if not s.roundup] or group
+        if all(s.details is not None and s.details.listed for s in effective) and any(
+            s.published_at is not None for s in effective
+        ):
+            only.add(code)
+    return only
 
 
 def _flag_first_listings(
@@ -1148,28 +1191,46 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 ping_trust=ping_trust,
             )
             known = known_codes(conn, [c.code for c in candidates])
+            official_codes = {s.code for s in sightings if s.trust == "official"}
+
+            # A fan site's typo doesn't get to silence Gearbox for good. A code recorded
+            # `too_old` only because of a table's data (see below) is released after all if an
+            # official source names it within 72 hours of the bot first seeing it. Until then
+            # it is "known"; from here to the plan it is treated as new, so the usual rules
+            # (fresh, trusted, dead on arrival, the flood guard, the ping) judge it as they
+            # would any code. The release itself is an UPDATE, guarded, in the same
+            # transaction as the queueing, so a second pass or a crash can't make it twice.
+            revivable = table_silenced_codes(conn, sorted(known & official_codes), now=now)
+            plan_known = known - revivable
 
             # A code that's already expired the first time we release it isn't news either.
             # Recorded as `too_old` like any stale code, which leaves `alerted_codes`' CHECK
             # alone; `/shift history` reads the expiry itself to say "expired".
             unknown_details = code_details_for(
-                conn, [c.code for c in candidates if c.code not in known]
+                conn, [c.code for c in candidates if c.code not in plan_known]
             )
-            official_codes = {s.code for s in sightings if s.trust == "official"}
-            candidates = [
-                replace(c, fresh=False)
-                if _dead_on_arrival(unknown_details.get(c.code), c.code, now, official_codes)
-                else c
-                for c in candidates
-            ]
-            candidates = _flood_to_roundup(candidates, sightings, known, table_sources)
+            table_only = _table_only_codes(sightings)
+            table_silenced: set[str] = set()
+            checked: list[CodeCandidate] = []
+            for c in candidates:
+                if c.code not in plan_known:
+                    row = unknown_details.get(c.code)
+                    if _dead_on_arrival(row, c.code, now, official_codes):
+                        # Silenced by an expiry; a table's, unless an official source said so.
+                        if row is not None and row.expires_source == "table":
+                            table_silenced.add(c.code)
+                        c = replace(c, fresh=False)
+                    elif not c.fresh and c.code in table_only:
+                        table_silenced.add(c.code)  # too old by a table's "Added" date alone
+                checked.append(c)
+            candidates = _flood_to_roundup(checked, sightings, plan_known, table_sources)
 
             state = get_alert_state(conn)
             # Pings are decided per server, so the global plan only gets to
             # say silent / to_post / roundup; its own ping verdict is unused.
             plan = plan_alerts(
                 candidates,
-                known=known,
+                known=plan_known,
                 seeded=state.seeded,
                 seeding_ok=seeding_ok,
                 pings_today=0,
@@ -1180,7 +1241,11 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
             ]
             if silent_rows or plan.mark_seeded:
                 record_silent_codes(
-                    conn, silent_rows, now=lambda: now, mark_seeded=plan.mark_seeded
+                    conn,
+                    silent_rows,
+                    now=lambda: now,
+                    mark_seeded=plan.mark_seeded,
+                    table_silenced=table_silenced,
                 )
             released = record_released_codes(
                 conn,
@@ -1189,6 +1254,8 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 now=lambda: now,
                 queue_for_games=shift_cfg.games,
                 flags={c.code: (c.golden, c.trusted) for c in plan.to_post + plan.roundup_to_post},
+                official=official_codes,
+                revive=revivable,
             )
             # D14: any of these codes that a second independent source (or a
             # trusted one) has now confirmed, inside 24 hours of its first

@@ -12,6 +12,11 @@ The rules, so nobody has to rediscover them:
 - the caller only asks about an official-trust post holding exactly one code
   (`decide.sightings_from_items`); with several codes nobody can say which
   detail belongs to which, and this module can't see the other codes anyway;
+- the post can be much longer than the code's own announcement (a Steam patch-notes
+  post is a screenful of unrelated prose with one code stuck in it somewhere), so a
+  count or an expiry only counts if it's near the code: in the code's own paragraph
+  (blank lines split paragraphs) and within about 200 characters either side of it.
+  A bonus that "expires October 20" three paragraphs up is the bonus's business;
 - a Golden Key count ("3 Golden Keys", "a Golden Key", "five Golden Keys") is
   the reward, and it makes the category golden. It has to be plainly a
   quantity: the number agrees with the noun (one key, several keys), isn't
@@ -26,17 +31,22 @@ The rules, so nobody has to rediscover them:
   and record no expiry at all, on:
   - two different dates, or a date that looks like one and won't parse
     ("10/14", "Feb 30");
-  - a negation just before the keyword ("not valid until"), or the post saying
-    when something starts ("starts", "valid from"), because that date is the
-    other end of the window;
+  - a negation just before the keyword ("not valid until"), a past tense one ("was
+    valid until", "were valid until") or the word "expired" anywhere nearby, or the
+    post saying when something starts ("starts", "valid from"), because that date
+    is the other end of the window, or the wrong tense of it;
   - a range or an alternative after the date ("Oct 14 - Oct 21", "Oct 14 or
     15");
   - a weekday that doesn't match its date;
+  - a date before the post's own Pacific day, year given or not. A code announced
+    already dead is a misread, and this is the cheap way to catch the ones where
+    "was valid until October 2, 2026" sailed past the tense check;
 - a date with no year takes its next occurrence on or after the post's publish
   day (Pacific), unless it fell in the week before that day, which is more
   likely a typo or past tense than a deadline eleven months out. With no
   publish time to go on, it takes `now`'s day; with neither, it's a date we
-  can't anchor, so the answer is no expiry.
+  can't anchor, so the answer is no expiry (a date with a year is taken as it
+  comes, since there's nothing to check it against).
 
 The date grammar is `collectors.shift_table.parse_shift_date`, the same one the
 table reader uses; this module only finds the dates in prose and hands each one
@@ -52,6 +62,7 @@ from datetime import UTC, date, datetime
 
 from newsbot.collectors.base import ItemDetails
 from newsbot.shift.details import SHIFT_TZ
+from newsbot.shift.match import CODE_RE, defuse_codes
 
 _WORD_COUNTS = {
     "a": 1,
@@ -118,6 +129,16 @@ _NEGATED_RE = re.compile(
     r"(?:[ \t\u00a0]+[A-Za-z']+){0,2}[ \t\u00a0]*\Z",
     re.ASCII | re.IGNORECASE,
 )
+# "was valid until", "were all valid until": the same shape as the negation, with a past-tense
+# verb. The thing being described is over.
+_PAST_RE = re.compile(
+    r"\b(?:was|were)(?:[ \t\u00a0]+[A-Za-z']+){0,2}[ \t\u00a0]*\Z",
+    re.ASCII | re.IGNORECASE,
+)
+# "expired", anywhere in the window. A post that talks about codes that have expired isn't
+# one whose dates this reader can tell apart, and "expires" is not matched by this: `\b` at
+# the end of "expire" refuses the "d".
+_EXPIRED_RE = re.compile(r"\bexpired\b", re.ASCII | re.IGNORECASE)
 # A post that says when something starts has two ends in it, and we only read one.
 _STARTS_RE = re.compile(r"\bstarts\b|\bvalid\s{1,3}from\b", re.ASCII | re.IGNORECASE)
 
@@ -154,6 +175,13 @@ _FULL_YEAR_RE = re.compile(r"\d{4}", re.ASCII)
 _LOOKAHEAD = 48
 # How far past a date to look for the rest of a range.
 _AFTER_WINDOW = 40
+
+# How far either side of the code a count or an expiry may sit, and what ends a paragraph.
+_CODE_WINDOW = 200
+# A post that names its one code more often than this isn't a one-line announcement, and
+# reading a window per mention would let it make the reader do real work. It gives up.
+_MAX_MENTIONS = 10
+_PARAGRAPH_BREAK_RE = re.compile(r"[ \t\r\f\v\u00a0]*\n[ \t\r\f\v\u00a0]*\n")
 
 # A year-less date this many days before the publish day (or fewer) is read as a typo or
 # past tense, not as next year's deadline.
@@ -252,14 +280,18 @@ def _read_numeric_date(match: re.Match[str]) -> date:
 
 
 def _read_expiry(text: str, anchor: date | None) -> date | None:
-    """The one expiry date `text` announces, or None (none found, two found, or unsure)."""
-    if _STARTS_RE.search(text):
+    """The one expiry date `text` announces, or None (none found, two found, or unsure).
+
+    `text` is the code's window (`_windows`), not the whole post. `anchor` is the post's
+    Pacific day; a date before it is a code announced already dead, which is a misread.
+    """
+    if _STARTS_RE.search(text) or _EXPIRED_RE.search(text):
         return None
     found: set[date] = set()
     try:
         for keyword in _KEYWORD_RE.finditer(text):
             before = text[max(0, keyword.start() - _NEGATION_WINDOW) : keyword.start()]
-            if _NEGATED_RE.search(before):
+            if _NEGATED_RE.search(before) or _PAST_RE.search(before):
                 raise _Unsure
             tail = text[keyword.end() : keyword.end() + _LOOKAHEAD]
             lead = _LEAD_RE.match(tail)
@@ -280,6 +312,8 @@ def _read_expiry(text: str, anchor: date | None) -> date | None:
                 date_end = month_date.end()
             if parsed is None:
                 continue
+            if anchor is not None and parsed < anchor:
+                raise _Unsure  # dated before the post itself: whatever this is, it isn't a deadline
             if weekday is not None and _WEEKDAYS[weekday[:3].lower()] != parsed.weekday():
                 raise _Unsure  # "Tuesday, October 14" when the 14th is a Wednesday
             after = keyword.end() + skipped + date_end
@@ -294,6 +328,42 @@ def _read_expiry(text: str, anchor: date | None) -> date | None:
     return expiry
 
 
+def _windows(text: str, code: str) -> list[str]:
+    """The stretches of `text` around each place `code` appears: its paragraph, and no further
+    than `_CODE_WINDOW` characters either side.
+
+    Only the slice around the code is ever searched for paragraph breaks, so a very long post
+    costs the same as a short one. Empty when the code isn't in the text at all, which the
+    caller treats as "can't say anything about it". Also empty for a code named more than
+    `_MAX_MENTIONS` times: a post that says the same code eleven times isn't a one-line
+    announcement.
+    """
+    windows = []
+    for match in CODE_RE.finditer(text):
+        if match.group(1).upper() != code:
+            continue
+        if len(windows) == _MAX_MENTIONS:
+            return []
+        lo, hi = max(0, match.start() - _CODE_WINDOW), match.end() + _CODE_WINDOW
+        start, end = lo, min(hi, len(text))
+        for paragraph_break in _PARAGRAPH_BREAK_RE.finditer(text, lo, match.start()):
+            start = paragraph_break.end()
+        after = _PARAGRAPH_BREAK_RE.search(text, match.end(), hi)
+        if after is not None:
+            end = after.start()
+        windows.append(text[start:end])
+    return windows
+
+
+def _agreed[T](readings: list[T | None]) -> T | None:
+    """The one value every window that read something agrees on, or None (nothing, or a clash)."""
+    values = {r for r in readings if r is not None}
+    if len(values) != 1:
+        return None
+    (value,) = values
+    return value
+
+
 def read_official_details(
     text: str,
     code: str,
@@ -304,17 +374,24 @@ def read_official_details(
     """What an official post says about `code`, or None if it says nothing we're sure of.
 
     `text` is the post as one string; the caller has already checked that `code`
-    is the only code in it. A found Golden Key count sets the reward to "N Golden
-    Key(s)" and the category to golden; a found expiry sets `expires_on`. Either
-    part can come back alone. The result is always rank "official".
+    is the only code in it. Only the text near the code is read (see `_windows`): a long
+    post's other paragraphs are about other things. A found Golden Key count sets the
+    reward to "N Golden Key(s)" and the category to golden; a found expiry sets
+    `expires_on`. Either part can come back alone. If the code turns up in more than one
+    place and the places disagree, that part is dropped. The result is always rank "official".
     """
-    count = _read_count(text)
-    expiry = _read_expiry(text, _post_day(published_at, now))
+    windows = _windows(text, code)
+    anchor = _post_day(published_at, now)
+    count = _agreed([_read_count(w) for w in windows])
+    expiry = _agreed([_read_expiry(w, anchor) for w in windows])
     if count is None and expiry is None:
         return None
     reward = ""
     if count is not None:
-        reward = f"{count} Golden Key{'' if count == 1 else 's'}"
+        # Built from a number, so nothing code-shaped can be in it today. The rule is
+        # "no code-shaped text in a reward", and this keeps it true if the reader ever
+        # learns to quote.
+        reward = defuse_codes(f"{count} Golden Key{'' if count == 1 else 's'}")
     return ItemDetails(
         code=code,
         rank="official",

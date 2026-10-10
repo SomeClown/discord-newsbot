@@ -173,8 +173,8 @@ def test_long_source_name_is_truncated():
 
 
 def test_a_full_page_of_ordinary_codes_stays_under_the_4096_cap():
-    # /shift codes pages 8 at a time (commands._SHIFT_PAGE_SIZE): a full
-    # page of ordinary-length entries is nowhere near the cap.
+    # The old fixed page of eight (`/shift codes` pages by size now, and the page-size constant
+    # is gone): eight ordinary-length entries are nowhere near the cap.
     codes = [
         _view(code=f"{i:05d}-AAAAA-AAAAA-AAAAA-AAAAA", item_url=f"https://e.com/{i}")
         for i in range(8)

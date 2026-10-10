@@ -176,6 +176,8 @@ class EditCall:
     channel_id: int
     message_id: int
     content: str
+    # The ping choice the edit carried (what becomes its `allowed_mentions`).
+    ping: str = "none"
 
 
 class FakeEditors:
@@ -183,8 +185,9 @@ class FakeEditors:
 
     Call it as the factory (`fake(guild_id, channel_id)`); every editor it hands out records into
     `.calls`. `.fail` scripts errors per message id (a list, raised one per call, in order), and
-    `.on_edit` runs before each call, which is where a test moves its injected clock. Nothing
-    here can say what `allowed_mentions` was; the real editor's own tests check that.
+    `.on_edit` runs before each call, which is where a test moves its injected clock. A call
+    records the ping choice it was handed (`EditCall.ping`); what that turns into as
+    `allowed_mentions` is the real editor's business, and its own tests check it.
     `.calls` holds the edits that succeeded; `.attempts` every try, failed ones included.
     """
 
@@ -211,8 +214,8 @@ class _FakeEditor:
         self._guild_id = guild_id
         self._channel_id = channel_id
 
-    async def edit(self, message_id: int, content: str) -> None:
-        call = EditCall(self._guild_id, self._channel_id, message_id, content)
+    async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
+        call = EditCall(self._guild_id, self._channel_id, message_id, content, ping)
         self._owner.attempts.append(call)
         if self._owner.on_edit is not None:
             self._owner.on_edit(call)

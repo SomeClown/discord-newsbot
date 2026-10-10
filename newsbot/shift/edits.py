@@ -6,8 +6,8 @@ and the message in the channel is still the bare code. This module is the proofr
 comes back through the channel with a pen: it finds every posted alert (inside two weeks)
 whose codes have learned something since the message was written, re-renders the whole
 message from the same codes in the same order, and edits it in place. No new message, no
-ping, nobody's phone buzzes. (Discord doesn't notify anyone for an edit anyway, and we send
-`AllowedMentions.none()` so a header that still says `@everyone` is only text.)
+ping, nobody's phone buzzes. (Discord doesn't notify anyone for an edit of a mention the
+message already had.)
 
 "Learned something since" is a version stamp, not a clock. `guild_alert_messages.rendered_at`
 is the largest `details_changed_at` the message was rendered with, and a message is due when
@@ -17,6 +17,14 @@ than the render that missed it. The stamps only compare with each other, so that
 happen. It also makes a reward that flaps between two values boring: the stamp moves once
 per net change per pass, so each message is edited at most once per pass, and whatever the
 flap does, it can't multiply the edits.
+
+An edit keeps the mentions its message already had. Discord rebuilds a message's mentions
+from the edit's `allowed_mentions`, so sending none strips the highlight from an alert that
+pinged (the text stays, the notification was long since delivered or not). The message's
+ping choice is stored when it posts (`guild_alert_messages.ping`) and goes back with the
+edit, but only while the stored header still starts with that ping's own text. A header
+that lost its ping to the ambiguous-failure retry stores "none", so an edit can't add a
+mention the message never carried, and an edit never makes a notification of its own.
 
 The edits ride the delivery walk's pacing and its time budget, after the deliveries and
 follow-ups (`fanout._deliver_then_edit`). Whatever the deadline cuts off keeps its old stamp
@@ -56,7 +64,12 @@ from typing import TYPE_CHECKING
 from newsbot.bot.format import render_alert_edit
 from newsbot.pipeline.publisher import PublishError
 from newsbot.shift.decide import CodeCandidate
-from newsbot.shift.sweep import ChannelGoneError, EditForbiddenError, MessageGoneError
+from newsbot.shift.sweep import (
+    ChannelGoneError,
+    EditForbiddenError,
+    MessageGoneError,
+    ping_prefix_for,
+)
 from newsbot.store.db import connect
 from newsbot.store.models import DETAILS_STAMP_FLOOR, EditTarget, QueuedCode
 from newsbot.store.repo import (
@@ -88,6 +101,28 @@ _BLOCKED_NOTICE = (
     "newsbot: I couldn't update a SHiFT alert in <#{channel_id}> with new code details "
     "(missing permission). I'll stop trying until /newsbot shift is saved again."
 )
+
+
+def _schema_error(exc: sqlite3.OperationalError) -> bool:
+    """Whether `exc` is a database that lacks something we need, as opposed to one that's busy.
+
+    A locked database fixes itself by the next pass. A missing column or table (a development
+    database that ran an earlier draft of migration 009 and slipped past the startup check)
+    never will, and calling it "busy" every hour is how it would stay unnoticed.
+    """
+    text = str(exc).lower()
+    return "no such column" in text or "no such table" in text
+
+
+def _ping_for(target: EditTarget) -> str:
+    """The ping choice an edit of `target` sends back: the stored one, if the header still wears it.
+
+    A header that doesn't start with its ping's text (stripped by a retry, or edited by
+    hand in the database) gets "none", so an edit can't put a mention on a message that
+    hasn't got one.
+    """
+    prefix = ping_prefix_for(target.ping)
+    return target.ping if prefix and target.header.startswith(prefix) else "none"
 
 
 @dataclass(frozen=True)
@@ -178,9 +213,17 @@ async def _write(
 
     try:
         await asyncio.to_thread(_sync)
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if _schema_error(exc):
+            logger.error(
+                "SHiFT edit bookkeeping can't use the database: %s",
+                exc,
+                extra={"guild_id": target.guild_id, "message_id": target.message_id},
+            )
+            raise
         logger.warning(
-            "SHiFT edit bookkeeping hit a busy database; the message stays due",
+            "SHiFT edit bookkeeping hit a busy database (%s); the message stays due",
+            exc,
             extra={"guild_id": target.guild_id, "message_id": target.message_id},
         )
 
@@ -226,7 +269,9 @@ async def _edit_one(
 
     Nothing that goes wrong with *this* message gets out of here: a read or a render that
     blows up is logged with its traceback and left due (a `ValueError` from the render is the
-    one expected kind, handled below). The pass has other servers to see to.
+    one expected kind, handled below). The pass has other servers to see to. The one thing
+    that does get out is a database that lacks a column or table (`_schema_error`), because
+    no amount of moving on will fix that.
     """
     try:
         codes = await asyncio.to_thread(_read_sync, deps, target)
@@ -269,7 +314,7 @@ async def _edit_one(
     editor = editor_for(target.guild_id, target.channel_id)
     for attempt in range(_RATE_LIMIT_TRIES):
         try:
-            await editor.edit(target.message_id, content)
+            await editor.edit(target.message_id, content, ping=_ping_for(target))
         except ChannelGoneError:
             return _CHANNEL_GONE
         except MessageGoneError:
@@ -315,9 +360,12 @@ async def _block(deps: FanoutDeps, target: EditTarget) -> None:
     """Stop this server's edits and say so, once: only the call that flips the flag speaks."""
     try:
         first = await asyncio.to_thread(_block_sync, deps, target.guild_id)
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if _schema_error(exc):
+            logger.error("couldn't block a server's edits: %s", exc)
+            raise
         # Not recorded, so not announced either: next pass will hit the 403 again and try.
-        logger.warning("couldn't block a server's edits (busy database)")
+        logger.warning("couldn't block a server's edits (busy database: %s)", exc)
         return
     if not first:
         return
@@ -355,8 +403,11 @@ async def edit_changed_alerts(deps: FanoutDeps, *, deadline: float | None = None
     async with deps.delivery_lock:
         try:
             targets = await asyncio.to_thread(_targets_sync, deps)
-        except sqlite3.OperationalError:
-            logger.warning("SHiFT edits hit a busy database; they wait for the next pass")
+        except sqlite3.OperationalError as exc:
+            if _schema_error(exc):
+                logger.error("SHiFT edits can't read the database: %s", exc)
+                raise
+            logger.warning("SHiFT edits hit a busy database (%s); they wait for the next pass", exc)
             return EditOutcome()
         counts = dict.fromkeys((_EDITED, _GONE, _UNRENDERABLE, _FAILED), 0)
         blocked_guilds: set[int] = set()

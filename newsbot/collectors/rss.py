@@ -123,13 +123,21 @@ def _describe_retry_after(response: httpx.Response, seconds: float | None) -> st
     return response.headers.get("retry-after") or "none"
 
 
+_CONDITIONAL_HEADERS = frozenset({"if-none-match", "if-modified-since"})
+
+
+def _asked_for_304(request_headers: Mapping[str, str]) -> bool:
+    """Whether the request carried a conditional header, which is what makes a 304 an answer."""
+    return any(name.lower() in _CONDITIONAL_HEADERS for name in request_headers)
+
+
 @dataclass(frozen=True, slots=True)
 class Fetched:
     """What `_fetch` got back: the status, the (capped) body and the page's cache validators.
 
-    A 304 comes back with an empty `body`; it's an answer, not an error, and
-    only a caller that sent `If-None-Match` or `If-Modified-Since` can have
-    asked for one.
+    A 304 comes back with an empty `body`; it's an answer, not an error, but only to a
+    caller that sent `If-None-Match` or `If-Modified-Since` (`_asked_for_304`). A 304 to
+    anyone else is a server being strange, and it raises like any other non-2xx.
     """
 
     status: int
@@ -153,8 +161,10 @@ async def _fetch(
     asking again: that's Reddit's mode, where the right response to "slow
     down" is to stop for the whole pass, not to try again in three seconds.
     `headers` are extras laid over the standard identifying ones (the conditional
-    request headers, for the one caller that sends them). A 304 is returned,
-    not raised, with an empty body.
+    request headers, for the one caller that sends them). A 304 to a request that
+    carried one of those is returned, not raised, with an empty body; to any other
+    request it's an error (`raise_for_status`), because "nothing changed" is an
+    answer to a question nobody asked.
     """
     attempts = 1 + len(_RETRY_BACKOFFS_S) if retry_429 else 1
     request_headers = {**_HEADERS, **(headers or {})}
@@ -179,7 +189,7 @@ async def _fetch(
                 raise RateLimited(retry_after)
             etag = response.headers.get("etag")
             last_modified = response.headers.get("last-modified")
-            if response.status_code == 304:
+            if response.status_code == 304 and _asked_for_304(request_headers):
                 return Fetched(304, b"", etag, last_modified)
             response.raise_for_status()
             chunks = []

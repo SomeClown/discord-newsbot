@@ -304,7 +304,9 @@ async def test_a_tables_expiry_typo_does_not_silence_a_gearbox_post_in_the_same_
 async def test_an_expiry_from_gearbox_itself_still_makes_a_new_code_quiet(h):
     add_guild(h.db_path, 1, ping="everyone")
     table = page(main_table(("1 Golden Key", d(T0.date()), X, "Oct 30, 2026")))
-    post = official(f"{X} valid until 10/01/2026", at=T0 - timedelta(hours=1))
+    # Gearbox, on the evening of Oct 7 (Pacific): good through that day, which is over by the
+    # time this pass runs. (QA batch 1, fix 1: a post can't announce a date before its own day.)
+    post = official(f"{X} valid until 10/07/2026", at=T0 - timedelta(hours=30))
 
     await h.run([post, *await read_named(table, T0)], at=T0)
 

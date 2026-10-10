@@ -323,6 +323,10 @@ def test_a_process_killed_at_any_point_leaves_a_database_that_still_migrates(v4_
     shutil.copy(v4_db, probe)
     total = _traced_statement_count(probe)
     assert total > 40
+    # What a start that migrates nothing still runs after the last COMMIT: the version read,
+    # then the check that no column 009 grew during the build is missing (QA batch 1, fix 15).
+    # A kill there finds a finished migration.
+    tail = _traced_statement_count(probe) - 1
     with closing(connect(v4_db)) as conn:
         before = _state(conn)
 
@@ -390,13 +394,14 @@ def test_a_process_killed_at_any_point_leaves_a_database_that_still_migrates(v4_
             else:
                 # The last traced statement is the pragma that runs after COMMIT, so a kill
                 # there finds a finished migration, never a half-done one.
-                assert version == 9 and point == total
+                assert version == 9 and point >= total - tail, point
             assert migrate(conn) == 9
             _assert_healthy(conn)
     # Every kill before a COMMIT lands is rolled back (the last traced statement
     # of 006 is its COMMIT, which a kill there pre-empts); only a kill after one
     # finds a finished migration.
-    assert rolled_back >= len(points) - 1
+    finished = sum(1 for point in points if point >= total - tail)
+    assert rolled_back >= len(points) - max(finished, 1)
 
 
 # --- WAL: other connections while the migration runs ---

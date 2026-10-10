@@ -273,7 +273,8 @@ def test_an_exception_after_every_single_statement_of_009_leaves_v8_untouched(
 ):
     text = MIGRATION.read_text()
     statements = _statements(text)
-    assert len(statements) == 6  # 2 tables, 2 indexes, the ALTER, the marker
+    # 2 tables, 3 indexes, 3 ALTERs (edits_blocked_at and the two code flags), the marker
+    assert len(statements) == 9
     with closing(connect(v8_path)) as conn:
         before = _state(conn)
     assert before["version"] == 8
@@ -327,6 +328,13 @@ def test_a_process_killed_at_any_step_of_009_leaves_v8_and_the_next_start_finish
         migrate(conn)
     total = seen[0]
     assert total >= 8
+    # The statements a start that migrates nothing runs after the last COMMIT: the version read
+    # and the check for columns 009 grew during the build (QA batch 1, fix 15).
+    seen[0] = 0
+    with closing(connect(probe)) as conn:
+        conn.set_trace_callback(lambda sql: seen.__setitem__(0, seen[0] + 1))
+        migrate(conn)
+    tail = seen[0] - 1
     with closing(connect(v8_path)) as conn:
         before = _state(conn)
 
@@ -354,14 +362,14 @@ def test_a_process_killed_at_any_step_of_009_leaves_v8_and_the_next_start_finish
                     assert migrate(conn) == 8
                     assert _state(conn) == before
             else:
-                assert version == 9 and point == total, point
+                assert version == 9 and point >= total - tail, point
             # ... and 3.1.0 starting again finishes the job.
             assert migrate(conn) == 9
             assert NEW_THINGS <= {
                 r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             assert _marker(conn) is not None
-    assert killed_before_commit >= total - 1
+    assert killed_before_commit >= total - tail - 1
 
 
 def test_four_processes_migrating_one_file_at_once_all_see_9_and_write_one_marker(

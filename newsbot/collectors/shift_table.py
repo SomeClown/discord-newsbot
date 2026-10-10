@@ -38,7 +38,7 @@ from newsbot.collectors.base import Category, ItemDetails, RawItem, TableKind
 from newsbot.collectors.rss import _fetch
 from newsbot.config import ShiftTableSource
 from newsbot.shift.details import SHIFT_TZ
-from newsbot.shift.match import GOLDEN_RE, find_codes
+from newsbot.shift.match import GOLDEN_RE, defuse_codes, find_codes
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,10 @@ _MAX_COLUMNS = 64
 # The header is the first row in this many that names a code column and another
 # role; a title row ("Latest codes!") above the real header shouldn't hide the table.
 _HEADER_SEARCH_ROWS = 5
+# One source gets to contribute this many codes in a pass. The real page has about thirty; a
+# page with five hundred and one is a different page (or an attack on a SQLite file), and it
+# is reported as a failed pass instead of being quietly truncated or believed.
+_MAX_CODES = 500
 
 # design.md §16: reward and origin are cut to this many UTF-16 units *as shown*,
 # so no page, honest or not, can make an alert entry too big for a message.
@@ -120,8 +124,8 @@ class PageValidators(dict[str, Validators]):
     validators; the dict itself (what the next request will send) changes when
     the owner calls `commit(url)` or `commit_all()`, after the sightings are
     safely saved. Staged values nobody commits are simply forgotten by the next
-    `collect()` for that URL. (Task 5 does the committing; until then nothing
-    does, which is safe, just chatty: every pass is a full fetch.)
+    `collect()` for that URL. (`pipeline/collect.py` does the committing, after the
+    SHiFT hook has saved what this collector read.)
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -166,12 +170,16 @@ class ParsedTable:
     kind: TableKind
     rows: list[list[str]]
     order: int = 0
+    # The section heading above the table, as the page wrote it. "Expired codes" is a table of
+    # codes that are, by its own account, dead (`_read_rows` skips those).
+    heading: str = ""
 
 
 @dataclass(slots=True)
 class _OpenTable:
     kind: TableKind
     order: int
+    heading: str = ""
     rows: list[list[str]] = field(default_factory=list)
     # The row being built: (text, colspan, rowspan) per cell, expanded into
     # grid columns when the row closes.
@@ -253,7 +261,9 @@ class _PageParser(HTMLParser):
                 self.truncated = True
                 return
             self._opened += 1
-            self._stack.append(_OpenTable(_kind_from_heading(self._heading), self._opened))
+            self._stack.append(
+                _OpenTable(_kind_from_heading(self._heading), self._opened, self._heading)
+            )
             return
         if self._deep:
             return
@@ -395,7 +405,7 @@ class _PageParser(HTMLParser):
         table = self._stack.pop()
         self._end_row(table)
         if table.rows:
-            self.tables.append(ParsedTable(table.kind, table.rows, table.order))
+            self.tables.append(ParsedTable(table.kind, table.rows, table.order, table.heading))
 
     def finish(self) -> None:
         """Flush whatever a page left open (an unclosed table is still a table)."""
@@ -530,9 +540,15 @@ def _read_rows(tables: list[ParsedTable], stats: _Stats, today: date) -> dict[st
     `today` is the fetch day in Pacific time. An "Added" date after tomorrow is
     treated as no date at all (and counted): the alternative is a code that
     claims to have been added in 2099 and so looks forever fresh.
+
+    A table whose section heading says "expired" is skipped whole. It is a list of codes
+    that don't work, and reading it would hand each one a fresh clock and, as often as not,
+    an alert; the heading is the page's own word for it.
     """
     by_code: dict[str, list[_Row]] = {}
     for table in tables:
+        if "expired" in _visible(table.heading).lower():
+            continue
         header = _find_header(table.rows)
         if header is None:
             continue
@@ -555,8 +571,10 @@ def _read_rows(tables: list[ParsedTable], stats: _Stats, today: date) -> dict[st
             if added is not None and added > today + timedelta(days=1):
                 dates["added"] = None
                 stats.future_dates += 1
-            reward_raw = _cell(row, cols, "reward")
-            origin_raw = _cell(row, cols, "source") if table.kind != "main" else ""
+            # Another code in a reward cell isn't one we found, and it mustn't look like one
+            # in an alert; it's replaced before the cap so the cap counts what's shown.
+            reward_raw = defuse_codes(_cell(row, cols, "reward"))
+            origin_raw = defuse_codes(_cell(row, cols, "source")) if table.kind != "main" else ""
             stats.rows_read += 1
             by_code.setdefault(codes[0], []).append(
                 _Row(
@@ -676,6 +694,15 @@ class ShiftTableCollector:
         by_code = _read_rows(tables, stats, today)
         if not by_code:
             raise ValueError("no SHiFT code tables found")
+        if len(by_code) > _MAX_CODES:
+            logger.warning(
+                "shift_table %s: %d codes on the page, more than the %d one source may "
+                "contribute in a pass; treating the pass as failed",
+                self.name,
+                len(by_code),
+                _MAX_CODES,
+            )
+            raise ValueError(f"too many rows ({len(by_code)} codes; the limit is {_MAX_CODES})")
         logger.info(
             "shift_table %s: %d rows read, %d skipped, %d unparseable dates%s%s",
             self.name,

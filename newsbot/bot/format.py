@@ -78,7 +78,7 @@ _LINKY_MENTION_RE = re.compile(r"<(?=[#/:]|a:|t:|id:)", re.IGNORECASE)
 # second layer, for whatever text reaches an embed some other way (or
 # whatever the first layer's regex didn't quite cover): a zero-width
 # space right after the scheme's colon defuses "https://" into
-# "https:/​/", which reads identically to a person and autolinks to
+# "https:/\u200b/", which reads identically to a person and autolinks to
 # nobody.
 _URL_SCHEME_RE = re.compile(r"\b([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
 # Discord makes invite links clickable even without a scheme, because of
@@ -140,9 +140,9 @@ def _defuse_mentions_and_links(s: str) -> str:
     adding punctuation nobody asked for.
     """
     escaped = discord.utils.escape_mentions(s)
-    escaped = _LINKY_MENTION_RE.sub("<​", escaped)
-    escaped = _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:​", escaped)
-    return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}​/", escaped)
+    escaped = _LINKY_MENTION_RE.sub("<\u200b", escaped)
+    escaped = _URL_SCHEME_RE.sub(lambda m: f"{m.group(1)}:\u200b", escaped)
+    return _BARE_INVITE_RE.sub(lambda m: f"{m.group(1)}\u200b/", escaped)
 
 
 def esc(s: str) -> str:
@@ -465,7 +465,9 @@ def _via_name(name: str) -> str:
     return name[: _VIA_NAME_MAX - 1].rstrip() + "…"
 
 
-def details_line(details: CodeDetailsRow | None, *, now: datetime) -> str | None:
+def details_line(
+    details: CodeDetailsRow | None, *, now: datetime, show_expiry: bool = True
+) -> str | None:
     """The line under an alert's code: `3 Golden Keys · expires Oct 14, 2026 · via mentalmars`.
 
     None when there's neither a reward nor an expiry to show, so an alert looks as it
@@ -473,11 +475,13 @@ def details_line(details: CodeDetailsRow | None, *, now: datetime) -> str | None
     names, in reward-then-expiry order, when they differ); a permanent code's "expiry"
     credits whoever set its category. Everything scraped goes through `esc()`, and
     `now` is only used to decide how soon is soon (Pacific time, see `_expiry_phrase`).
+    `show_expiry=False` leaves the expiry (and its "via") out; `/shift history` uses it for a
+    code whose marker already says "expired", so the page says it once.
     """
     if details is None:
         return None
     reward = _detail_text(details.reward)
-    expiry = _expiry_phrase(details, now)
+    expiry = _expiry_phrase(details, now) if show_expiry else None
     if not reward and expiry is None:
         return None
     parts: list[str] = []
@@ -561,7 +565,11 @@ def _code_page_block(
     marker_suffix = f" · ({marker})" if marker else ""
     # `/shift history` (it passes `now`) also shows the details line under the source line.
     # It never sheds: it's capped, and it's the point.
-    line = details_line(view.details, now=now) if now is not None else None
+    line = (
+        details_line(view.details, now=now, show_expiry=marker != "expired")
+        if now is not None
+        else None
+    )
     tail = f"\n{line}" if line else ""
     if max_len is not None:
         max_len -= discord_len(tail)

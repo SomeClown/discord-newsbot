@@ -20,7 +20,11 @@ The rules (design.md §16), field by field for reward, category and expiry:
   who supplied it), and only on the net difference, because that timestamp is what sends
   an edit to a posted message and nobody wants an edit for a change that undid itself;
   it also only moves forward, by at least a microsecond, so a change always looks newer
-  than the message that doesn't show it yet.
+  than the message that doesn't show it yet. ("Shows" is `displayed`: a category change
+  that doesn't change the line, golden to other, is not a change.) The store goes one
+  better and keeps every new stamp above every other row's (`repo.upsert_code_details`),
+  because a message's version stamp is the largest among its codes and has to be safe to
+  compare with any of them.
 
 The clock is the other half. A code is "current" until its expiry date ends in Pacific
 time, or forever if it's permanent, or (no expiry known) 180 days after its clock
@@ -110,8 +114,8 @@ def _clean_text(label: str, text: str) -> None:
 
 
 def _shown_length(text: str) -> int:
-    # Imported here because format.py will want this module one day, and I'd like that day
-    # to be boring.
+    # Imported here because format.py imports this module (for the Pacific day helpers), so
+    # a top-level import would be a circle, and I have met enough of those.
     from newsbot.bot.format import discord_len, esc
 
     return discord_len(esc(text))
@@ -180,16 +184,43 @@ def _take[T](
     return old, old_source, old_from
 
 
-def displayed(row: CodeDetailsRow) -> tuple:
-    """Everything an alert's details line shows: the three values and who supplied each."""
+def displayed(row: CodeDetailsRow | None) -> tuple:
+    """What an alert's details line shows for `row`, as a value that compares equal when it does.
+
+    Mirrors `format.details_line`, and nothing more: the reward and, if there is one, who
+    supplied it; for a permanent code the word "permanent" and who set the category; for any
+    other code the expiry and who supplied it. A category that never reaches the line
+    (golden, cosmetic, other) isn't in here, so changing it doesn't send an edit to every
+    message that holds the code. None, like a row with nothing to show, is the all-empty
+    tuple, which is what makes "the first details" a change.
+    """
+    if row is None:
+        return ("", "", False, "", None, "")
+    reward = row.reward.strip()
+    if row.category == "permanent":
+        return (reward, row.reward_from if reward else "", True, row.category_from, None, "")
     return (
-        row.reward,
-        row.reward_from,
-        row.category,
-        row.category_from,
+        reward,
+        row.reward_from if reward else "",
+        False,
+        "",
         row.expires_on,
-        row.expires_from,
+        row.expires_from if row.expires_on is not None else "",
     )
+
+
+def silenced_by_expiry(row: CodeDetailsRow | None, now: datetime, *, official_seen: bool) -> bool:
+    """Whether a code's expiry has passed and the expiry is believable enough to silence it.
+
+    The one rule for "dead on arrival", shared by release (`fanout._dead_on_arrival`) and by
+    delivery's last look at a queued code, so the two can't drift apart. A table's expiry is
+    a stranger's typing: if an official-trust source named the code, a typo in somebody
+    else's table doesn't get to silence Gearbox. Only an expiry that came from an official
+    source can, and then an official mention doesn't help.
+    """
+    if not expired_by_expiry(row, now):
+        return False
+    return not official_seen or (row is not None and row.expires_source == "official")
 
 
 def _clock_start(
@@ -282,10 +313,7 @@ def merge_details(
         last_listed_at=now if d.listed else base.last_listed_at,
         updated_at=max(_utc(base.updated_at), now),
     )
-    if old is None:
-        changed = bool(reward or category or expires_on)
-    else:
-        changed = displayed(merged) != displayed(old)
+    changed = displayed(merged) != displayed(old)
     if not changed:
         return merged
     # Strictly forward, by at least a microsecond. An edit is due when a code's stamp is

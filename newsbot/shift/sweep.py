@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
@@ -63,9 +64,35 @@ class EditForbiddenError(Exception):
     """
 
 
+# The text a ping puts in front of an alert's header, by the server's ping choice: "everyone",
+# or a role id (a snowflake, 17 to 20 digits). Same shape rule as `client.mentions_for`.
+_ROLE_ID = re.compile(r"[0-9]{17,20}", re.ASCII)
+
+
+def ping_prefix_for(choice: object) -> str:
+    """The prefix ("@everyone " or "<@&id> ") an alert carries for ping `choice`; "" for none.
+
+    Anything that isn't "everyone" or a role id (including "none", garbage and a non-string)
+    is "": it pings nobody, so no header starts with it.
+    """
+    if type(choice) is not str:
+        return ""
+    if choice == "everyone":
+        return _PING_PREFIX
+    if _ROLE_ID.fullmatch(choice):
+        return f"<@&{choice}> "
+    return ""
+
+
 class CodeAlertEditor(Protocol):
-    async def edit(self, message_id: int, content: str) -> None:
-        """Replace one alert message's text, with every mention switched off.
+    async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
+        """Replace one alert message's text, keeping the mentions it already had.
+
+        `ping` is the choice the message went out with ("none", "everyone" or a role id),
+        sent back as the edit's mentions because Discord rebuilds a message's mentions from
+        the edit: an edit with none would strip the highlight from an alert that pinged. The
+        caller only passes a choice when the message's own text still starts with that ping,
+        so an edit never adds a mention the message didn't have.
 
         Raises `MessageGoneError` or `EditForbiddenError` for those two outcomes, and
         `PublishError` for a failure worth another try later (a 5xx, a timeout, or a 429,

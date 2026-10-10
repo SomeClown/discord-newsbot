@@ -160,8 +160,10 @@ class CodeDetailsRow:
     in `shift/details.py`, and this class just holds the result (design.md §16).
 
     `clock_start` is set once, when the row is created, and never moves.
-    `details_changed_at` moves only when something an alert shows (reward, category,
-    expiry) changes, which is what flags an alert for an edit.
+    `details_changed_at` moves only when something an alert shows changes (the reward, the
+    expiry, "permanent" for a permanent code, or whose name goes in a "via"), which is what
+    flags an alert for an edit. Every new stamp is later than every other row's, so one
+    message's version stamp (the largest among its codes) is safe to compare with any code's.
     """
 
     code: str
@@ -210,6 +212,9 @@ class AlertMessageRecord:
     golden_prefix: bool
     posted_at: datetime
     rendered_at: datetime
+    # The ping choice it went out with: "none", "everyone" or a role id. "none" when the ping
+    # was stripped on the way, since the stored header has no ping prefix then.
+    ping: str = "none"
 
 
 @dataclass(frozen=True)
@@ -226,6 +231,8 @@ class EditTarget:
     header: str
     golden_prefix: bool
     rendered_at: datetime
+    # What `AlertMessageRecord.ping` stored; the edit sends it back as the message's mentions.
+    ping: str = "none"
 
 
 @dataclass(frozen=True)
@@ -244,7 +251,7 @@ class CodeView:
     `from_roundup` (migration 003) is the marker `/shift history` needs to
     show "from a roundup" that the `status` column alone can't give it
     once a roundup post's status is just `posted` like everything else
-    (design.md §13): see `repo.query_codes`.
+    (design.md §13): see `repo.history_codes`.
     """
 
     code: str
@@ -501,6 +508,10 @@ class QueuedCode:
     # Migration 009's details for the code; same story as `CodeView.details` (v3.0.5 builds
     # this class too).
     details: CodeDetailsRow | None = None
+    # Whether an official-trust source named the code in the pass that released it
+    # (`alerted_codes.official_seen_at`). Delivery needs it to decide, by the rule release
+    # used, whether a fan site's expiry may silence the code.
+    official_seen: bool = False
 
 
 # --- Per-guild digests (design.md §15, plan task 6) ---

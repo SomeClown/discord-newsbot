@@ -985,13 +985,31 @@ def test_a_shared_official_source_with_a_long_name_widens_the_reserve(cfg):
 
 
 def _raw_names(path: Path) -> set[str]:
-    """Official or table source names read straight out of the YAML, the slow independent way."""
+    """Official or table source names that can reach a SHiFT alert, read straight out of the YAML.
+
+    The slow independent way. QA batch 1, fix 6: only sources detection can read for a code
+    count: under a game in `shift.games` (v3), or on a topic in `alerts.topics` (v2) or with no
+    topic at all; an empty list means every game, the v2 reading, and a v3 file that leaves
+    `shift.games` out means Borderlands 4.
+    """
     import yaml
 
     raw = yaml.safe_load(path.read_text())
-    sources = list(raw.get("sources", [])) + list(raw.get("shared_sources", []))
+    games = set(
+        (raw.get("shift") or {}).get("games") or (raw.get("alerts") or {}).get("topics") or []
+    )
+    if not games and "catalog" in raw:
+        games = {"borderlands4"}
+
+    def in_scope(source: dict, key: str) -> bool:
+        listed = source.get(key)
+        return not games or not listed or bool(games & set(listed))
+
+    sources = [s for s in raw.get("sources", []) if in_scope(s, "topics")]
+    sources += [s for s in raw.get("shared_sources", []) if in_scope(s, "games")]
     for game in raw.get("catalog", []):
-        sources += game.get("sources", [])
+        if not games or game["key"] in games:
+            sources += game.get("sources", [])
     names = set()
     for source in sources:
         if source.get("trust") == "official" or source.get("type") == "shift_table":

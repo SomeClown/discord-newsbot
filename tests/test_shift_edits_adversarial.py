@@ -43,6 +43,7 @@ from test_shift_delivery_details import (
 from test_shift_edits import EditHarness, blocked_at, learn, message_state, table_row
 from test_shift_fanout import CODE_A, CODE_B, CODE_C, NOW, ROLE, V3, add_guild, item, rows, seed
 
+from newsbot.bot import client as client_module
 from newsbot.bot.client import DiscordCodeAlertEditor
 from newsbot.bot.format import render_alert_edit
 from newsbot.collectors.base import ItemDetails
@@ -218,7 +219,7 @@ def edited_per_guild(h) -> dict[int, int]:
 # =====================================================================================
 
 
-async def test_every_edit_path_leaves_the_bot_with_mentions_off_and_the_header_as_text(h):
+async def test_every_edit_path_repeats_the_mention_the_message_had_and_never_adds_one(h):
     world = World()
     for guild_id, ping in ((1, "everyone"), (2, ROLE), (3, "none")):
         add_guild(h.db_path, guild_id, ping=ping)
@@ -236,9 +237,16 @@ async def test_every_edit_path_leaves_the_bot_with_mentions_off_and_the_header_a
 
     sent = [(cid, mid, kw) for cid, ch in sorted(world.channels.items()) for mid, kw in ch.edits]
     assert [cid for cid, _mid, _kw in sent] == [100, 200, 300]
-    assert all(all_mentions_off(kw) for _cid, _mid, kw in sent)
+    # QA batch 1: Discord rebuilds a message's mentions from the edit, so an edit sends the
+    # choice the message went out with (the highlight stays); a message that had none gets none.
+    by_channel = {cid: kw for cid, _mid, kw in sent}
+    assert by_channel[100]["allowed_mentions"] is client_module._PING_EVERYONE
+    role_mentions = by_channel[200]["allowed_mentions"]
+    assert not role_mentions.everyone and not role_mentions.users
+    assert [r.id for r in role_mentions.roles] == [int(ROLE)]
+    assert all_mentions_off(by_channel[300])
     contents = {cid: kw["content"] for cid, _mid, kw in sent}
-    assert contents[100].startswith("@everyone **New SHiFT code**")  # text, not a ping
+    assert contents[100].startswith("@everyone **New SHiFT code**")
     assert contents[200].startswith(f"<@&{ROLE}> **New SHiFT code**")
     assert contents[300].startswith("**New SHiFT code**")
 
@@ -253,7 +261,7 @@ def _calls_named_edit(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
-def test_the_editor_source_has_exactly_one_edit_call_and_it_says_mentions_none():
+def test_the_editor_source_has_exactly_one_edit_call_and_its_mentions_come_from_mentions_for():
     from newsbot.bot import client
 
     tree = ast.parse(inspect.getsource(client.DiscordCodeAlertEditor))
@@ -262,7 +270,9 @@ def test_the_editor_source_has_exactly_one_edit_call_and_it_says_mentions_none()
     assert len(calls) == 1
     (call,) = calls
     mentions = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
-    assert mentions["allowed_mentions"] == "discord.AllowedMentions.none()"
+    # The one place a ping choice becomes an `AllowedMentions` (and the only `everyone=True`,
+    # held by tests/test_mentions_tripwire.py), not a mention built on the spot.
+    assert mentions["allowed_mentions"] == "mentions_for(ping)"
     # And nothing in the class (or the edit pass) builds an AllowedMentions of its own.
     # (Docstrings may talk about `everyone=True`; the code may not do it, so read the syntax.)
     for source in (
@@ -495,10 +505,10 @@ class _Yielding:
         inner = self._factory(guild_id, channel_id)
 
         class _Slow:
-            async def edit(self, message_id: int, content: str) -> None:
+            async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
                 for _ in range(5):
                     await asyncio.sleep(0)
-                await inner.edit(message_id, content)
+                await inner.edit(message_id, content, ping=ping)
 
         return _Slow()
 
@@ -697,10 +707,10 @@ async def test_two_blocked_servers_get_one_notice_each_and_a_third_is_untouched(
         editor = original_edit(h.editors, guild_id, channel_id)
         real_edit = editor.edit
 
-        async def edit(message_id, content):
+        async def edit(message_id, content, *, ping="none"):
             if guild_id in (1, 2):
                 raise EditForbiddenError("50013")
-            await real_edit(message_id, content)
+            await real_edit(message_id, content, ping=ping)
 
         editor.edit = edit
         return editor
@@ -772,7 +782,7 @@ async def test_the_slash_command_save_with_no_options_unblocks_too(h):
     assert blocked_at(h.db_path, 1) is None
 
 
-async def test_disabling_the_alerts_also_clears_the_block_and_edits_do_not_care(h):
+async def test_disabling_the_alerts_clears_the_block_and_pauses_edits_until_they_are_back_on(h):
     add_guild(h.db_path, 1, ping="none")
     await h.run([item(CODE_A)])
     learn(h, CODE_A, "3 Golden Keys", at=NOW + HOUR)
@@ -783,7 +793,15 @@ async def test_disabling_the_alerts_also_clears_the_block_and_edits_do_not_care(
     h.clock = NOW + 2 * HOUR
     await h.run([])
 
-    # Alerts off is a delivery setting; the already-posted message still learns its reward.
+    # QA batch 1, fix 7 reverses this test's old half: a server that switched its SHiFT alerts
+    # off isn't edited ("alerts off is a delivery setting" was how it used to read). Saving the
+    # settings did clear the block, though, and switching back on gets the edit.
+    assert h.editors.attempts == []
+    assert blocked_at(h.db_path, 1) is None
+    with closing(connect(h.db_path)) as conn:
+        repo.set_shift(conn, 1, enabled=True, channel_id=100, ping="none")
+    h.clock = NOW + 3 * HOUR
+    await h.run([])
     assert [c.message_id for c in h.editors.calls] == [9001]
 
 
@@ -921,7 +939,7 @@ class _Hangs:
     def __call__(self, _guild_id, _channel_id):
         return self
 
-    async def edit(self, _message_id, _content) -> None:
+    async def edit(self, _message_id, _content, *, ping="none") -> None:
         self.started.set()
         await asyncio.Event().wait()
 

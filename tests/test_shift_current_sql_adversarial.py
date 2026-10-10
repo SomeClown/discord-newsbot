@@ -34,6 +34,12 @@ PT = ZoneInfo("America/Los_Angeles")
 NOW = datetime(2026, 10, 9, 18, 0, tzinfo=UTC)
 TODAY = date(2026, 10, 9)
 RELEASED = frozenset({"seeded", "too_old", "roundup", "posted"})
+# QA batch 1, fix 5: statuses that mean "recorded quietly", whose codes are listed only if
+# something besides one stranger's say-so vouches for them (see `World.listed`).
+QUIET = frozenset({"seeded", "too_old", "roundup"})
+# Source names for the random sightings: case twins and a name only a real casefold can pair
+# (SQLite's lower() would call "Strasse" and "STRASSE" the same and "Stra\u00dfe" different).
+SIGHTING_NAMES = ("Alpha", "alpha", "Beta", "Stra\N{LATIN SMALL LETTER SHARP S}e", "STRASSE")
 STATUSES = ("seeded", "too_old", "roundup", "posted", "pending", "failed")
 CATEGORIES = (None, "golden", "cosmetic", "permanent", "other")
 ONE_US = timedelta(microseconds=1)
@@ -82,13 +88,20 @@ def _us(moment: datetime) -> int:
     return (moment - EPOCH) // ONE_US
 
 
-def _put_alerted(conn, n: int, seen: datetime | str, status: str = "posted") -> str:
+def _put_alerted(
+    conn, n: int, seen: datetime | str, status: str = "posted", from_roundup: bool | None = None
+) -> str:
     text = seen if isinstance(seen, str) else seen.astimezone(UTC).isoformat()
     conn.execute(
         "INSERT INTO alerted_codes "
         "(code, first_seen_at, source_name, item_url, status, from_roundup, pinged) "
         "VALUES (?, ?, 'Feed', 'https://example.com/p', ?, ?, 0)",
-        (_code(n), text, status, int(status == "roundup")),
+        (
+            _code(n),
+            text,
+            status,
+            int(status == "roundup") if from_roundup is None else int(from_roundup),
+        ),
     )
     return _code(n)
 
@@ -104,10 +117,29 @@ class World:
 
     def __init__(self) -> None:
         self.rows: list[tuple[str, datetime, str]] = []  # code, first_seen, status, in insert order
+        # What the vetting rule is told about, kept beside the rows so the Python rule judges the
+        # same facts: the roundup flag, whether a details row has a ranked source, and sightings.
+        self.from_roundup: dict[str, bool] = {}
+        self.ranked: dict[str, bool] = {}
+        self.sightings: dict[str, list[tuple[str, bool]]] = {}
 
-    def add(self, conn, n: int, seen: datetime, status: str) -> str:
-        self.rows.append((_put_alerted(conn, n, seen, status), seen, status))
-        return _code(n)
+    def add(self, conn, n: int, seen: datetime, status: str, *, from_roundup=None) -> str:
+        code = _put_alerted(conn, n, seen, status, from_roundup)
+        self.rows.append((code, seen, status))
+        self.from_roundup[code] = status == "roundup" if from_roundup is None else from_roundup
+        return code
+
+    def listed(self, code: str, status: str) -> bool:
+        """The vetting half of `/shift codes`, written the slow way (casefold, not lower)."""
+        quiet = status in QUIET or self.from_roundup.get(code, False)
+        if not quiet:
+            return True
+        seen = self.sightings.get(code, [])
+        return (
+            self.ranked.get(code, False)
+            or any(trusted for _, trusted in seen)
+            or len({name.casefold() for name, _ in seen}) >= 2
+        )
 
 
 def _random_instant(rng: random.Random, now0: datetime) -> datetime:
@@ -149,8 +181,9 @@ def _build_world(conn, rng: random.Random, now0: datetime, size: int = 80) -> Wo
     for n in range(size):
         seen = _random_instant(rng, now0)
         status = rng.choice(STATUSES)
-        world.add(conn, n, seen, status)
+        world.add(conn, n, seen, status, from_roundup=True if rng.random() < 0.12 else None)
         if rng.random() < 0.65:
+            sources = [rng.choice(["", "", "table", "official"]) for _ in range(3)]
             with conn:
                 _put_details(
                     conn,
@@ -158,7 +191,25 @@ def _build_world(conn, rng: random.Random, now0: datetime, size: int = 80) -> Wo
                     _random_instant(rng, now0),
                     category=rng.choice(CATEGORIES),
                     expires_on=_random_expiry(rng, now0),
+                    reward_source=sources[0],
+                    category_source=sources[1],
+                    expires_source=sources[2],
                 )
+            world.ranked[_code(n)] = any(sources)
+        if rng.random() < 0.5:
+            picked = [
+                (rng.choice(SIGHTING_NAMES), rng.random() < 0.15) for _ in range(rng.randint(1, 3))
+            ]
+            with conn:
+                repo.record_code_sightings(
+                    conn,
+                    [(_code(n), name, trusted, rng.random() < 0.3) for name, trusted in picked],
+                    now=lambda: NOW,
+                )
+            stored: dict[str, bool] = {}
+            for name, trusted in picked:  # one row per (code, name); trust only goes up
+                stored[name] = stored.get(name, False) or trusted
+            world.sightings[_code(n)] = list(stored.items())
     conn.commit()
     return world
 
@@ -181,7 +232,9 @@ def _expected_current(conn, world: World, now: datetime) -> list[str]:
     keep = [
         (index, code, seen)
         for index, (code, seen, status) in enumerate(world.rows)
-        if status in RELEASED and is_current(details.get(code), seen, now=now)
+        if status in RELEASED
+        and is_current(details.get(code), seen, now=now)
+        and world.listed(code, status)
     ]
     keep.sort(key=lambda item: (-_us(item[2]), item[0]))
     return [code for _, code, _ in keep]
@@ -285,7 +338,12 @@ def test_permanent_codes_still_obey_the_status_filter(v3_db):
                 _put_alerted(conn, n, NOW, status)
                 _put_details(conn, n, NOW, category="permanent")
         got = {c.code for c in repo.current_codes(conn, now=NOW)}
-    assert got == {_code(n) for n, status in enumerate(STATUSES, start=1) if status in RELEASED}
+    # Quiet statuses are unvetted here (no sightings, no ranked source), so only "posted" lists.
+    assert got == {
+        _code(n)
+        for n, status in enumerate(STATUSES, start=1)
+        if status in RELEASED and status not in QUIET
+    }
 
 
 def test_a_code_without_a_row_runs_the_clock_from_first_seen(v3_db):
@@ -335,7 +393,7 @@ def test_each_status_is_judged_by_the_same_rules(v3_db, status):
         with conn:
             _put_alerted(conn, 1, NOW - timedelta(days=1), status)
         got = [c.code for c in repo.current_codes(conn, now=NOW)]
-    assert got == ([_code(1)] if status in RELEASED else [])
+    assert got == ([_code(1)] if status in RELEASED and status not in QUIET else [])
 
 
 # --- a code in code_details that was never released ---

@@ -755,3 +755,20 @@ About **8.5 agent days**, plus about half a day of the owner's time for the chec
 - **The edit reserve covers stored names too:** delivery sizes it over the configured official and table names plus every name already stored in `code_details`, so a renamed source can't overflow an edit.
 - **Edits are fair across servers:** round-robin, at most 20 per server per pass (200 overall), least recently tried first (`guild_alert_messages.edit_tried_at`); a server whose edit fails is skipped for the rest of that pass; a deleted channel marks all its messages gone at once.
 - **A forbidden edit blocks that server's edits until any save of `/newsbot shift`,** including one that changes nothing.
+
+### From the qa pass (fix batch 1)
+
+- **The official reader reads only near the code** (its paragraph, about 200 characters either side), gives up on an expiry dated before the post's own Pacific day, on past tense ("was valid until", "expired"), and on a code named more than 10 times.
+- **Delivery uses release's dead-code rule exactly** (`details.silenced_by_expiry`, with `alerted_codes.official_seen_at`).
+- **A code silenced only by table data** (`alerted_codes.table_silenced_at`) is released, once, if an official source names it within 72 hours of first sight.
+- **Edits keep the original ping highlight:** `guild_alert_messages.ping` is stored, and an edit sends `mentions_for(ping)` while its header still carries that ping. Discord doesn't notify on edits. This replaces "edits are sent with mentions off".
+- **`/shift codes` lists quiet codes** (roundup, too_old, seeded) only when vetted: a ranked details source, a trusted sighting, or two source names.
+- **The edit reserve** counts only official and table sources under `shift.games`.
+- **Edits skip servers with SHiFT alerts off.**
+- **Table guards:** tables whose heading says "expired" are skipped; more than 500 codes from one table in a pass fails the pass ("too many rows"); code-shaped text in rewards and origins becomes "[code]".
+- **A 304 counts only when the request was conditional.**
+- **Source names** also refuse bidi controls and line or paragraph separators.
+- **Stamps:** every new `details_changed_at` is above the table-wide maximum.
+- **What counts as displayed:** `displayed()` mirrors exactly what the details line shows.
+- **Startup refuses a database migrated with an earlier draft of 009.**
+- **`/shift history` says "expired" once.**

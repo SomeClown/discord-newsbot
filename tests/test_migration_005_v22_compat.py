@@ -51,6 +51,13 @@ def _clock():
     return NOW
 
 
+def _inside_the_window():
+    """Ten hours after the fixture codes' first sighting (2026-09-29 10:00), inside the 24-hour
+    confirmation window. (QA batch 1, fix 12: a code whose window has closed is skipped before
+    anything else is read, and `_clock` is two days past it.)"""
+    return datetime(2026, 9, 29, 20, 0, tzinfo=UTC)
+
+
 def _item(url, topics=None, title="Zebracorn spotted in Palworld"):
     return StoredItem(
         url=url,
@@ -458,7 +465,7 @@ def test_v22_shift_paths_work_beside_populated_followup_tables(v22, conn, codes)
             "JOIN (SELECT 'r/Borderlands4' AS source UNION SELECT 'Bluesky') WHERE code = ?",
             (posted,),
         )
-    assert repo.queue_confirmed_followups(conn, [posted], now=_clock) == 1
+    assert repo.queue_confirmed_followups(conn, [posted], now=_inside_the_window) == 1
 
     # Now v2.2 is rolled back in: every SHiFT read and write it has still works.
     new_code = "ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ-ZZZ77"

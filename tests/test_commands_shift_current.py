@@ -339,7 +339,26 @@ async def test_pending_and_failed_codes_never_show(v3_cfg, v3_db):
 
     await _codes(v3_cfg, v3_db)(interaction)
 
-    assert {n for n in range(1, 7) if _shows(interaction, _code(n))} == {3, 4, 5, 6}
+    # QA batch 1, fix 5: a code that was only ever recorded quietly (seeded, too_old, roundup)
+    # and that nothing vouches for stays off the list; the posted one is listed as before.
+    assert {n for n in range(1, 7) if _shows(interaction, _code(n))} == {6}
+
+
+async def test_quiet_codes_show_once_something_vouches_for_them(v3_cfg, v3_db):
+    _guild(v3_db)
+    for status, n in (("seeded", 3), ("too_old", 4), ("roundup", 5)):
+        _seen(v3_db, n, status=status, from_roundup=status == "roundup")
+    _details(v3_db, 4, reward="Cosmetic", reward_source="table", reward_from="mentalmars")
+    with closing(connect(v3_db)) as conn:
+        repo.record_code_sightings(conn, [(_code(3), "Gearbox", True, False)])
+        repo.record_code_sightings(
+            conn, [(_code(5), "Reddit", False, False), (_code(5), "Bluesky", False, False)]
+        )
+    interaction = FakeInteraction(guild_id=GUILD_A)
+
+    await _codes(v3_cfg, v3_db)(interaction)
+
+    assert {n for n in range(3, 6) if _shows(interaction, _code(n))} == {3, 4, 5}
 
 
 def test_current_codes_agrees_with_is_current_at_every_boundary(v3_db):
@@ -497,7 +516,12 @@ async def test_history_marks_expired_codes_and_wins_over_the_other_markers(v3_cf
     assert "(expired)" in blocks[1] and "(old post)" not in blocks[1]
     assert "(old post)" in blocks[2]
     assert "(expired)" in blocks[3] and "(from a roundup)" not in blocks[3]
-    assert "1 Golden Key · expired" in blocks[1]  # the details line sits under the source line
+    # The details line sits under the source line, and the marker has already said "expired",
+    # so the line doesn't say it again (QA batch 1, fix 16).
+    assert blocks[1].endswith("\n1 Golden Key")
+    assert "1 Golden Key ·" not in blocks[1]
+    assert blocks[1].count("expired") == 1
+    assert blocks[3].endswith("\nCosmetic") and blocks[3].count("expired") == 1
 
 
 async def test_history_is_the_old_list_with_its_own_title_and_gating(v3_cfg, v3_db):

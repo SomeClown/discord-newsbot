@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from newsbot.bot.format import discord_len, esc
+from newsbot.bot.format import details_line, discord_len, esc
 from newsbot.collectors.base import ItemDetails
 from newsbot.shift.details import DetailObservation
 from newsbot.store import repo
@@ -81,7 +81,7 @@ NASTY = [
     '"; DELETE FROM alerted_codes; --',
     "Robert'); --",
     "100% of _wildcards_ and \\backslashes\\",
-    "‮RTL override‬ and a zero​width space",
+    "\u202eRTL override\u202c and a zero\u200bwidth space",
     "line one\nline two\r\nline three\ttabbed",
     "emoji \U0001f600\U0001f3ae and CJK \U00020bb7 and combining é",
     "@everyone <@123> <#456> [link](https://example.com)",
@@ -337,15 +337,16 @@ def test_property_the_list_is_exactly_the_codes_whose_details_changed_at_moved(c
         }
         assert set(changed) == moved, f"seed {seed}"
         assert len(changed) == len(set(changed)), f"seed {seed}"
-        # Soundness for alerts: a net change to anything shown is never missed.
+        # Soundness for alerts: a net change to anything the details line shows is never
+        # missed (QA batch 1, fix 14: "shown" is the printed line, not the raw columns; a
+        # long-ago clock keeps every distinct date a distinct phrase).
+        long_ago = datetime(2000, 1, 1, tzinfo=UTC)
         for c, row in after.items():
-            if c in before and (row.reward, row.category, row.expires_on) != (
-                before[c].reward,
-                before[c].category,
-                before[c].expires_on,
+            if c in before and details_line(row, now=long_ago) != details_line(
+                before[c], now=long_ago
             ):
                 assert c in changed, f"seed {seed}: missed an edit for {c}"
-            if c not in before and (row.reward or row.category or row.expires_on):
+            if c not in before and details_line(row, now=long_ago) is not None:
                 assert c in changed, f"seed {seed}: missed a new row for {c}"
 
 

@@ -109,6 +109,11 @@ def test_a_v8_database_migrates_to_9_with_all_data_intact(v8_path):
         marker = [row for row in after["app_state"] if row[0] == "shift_details_since"]
         after["app_state"] = [row for row in after["app_state"] if row[0] != "shift_details_since"]
         assert len(marker) == 1
+        # alerted_codes gained two trailing NULL columns (QA batch 1, fixes 2 and 3) and nothing
+        # else about it moved.
+        codes_after = after.pop("alerted_codes")
+        assert [row[-2:] for row in codes_after] == [(None, None)] * len(codes_after)
+        assert [row[:-2] for row in codes_after] == before.pop("alerted_codes")
         assert after == before
         # guild_shift gained a trailing NULL column and nothing else changed.
         guild_shift_after = [tuple(r) for r in conn.execute("SELECT * FROM guild_shift")]
@@ -123,13 +128,14 @@ def test_the_migration_only_adds_things(v8_path):
         migrate(conn)
         new = _schema(conn)
     for key, sql in old.items():
-        if key == ("table", "guild_shift"):
-            continue  # gained one column, checked below
+        if key in (("table", "guild_shift"), ("table", "alerted_codes")):
+            continue  # each gained nullable columns, checked below
         assert new[key] == sql, f"{key} was changed by 009"
     assert {name for (kind, name) in new.keys() - old.keys() if kind == "table"} == NEW_TABLES
     assert {name for (kind, name) in new.keys() - old.keys() if kind == "index"} == {
         "idx_guild_alert_messages_posted",
         "idx_guild_code_posts_message",
+        "idx_guild_code_posts_code",
     }
     assert [k for k in old.keys() - new.keys()] == []
 
@@ -142,6 +148,30 @@ def test_guild_shift_gains_one_nullable_column_with_no_default(v8_path):
     assert [r["name"] for r in info][:-1] == before
     last = info[-1]
     assert (last["name"], last["notnull"], last["dflt_value"]) == ("edits_blocked_at", 0, None)
+
+
+def test_alerted_codes_gains_two_nullable_timestamps_and_keeps_its_status_check(v8_path):
+    with closing(connect(v8_path)) as conn:
+        before = [r["name"] for r in conn.execute("PRAGMA table_info(alerted_codes)")]
+        old_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='alerted_codes'"
+        ).fetchone()
+        migrate(conn)
+        info = list(conn.execute("PRAGMA table_info(alerted_codes)"))
+        new_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='alerted_codes'"
+        ).fetchone()
+        # The release of a silenced code is an UPDATE to a status the CHECK already allows.
+        statuses = conn.execute("SELECT status FROM alerted_codes").fetchall()
+    assert statuses is not None
+    assert [r["name"] for r in info][:-2] == before
+    assert [(r["name"], r["notnull"], r["dflt_value"]) for r in info[-2:]] == [
+        ("official_seen_at", 0, None),
+        ("table_silenced_at", 0, None),
+    ]
+    status_check = "status IN ('seeded', 'too_old', 'pending', 'posted', 'failed', 'roundup')"
+    assert status_check in " ".join(old_sql[0].split())
+    assert status_check in " ".join(new_sql[0].split())
 
 
 def test_the_file_has_no_destructive_statements_and_needs_no_fk_header():

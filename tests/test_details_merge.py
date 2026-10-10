@@ -150,8 +150,16 @@ def test_an_official_observation_leaves_added_on_and_origin_alone():
 
 def test_a_new_row_with_something_to_show_is_marked_changed():
     assert merge(None, obs(reward="A skin")).details_changed_at == T0
-    assert merge(None, obs(category="other")).details_changed_at == T0
     assert merge(None, obs(expires_on=date(2026, 10, 14))).details_changed_at == T0
+    # "permanent" is a category the line shows (QA batch 1, fix 14); the others never reach it.
+    assert merge(None, obs(category="permanent")).details_changed_at == T0
+
+
+@pytest.mark.parametrize("category", ["golden", "cosmetic", "other"])
+def test_a_category_the_line_never_shows_is_not_something_to_show(category):
+    merged = merge(None, obs(category=category))
+    assert merged.category == category  # stored, and used for grouping
+    assert merged.details_changed_at is None
 
 
 def test_a_new_row_with_nothing_to_show_is_not():
@@ -168,10 +176,25 @@ def test_the_same_values_again_do_not_move_it():
     assert again.updated_at == LATER
 
 
-@pytest.mark.parametrize(("field", "source", "origin", "value", "other"), FIELDS)
-def test_a_changed_shown_field_moves_it(field, source, origin, value, other):
+SHOWN_CHANGES = [
+    ("reward", "3 Golden Keys", "1 Golden Key"),
+    ("expires_on", date(2026, 10, 14), date(2026, 10, 20)),
+    ("category", "golden", "permanent"),
+]
+
+
+@pytest.mark.parametrize(("field", "value", "other"), SHOWN_CHANGES)
+def test_a_changed_shown_field_moves_it(field, value, other):
     first = merge(None, obs(**{field: value}))
-    assert merge(first, obs(**{field: other}), now=LATER).details_changed_at == LATER
+    moved = merge(first, obs(**{field: other}), now=LATER)
+    assert moved.details_changed_at == LATER
+
+
+def test_a_category_change_the_line_does_not_show_moves_nothing():
+    first = merge(None, obs(reward="A skin", category="golden"))
+    later = merge(first, obs(category="cosmetic"), now=LATER)
+    assert later.category == "cosmetic"
+    assert later.details_changed_at == T0
 
 
 def test_a_lower_rank_reading_that_is_ignored_does_not_move_it():

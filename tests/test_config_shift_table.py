@@ -310,8 +310,12 @@ async def test_without_validators_the_request_is_unconditional(tmp_path):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         (collector,) = build_catalog_collectors(cfg, SECRETS)
-        await collector.collect(http)
+        # A 304 is only an answer to a conditional request. This one wasn't, so (QA batch 1,
+        # fix 10) the 304 is an error; the point of the test is the request that went out.
+        with pytest.raises(httpx.HTTPStatusError):
+            await collector.collect(http)
     assert "If-None-Match" not in seen[0].headers
+    assert "If-Modified-Since" not in seen[0].headers
 
 
 # --- --check-sources ---

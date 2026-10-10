@@ -748,9 +748,15 @@ class DiscordCodeAlertEditor:
 
     The poster's sibling, with its channel resolution and its refusal to touch a channel
     that isn't in the server. It edits through a partial message (`get_partial_message`),
-    which needs no Read Message History and no fetch of the message first; and every edit
-    goes out with `AllowedMentions.none()`, so the only `everyone=True` in this codebase
-    stays the one on the poster's side (`_PING_EVERYONE`). A channel in the wrong server is
+    which needs no Read Message History and no fetch of the message first.
+
+    Discord rebuilds a message's mentions from each edit's `allowed_mentions`, so an edit
+    that sent none would strip the highlight from an alert that pinged. The caller passes
+    the ping choice the message went out with, and the mentions come from `mentions_for`
+    like every other send: `_PING_EVERYONE` itself, one role, or nobody. The edit pass only
+    passes a choice while the stored header still starts with that ping's own text, so an
+    edit repeats a mention the message already had and never adds one. That keeps this
+    codebase's one `everyone=True` where it has always been. A channel in the wrong server is
     reported as `ChannelGoneError`: nothing in it can ever be edited from here, so there's
     no point in asking again.
     """
@@ -760,7 +766,7 @@ class DiscordCodeAlertEditor:
         self._channel_id = channel_id
         self._guild_id = guild_id
 
-    async def edit(self, message_id: int, content: str) -> None:
+    async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
         channel = self._client.get_channel(self._channel_id)
         if channel is None:
             try:
@@ -774,9 +780,7 @@ class DiscordCodeAlertEditor:
         if get_partial is None:
             raise ChannelGoneError(f"channel {self._channel_id} can't hold messages to edit")
         try:
-            await get_partial(message_id).edit(
-                content=content, allowed_mentions=discord.AllowedMentions.none()
-            )
+            await get_partial(message_id).edit(content=content, allowed_mentions=mentions_for(ping))
         except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
             _classify_edit_error(exc)
 

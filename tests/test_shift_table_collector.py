@@ -355,7 +355,7 @@ async def test_a_mention_in_a_cell_survives_as_text_for_the_renderer_to_defuse()
     items = await _collect("hostile.html")
     reward = _details(items["A1B2C-D3E4F-G5H6J-K7L8M-N9P2Q"]).reward
     assert reward == "@everyone free keys"
-    assert "@everyone" not in esc(reward).replace("@​everyone", "")
+    assert "@everyone" not in esc(reward).replace("@\u200beveryone", "")
 
 
 async def test_markup_and_pings_are_kept_verbatim_below_the_cap():
@@ -410,12 +410,15 @@ def _rows_page(n: int) -> str:
     return f"<h2>Codes</h2><table><tr><th>Code</th></tr>{rows}</table>"
 
 
-async def test_a_page_stops_being_read_after_a_thousand_rows(caplog):
-    with caplog.at_level(logging.INFO, logger="newsbot.collectors.shift_table"):
-        items = await _collect_body(_rows_page(1200))
+async def test_a_page_stops_being_read_after_a_thousand_rows():
+    # The parser's budget, asked of the parser: since QA batch 1 (fix 8) a collector fails a
+    # pass that has more than 500 codes, and this page has 999 after the cut.
+    parsed, truncated = parse_tables(_rows_page(1200))
     # The header row counts toward the limit, so a thousand rows is 999 codes.
-    assert len(items) == 999
-    assert "page hit a size limit" in caplog.text
+    assert [len(t.rows) for t in parsed] == [1000]
+    assert truncated
+    with pytest.raises(ValueError, match="too many rows"):
+        await _collect_body(_rows_page(1200))
 
 
 async def test_tables_nested_too_deep_are_ignored_without_breaking_the_rest():
@@ -527,7 +530,7 @@ async def test_a_row_limit_is_per_table_so_junk_cannot_starve_the_code_tables():
     assert [i.title for i in items] == [GOLD3]
 
 
-async def test_the_page_as_a_whole_stops_at_five_thousand_rows(caplog):
+async def test_the_page_as_a_whole_stops_at_five_thousand_rows():
     def table(n: int) -> str:
         rows = "".join(
             f"<tr><td>{n:02d}{i:03d}-{n:02d}{i:03d}-{n:02d}{i:03d}-{n:02d}{i:03d}-{n:02d}{i:03d}</td></tr>"
@@ -535,11 +538,11 @@ async def test_the_page_as_a_whole_stops_at_five_thousand_rows(caplog):
         )
         return f"<table><tr><th>Code</th></tr>{rows}</table>"
 
-    with caplog.at_level(logging.INFO, logger="newsbot.collectors.shift_table"):
-        items = await _collect_body("".join(table(n) for n in range(8)))
-    # Eight tables of 901 rows is 7,208; the page-wide budget of 5,000 rows is spent first.
-    assert len(items) == 5000 - 6  # five and a half tables, each minus its header row
-    assert "page hit a size limit" in caplog.text
+    parsed, truncated = parse_tables("".join(table(n) for n in range(8)))
+    # Eight tables of 901 rows is 7,208; the page-wide budget of 5,000 rows is spent first. (As
+    # for the thousand-row test, the collector's 500-code cap now fails such a page outright.)
+    assert sum(len(t.rows) for t in parsed) == 5000  # five and a half tables
+    assert truncated
 
 
 @pytest.mark.parametrize(
@@ -663,14 +666,14 @@ async def test_a_header_this_far_down_is_not_looked_for():
 
 
 async def test_an_invisible_character_in_a_header_cell_does_not_hide_the_column():
-    page = f"""<table><tr><th>Re​ward</th><th>Co​de</th></tr>
+    page = f"""<table><tr><th>Re\u200bward</th><th>Co\u200bde</th></tr>
     <tr><td>3 Golden Keys</td><td>{GOLD3}</td></tr></table>"""
     (item,) = await _collect_body(page)
     assert _details(item).reward == "3 Golden Keys"
 
 
 async def test_an_invisible_character_is_still_fatal_to_a_code():
-    broken = GOLD3[:11] + "​" + GOLD3[11:]
+    broken = GOLD3[:11] + "\u200b" + GOLD3[11:]
     items = await _collect_body(
         f"<table><tr><th>Code</th></tr><tr><td>{broken}</td></tr><tr><td>{GOLD1}</td></tr></table>"
     )
@@ -684,6 +687,6 @@ def test_dates_are_case_insensitive_all_the_way_through(text):
     assert parse_shift_date(text) is not None
 
 
-@pytest.mark.parametrize("text", ["???​", "​Unknown", "﻿"])
+@pytest.mark.parametrize("text", ["???\u200b", "\u200bUnknown", "\ufeff"])
 def test_an_invisible_character_does_not_turn_no_date_into_a_bad_date(text):
     assert _is_no_date(text)

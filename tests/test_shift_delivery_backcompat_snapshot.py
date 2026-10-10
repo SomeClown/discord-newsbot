@@ -170,7 +170,16 @@ class World:
             for table in sorted(tables):
                 if table in skip:
                     continue
-                got = [tuple(r) for r in conn.execute(f"SELECT * FROM {table}")]  # noqa: S608
+                columns = "*"
+                if table == "alerted_codes":
+                    # The two flags 009 grew for QA batch 1 (official_seen_at, table_silenced_at)
+                    # are facts only the new fan-out writes, like guild_alert_messages, so they
+                    # sit out the comparison; every column the old one wrote must still match.
+                    names = [r["name"] for r in conn.execute("PRAGMA table_info(alerted_codes)")]
+                    columns = ", ".join(
+                        n for n in names if n not in ("official_seen_at", "table_silenced_at")
+                    )
+                got = [tuple(r) for r in conn.execute(f"SELECT {columns} FROM {table}")]  # noqa: S608
                 if table == "app_state":
                     # Migration 009 stamps this with the wall clock when the database is built.
                     got = [r for r in got if r[0] != "shift_details_since"]

@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from newsbot.bot.format import details_line
 from newsbot.collectors.base import ItemDetails
 from newsbot.shift.details import (
     CLOCK_DAYS,
@@ -138,9 +139,20 @@ def shown(row):
     return (row.reward, row.category, row.expires_on)
 
 
+# A moment long before any date these tests use, so no expiry phrase is "expired", "tomorrow" or
+# "in N hours": every distinct date reads as a distinct "expires Oct 14, 2026".
+_LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
+
+
 def displayed(row):
-    """What an alert shows: the values and who supplied each (the "via" line counts)."""
-    return (*shown(row), row.reward_from, row.category_from, row.expires_from)
+    """What an alert shows: the details line itself, which is the only honest judge.
+
+    QA batch 1, fix 14: `shift.details.displayed` is meant to be exactly what `details_line`
+    prints, so a change is "a change" when the printed line differs. A category that never
+    reaches the line (golden to cosmetic) is no change; the "via" names count because they
+    are in the line. None means the line is left out.
+    """
+    return details_line(row, now=_LONG_AGO)
 
 
 # --- precedence: the answer doesn't depend on the order, beyond "newer wins" ---
@@ -306,7 +318,7 @@ def test_property_details_changed_at_moves_exactly_when_a_shown_value_does():
             row = merge(row, o, now=now)
             if before is None:
                 moved = row.details_changed_at == now
-                assert moved == bool(row.reward or row.category or row.expires_on), f"seed {seed}"
+                assert moved == (displayed(row) is not None), f"seed {seed}"
             else:
                 moved = row.details_changed_at != before.details_changed_at
                 assert moved == (displayed(row) != displayed(before)), f"seed {seed} step {step}"
@@ -367,7 +379,7 @@ def test_a_table_that_goes_back_to_unknown_does_not_take_the_expiry_away():
 
 def test_a_reward_cleared_on_the_page_stays_and_a_whitespace_one_is_empty():
     row = merge(None, make("table", "mentalmars", reward="3 Golden Keys"))
-    for blank in ("", " ", "\t\n", " "):
+    for blank in ("", " ", "\t\n", "\u00a0"):
         after = merge(row, make("table", "mentalmars", reward=blank), now=LATER)
         # NBSP counts as whitespace to str.strip(), so all four are "empty".
         assert after.reward == "3 Golden Keys", repr(blank)

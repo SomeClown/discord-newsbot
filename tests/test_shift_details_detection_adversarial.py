@@ -755,13 +755,17 @@ async def test_a_code_recorded_quietly_for_its_expiry_stays_quiet_if_the_expiry_
 async def test_an_official_post_can_pull_the_expiry_into_the_past_for_a_new_code(h):
     add_guild(h.db_path, 1, ping="everyone")
     table = page(main_table(("1 Golden Key", d(T0.date()), X, "Oct 30, 2026")))
-    post = official(f"{X} valid until 10/01/2026", at=T0 - timedelta(hours=1))
+    # Posted on the evening of Oct 7 (Pacific) saying it's good through that day: a deadline
+    # that is already over by the time this pass reads it. (QA batch 1, fix 1: a post can no
+    # longer announce a date before its own day, so "valid until 10/01/2026" on Oct 9 is a
+    # misread now, not an expiry.)
+    post = official(f"{X} valid until 10/07/2026", at=T0 - timedelta(hours=30))
 
     assert await h.run([post, *await read_named(table, T0)]) == 0
 
     # Gearbox outranks the table on the field it speaks to, and an expired code is quiet.
     row = details_of(h.db_path, X)
-    assert (row.expires_on, row.expires_from) == (date(2026, 10, 1), GEARBOX)
+    assert (row.expires_on, row.expires_from) == (date(2026, 10, 7), GEARBOX)
     assert statuses(h.db_path) == {X: "too_old"}
     assert h.alerts(1) == []
 
@@ -1686,6 +1690,7 @@ async def test_three_days_of_hourly_passes_never_repeat_a_post_a_ping_or_a_follo
     add_guild(path, 3, ping="none")
     pool = [code_n(500 + i) for i in range(30)]
     known_status: dict[str, tuple[str, str]] = {}
+    revived: set[str] = set()
 
     for hour in range(72):
         clock = start + timedelta(hours=hour)
@@ -1700,23 +1705,39 @@ async def test_three_days_of_hourly_passes_never_repeat_a_post_a_ping_or_a_follo
                     source=rng.choice([REDDIT, BLUESKY, "r/borderlands4"]),
                 )
             )
+        named_by_gearbox: set[str] = set()
         if rng.random() < 0.12:
             code = rng.choice(pool)
             today = clock.astimezone(SHIFT_TZ).date()
             when = today + timedelta(days=rng.choice([-2, 3]))
+            named_by_gearbox.add(code)
             items.append(
                 official(f"{code} valid until {when:%m/%d/%Y}", at=clock, tag=f"{seed_}-{hour}")
             )
         await h.run(items, at=clock)
 
-        # Rule: a code's record never changes under it, and never un-posts.
+        # Rule: a code's record never changes under it, and never un-posts. The one move there
+        # is (QA batch 1, fix 3): a code a table's data silenced is released after all when an
+        # official source names it, `too_old` to `posted`, once, with its first sighting intact.
         for code, status, first in rows(
             path, "SELECT code, status, first_seen_at FROM alerted_codes"
         ):
             if code in known_status:
-                assert known_status[code] == (status, first), (seed_, hour, code)
+                was_status, was_first = known_status[code]
+                assert was_first == first, (seed_, hour, code)
+                if was_status != status:
+                    assert (was_status, status) == ("too_old", "posted"), (seed_, hour, code)
+                    assert code not in revived, (seed_, hour, code)
+                    assert rows(
+                        path, "SELECT table_silenced_at FROM alerted_codes WHERE code = ?", code
+                    ) != [(None,)], (seed_, hour, code)
+                    revived.add(code)
             known_status[code] = (status, first)
-        # Rule: a code isn't announced when its expiry, as known right now, has passed.
+        # Rule: a code isn't announced when its expiry, as known right now, has passed. The one
+        # exception is the standing one (a table's typo can't silence Gearbox): a post from
+        # Gearbox naming the code this very pass outranks an expiry only a table gave. (A post
+        # dated before its own day gives no expiry at all now, QA batch 1, fix 1, so the "-2
+        # days" posts above are such mentions and not deadlines.)
         today = clock.astimezone(SHIFT_TZ).date()
         for guild_id in (1, 2, 3):
             this_pass = [
@@ -1728,7 +1749,12 @@ async def test_three_days_of_hourly_passes_never_repeat_a_post_a_ping_or_a_follo
             with closing(connect(path)) as conn:
                 found = repo.code_details_for(conn, this_pass)
             for code, row in found.items():
-                assert row.expires_on is None or row.expires_on >= today, (seed_, hour, code)
+                tables_typo = row.expires_source == "table" and code in named_by_gearbox
+                assert row.expires_on is None or row.expires_on >= today or tables_typo, (
+                    seed_,
+                    hour,
+                    code,
+                )
 
     for guild_id in (1, 2, 3):
         originals = h.original_codes(guild_id)

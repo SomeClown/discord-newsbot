@@ -341,7 +341,7 @@ async def test_two_different_codes_in_one_cell_skip_the_row_rather_than_guess():
 
 
 async def test_a_code_with_an_invisible_character_inside_is_not_a_code():
-    broken = C1[:11] + "​" + C1[11:]  # "AB12C-DE34F​-GH56J-..."
+    broken = C1[:11] + "\u200b" + C1[11:]  # "AB12C-DE34F\u200b-GH56J-..."
     page = _table(["Code"], [broken], [C2])
     assert [i.title for i in await _collect_body(page)] == [C2]
 
@@ -466,10 +466,10 @@ async def test_mentions_in_reward_and_origin_arrive_as_text_and_defuse_when_esca
         "> quote\n# heading\n- list",
         "[click](https://evil.example/x) https://evil.example/y discord.gg/abc",
         "\\*escaped\\* \\\\ \\`",
-        "‮evil text‬ normal ​zero​width​ ‏‎ ﻿",
-        "​" * 1000,
-        "‮" * 1000,
-        "\U0001f468‍\U0001f469‍\U0001f467 family " * 80,
+        "\u202eevil text\u202c normal \u200bzero\u200bwidth\u200b \u200f\u200e \ufeff",
+        "\u200b" * 1000,
+        "\u202e" * 1000,
+        "\U0001f468\u200d\U0001f469\u200d\U0001f467 family " * 80,
         "\U0001f1fa\U0001f1f8" * 400,
         "*" * 5000,
         "<@&1>" * 1000,
@@ -513,7 +513,7 @@ async def test_an_emoji_at_the_cut_is_dropped_whole_not_split():
         "x" * 295 + "<@&123456789012345678>",
         "*" * 149 + "@everyone",
         "\U0001f52b" * 150 + "tail",
-        "ab" + "\U0001f468‍\U0001f469‍\U0001f467" * 40,
+        "ab" + "\U0001f468\u200d\U0001f469\u200d\U0001f467" * 40,
     ],
 )
 @pytest.mark.parametrize("limit", [1, 2, 3, 7, 40, 299, 300])
@@ -630,8 +630,14 @@ async def test_a_thousand_code_tables_of_one_row_each_stop_at_the_row_budget():
         f"<table><tr><th>Code</th></tr><tr><td>{i:05d}-{i:05d}-{i:05d}-{i:05d}-{i:05d}</td></tr></table>"
         for i in range(1, 3001)
     )
-    items = await _collect_body(tables)
-    assert len(items) == 2500  # two rows a table; the page-wide cap is five thousand rows
+    # Two rows a table; the page-wide cap is five thousand rows. That is the parser's budget,
+    # asked of the parser: since QA batch 1 (fix 8) a collector will not hand over more than 500
+    # codes from one page, so the 2,500 that survive the budget make a failed pass instead.
+    parsed, truncated = parse_tables(tables)
+    assert sum(len(t.rows) for t in parsed) == 5000
+    assert truncated
+    with pytest.raises(ValueError, match="too many rows"):
+        await _collect_body(tables)
 
 
 async def test_bytes_that_are_not_utf8_become_replacement_characters_and_the_page_still_reads():
@@ -760,7 +766,7 @@ async def test_a_date_split_by_nbsp_and_tags_still_reads_as_a_date():
     assert _details(item).expires_on == date(2026, 10, 6)
 
 
-@pytest.mark.parametrize("junk", ["​", "‌", "‍", "﻿", "⁠", "‎"])
+@pytest.mark.parametrize("junk", ["\u200b", "\u200c", "\u200d", "\ufeff", "\u2060", "\u200e"])
 async def test_an_invisible_character_beside_a_date_does_not_erase_the_expiry(junk):
     page = _table(["Code", "Expire"], [C1, f"Sept 30, 2026{junk}"])
     (item,) = await _collect_body(page)

@@ -71,11 +71,14 @@ async def _collect(validators, http, *, url: str = URL, sleep=_noop_sleep):
     return await _collector(validators, url=url, sleep=sleep).collect(http)
 
 
-async def test_a_304_nobody_asked_for_is_still_a_healthy_pass():
+async def test_a_304_nobody_asked_for_is_an_error_and_stages_nothing():
+    """QA batch 1, fix 10: "not modified" answers a question; this request asked none."""
     validators = PageValidators()
     async with _client(lambda request: httpx.Response(304)) as http:
-        assert await _collect(validators, http) == []
+        with pytest.raises(httpx.HTTPStatusError):
+            await _collect(validators, http)
     assert validators == {}
+    assert validators.pending == {}
 
 
 async def test_a_304_that_arrives_with_a_body_ignores_the_body():

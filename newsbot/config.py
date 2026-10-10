@@ -1129,6 +1129,11 @@ def _source_names(cfg: AppConfig) -> list[str]:
     return [name for name in names if name is not None]
 
 
+# U+202A to U+202E (embeddings, overrides and their pop) and U+2066 to U+2069 (isolates), written as
+# escapes so the source stays honest about what it contains.
+_BIDI_CONTROL_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+
 def _name_problem(name: str) -> str | None:
     """Why `name` can't be shown in an alert and saved in the database, or None if it can.
 
@@ -1144,6 +1149,10 @@ def _name_problem(name: str) -> str | None:
         return f"source name {shown} has a character that can't be saved (a lone surrogate)"
     if any(unicodedata.category(c) == "Cc" for c in name):
         return f"source name {shown} has a control character (a newline or tab, say)"
+    # Bidi controls reorder what's around them, and the line and paragraph separators break
+    # a line the way a newline would; neither is a Cc, and both end up in front of members.
+    if _BIDI_CONTROL_RE.search(name) or any(unicodedata.category(c) in ("Zl", "Zp") for c in name):
+        return f"source name {shown} has a text-direction control or a line or paragraph separator"
     if not any(not c.isspace() and unicodedata.category(c) != "Cf" for c in name):
         return f"source name {shown} is empty or only invisible characters"
     if name != name.strip():

@@ -436,6 +436,7 @@ def record_silent_codes(
     *,
     now: Callable[[], datetime] | None = None,
     mark_seeded: bool,
+    table_silenced: Collection[str] = (),
 ) -> None:
     """Record codes without posting them: `(code, source_name, item_url, status, from_roundup)`.
 
@@ -453,15 +454,29 @@ def record_silent_codes(
     recorded. `mark_seeded=True` sets the `seeded_at` marker, but only
     if it isn't already set, since the marker means "the first sweep
     after enabling has run", not "the most recent healthy sweep ran".
+
+    `table_silenced` names the `'too_old'` codes that were silenced only by a fan site's data
+    (an expiry already past, an "Added" date over 48 hours old). Those get
+    `table_silenced_at`, which is what lets an official source's later sighting release them
+    after all (`table_silenced_codes`, `record_released_codes`). Any other status ignores it.
     """
     now_iso = _resolve_now(now)
     with conn:
         for code, source_name, item_url, status, from_roundup in rows:
             conn.execute(
                 "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, status, from_roundup) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
-                (code, now_iso, source_name, item_url, status, int(from_roundup)),
+                "(code, first_seen_at, source_name, item_url, status, from_roundup, "
+                "table_silenced_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
+                (
+                    code,
+                    now_iso,
+                    source_name,
+                    item_url,
+                    status,
+                    int(from_roundup),
+                    now_iso if status == "too_old" and code in table_silenced else None,
+                ),
             )
         if mark_seeded:
             conn.execute(
@@ -604,6 +619,21 @@ def history_codes(conn: sqlite3.Connection, since: datetime) -> list[CodeView]:
     return views
 
 
+def _named_by_two_sources(conn: sqlite3.Connection, codes: list[str]) -> set[str]:
+    """Which of `codes` have sightings under two or more different source names (casefolded)."""
+    names: dict[str, set[str]] = {}
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, source_name FROM code_sightings "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            names.setdefault(row["code"], set()).add(row["source_name"].casefold())
+    return {code for code, seen in names.items() if len(seen) >= 2}
+
+
 def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCode]:
     """The codes that should still work at `now`, for `/shift codes` (design.md §16).
 
@@ -622,6 +652,15 @@ def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCod
     one snapshot, so a commit in between can't pair a code with details it didn't qualify
     on. A row with an unreadable date is skipped, with one warning for the call.
 
+    Unvetted codes stay off the list. A code that was only ever recorded quietly (`'roundup'`,
+    `'too_old'`, `'seeded'`) or that came from a roundup post is something nobody told a
+    channel about, and the list shouldn't be the first place a member meets it unless
+    something besides one stranger's say-so stands behind it: a details row set by a fan
+    site's table or an official post, a trusted (official or press) sighting, or two
+    different sources (compared casefolded) having named it. A posted code that wasn't a
+    roundup is as vetted as it needs to be. `/shift history` is the unfiltered view, with
+    markers, and doesn't do this.
+
     Newest sighting first, ties on `rowid`; the page renderer does the grouping and its
     own "Added" ordering. The list isn't paged: it's whatever is current, which is a
     few dozen codes on a busy week.
@@ -632,7 +671,13 @@ def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCod
     bad: list[str] = []
     with _read_snapshot(conn):
         rows = conn.execute(
-            "SELECT a.code, a.first_seen_at "
+            "SELECT a.code, a.first_seen_at, "
+            "(a.status IN ('roundup', 'too_old', 'seeded') OR a.from_roundup = 1) AS quiet, "
+            "(EXISTS (SELECT 1 FROM code_details v WHERE v.code = a.code AND "
+            "         (v.reward_source != '' OR v.category_source != '' "
+            "          OR v.expires_source != '')) "
+            " OR EXISTS (SELECT 1 FROM code_sightings t WHERE t.code = a.code "
+            "            AND t.trusted = 1)) AS vetted "
             "FROM alerted_codes a LEFT JOIN code_details d ON d.code = a.code "
             "WHERE a.status NOT IN ('pending', 'failed') "
             "AND (d.category = 'permanent' "
@@ -641,6 +686,13 @@ def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCod
             "ORDER BY a.first_seen_at DESC, a.rowid ASC",
             (today, cutoff),
         ).fetchall()
+        # What SQL can't judge: "two different sources" is a casefold, and SQLite's lower()
+        # only knows ASCII. Only the quiet, not-yet-vetted rows are asked.
+        doubtful = [row["code"] for row in rows if row["quiet"] and not row["vetted"]]
+        corroborated = _named_by_two_sources(conn, doubtful)
+        rows = [
+            row for row in rows if not row["quiet"] or row["vetted"] or row["code"] in corroborated
+        ]
         details = _details_or_skip(conn, [row["code"] for row in rows], bad)
     current = []
     for row in rows:
@@ -1699,6 +1751,8 @@ def record_released_codes(
     now: Callable[[], datetime] | None = None,
     queue_for_games: list[str] | None = None,
     flags: Mapping[str, tuple[bool, bool]] | None = None,
+    official: Collection[str] = (),
+    revive: Collection[str] = (),
 ) -> list[str]:
     """Record globally-new codes as released: `(code, source_name, item_url, from_roundup)`.
 
@@ -1713,18 +1767,36 @@ def record_released_codes(
     same transaction, so who hears about a code is decided at the moment it's
     released and not by whoever happens to be reachable before a timeout.
     `flags` maps a code to its `(golden, trusted)` for the later render.
+
+    `official` names the codes an official-trust source saw in this pass
+    (`official_seen_at`, which delivery reads). `revive` names codes that are already
+    recorded as `'too_old'` because of a fan site's data, and that an official source has
+    now named: they are released by an UPDATE to `'posted'` (the status CHECK is never
+    touched, and the original `first_seen_at` stays) instead of an INSERT. The UPDATE only
+    lands on a row that is still `'too_old'` and still flagged, in the same transaction as
+    the queueing below, so two passes racing for the same code have exactly one winner and
+    a crash between the two statements is not a thing that can happen.
     """
     moment = (now or (lambda: datetime.now(UTC)))()
     now_iso = moment.isoformat()
     inserted: list[str] = []
     with conn:
         for code, source_name, item_url, from_roundup in rows:
-            cur = conn.execute(
-                "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, pinged, from_roundup, status) "
-                "VALUES (?, ?, ?, ?, 0, ?, 'posted') ON CONFLICT(code) DO NOTHING",
-                (code, now_iso, source_name, item_url, int(from_roundup)),
-            )
+            seen_official = now_iso if code in official else None
+            if code in revive:
+                cur = conn.execute(
+                    "UPDATE alerted_codes SET status = 'posted', source_name = ?, "
+                    "item_url = ?, from_roundup = ?, official_seen_at = ? "
+                    "WHERE code = ? AND status = 'too_old' AND table_silenced_at IS NOT NULL",
+                    (source_name, item_url, int(from_roundup), seen_official, code),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, "
+                    "pinged, from_roundup, status, official_seen_at) "
+                    "VALUES (?, ?, ?, ?, 0, ?, 'posted', ?) ON CONFLICT(code) DO NOTHING",
+                    (code, now_iso, source_name, item_url, int(from_roundup), seen_official),
+                )
             if cur.rowcount == 1:
                 inserted.append(code)
         if queue_for_games is None or not inserted:
@@ -1824,7 +1896,8 @@ def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCo
     """
     rows = conn.execute(
         "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
-        "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
+        "p.claimed_at, a.official_seen_at FROM guild_code_posts p "
+        "JOIN alerted_codes a ON a.code = p.code "
         "WHERE p.guild_id = ? AND p.status = 'queued' ORDER BY p.rowid",
         (guild_id,),
     ).fetchall()
@@ -1839,6 +1912,7 @@ def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCo
             trusted=bool(row["trusted"]),
             queued_at=datetime.fromisoformat(row["claimed_at"]),
             details=details.get(row["code"]),
+            official_seen=row["official_seen_at"] is not None,
         )
         for row in rows
     ]
@@ -2010,8 +2084,8 @@ def mark_guild_codes_posted(
             conn.execute(
                 "INSERT INTO guild_alert_messages "
                 "(guild_id, message_id, channel_id, header, golden_prefix, posted_at, "
-                "rendered_at) "
-                "SELECT ?, ?, ?, ?, ?, ?, ? "
+                "rendered_at, ping) "
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
                 "WHERE EXISTS (SELECT 1 FROM guilds WHERE guild_id = ?) "
                 "ON CONFLICT(guild_id, message_id) DO NOTHING",
                 (
@@ -2022,6 +2096,9 @@ def mark_guild_codes_posted(
                     int(message.golden_prefix),
                     _utc_iso(message.posted_at),
                     _utc_iso(message.rendered_at),
+                    # A choice the table would refuse is stored as "none": an edit that can't
+                    # ping is a much better outcome than a record that can't be written.
+                    message.ping if _PING_CHOICE_RE.fullmatch(message.ping) else "none",
                     guild_id,
                 ),
             )
@@ -2036,6 +2113,9 @@ def mark_guild_codes_posted(
 
 
 _SQLITE_MAX_INT = 2**63 - 1
+
+# `guild_alert_messages.ping`'s CHECK: "none", "everyone" or a role id (17 to 20 digits).
+_PING_CHOICE_RE = re.compile(r"none|everyone|[0-9]{17,20}", re.ASCII)
 
 
 def _alert_record_problem(message_id: int, message: AlertMessageRecord) -> str | None:
@@ -2177,22 +2257,29 @@ def queue_confirmed_followups(
     state, is left alone, so calling this every pass is safe (and is how a
     second pass that races the first sends nothing extra). A code whose known expiry
     has passed (Pacific end of day; never a permanent one) is not confirmed at all.
+
+    Every code in every pass comes through here, and a table lists dozens of them hour
+    after hour, so a code whose window has already closed (`first_seen_at + window` is in
+    the past) is dropped before anything else is read about it. Its follow-ups, if it was
+    ever going to have any, were queued in the pass that confirmed it.
     """
     now_iso = _resolve_now(now)
     moment = datetime.fromisoformat(now_iso)
     queued = 0
     with conn:
         for code in dict.fromkeys(codes):
-            # A code whose known expiry has already passed isn't worth a pinged "confirmed":
-            # the second source is probably just a table still listing yesterday's news.
-            if expired_by_expiry(code_details_for(conn, [code]).get(code), moment):
-                continue
             first = conn.execute(
                 "SELECT first_seen_at FROM alerted_codes WHERE code = ?", (code,)
             ).fetchone()
             if first is None:
                 continue
             deadline = datetime.fromisoformat(first["first_seen_at"]) + window
+            if _as_utc(deadline) < _as_utc(moment):
+                continue
+            # A code whose known expiry has already passed isn't worth a pinged "confirmed":
+            # the second source is probably just a table still listing yesterday's news.
+            if expired_by_expiry(code_details_for(conn, [code]).get(code), moment):
+                continue
             sightings = [
                 row
                 for row in conn.execute(
@@ -2593,6 +2680,12 @@ def upsert_code_details(
         since = _parse_dt_or_none(marker["value"]) if marker else None
         if marker and since is None:
             logger.warning("%s isn't a timestamp; reading it as now", DETAILS_SINCE_KEY)
+        # Every new stamp has to be later than every stamp already in the table, not just
+        # later than its own row's. A message's version stamp is the largest among its codes,
+        # so a code whose change got a stamp below that of a sibling it shares a message with
+        # would be a change the message "already shows". A clock that stepped back, or two
+        # changes in one pass at the same `now`, are enough to get there.
+        floor = _stamp_floor(conn)
         changed: list[str] = []
         for code, group in by_code.items():
             old = before.get(code)
@@ -2603,13 +2696,72 @@ def upsert_code_details(
                 first_seen_at=first_seen.get(code),
                 details_since=since or now,
             )
+            shown_change = displayed(merged) != displayed(old)
+            if shown_change and merged.details_changed_at is not None:
+                stamp = _as_utc(merged.details_changed_at)
+                if floor is not None and stamp <= floor:
+                    stamp = floor + timedelta(microseconds=1)
+                floor = stamp
+                merged = replace(merged, details_changed_at=stamp)
             if merged != old:
                 _write_details(conn, merged)
-            if (old is None and (merged.reward or merged.category or merged.expires_on)) or (
-                old is not None and displayed(merged) != displayed(old)
-            ):
+            if shown_change:
                 changed.append(code)
     return changed
+
+
+def _stamp_floor(conn: sqlite3.Connection) -> datetime | None:
+    """The latest `details_changed_at` in the whole table, or None if there isn't one.
+
+    Text order is time order here (`_utc_iso` strings, '+' before '.'), so MAX does it. A
+    value that isn't a timestamp (people edit databases) can't be a floor; it's ignored
+    with a warning, which is the safe direction: the stamps below it just stay as they were.
+    """
+    newest = conn.execute("SELECT MAX(details_changed_at) FROM code_details").fetchone()[0]
+    if newest is None:
+        return None
+    parsed = _parse_dt_or_none(newest)
+    if parsed is None:
+        logger.warning("a code_details.details_changed_at isn't a timestamp; ignoring it")
+        return None
+    return _as_utc(parsed)
+
+
+# An official source naming a code that a fan site's data silenced counts as the code's real
+# announcement for this long after the bot first saw it (design.md §16).
+TABLE_SILENCE_WINDOW = timedelta(hours=72)
+
+
+def table_silenced_codes(
+    conn: sqlite3.Connection,
+    codes: Iterable[str],
+    *,
+    now: datetime,
+    window: timedelta = TABLE_SILENCE_WINDOW,
+) -> set[str]:
+    """Which of `codes` are recorded `'too_old'` only for a fan site's data, and still young enough.
+
+    "Young enough" is `first_seen_at` within `window` of `now`. These are the codes an
+    official sighting may release after all (`record_released_codes(revive=...)`); a code
+    silenced by an official expiry, or by anything a fan site didn't say alone, is never in
+    here.
+    """
+    code_list = list(dict.fromkeys(codes))
+    cutoff = _as_utc(now) - window
+    found: set[str] = set()
+    for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = code_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, first_seen_at FROM alerted_codes "  # noqa: S608
+            "WHERE status = 'too_old' AND table_silenced_at IS NOT NULL "
+            f"AND code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            first = _parse_dt_or_none(row["first_seen_at"])
+            if first is not None and _as_utc(first) >= cutoff:
+                found.add(row["code"])
+    return found
 
 
 def table_listed_sources(conn: sqlite3.Connection, names: Iterable[str]) -> set[str]:
@@ -2706,7 +2858,9 @@ def alert_messages_to_edit(
     (`edit_tried_at`; never tried counts as oldest), then oldest posted, so a message that keeps
     failing goes to the back of its own server's line and can't sit at the head forever.
 
-    A server whose edits are blocked (`guild_shift.edits_blocked_at`) isn't listed at all.
+    A server whose edits are blocked (`guild_shift.edits_blocked_at`), or that has switched its
+    SHiFT alerts off, isn't listed at all: someone who turned the feature off has not asked to
+    have its old messages tended, and an edit is a thing the bot does in their channel.
     Roundup codes don't count: their messages have no record, and a roundup code that shares a
     code with a normal alert only matters through the normal alert's own row.
 
@@ -2717,13 +2871,14 @@ def alert_messages_to_edit(
     # arithmetic, which comes out an hour off across a DST change.
     cutoff = datetime.fromisoformat(_utc_iso(now)) - window
     rows = conn.execute(
-        "SELECT guild_id, message_id, channel_id, header, golden_prefix, rendered_at, posted_at "
-        "FROM (SELECT m.guild_id, m.message_id, m.channel_id, m.header, m.golden_prefix, "
-        "m.rendered_at, m.posted_at, ROW_NUMBER() OVER (PARTITION BY m.guild_id "
+        "SELECT guild_id, message_id, channel_id, header, golden_prefix, rendered_at, posted_at, "
+        "ping FROM (SELECT m.guild_id, m.message_id, m.channel_id, m.header, m.golden_prefix, "
+        "m.rendered_at, m.posted_at, m.ping, ROW_NUMBER() OVER (PARTITION BY m.guild_id "
         "ORDER BY m.edit_tried_at IS NOT NULL, m.edit_tried_at, m.posted_at, m.message_id) "
         "AS turn FROM guild_alert_messages m "
         "JOIN guild_shift s ON s.guild_id = m.guild_id "
         "WHERE m.state = 'live' AND m.posted_at >= ? AND s.edits_blocked_at IS NULL "
+        "AND s.enabled = 1 "
         "AND EXISTS (SELECT 1 FROM guild_code_posts p JOIN code_details d ON d.code = p.code "
         "WHERE p.guild_id = m.guild_id AND p.message_id = m.message_id "
         "AND p.from_roundup = 0 AND d.details_changed_at > m.rendered_at)) "
@@ -2747,6 +2902,7 @@ def alert_messages_to_edit(
                 header=row["header"],
                 golden_prefix=bool(row["golden_prefix"]),
                 rendered_at=rendered_at,
+                ping=row["ping"],
             )
         )
     return targets
@@ -2765,7 +2921,8 @@ def alert_message_codes(
     """
     rows = conn.execute(
         "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
-        "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
+        "p.claimed_at, a.official_seen_at FROM guild_code_posts p "
+        "JOIN alerted_codes a ON a.code = p.code "
         "WHERE p.guild_id = ? AND p.message_id = ? AND p.status = 'posted' "
         "AND p.from_roundup = 0 ORDER BY p.rowid",
         (guild_id, message_id),
@@ -2781,6 +2938,7 @@ def alert_message_codes(
             trusted=bool(row["trusted"]),
             queued_at=datetime.fromisoformat(row["claimed_at"]),
             details=details.get(row["code"]),
+            official_seen=row["official_seen_at"] is not None,
         )
         for row in rows
     ]

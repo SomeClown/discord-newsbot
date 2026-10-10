@@ -51,6 +51,10 @@ OLD_DIGEST_COLUMNS = (
     "input_tokens, output_tokens, created_at, updated_at"
 )
 OLD_STORY_COLUMNS = "id, topic_key, headline, summary, label, is_update_of, digest_id, created_at"
+# alerted_codes as it was before 009 added its two trailing flags (QA batch 1).
+OLD_CODE_COLUMNS = (
+    "code, first_seen_at, source_name, item_url, message_id, pinged, status, from_roundup"
+)
 
 
 def test_fresh_db_reaches_the_latest_user_version(tmp_path):
@@ -67,7 +71,7 @@ def test_digests_and_stories_keep_their_ids_and_data(v4_db):
         links_before = _dump(conn, "SELECT * FROM story_items ORDER BY 1, 2")
         items_before = _dump(conn, "SELECT * FROM items ORDER BY id")
         topics_before = _dump(conn, "SELECT * FROM item_topics ORDER BY 1, 2")
-        codes_before = _dump(conn, "SELECT * FROM alerted_codes ORDER BY code")
+        codes_before = _dump(conn, f"SELECT {OLD_CODE_COLUMNS} FROM alerted_codes ORDER BY code")
         lounge_before = _dump(conn, "SELECT * FROM lounge_quotes_used ORDER BY 1, 2")
         assert len(digests_before) == 4 and len(stories_before) == 5
 
@@ -80,7 +84,10 @@ def test_digests_and_stories_keep_their_ids_and_data(v4_db):
         assert _dump(conn, "SELECT * FROM story_items ORDER BY 1, 2") == links_before
         assert _dump(conn, "SELECT * FROM items ORDER BY id") == items_before
         assert _dump(conn, "SELECT * FROM item_topics ORDER BY 1, 2") == topics_before
-        assert _dump(conn, "SELECT * FROM alerted_codes ORDER BY code") == codes_before
+        assert (
+            _dump(conn, f"SELECT {OLD_CODE_COLUMNS} FROM alerted_codes ORDER BY code")
+            == codes_before
+        )
         assert (
             _dump(
                 conn, "SELECT source_key, quote_hash, used_at FROM lounge_quotes_used ORDER BY 1, 2"
