@@ -69,10 +69,14 @@ _BUILD_COLUMNS = (
     ("alerted_codes", "official_seen_at"),
     ("alerted_codes", "table_silenced_at"),
 )
+# And the one index it grew: without it the follow-up check scans guild_code_posts for every
+# code of every pass. Nothing breaks, it just gets slowly and quietly worse, which is the
+# kind of stale I'd rather hear about now.
+_BUILD_INDEXES = ("idx_guild_code_posts_code",)
 
 
 def _check_build_columns(conn: sqlite3.Connection, version: int) -> None:
-    """Raise `StoreError` if a version 9+ database lacks a column 009 grew during the build."""
+    """Raise `StoreError` if a version 9+ database lacks a column or index 009 grew in the build."""
     if version < 9:
         return
     missing = []
@@ -81,6 +85,12 @@ def _check_build_columns(conn: sqlite3.Connection, version: int) -> None:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             missing.append(f"{table}.{column}")
+    for name in _BUILD_INDEXES:
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)
+        ).fetchone()
+        if found is None:
+            missing.append(f"index {name}")
     if missing:
         raise StoreError(
             "This database has migration 009 from an earlier draft of v3.1.0 "

@@ -426,12 +426,22 @@ async def test_the_bot_never_pairs_validators_with_the_default_hook(cfg, db_path
 
 
 def test_the_collect_cli_builds_its_deps_without_validators():
+    import ast
     import inspect
+    import textwrap
 
     from newsbot.pipeline import run
 
-    source = inspect.getsource(run._run_collect_cli)
-    assert "page_validators" not in source  # one pass, then the process exits; nothing to keep
+    # Read the syntax, not the text: a comment or a docstring may say "page_validators" all it
+    # likes, and a substring search would call that a failure. What matters is that no name,
+    # attribute or keyword argument in the function is one.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(run._run_collect_cli)))
+    used = {
+        *(n.id for n in ast.walk(tree) if isinstance(n, ast.Name)),
+        *(n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)),
+        *(k.arg for n in ast.walk(tree) if isinstance(n, ast.Call) for k in n.keywords),
+    }
+    assert "page_validators" not in used  # one pass, then the process exits; nothing to keep
 
 
 # --- the real hook, failing for real ---

@@ -108,11 +108,6 @@ def test_a_source_that_cannot_supply_details_never_counts():
     )
 
 
-def test_stored_names_still_widen_it():
-    cfg = load_config(V3)
-    assert reserve_for_config(cfg, [LONG]) > reserve_for_config(cfg)
-
-
 def test_a_shift_table_source_under_a_shift_game_counts():
     cfg = load_config(V3)
     table = ShiftTableSource(type="shift_table", name=LONG, url=PAGE_URL, trust="community")

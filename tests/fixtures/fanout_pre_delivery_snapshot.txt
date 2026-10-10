@@ -101,7 +101,6 @@ from newsbot.store.repo import (
     skip_queued_guild_codes,
     skip_queued_guild_followups,
     table_kinds_listed,
-    table_listed_sources,
     upsert_code_details,
 )
 
@@ -923,7 +922,7 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 if s.details is not None and s.details.listed:
                     listed_kinds.setdefault(s.source_name, set()).update(s.details.listed_in)
             table_sources = set(listed_kinds)
-            legacy = table_listed_sources(conn, table_sources) if table_sources else set()
+            legacy = set()  # (the per-source key this read is gone from the repo; nothing wrote it)
             by_kind = table_kinds_listed(conn, table_sources) if table_sources else set()
             candidates = aggregate(
                 _flag_first_listings(sightings, legacy, by_kind),

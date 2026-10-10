@@ -1108,7 +1108,10 @@ def _stale_then_grown_edit(*, first_from, grown_expires_from, reward_length, sto
         )
         for c in cs
     }
-    reserve = reserve_for_config(load_config(V3), stored_names)
+    # What `_deliver_one` does: the config's floor, widened by the names still on rows.
+    reserve = reserve_for_config(load_config(V3))
+    if stored_names:
+        reserve = max(reserve, details_reserve(stored_names))
     alerts = render_code_alerts(
         cs, ping=True, ping_mention="@everyone", details=first, now=NOW, reserve=reserve
     )

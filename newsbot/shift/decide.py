@@ -217,18 +217,13 @@ def _sighting_key(sighting: CodeSighting) -> tuple[int, float]:
     return (_TRUST_RANK.get(sighting.trust, len(_TRUST_RANK)), recency)
 
 
-def _is_fresh(
-    sighting: CodeSighting,
-    now: datetime,
-    max_age: timedelta,
-    undated_stale: frozenset[str] = frozenset(),
-) -> bool:
+def _is_fresh(sighting: CodeSighting, now: datetime, max_age: timedelta) -> bool:
     # Undated items are treated as fresh (SPEC-DEV 4's rule, carried over
     # here per A11): there's no date to judge them stale by. The exception is
     # a table on its very first listing (design.md §16, E1): every undated
     # row of a table we've never read before is "already around", not news.
     if sighting.published_at is None:
-        return not sighting.first_listing and sighting.source_name.casefold() not in undated_stale
+        return not sighting.first_listing
     return sighting.published_at >= now - max_age
 
 
@@ -238,7 +233,6 @@ def aggregate(
     now: datetime,
     max_age: timedelta,
     ping_trust: tuple[str, ...] = ("official", "press"),
-    undated_stale_sources: frozenset[str] = frozenset(),
 ) -> list[CodeCandidate]:
     """Collapse every sighting of the same code into one `CodeCandidate`.
 
@@ -264,16 +258,11 @@ def aggregate(
     else on the candidate matters once that's true, since `plan_alerts`
     never posts one.
 
-    `undated_stale_sources` names the sources (any case) whose *undated*
-    sightings don't count as fresh this time: a table source's first listing
-    in this database, where a row with no "added" date can't be told from one
-    that's been on the page for a year. Dated sightings from them follow the
-    usual age rule, and so do undated ones from every other source. A sighting
-    flagged `first_listing` says the same thing for one table kind of one source
-    (`fanout` sets it), which is how a source that only showed part of its page
-    the first time doesn't flood when the rest turns up.
+    A sighting flagged `first_listing` (`fanout` sets it) is a table row from a kind of
+    table its source has never listed here: where a row with no "added" date can't be told
+    from one that's been on the page for a year, so an undated one doesn't count as fresh.
+    Dated sightings follow the usual age rule, and so do undated ones from everywhere else.
     """
-    stale_names = frozenset(name.casefold() for name in undated_stale_sources)
     order: list[str] = []
     by_code: dict[str, list[CodeSighting]] = {}
     for sighting in sightings:
@@ -287,7 +276,7 @@ def aggregate(
         group = by_code[code]
         normal = [s for s in group if not s.roundup]
         effective = normal if normal else group
-        fresh = any(_is_fresh(s, now, max_age, stale_names) for s in effective)
+        fresh = any(_is_fresh(s, now, max_age) for s in effective)
         golden = any(s.golden for s in effective)
         trusted = any(s.trust in ping_trust for s in effective) or (
             len({s.source_name.casefold() for s in effective}) >= 2

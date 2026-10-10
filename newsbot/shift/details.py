@@ -79,6 +79,19 @@ class DetailObservation:
     published_at: datetime | None = None
 
 
+def after(moment: datetime) -> datetime:
+    """`moment` plus one microsecond, or `moment` itself at the very end of time.
+
+    A stamp has to be strictly later than the one before it; a stamp that is already the
+    last representable instant (a hand-edited row, nothing we'd write) has nowhere to go,
+    and an `OverflowError` out of the middle of a release is a worse answer than a tie.
+    """
+    try:
+        return moment + timedelta(microseconds=1)
+    except OverflowError:
+        return moment
+
+
 def _utc(moment: datetime) -> datetime:
     """An aware UTC datetime; a naive one is taken to already be UTC, like the rest of the store."""
     if moment.tzinfo is None:
@@ -322,7 +335,7 @@ def merge_details(
     # otherwise hand the change a stamp the message already shows and the edit would never
     # come. The microsecond is the price of that, and it's cheap.
     if base.details_changed_at:
-        stamp = max(_utc(base.details_changed_at) + timedelta(microseconds=1), now)
+        stamp = max(after(_utc(base.details_changed_at)), now)
     else:
         stamp = now
     return replace(merged, details_changed_at=stamp)
@@ -356,7 +369,7 @@ def merge_observations(
         # The chain bumped the stamp once per observation; a net change is one change, so it
         # gets one stamp: strictly after the old one, and `now` when the clock is behaving.
         previous = old.details_changed_at if old is not None else None
-        stamp = max(_utc(previous) + timedelta(microseconds=1), now) if previous else now
+        stamp = max(after(_utc(previous)), now) if previous else now
         row = replace(row, details_changed_at=stamp)
     return row
 

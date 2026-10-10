@@ -181,7 +181,14 @@ _CODE_WINDOW = 200
 # A post that names its one code more often than this isn't a one-line announcement, and
 # reading a window per mention would let it make the reader do real work. It gives up.
 _MAX_MENTIONS = 10
-_PARAGRAPH_BREAK_RE = re.compile(r"[ \t\r\f\v\u00a0]*\n[ \t\r\f\v\u00a0]*\n")
+# A blank line, or one of the Unicode line and paragraph separators (U+2028, U+2029, U+0085),
+# which are somebody's idea of a paragraph break whether or not an editor shares the opinion.
+_PARAGRAPH_BREAK_RE = re.compile(r"[ \t\r\f\v\u00a0]*\n[ \t\r\f\v\u00a0]*\n|[\u2028\u2029\u0085]")
+# Where a clause ends: sentence punctuation (and any closing quote or bracket) before a space
+# or the end, or a line break. A period before a digit ("Oct. 14", "No. 5") doesn't count,
+# because the clause it would cut is the very thing the reader is trying not to cut.
+_SENTENCE_END_RE = re.compile(r"[.!?]+[\"')\]\u201d\u2019]*(?=\s|\Z)|\n")
+_DIGIT_AHEAD_RE = re.compile(r"\s*\d")
 
 # A year-less date this many days before the publish day (or fewer) is read as a typo or
 # past tense, not as next year's deadline.
@@ -317,6 +324,8 @@ def _read_expiry(text: str, anchor: date | None) -> date | None:
             if weekday is not None and _WEEKDAYS[weekday[:3].lower()] != parsed.weekday():
                 raise _Unsure  # "Tuesday, October 14" when the 14th is a Wednesday
             after = keyword.end() + skipped + date_end
+            if text[after : after + 1].isdecimal():
+                raise _Unsure  # a digit from another script glued on: not the date it looks like
             if _MORE_DATE_RE.match(text, after, after + _AFTER_WINDOW):
                 raise _Unsure  # a range or an alternative; the first date is likely the wrong end
             found.add(parsed)
@@ -328,15 +337,94 @@ def _read_expiry(text: str, anchor: date | None) -> date | None:
     return expiry
 
 
-def _windows(text: str, code: str) -> list[str]:
-    """The stretches of `text` around each place `code` appears: its paragraph, and no further
-    than `_CODE_WINDOW` characters either side.
+def _clause_edges(text: str, lo: int, hi: int) -> tuple[list[int], list[int]]:
+    """Where clauses start and end in `text[lo:hi]`: two lists of positions, each in order.
 
-    Only the slice around the code is ever searched for paragraph breaks, so a very long post
-    costs the same as a short one. Empty when the code isn't in the text at all, which the
-    caller treats as "can't say anything about it". Also empty for a code named more than
-    `_MAX_MENTIONS` times: a post that says the same code eleven times isn't a one-line
-    announcement.
+    A clause ends just after its sentence punctuation (or at a line break) and the next one
+    starts right after that. Positions outside `lo..hi` are left out.
+    """
+    starts: list[int] = []
+    ends: list[int] = []
+    for match in _SENTENCE_END_RE.finditer(text, lo, min(len(text), hi + 2)):
+        if match.group() == "\n":
+            end, start = match.start(), match.end()
+        else:
+            run = match.group()
+            if "!" not in run and "?" not in run and _DIGIT_AHEAD_RE.match(text, match.end()):
+                continue
+            end = start = match.end()
+        if lo <= end <= hi:
+            ends.append(end)
+        if lo <= start <= hi:
+            starts.append(start)
+    return starts, ends
+
+
+def _window_for(text: str, first: int, last: int) -> str:
+    """The stretch of `text` around the mention at `text[first:last]` that is safe to read.
+
+    The plain window is the mention's paragraph and `_CODE_WINDOW` characters either side.
+    A plain cut is a bad idea, though: it lands in the middle of "December 31, 2027" and
+    leaves "December 3", or takes "not" off the front of "valid until October 14" and leaves a
+    promise nobody made. So each edge that isn't a paragraph edge snaps outward to the nearest
+    clause boundary, at most another `_CODE_WINDOW` characters away. An edge with no boundary
+    that close is inside some very long clause, and the partial clause at that edge is
+    dropped instead: the window pulls in to the boundary nearest the mention, or to the
+    mention itself. Giving up is the feature.
+    """
+    width = _CODE_WINDOW
+    # The paragraph edges, looked for no further than a snap can ever reach. An edge nobody
+    # found a break for is a limit of the search (unknown), not the start of a paragraph.
+    region_lo, region_hi = max(0, first - 2 * width), min(len(text), last + 2 * width)
+    floor, floor_known = region_lo, region_lo == 0
+    for paragraph_break in _PARAGRAPH_BREAK_RE.finditer(text, region_lo, first):
+        floor, floor_known = paragraph_break.end(), True
+    ceiling, ceiling_known = region_hi, region_hi == len(text)
+    found = _PARAGRAPH_BREAK_RE.search(text, last, region_hi)
+    if found is not None:
+        ceiling, ceiling_known = found.start(), True
+
+    # The front edge.
+    base_lo = max(floor, first - width)
+    if base_lo == floor and floor_known:
+        start = floor
+    else:
+        reach = max(floor, base_lo - width)
+        starts, _ = _clause_edges(text, reach, first)
+        outward = [b for b in starts if b <= base_lo]
+        if reach == floor and floor_known:
+            outward.append(floor)
+        if outward:
+            start = max(outward)
+        else:
+            inward = [b for b in starts if b > base_lo]
+            start = min(inward) if inward else first
+
+    # The back edge.
+    base_hi = min(ceiling, last + width)
+    if base_hi == ceiling and ceiling_known:
+        end = ceiling
+    else:
+        reach = min(ceiling, base_hi + width)
+        _, ends = _clause_edges(text, last, reach)
+        outward = [e for e in ends if e >= base_hi]
+        if reach == ceiling and ceiling_known:
+            outward.append(ceiling)
+        if outward:
+            end = min(outward)
+        else:
+            inward = [e for e in ends if e < base_hi]
+            end = max(inward) if inward else last
+    return text[start:end]
+
+
+def _windows(text: str, code: str) -> list[str]:
+    """The stretches of `text` around each place `code` appears (see `_window_for`).
+
+    Only the slice around the code is ever searched, so a very long post costs the same as a
+    short one. Empty when the code isn't in the text at all, which the caller treats as "can't
+    say anything about it". Also empty for a code named more than `_MAX_MENTIONS` times: a
+    post that says the same code eleven times isn't a one-line announcement.
     """
     windows = []
     for match in CODE_RE.finditer(text):
@@ -344,14 +432,7 @@ def _windows(text: str, code: str) -> list[str]:
             continue
         if len(windows) == _MAX_MENTIONS:
             return []
-        lo, hi = max(0, match.start() - _CODE_WINDOW), match.end() + _CODE_WINDOW
-        start, end = lo, min(hi, len(text))
-        for paragraph_break in _PARAGRAPH_BREAK_RE.finditer(text, lo, match.start()):
-            start = paragraph_break.end()
-        after = _PARAGRAPH_BREAK_RE.search(text, match.end(), hi)
-        if after is not None:
-            end = after.start()
-        windows.append(text[start:end])
+        windows.append(_window_for(text, match.start(), match.end()))
     return windows
 
 

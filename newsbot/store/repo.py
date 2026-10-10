@@ -31,6 +31,7 @@ from newsbot.shift.details import (
     CLOCK_DAYS,
     SHIFT_TZ,
     DetailObservation,
+    after,
     clean_observation,
     displayed,
     expired_by_expiry,
@@ -514,51 +515,6 @@ def record_sweep(
         _set_alert_state(conn, "last_sweep_summary", summary)
 
 
-def query_codes(
-    conn: sqlite3.Connection, since: datetime, limit: int, offset: int
-) -> tuple[list[CodeView], int]:
-    """Known SHiFT codes, newest first, a page at a time (the v2 and v3.0.5 `/shift codes`).
-
-    `/shift history` uses `history_codes` now. This one stays because tests still call it
-    (and it's the shape v3.0.5's copy is held against); nothing in the bot does.
-
-    Excludes `'pending'` (still being claimed/posted, not confirmed yet)
-    and `'failed'` (claimed but never actually landed in Discord): a
-    member paging through known codes shouldn't see either half-state.
-    Everything else (`'seeded'`, `'too_old'`, `'roundup'`, `'posted'`)
-    is fair game; `format.render_code_page` is what turns `from_roundup`
-    and `status` into the "from a roundup" / "old post" / "already
-    around when alerts started" markers (D5). Ties in `first_seen_at`
-    (plausible: a batch claimed together shares one timestamp) break on
-    `rowid`, so paging never reorders rows between calls.
-    """
-    since_iso = _utc_iso(since)
-    total = conn.execute(
-        "SELECT COUNT(*) FROM alerted_codes "
-        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ?",
-        (since_iso,),
-    ).fetchone()[0]
-    rows = conn.execute(
-        "SELECT code, first_seen_at, source_name, item_url, status, from_roundup "
-        "FROM alerted_codes "
-        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ? "
-        "ORDER BY first_seen_at DESC, rowid ASC "
-        "LIMIT ? OFFSET ?",
-        (since_iso, limit, offset),
-    ).fetchall()
-    return [
-        CodeView(
-            code=row["code"],
-            first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
-            source_name=row["source_name"],
-            item_url=row["item_url"],
-            status=row["status"],
-            from_roundup=bool(row["from_roundup"]),
-        )
-        for row in rows
-    ], total
-
-
 def _warn_unreadable(what: str, bad: list[str]) -> None:
     """One warning per call about the rows a member command skipped, however many there were."""
     if bad:
@@ -573,7 +529,7 @@ def _warn_unreadable(what: str, bad: list[str]) -> None:
 def history_codes(conn: sqlite3.Connection, since: datetime) -> list[CodeView]:
     """Every known SHiFT code first seen at or after `since`, newest first, for `/shift history`.
 
-    `query_codes` without the paging: `/shift history` pages by size, which means rendering
+    The window query behind `/shift history`, which pages by size, which means rendering
     the whole window first and cutting it into pages afterwards, so there's no LIMIT to
     pass. Same exclusions (`'pending'` and `'failed'` never show) and the same tie-break on
     `rowid`. Each code carries its `code_details` row when it has one, which is what lets
@@ -688,6 +644,11 @@ def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCod
         ).fetchall()
         # What SQL can't judge: "two different sources" is a casefold, and SQLite's lower()
         # only knows ASCII. Only the quiet, not-yet-vetted rows are asked.
+        #
+        # Every sighting counts here, roundup ones included, and that is deliberate: a
+        # megathread naming a code is a fair reason to put it on a list a member asks for. It
+        # is not a fair reason to ping a server, so `queue_confirmed_followups` only counts
+        # non-roundup sightings. Two rules, two jobs; please don't "fix" one to match the other.
         doubtful = [row["code"] for row in rows if row["quiet"] and not row["vetted"]]
         corroborated = _named_by_two_sources(conn, doubtful)
         rows = [
@@ -2479,10 +2440,6 @@ def claim_guild_followups(
 # The rollout marker (`app_state['shift_details_since']`) is written by the migration.
 
 DETAILS_SINCE_KEY = "shift_details_since"
-# "This source has listed something", one key per source. It is all the first draft of the
-# first-listing rule knew, so it stays readable: on its own (no kind keys beside it) it means
-# "every kind of table has been read", which is what that draft meant.
-TABLE_LISTED_PREFIX = "shift_table_listed:"
 # The real rule (owner, 2026-10-09): one key per source *and* table kind,
 # `shift_table_kind_listed:<kind>:<source name>`. The kind comes first because it is one of
 # three fixed words and a source name can hold any character, colons included.
@@ -2700,7 +2657,7 @@ def upsert_code_details(
             if shown_change and merged.details_changed_at is not None:
                 stamp = _as_utc(merged.details_changed_at)
                 if floor is not None and stamp <= floor:
-                    stamp = floor + timedelta(microseconds=1)
+                    stamp = after(floor)
                 floor = stamp
                 merged = replace(merged, details_changed_at=stamp)
             if merged != old:
@@ -2710,21 +2667,58 @@ def upsert_code_details(
     return changed
 
 
-def _stamp_floor(conn: sqlite3.Connection) -> datetime | None:
-    """The latest `details_changed_at` in the whole table, or None if there isn't one.
+# What `_utc_iso` writes, as SQLite sees it. Text order is time order among these ('+' sorts
+# before '.', so a whole second comes before its fractions), which is what lets an index-friendly
+# ORDER BY stand in for parsing the whole table.
+_UTC_STAMP_GLOB = "????-??-??T??:??:??*+00:00"
+# How many rows of each kind `_stamp_floor` will look at. A healthy table has no odd ones at all.
+_STAMP_SCAN_LIMIT = 200
 
-    Text order is time order here (`_utc_iso` strings, '+' before '.'), so MAX does it. A
-    value that isn't a timestamp (people edit databases) can't be a floor; it's ignored
-    with a warning, which is the safe direction: the stamps below it just stay as they were.
+
+def _stamp_moment(text: str) -> datetime | None:
+    try:
+        return _as_utc(datetime.fromisoformat(text))
+    except ValueError, OverflowError:
+        return None
+
+
+def _stamp_floor(conn: sqlite3.Connection) -> datetime | None:
+    """The latest `details_changed_at` in the whole table that is a timestamp, or None.
+
+    Writers always store UTC, so the stamps spelled the way they write them are ordered by
+    text and the newest one that parses wins (a garbled row that happens to sort last, like
+    "2026-13-45T00:00:00+00:00", is stepped over). Whatever isn't spelled that way (an odd
+    offset, a hand edit, plain junk) is parsed one by one and compared as the instant it
+    is; junk is ignored with a warning. Both looks are bounded, so a table that has grown
+    for years costs about what it did on day one. A stamp that can't be read can't be a
+    floor, and the safe direction is that the stamps below it just stay as they were.
     """
-    newest = conn.execute("SELECT MAX(details_changed_at) FROM code_details").fetchone()[0]
-    if newest is None:
-        return None
-    parsed = _parse_dt_or_none(newest)
-    if parsed is None:
+    best: datetime | None = None
+    unreadable = 0
+    for (text,) in conn.execute(
+        "SELECT details_changed_at FROM code_details WHERE details_changed_at GLOB ? "
+        "ORDER BY details_changed_at DESC LIMIT ?",
+        (_UTC_STAMP_GLOB, _STAMP_SCAN_LIMIT),
+    ):
+        moment = _stamp_moment(text)
+        if moment is None:
+            unreadable += 1
+            continue
+        best = moment
+        break
+    for (text,) in conn.execute(
+        "SELECT details_changed_at FROM code_details "
+        "WHERE details_changed_at IS NOT NULL AND details_changed_at NOT GLOB ? LIMIT ?",
+        (_UTC_STAMP_GLOB, _STAMP_SCAN_LIMIT),
+    ):
+        moment = _stamp_moment(text)
+        if moment is None:
+            unreadable += 1
+        elif best is None or moment > best:
+            best = moment
+    if unreadable:
         logger.warning("a code_details.details_changed_at isn't a timestamp; ignoring it")
-        return None
-    return _as_utc(parsed)
+    return best
 
 
 # An official source naming a code that a fan site's data silenced counts as the code's real
@@ -2764,23 +2758,6 @@ def table_silenced_codes(
     return found
 
 
-def table_listed_sources(conn: sqlite3.Connection, names: Iterable[str]) -> set[str]:
-    """Which of these `shift_table` sources have ever had a successful listing in this database.
-
-    A source's first listing is when its undated rows get recorded quietly instead of alerted
-    (owner decision E1). The marker is an `app_state` key per source name.
-    """
-    by_key = {f"{TABLE_LISTED_PREFIX}{name}": name for name in dict.fromkeys(names)}
-    keys = list(by_key)
-    found: set[str] = set()
-    for i in range(0, len(keys), _SQLITE_VARIABLE_CHUNK):
-        chunk = keys[i : i + _SQLITE_VARIABLE_CHUNK]
-        placeholders = ",".join("?" for _ in chunk)
-        query = f"SELECT key FROM app_state WHERE key IN ({placeholders})"  # noqa: S608
-        found.update(by_key[row["key"]] for row in conn.execute(query, chunk))
-    return found
-
-
 def table_kinds_listed(conn: sqlite3.Connection, names: Iterable[str]) -> set[tuple[str, str]]:
     """Which `(source name, table kind)` pairs among `names` have had a successful listing.
 
@@ -2808,9 +2785,7 @@ def mark_table_listed(
 ) -> None:
     """Remember that the `shift_table` source `name` has listed codes, in these table `kinds`.
 
-    The kind keys go in first and the per-source key last, in one transaction, so a
-    per-source key never shows up without its kinds (alone, it reads as "every kind has
-    been read"). The first time sticks.
+    One `app_state` key per kind, in one transaction; the first time sticks.
     """
     stamp = _utc_iso(now)
     with conn:
@@ -2819,10 +2794,6 @@ def mark_table_listed(
                 "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
                 (f"{TABLE_KIND_LISTED_PREFIX}{kind}:{name}", stamp),
             )
-        conn.execute(
-            "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
-            (f"{TABLE_LISTED_PREFIX}{name}", stamp),
-        )
 
 
 # --- Edits in place (design.md §16) ---

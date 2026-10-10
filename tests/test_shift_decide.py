@@ -848,54 +848,41 @@ def test_a_roundup_that_is_also_a_table_item_still_carries_none():
 
 
 # --- the undated rule for a table's first listing (E1 A) ---
+#
+# A table row from a kind of table its source has never listed here is flagged
+# `first_listing` (`fanout` does it, per source and kind). The old way to say the same thing,
+# a set of source names handed to `aggregate`, is gone.
 
 
-def test_an_undated_sighting_from_a_first_listing_source_is_not_fresh():
-    undated = _sighting(source_name="mentalmars", published_at=None)
-    (candidate,) = aggregate(
-        [undated],
-        now=NOW,
-        max_age=MAX_AGE,
-        undated_stale_sources=frozenset({"mentalmars"}),
-    )
+def test_an_undated_sighting_from_a_first_listing_is_not_fresh():
+    undated = _sighting(source_name="mentalmars", published_at=None, first_listing=True)
+    (candidate,) = aggregate([undated], now=NOW, max_age=MAX_AGE)
     assert not candidate.fresh
 
 
-def test_the_undated_rule_ignores_case_in_the_source_name():
-    undated = _sighting(source_name="MentalMars", published_at=None)
-    (candidate,) = aggregate(
-        [undated], now=NOW, max_age=MAX_AGE, undated_stale_sources=frozenset({"mentalmars"})
+def test_a_dated_sighting_from_a_first_listing_follows_the_age_rule():
+    recent = _sighting(
+        source_name="mentalmars", published_at=NOW - timedelta(hours=3), first_listing=True
     )
-    assert not candidate.fresh
-
-
-def test_a_dated_sighting_from_a_first_listing_source_follows_the_age_rule():
-    recent = _sighting(source_name="mentalmars", published_at=NOW - timedelta(hours=3))
-    (candidate,) = aggregate(
-        [recent], now=NOW, max_age=MAX_AGE, undated_stale_sources=frozenset({"mentalmars"})
-    )
+    (candidate,) = aggregate([recent], now=NOW, max_age=MAX_AGE)
     assert candidate.fresh
 
 
-def test_an_undated_sighting_from_any_other_source_is_still_fresh():
+def test_an_undated_sighting_that_is_not_a_first_listing_is_still_fresh():
     undated = _sighting(source_name="Bluesky", published_at=None)
-    (candidate,) = aggregate(
-        [undated], now=NOW, max_age=MAX_AGE, undated_stale_sources=frozenset({"mentalmars"})
-    )
+    (candidate,) = aggregate([undated], now=NOW, max_age=MAX_AGE)
     assert candidate.fresh
 
 
 def test_another_sources_fresh_sighting_still_makes_the_code_fresh():
     sightings = [
-        _sighting(source_name="mentalmars", published_at=None),
+        _sighting(source_name="mentalmars", published_at=None, first_listing=True),
         _sighting(source_name="Bluesky", published_at=NOW),
     ]
-    (candidate,) = aggregate(
-        sightings, now=NOW, max_age=MAX_AGE, undated_stale_sources=frozenset({"mentalmars"})
-    )
+    (candidate,) = aggregate(sightings, now=NOW, max_age=MAX_AGE)
     assert candidate.fresh
 
 
-def test_with_no_stale_sources_an_undated_sighting_is_fresh_as_before():
+def test_with_no_flag_an_undated_sighting_is_fresh_as_before():
     undated = _sighting(source_name="mentalmars", published_at=None)
     assert aggregate([undated], now=NOW, max_age=MAX_AGE)[0].fresh

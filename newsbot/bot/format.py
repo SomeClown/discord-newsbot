@@ -528,7 +528,6 @@ def details_reserve(names: Iterable[str]) -> int:
 # --- /shift codes (design.md §13) ---
 
 _CODE_PAGE_MAX_SOURCE = 100
-_CODE_PAGE_FOOTER_NOTE = "I don't know when codes expire; older ones may have stopped working."
 _CODE_PAGE_EMPTY = "No codes seen in that window."
 
 
@@ -594,51 +593,6 @@ def _code_page_block(
     name_budget = max(max_len - fixed_len, 0)
     truncated_name = _truncate_utf16(esc(view.source_name), name_budget, suffix="…")
     return f"{code_block}\n{seen_prefix}{truncated_name}{marker_suffix}{tail}"
-
-
-def render_code_page(
-    codes: list[CodeView], *, title: str, page: int, pages: int, timezone: str
-) -> discord.Embed:
-    """Render one page of the old `/shift codes`: every known code, newest-first, in blocks.
-
-    SUPERSEDED: `/shift history` uses `render_history_pages`. This stays only because the
-    back-compat tests hold the new renderer to its output, block for block, and goes when
-    they do.
-
-    `timezone` is `cfg.digest.timezone`: the same local calendar the
-    daily digest and the ping cap already reason in, so "first seen" reads
-    against the clock a member already expects everything else in this
-    bot to use, not a UTC date nobody configured. `_code_marker` is what
-    turns `from_roundup`/`status` into D5's three markers; a plain
-    `'posted'`, non-roundup code gets none, since "posted normally" isn't
-    something a reader needs flagged.
-
-    Every entry gets an equal share of the description budget up front
-    (QA follow-up: hard-truncating the whole joined description used to
-    silently drop entries near the end of a page, and could cut a fenced
-    code block in half). `_code_page_block`'s own shrinking (drop the
-    link, then truncate the source) only kicks in for an entry that
-    actually needs it; a normal-length one is untouched.
-    """
-    embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])
-    if not codes:
-        embed.description = _CODE_PAGE_EMPTY
-    else:
-        joiner_overhead = 2 * (len(codes) - 1)  # "\n\n" between entries
-        per_entry_budget = max((_DESCRIPTION_LIMIT - joiner_overhead) // len(codes), 0)
-        blocks = [_code_page_block(c, timezone, max_len=per_entry_budget) for c in codes]
-        description = "\n\n".join(blocks)
-        # Belt-and-suspenders, same spirit as `render_code_alerts`' own
-        # loud failure: nothing should reach here over the cap, since
-        # every block above was built to fit its own share of it.
-        if discord_len(description) > _DESCRIPTION_LIMIT:
-            raise ValueError(
-                f"rendered code page exceeds {_DESCRIPTION_LIMIT} UTF-16 units "
-                f"({discord_len(description)})"
-            )
-        embed.description = description
-    embed.set_footer(text=f"Page {page} of {pages} · {_CODE_PAGE_FOOTER_NOTE}")
-    return embed
 
 
 # --- /shift codes and /shift history pages (design.md §16) ---
@@ -1021,8 +975,10 @@ def render_alert_edit(
     `render_code_alerts` made, with whatever the details say today. They fit because
     the original packing reserved room for the worst line; if the config has since gained
     a longer source name and they somehow don't, every link goes, and if that still
-    isn't enough this raises ValueError for the caller to log. The edit pass sends it
-    with mentions off, so a ping prefix in the header is text, never a ping.
+    isn't enough this raises ValueError for the caller to log. The header's ping prefix goes
+    back out as it went in: the edit pass sends the message's stored ping choice with it
+    (`mentions_for`), but only while the header still starts with that ping's own text, so an
+    edit repeats a mention the message already had and never adds one.
     """
     for with_link in (True, False):
         blocks = [
@@ -1940,7 +1896,6 @@ __all__ = [
     "outcome_from_digest",
     "render_alert_edit",
     "render_code_alerts",
-    "render_code_page",
     "render_current_pages",
     "render_digest_summary_line",
     "render_followup_alert",

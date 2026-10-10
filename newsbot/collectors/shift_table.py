@@ -70,7 +70,7 @@ _MAX_CODES = 500
 _SHOWN_LIMIT = 300
 
 _SKIPPED_TAGS = frozenset({"script", "style"})
-_HEADING_TAGS = frozenset({"h2", "h3", "h4"})
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 # Tags that end a line of text; a cell with "a<br>b" shouldn't read "ab".
 _BREAK_TAGS = frozenset({"br", "p", "div", "li"})
 
@@ -241,6 +241,7 @@ class _PageParser(HTMLParser):
         self.truncated = False
         self._heading = ""
         self._heading_buf: list[str] | None = None
+        self._caption_buf: list[str] | None = None
         self._stack: list[_OpenTable] = []
         self._skip = 0
         self._deep = 0  # tables past _MAX_TABLE_DEPTH, ignored along with their insides
@@ -260,6 +261,9 @@ class _PageParser(HTMLParser):
                 self._deep += 1
                 self.truncated = True
                 return
+            # A heading nobody closed ("<h5>Expired codes<table>") runs into the table. It was
+            # still meant as the heading, so it is one.
+            self._flush_heading()
             self._opened += 1
             self._stack.append(
                 _OpenTable(_kind_from_heading(self._heading), self._opened, self._heading)
@@ -268,9 +272,16 @@ class _PageParser(HTMLParser):
         if self._deep:
             return
         if tag in _HEADING_TAGS:
+            self._flush_heading()
             self._heading_buf = []
             return
         table = self._stack[-1] if self._stack else None
+        if tag == "caption":
+            if table is not None and table.row is None and not table.rows:
+                self._caption_buf = []
+            return
+        if tag in ("tr", "td", "th") and table is not None:
+            self._flush_caption(table)
         if tag == "tr":
             if table is not None:
                 self._end_row(table)
@@ -304,11 +315,13 @@ class _PageParser(HTMLParser):
         if self._deep:
             return
         if tag in _HEADING_TAGS:
-            if self._heading_buf is not None:
-                self._heading = _collapse("".join(self._heading_buf))
-                self._heading_buf = None
+            self._flush_heading()
             return
         table = self._stack[-1] if self._stack else None
+        if tag == "caption":
+            if table is not None:
+                self._flush_caption(table)
+            return
         if tag == "tr":
             if table is not None:
                 self._end_row(table)
@@ -337,8 +350,33 @@ class _PageParser(HTMLParser):
                 self.truncated = True
             table.cell.append(data)
             table.cell_chars += len(data)
+        elif self._caption_buf is not None:
+            self._caption_buf.append(data)
         elif self._heading_buf is not None:
             self._heading_buf.append(data)
+
+    def _flush_heading(self) -> None:
+        if self._heading_buf is not None:
+            self._heading = _collapse("".join(self._heading_buf))
+            self._heading_buf = None
+
+    def _flush_caption(self, table: _OpenTable) -> None:
+        """A table's `<caption>` is part of what the table is called, so it joins the heading.
+
+        The words from either one count ("expired" in the heading or the caption skips the
+        table), and a caption that says permanent or cosmetic decides the kind over a heading
+        that doesn't.
+        """
+        if self._caption_buf is None:
+            return
+        caption = _collapse("".join(self._caption_buf))
+        self._caption_buf = None
+        if not caption:
+            return
+        table.heading = _collapse(f"{table.heading} {caption}")
+        from_caption = _kind_from_heading(caption)
+        if from_caption != "main":
+            table.kind = from_caption
 
     def _end_cell(self, table: _OpenTable) -> None:
         if table.cell is None:
@@ -403,6 +441,7 @@ class _PageParser(HTMLParser):
 
     def _close_table(self) -> None:
         table = self._stack.pop()
+        self._flush_caption(table)
         self._end_row(table)
         if table.rows:
             self.tables.append(ParsedTable(table.kind, table.rows, table.order, table.heading))

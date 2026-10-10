@@ -5,8 +5,8 @@
 - which item gets a reader, and which never does (community and press, roundups, posts
   with more than one code, rows whose details are about some other code);
 - `golden`, which is now "the text says so, or the details do";
-- `aggregate(undated_stale_sources=...)` with names that differ in case, whitespace and
-  Unicode folding, and its interplay with the second-source rule;
+- the `first_listing` flag on a sighting (the undated rule for a table's first listing)
+  and its interplay with the second-source rule;
 - one megabyte of official post going through the whole attach path.
 
 Pure functions, no database, no clock beyond the `now` each test hands in.
@@ -334,131 +334,83 @@ def test_a_roundup_row_with_a_golden_category_is_golden_only_if_it_says_so():
 
 
 # --- the undated rule for a table's first listing ---
+#
+# `first_listing` on a sighting is how `fanout` says "this row's table kind has never been
+# listed by its source here". (The by-name set `aggregate` used to take is gone, and its case,
+# whitespace and folding tests went with it: nothing compares a name any more.)
 
 
-def _fresh(sightings, stale=frozenset(), now=NOW):
-    return aggregate(sightings, now=now, max_age=MAX_AGE, undated_stale_sources=stale)
+def _first(**kwargs) -> CodeSighting:
+    return _sighting(first_listing=True, **kwargs)
 
 
-@pytest.mark.parametrize(
-    "source_name",
-    ["mentalmars", "MENTALMARS", "MentalMars", "mEnTaLmArS"],
-)
-def test_the_stale_name_matches_the_source_in_any_case(source_name):
-    (candidate,) = _fresh(
-        [_sighting(source_name=source_name, published_at=None)], frozenset({"mentalmars"})
-    )
+def _fresh(sightings, now=NOW):
+    return aggregate(sightings, now=now, max_age=MAX_AGE)
+
+
+def test_a_flagged_undated_row_is_not_fresh_and_an_unflagged_one_is():
+    (flagged,) = _fresh([_first(published_at=None)])
+    (plain,) = _fresh([_sighting(published_at=None)])
+    assert not flagged.fresh
+    assert plain.fresh
+
+
+def test_an_old_dated_flagged_sighting_is_stale_by_age_not_by_the_rule():
+    old = _first(published_at=NOW - timedelta(hours=49))
+    (candidate,) = _fresh([old])
     assert not candidate.fresh
-
-
-@pytest.mark.parametrize("stale_name", ["MentalMars", "MENTALMARS", "mentalmars"])
-def test_the_stale_set_may_use_any_case_too(stale_name):
-    (candidate,) = _fresh(
-        [_sighting(source_name="mentalmars", published_at=None)], frozenset({stale_name})
-    )
-    assert not candidate.fresh
-
-
-def test_names_are_compared_with_full_case_folding_not_just_lower():
-    # casefold turns the German sharp s into "ss"; lower() would not.
-    (candidate,) = _fresh(
-        [_sighting(source_name="Straße Codes", published_at=None)],
-        frozenset({"STRASSE CODES"}),
-    )
-    assert not candidate.fresh
-
-
-@pytest.mark.parametrize("padded", [" mentalmars", "mentalmars ", "mentalmars\n", "mental mars"])
-def test_whitespace_is_significant_in_a_source_name_exactly_as_in_the_second_source_rule(padded):
-    """Characterization, not a spec line: names are compared as written, apart from case.
-
-    Config doesn't strip names and the stale set is built from the same config strings, so a
-    padded name only misses if the caller invents one. If the owner wants names stripped,
-    `_is_fresh` and the second-source rule in `aggregate` both have to change together.
-    """
-    (candidate,) = _fresh(
-        [_sighting(source_name=padded, published_at=None)], frozenset({"mentalmars"})
-    )
-    assert candidate.fresh
-
-
-def test_two_names_that_differ_only_by_padding_still_count_as_two_sources():
-    # The same "exactly as written" rule the stale check uses, seen from the trust side.
-    sightings = [_sighting(source_name="mentalmars"), _sighting(source_name="mentalmars ")]
-    (candidate,) = _fresh(sightings)
-    assert candidate.trusted
-
-
-def test_a_stale_source_not_named_exactly_leaves_other_sources_undated_rows_fresh():
-    (candidate,) = _fresh(
-        [_sighting(source_name="Bluesky search", published_at=None)], frozenset({"mentalmars"})
-    )
-    assert candidate.fresh
-
-
-def test_an_old_dated_sighting_from_the_stale_source_is_stale_by_age_not_by_the_rule():
-    old = _sighting(source_name="mentalmars", published_at=NOW - timedelta(hours=49))
-    (candidate,) = _fresh([old], frozenset({"mentalmars"}))
-    assert not candidate.fresh
-    (without,) = _fresh([old])
+    (without,) = _fresh([_sighting(published_at=NOW - timedelta(hours=49))])
     assert not without.fresh
 
 
-def test_a_dated_sighting_exactly_at_the_age_limit_is_fresh_even_from_the_stale_source():
-    edge = _sighting(source_name="mentalmars", published_at=NOW - MAX_AGE)
-    (candidate,) = _fresh([edge], frozenset({"mentalmars"}))
+def test_a_dated_flagged_sighting_exactly_at_the_age_limit_is_fresh():
+    (candidate,) = _fresh([_first(published_at=NOW - MAX_AGE)])
     assert candidate.fresh
 
 
-def test_a_stale_undated_row_beside_an_old_dated_one_from_the_same_source_is_not_fresh():
+def test_a_flagged_undated_row_beside_an_old_dated_one_from_the_same_source_is_not_fresh():
     sightings = [
-        _sighting(source_name="mentalmars", published_at=None),
-        _sighting(source_name="mentalmars", published_at=NOW - timedelta(days=30)),
+        _first(source_name="mentalmars", published_at=None),
+        _first(source_name="mentalmars", published_at=NOW - timedelta(days=30)),
     ]
-    (candidate,) = _fresh(sightings, frozenset({"mentalmars"}))
+    (candidate,) = _fresh(sightings)
     assert not candidate.fresh
 
 
 def test_a_community_find_in_the_same_pass_keeps_the_code_fresh_and_makes_it_trusted():
     # The B+ story: Reddit saw it just now, mentalmars lists it with no date.
     sightings = [
-        _sighting(source_name="mentalmars", published_at=None),
+        _first(source_name="mentalmars", published_at=None),
         _sighting(source_name="r/Borderlands4", published_at=NOW - timedelta(hours=2)),
     ]
-    (candidate,) = _fresh(sightings, frozenset({"mentalmars"}))
+    (candidate,) = _fresh(sightings)
     assert candidate.fresh
     assert candidate.trusted
 
 
-def test_the_rule_only_touches_freshness_not_trust_golden_or_order():
+def test_two_names_that_differ_only_by_padding_still_count_as_two_sources():
+    # Names are compared as written, apart from case, by the second-source rule.
+    sightings = [_sighting(source_name="mentalmars"), _sighting(source_name="mentalmars ")]
+    (candidate,) = _fresh(sightings)
+    assert candidate.trusted
+
+
+def test_the_flag_only_touches_freshness_not_trust_golden_or_order():
     sightings = [
-        _sighting(code=CODE_A, source_name="mentalmars", published_at=None, golden=True),
+        _first(code=CODE_A, source_name="mentalmars", published_at=None, golden=True),
         _sighting(code=CODE_B, source_name="Src", published_at=None, trust="official"),
     ]
-    candidates = _fresh(sightings, frozenset({"mentalmars"}))
+    candidates = _fresh(sightings)
     assert [c.code for c in candidates] == [CODE_A, CODE_B]
     assert [c.fresh for c in candidates] == [False, True]
     assert candidates[0].golden
     assert candidates[1].trusted
 
 
-def test_an_empty_stale_set_changes_nothing_for_any_source():
-    for name in ("mentalmars", "Bluesky", ""):
-        (candidate,) = _fresh([_sighting(source_name=name, published_at=None)], frozenset())
-        assert candidate.fresh
-
-
-def test_a_roundup_only_group_from_a_stale_source_is_not_fresh_either():
-    sightings = [_sighting(source_name="mentalmars", published_at=None, roundup=True)]
-    (candidate,) = _fresh(sightings, frozenset({"mentalmars"}))
+def test_a_roundup_only_group_flagged_as_a_first_listing_is_not_fresh_either():
+    (candidate,) = _fresh([_first(source_name="mentalmars", published_at=None, roundup=True)])
     assert candidate.roundup
     assert not candidate.fresh
-
-
-def test_the_stale_set_is_not_modified_by_aggregate():
-    stale = frozenset({"MentalMars"})
-    _fresh([_sighting(source_name="mentalmars", published_at=None)], stale)
-    assert stale == frozenset({"MentalMars"})
 
 
 # --- one megabyte through the whole attach path ---

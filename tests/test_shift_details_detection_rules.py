@@ -154,22 +154,7 @@ async def test_a_code_listed_in_a_table_kind_read_before_is_not_a_first_listing(
     assert statuses(h.db_path)[Y] == "too_old"
 
 
-async def test_an_old_per_source_marker_alone_still_means_every_kind_was_read(h):
-    add_guild(h.db_path, 1, ping="everyone")
-    with closing(connect(h.db_path)) as conn:
-        conn.execute(
-            "INSERT INTO app_state (key, value) VALUES (?, ?)",
-            (f"{repo.TABLE_LISTED_PREFIX}{MENTALMARS}", T0.isoformat()),
-        )
-        conn.commit()
-
-    await h.run(await read_named(page(permanent_table(("Skin", "Stream", X))), T0))
-
-    assert h.original_codes(1) == [X]
-    assert kind_markers(h.db_path) == [f"shift_table_kind_listed:permanent:{MENTALMARS}"]
-
-
-def test_the_kind_markers_round_trip_and_keep_the_per_source_key(db_path):
+def test_the_kind_markers_round_trip_and_the_first_stamp_sticks(db_path):
     name = "odd: name:with colons"
     with closing(connect(db_path)) as conn:
         assert repo.table_kinds_listed(conn, [name, "other"]) == set()
@@ -180,7 +165,6 @@ def test_the_kind_markers_round_trip_and_keep_the_per_source_key(db_path):
             (name, "permanent"),
             (name, "cosmetic"),
         }
-        assert repo.table_listed_sources(conn, [name, "other"]) == {name}
         # The first stamp sticks.
         [(stamp,)] = conn.execute(
             "SELECT value FROM app_state WHERE key = ?",

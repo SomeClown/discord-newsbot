@@ -45,7 +45,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -118,7 +118,6 @@ from newsbot.store.repo import (
     skip_queued_guild_followups,
     stored_detail_source_names,
     table_kinds_listed,
-    table_listed_sources,
     table_silenced_codes,
     upsert_code_details,
 )
@@ -185,13 +184,12 @@ class FanoutDeps:
     editor_for: EditorFactory | None = None
 
 
-def reserve_for_config(cfg: AppConfig, stored_names: Iterable[str] = ()) -> int:
+def reserve_for_config(cfg: AppConfig) -> int:
     """The per-code details reservation for `cfg`'s sources (`format.details_reserve`).
 
-    `stored_names` are the "via" names still sitting in `code_details` rows
-    (`stored_detail_source_names`), which can be longer than anything the config says
-    today after a source is renamed. Delivery reads them fresh each turn; this is the
-    same arithmetic for a caller that has them in hand.
+    This is the config's floor. Delivery widens it each turn with the "via" names still
+    sitting in `code_details` rows (`stored_detail_source_names`), which can be longer than
+    anything the config says today after a source is renamed.
 
     Only a source that can supply details can put its name in a "via" clause: an
     official source (Gearbox's own posts, read by the official reader) or a
@@ -218,12 +216,9 @@ def reserve_for_config(cfg: AppConfig, stored_names: Iterable[str] = ()) -> int:
     ]
     return details_reserve(
         [
-            *(
-                s.name
-                for s in sources
-                if getattr(s, "name", None) and (s.type == "shift_table" or s.trust == "official")
-            ),
-            *stored_names,
+            s.name
+            for s in sources
+            if getattr(s, "name", None) and (s.type == "shift_table" or s.trust == "official")
         ]
     )
 
@@ -1043,24 +1038,22 @@ def _table_only_codes(sightings: list[CodeSighting]) -> set[str]:
 
 
 def _flag_first_listings(
-    sightings: list[CodeSighting], legacy: set[str], by_kind: set[tuple[str, str]]
+    sightings: list[CodeSighting], by_kind: set[tuple[str, str]]
 ) -> list[CodeSighting]:
     """Mark table rows from a table kind their source has never listed here before (E1).
 
     Per source *and* kind, so a first page that only came back with its main table doesn't
     make the cosmetic and permanent tables a flood the next hour, and a site adding a table
     later gets the same quiet welcome. A code listed in several tables counts as read before
-    if any of them was. A source with only the old per-source key counts as having read every
-    kind; a row with no kind at all (not from the collector) is judged by the source alone.
+    if any of them was. A row with no kind at all (not from the collector) is judged by the
+    source alone.
     """
     with_kinds = {name for name, _ in by_kind}
 
     def read_before(name: str, kinds: tuple[str, ...]) -> bool:
         if not kinds:
-            return name in legacy or name in with_kinds
-        return any(
-            (name, kind) in by_kind or (name in legacy and name not in with_kinds) for kind in kinds
-        )
+            return name in with_kinds
+        return any((name, kind) in by_kind for kind in kinds)
 
     return [
         replace(s, first_listing=True)
@@ -1182,10 +1175,9 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
                 if s.details is not None and s.details.listed:
                     listed_kinds.setdefault(s.source_name, set()).update(s.details.listed_in)
             table_sources = set(listed_kinds)
-            legacy = table_listed_sources(conn, table_sources) if table_sources else set()
             by_kind = table_kinds_listed(conn, table_sources) if table_sources else set()
             candidates = aggregate(
-                _flag_first_listings(sightings, legacy, by_kind),
+                _flag_first_listings(sightings, by_kind),
                 now=now,
                 max_age=max_age,
                 ping_trust=ping_trust,
@@ -1264,7 +1256,9 @@ async def _release(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) 
             # Last of all, so a crash anywhere above makes the next pass a first listing
             # again, which it can redo safely: whatever it recorded is known by then.
             for name in sorted(table_sources):
-                mark_table_listed(conn, name, now, sorted(listed_kinds[name]))
+                # (A row that names no kind didn't come from the collector; "main" is the kind
+                # `_flag_first_listings` will look for on it next time, which is any kind.)
+                mark_table_listed(conn, name, now, sorted(listed_kinds[name]) or ["main"])
             overflow = sum(1 for _, status in plan.silent if status == "roundup")
             return len(released), overflow
 

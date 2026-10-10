@@ -210,27 +210,54 @@ def _view(i: int, **kwargs) -> CodeView:
     return CodeView(**defaults)
 
 
-def test_the_old_code_page_is_byte_identical(old):
-    sets = [
-        [],
-        [_view(0)],
-        [
-            _view(i, status=("posted", "too_old", "seeded")[i % 3], from_roundup=i % 4 == 0)
-            for i in range(8)
-        ],
-        [_view(i, item_url="https://e.com/" + "a/" * 400, source_name="*" * 100) for i in range(8)],
-        [_view(i, source_name="\U0001f600" * 100, item_url="") for i in range(12)],
+# The old `/shift codes` page renderer is gone (`/shift history` draws the same blocks). What it
+# drew is kept as fixed strings, taken from the snapshot's own `render_code_page` before it was
+# deleted from the live module, so the blocks can't drift without a test noticing.
+_BLOCK = "```\n{code}\n```\nFirst seen {day} · {rest}"
+_ELLIPSIS = "\N{HORIZONTAL ELLIPSIS}"
+_URL = "<https://e.com/a>"
+
+
+def _history(views, tz):
+    embeds = new.render_history_pages(
+        views, timezone=tz, now=datetime(2026, 9, 26, 12, 0, tzinfo=UTC), title="/shift history"
+    )
+    return "\n\n".join(e.description for e in embeds)
+
+
+@pytest.mark.parametrize(
+    ("tz", "day"), [("America/Los_Angeles", "2026-09-25"), ("Pacific/Kiritimati", "2026-09-26")]
+)
+def test_history_draws_the_old_code_page_blocks_byte_for_byte(tz, day):
+    def block(i, rest):
+        return _BLOCK.format(code=_code(i), day=day, rest=rest)
+
+    base = f"Gearbox Blog · {_URL}"
+    assert _history([], tz) == "No codes seen in that window."
+    assert _history([_view(0)], tz) == block(0, base)
+    markers = [
+        _view(0),
+        _view(1, status="too_old"),
+        _view(2, status="seeded"),
+        _view(3, from_roundup=True),
     ]
-    for views in sets:
-        for tz in ("America/Los_Angeles", "UTC", "Pacific/Kiritimati"):
-            a = new.render_code_page(views, title="/shift codes", page=2, pages=5, timezone=tz)
-            b = old.render_code_page(views, title="/shift codes", page=2, pages=5, timezone=tz)
-            assert (a.title, a.description, a.footer.text, a.color) == (
-                b.title,
-                b.description,
-                b.footer.text,
-                b.color,
-            )
+    assert _history(markers, tz) == "\n\n".join(
+        [
+            block(0, base),
+            block(1, f"{base} · (old post)"),
+            block(2, f"{base} · (already around when alerts started)"),
+            block(3, f"{base} · (from a roundup)"),
+        ]
+    )
+    stars = [_view(0, source_name="*" * 100), _view(1, item_url="javascript:x")]
+    assert _history(stars, tz) == "\n\n".join(
+        [
+            block(0, "\\*" * 49 + "\\" + _ELLIPSIS + f" · {_URL}"),
+            block(1, "Gearbox Blog"),
+        ]
+    )
+    emoji = [_view(0, source_name="\N{GRINNING FACE}" * 100, item_url="")]
+    assert _history(emoji, tz) == block(0, "\N{GRINNING FACE}" * 49 + _ELLIPSIS)
 
 
 # --- helpers every other renderer leans on ---
@@ -257,12 +284,18 @@ def test_the_shared_text_helpers_are_unchanged(old):
 # --- the contract of everything that was public ---
 
 
+# Gone on purpose, with the `/shift codes` it drew (its blocks live on in `/shift history`, and
+# the fixed strings above hold them).
+RETIRED = {"render_code_page"}
+
+
 def test_every_old_public_name_is_still_exported(old):
-    assert set(old.__all__) <= set(new.__all__)
+    assert set(old.__all__) - RETIRED <= set(new.__all__)
+    assert not RETIRED & set(new.__all__)
 
 
 def test_every_old_public_function_still_accepts_every_old_call(old):
-    for name in old.__all__:
+    for name in sorted(set(old.__all__) - RETIRED):
         before, after = getattr(old, name), getattr(new, name)
         if not inspect.isfunction(before):
             continue

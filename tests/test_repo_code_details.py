@@ -217,30 +217,41 @@ def test_a_failed_upsert_rolls_back_and_leaves_the_connection_usable(conn):
 # --- which table sources have listed ---
 
 
+def _sources_listed(conn, names):
+    return {name for name, _kind in repo.table_kinds_listed(conn, names)}
+
+
 def test_table_listed_markers(conn):
-    assert repo.table_listed_sources(conn, ["mentalmars", "other site"]) == set()
-    repo.mark_table_listed(conn, "mentalmars", NOW)
-    assert repo.table_listed_sources(conn, ["mentalmars", "other site"]) == {"mentalmars"}
-    assert repo.table_listed_sources(conn, []) == set()
+    assert _sources_listed(conn, ["mentalmars", "other site"]) == set()
+    repo.mark_table_listed(conn, "mentalmars", NOW, ["main"])
+    assert _sources_listed(conn, ["mentalmars", "other site"]) == {"mentalmars"}
+    assert _sources_listed(conn, []) == set()
 
 
 def test_the_first_listing_time_sticks(conn):
-    repo.mark_table_listed(conn, "mentalmars", NOW)
-    repo.mark_table_listed(conn, "mentalmars", NOW + timedelta(days=3))
-    value = repo.app_state_get(conn, f"{repo.TABLE_LISTED_PREFIX}mentalmars")
+    repo.mark_table_listed(conn, "mentalmars", NOW, ["main"])
+    repo.mark_table_listed(conn, "mentalmars", NOW + timedelta(days=3), ["main"])
+    value = repo.app_state_get(conn, f"{repo.TABLE_KIND_LISTED_PREFIX}main:mentalmars")
     assert datetime.fromisoformat(value) == NOW
+
+
+def test_marking_a_source_with_no_kinds_writes_nothing(conn):
+    repo.mark_table_listed(conn, "mentalmars", NOW)
+    assert (
+        conn.execute("SELECT COUNT(*) FROM app_state WHERE key LIKE '%listed%'").fetchone()[0] == 0
+    )
 
 
 def test_source_names_are_bound_not_built_into_the_sql(conn):
     nasty = "x'); DROP TABLE code_details; --"
-    repo.mark_table_listed(conn, nasty, NOW)
-    assert repo.table_listed_sources(conn, [nasty, "mentalmars"]) == {nasty}
+    repo.mark_table_listed(conn, nasty, NOW, ["main"])
+    assert _sources_listed(conn, [nasty, "mentalmars"]) == {nasty}
     assert conn.execute("SELECT COUNT(*) FROM code_details").fetchone()[0] == 0
 
 
 def test_a_name_is_not_confused_with_one_that_contains_it(conn):
-    repo.mark_table_listed(conn, "mentalmars", NOW)
-    assert repo.table_listed_sources(conn, ["mentalmars 2", "mental"]) == set()
+    repo.mark_table_listed(conn, "mentalmars", NOW, ["main"])
+    assert _sources_listed(conn, ["mentalmars 2", "mental"]) == set()
 
 
 # --- retention for guild_alert_messages ---

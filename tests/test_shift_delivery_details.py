@@ -512,7 +512,7 @@ async def test_a_name_stored_on_a_row_widens_the_reserve_at_delivery(h):
         )  # fmt: skip
         return [a.codes for a in alerts]
 
-    widened = partition(reserve_for_config(h.cfg, [long_name]))
+    widened = partition(max(reserve_for_config(h.cfg), details_reserve([long_name])))
     assert partition(h.reserve) != widened, "the stored name should change the packing"
     assert [a.codes for a in h.sent(1)] == widened
 
@@ -522,7 +522,8 @@ async def test_a_name_stored_on_a_row_widens_the_reserve_at_delivery(h):
 
 def store_expiry(db_path, code, expires_on, *, category=None, rank="official"):
     """Give `code` an expiry after it was released. Official unless said otherwise: a table's
-    expiry can't silence a trusted code (the same rule as at release), an official one can."""
+    expiry can't silence a code an official source named (the same rule as at release), an
+    official one can."""
     obs = DetailObservation(
         code,
         ItemDetails(

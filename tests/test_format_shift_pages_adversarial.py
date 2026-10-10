@@ -20,7 +20,6 @@ import pytest
 
 from newsbot.bot.format import (
     discord_len,
-    render_code_page,
     render_current_pages,
     render_history_pages,
 )
@@ -401,7 +400,8 @@ def _history(views, *, now=NOW, title="Codes seen in the last 14 days"):
     return render_history_pages(views, timezone="America/Los_Angeles", now=now, title=title)
 
 
-def test_history_with_no_details_matches_the_old_page_block_for_block():
+def test_history_with_no_details_is_the_old_page_block_for_block():
+    # The old page renderer is gone; its output for these four views is kept as a fixed string.
     views = [
         _view(0),
         _view(1, status="too_old"),
@@ -409,8 +409,19 @@ def test_history_with_no_details_matches_the_old_page_block_for_block():
         _view(4, source_name="*" * 100),
     ]
     [new] = _history(views)
-    old = render_code_page(views, title="t", page=1, pages=1, timezone="America/Los_Angeles")
-    assert new.description == old.description
+
+    def block(i, rest):
+        return f"```\n{_code(i)}\n```\nFirst seen 2026-09-25 · {rest}"
+
+    link = "<https://e.com/a>"
+    assert new.description == "\n\n".join(
+        [
+            block(0, f"Gearbox Blog · {link}"),
+            block(1, f"Gearbox Blog · {link} · (old post)"),
+            block(2, f"Gearbox Blog · {link} · (from a roundup)"),
+            block(4, "\\*" * 49 + "\\\N{HORIZONTAL ELLIPSIS}" + f" · {link}"),
+        ]
+    )
 
 
 def test_history_marks_a_code_expired_only_from_the_instant_its_day_ends():

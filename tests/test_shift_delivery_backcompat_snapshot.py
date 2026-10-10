@@ -15,6 +15,10 @@ servers were told, and every table in the database must come out the same. The o
 allowed to differ is `guild_alert_messages`, which only the new code writes, and a test
 says so out loud.
 
+One edit to the snapshot itself (QA batch 2): it imported `repo.table_listed_sources`, the
+legacy per-source first-listing key's reader, which no longer exists, so that import is gone and
+its one use reads `set()`. Nothing ever wrote the key, so the comparison is unchanged.
+
 Invisible characters are `\\uXXXX` escapes on purpose; this file stays visible.
 """
 

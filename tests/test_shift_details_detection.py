@@ -385,7 +385,9 @@ async def test_rollout_onto_a_prod_like_database_is_silent(h, shape):
         assert row is not None, code
         assert row.clock_start == LATER
         assert row.first_listed_at == LATER
-    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key = 'shift_table_listed:mentalmars'")
+    assert rows(
+        h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_kind_listed:%:mentalmars'"
+    )
 
     # And the next hourly pass has nothing to say either.
     h.clock = LATER + timedelta(hours=1)
@@ -430,7 +432,7 @@ async def test_the_first_listing_is_per_source_and_remembered(h, db_path):
     assert h.sent(1) == []
     assert statuses(db_path) == {X: "too_old"}
     with closing(connect(db_path)) as conn:
-        assert repo.table_listed_sources(conn, [MENTALMARS, "other"]) == {MENTALMARS}
+        assert {n for n, _ in repo.table_kinds_listed(conn, [MENTALMARS, "other"])} == {MENTALMARS}
 
 
 async def test_an_undated_new_row_after_the_first_listing_posts_unpinged(h):
@@ -458,8 +460,8 @@ async def test_undated_rows_of_a_second_table_source_get_their_own_first_listing
     add_guild(h.db_path, 1)
     await h.run(await read_page(page(cosmetic_table(("Gnome", "Event", X, "Unknown"))), T0))
     with closing(connect(h.db_path)) as conn:
-        repo.mark_table_listed(conn, MENTALMARS, T0)
-        assert repo.table_listed_sources(conn, ["another site"]) == set()
+        repo.mark_table_listed(conn, MENTALMARS, T0, ["cosmetic"])
+        assert repo.table_kinds_listed(conn, ["another site"]) == set()
 
     other = [
         RawItem(
@@ -697,7 +699,9 @@ async def test_a_crash_before_the_release_is_redone_by_the_next_pass(h, monkeypa
         await h.run(await read_page(FIXTURE.read_bytes(), FRESH_DAY))
     # Sightings and details were written; the release and the first-listing mark were not.
     assert details_row(h.db_path, K5) is not None
-    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_listed:%'") == []
+    assert (
+        rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_kind_listed:%'") == []
+    )
     assert rows(h.db_path, "SELECT COUNT(*) FROM guild_code_posts") == [(0,)]
 
     h.clock = FRESH_DAY + timedelta(hours=1)
@@ -707,7 +711,7 @@ async def test_a_crash_before_the_release_is_redone_by_the_next_pass(h, monkeypa
     after = statuses(h.db_path)
     assert after[K5] == "posted"
     assert {s for c, s in after.items() if c != K5} == {"too_old"}
-    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_listed:%'")
+    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_kind_listed:%'")
 
 
 async def test_a_crash_before_the_first_listing_mark_posts_nothing_twice(h, monkeypatch):
@@ -726,7 +730,7 @@ async def test_a_crash_before_the_first_listing_mark_posts_nothing_twice(h, monk
 
     # The queued code from the crashed pass goes out exactly once, on the redo.
     assert sent_codes(h, 1) == [K5]
-    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_listed:%'")
+    assert rows(h.db_path, "SELECT 1 FROM app_state WHERE key LIKE 'shift_table_kind_listed:%'")
     h.clock = FRESH_DAY + timedelta(hours=2)
     await h.run(await read_page(FIXTURE.read_bytes(), h.clock))
     assert h.sent(1) == []

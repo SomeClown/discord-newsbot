@@ -136,16 +136,18 @@ def test_a_single_newline_is_not_a_paragraph_break():
     assert _read(f"3 Golden Keys\n{CODE}") is not None
 
 
-def test_two_hundred_characters_away_in_one_paragraph_is_in_range_and_three_hundred_is_not():
+def test_a_mention_in_range_is_read_and_one_past_the_snap_is_not():
     def pad(n: int) -> str:
         return " ".join(["so"] * (n // 3))
 
     near = f"3 Golden Keys {pad(150)} {CODE}"
-    far = f"3 Golden Keys {pad(330)} {CODE}"
+    # QA batch 2: an edge snaps outward to a clause boundary, up to 200 characters more, so
+    # "far" has to be past 200 + 200 and not just past 200.
+    far = f"3 Golden Keys {pad(500)} {CODE}"
     assert _read(near) is not None
     assert _read(far) is None
     near_after = f"{CODE} {pad(150)} expires October 14"
-    far_after = f"{CODE} {pad(330)} expires October 14"
+    far_after = f"{CODE} {pad(500)} expires October 14"
     assert _read(near_after) is not None
     assert _read(far_after) is None
 

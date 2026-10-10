@@ -222,12 +222,9 @@ def followup_rows(db_path: str):
 
 
 def listed_markers(db_path: str) -> list[str]:
-    return [
-        k
-        for (k,) in rows(
-            db_path, "SELECT key FROM app_state WHERE key LIKE 'shift_table_listed:%' ORDER BY key"
-        )
-    ]
+    """The names of the table sources that have listed something, from their per-kind markers."""
+    keys = rows(db_path, "SELECT key FROM app_state WHERE key LIKE 'shift_table_kind_listed:%'")
+    return sorted({k.split(":", 2)[2] for (k,) in keys})
 
 
 def official(text: str, *, at: datetime, tag: str = "post") -> RawItem:
@@ -311,7 +308,7 @@ async def test_first_listing_on_an_unseeded_database_seeds_it_and_stays_silent(d
     assert {s for s in statuses(db_path).values()} == {"seeded"}
     assert len(statuses(db_path)) == 11
     assert rows(db_path, "SELECT 1 FROM alert_state WHERE key = 'seeded_at'")
-    assert listed_markers(db_path) == [f"shift_table_listed:{MENTALMARS}"]
+    assert listed_markers(db_path) == [MENTALMARS]
 
     # Now it's seeded and the source has listed once: an undated newcomer is ordinary news.
     harness.clock = LATER + timedelta(hours=1)
@@ -352,9 +349,7 @@ async def test_two_table_sources_listing_for_the_first_time_in_one_pass_are_both
 
     assert h.alerts(1) == []
     assert statuses(h.db_path) == {X: "too_old", Y: "too_old"}
-    assert listed_markers(h.db_path) == sorted(
-        [f"shift_table_listed:{MENTALMARS}", f"shift_table_listed:{OTHER_SITE}"]
-    )
+    assert listed_markers(h.db_path) == sorted([MENTALMARS, OTHER_SITE])
     # Each earns its own later passes: one undated newcomer from each posts, unpinged.
     h.clock = T0 + timedelta(hours=1)
     next_a = page(cosmetic_table(("Gnome", "Event", X, "Unknown"), ("Hat", "Event", Z, "Unknown")))
@@ -433,8 +428,8 @@ async def test_renamed_source_is_a_new_first_listing_and_does_not_flood(h):
         if r[1] in (X, Y, Z)
     ] == [r for r in before if r[1] in (X, Y, Z)]
     assert listed_markers(h.db_path) == [
-        "shift_table_listed:mentalmars",
-        "shift_table_listed:mentalmars.com",
+        "mentalmars",
+        "mentalmars.com",
     ]
     assert h.pings(1) == []
 
@@ -488,7 +483,7 @@ async def test_a_collector_that_errors_leaves_the_first_listing_for_the_next_pas
     # Pass 2: the page is back. It is still the first listing, so it is quiet.
     h.clock = T0 + timedelta(hours=1)
     assert await h.run(await read_named(FIXTURE.read_bytes(), h.clock)) == 0
-    assert listed_markers(h.db_path) == [f"shift_table_listed:{MENTALMARS}"]
+    assert listed_markers(h.db_path) == [MENTALMARS]
     assert h.original_codes(1) == [code_n(3)]  # nothing from the page: every row is history
     assert len(statuses(h.db_path)) == 12
 
@@ -1238,7 +1233,7 @@ async def test_5000_fresh_rows_are_released_inside_the_budget_and_delivered(h):
 STEPS = [
     "record_code_sightings",
     "upsert_code_details",
-    "table_listed_sources",
+    "table_kinds_listed",
     "code_details_for",
     "plan_alerts",
     "record_silent_codes",
@@ -1330,7 +1325,7 @@ async def test_a_clean_run_of_the_crash_scenario_does_what_the_scenario_claims(t
     assert all(status[c] == "too_old" for c in UNDATED)
     # RC's one follow-up went to the pinging servers (1 everyone, 3 role), not to "none".
     assert sorted((r[0], r[1]) for r in got["followups"]) == [(1, RC), (3, RC)]
-    assert got["markers"] == [f"shift_table_listed:{MENTALMARS}"]
+    assert got["markers"] == [MENTALMARS]
 
 
 @pytest.mark.parametrize("step", STEPS)
@@ -1405,7 +1400,7 @@ async def test_a_crash_during_the_unseeded_first_pass_still_seeds_everything_qui
     assert harness.alerts(1) == []
     assert set(statuses(path).values()) == {"seeded"} and len(statuses(path)) == 11
     assert rows(path, "SELECT 1 FROM alert_state WHERE key = 'seeded_at'")
-    assert listed_markers(path) == [f"shift_table_listed:{MENTALMARS}"]
+    assert listed_markers(path) == [MENTALMARS]
 
 
 async def test_a_crash_after_release_loses_neither_the_queue_nor_the_ping_budget(
@@ -1556,9 +1551,7 @@ async def test_readers_polling_during_the_hook_see_consistent_counts_and_no_erro
         try:
             with closing(connect(h.db_path)) as conn:
                 while not stop.is_set():
-                    rows_, total = repo.query_codes(conn, T0 - timedelta(days=90), 50, 0)
-                    seen.append(total)
-                    assert len(rows_) <= 50
+                    seen.append(len(repo.history_codes(conn, T0 - timedelta(days=90))))
         except BaseException as exc:
             errors.append(exc)
 
