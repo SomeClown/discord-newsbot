@@ -14,8 +14,9 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** v3.0.0 is built and in testing. Production still runs v2.2.0, and the bot
-isn't open to the public yet.
+**Status.** Production runs v3.0.5, and the bot isn't open to the public yet.
+v3.1.0 (SHiFT code details, `/shift codes` as a list of current codes, and
+`/shift history`) is built and waiting for release.
 
 ## Free and comped servers
 
@@ -101,11 +102,21 @@ Everything below is server-only (no DMs). Until an admin has run
 - **`/news search query:<text> days:<1-30, default 30> public:<bool, default false>`**:
   full-text search over the headlines (free) or the story headlines and
   summaries (comped), limited to the games this server follows.
-- **`/shift codes days:<1-90, default 14> public:<bool, default false>`**:
-  lists every SHiFT code the bot has seen and posted within the window,
-  newest first, each with a copyable code block, first-seen date, and source
-  link. Only for servers that follow a game SHiFT detection covers
-  (Borderlands 4 by default).
+- **`/shift codes type:<all|golden|cosmetic|permanent, default all> public:<bool, default false>`**:
+  the SHiFT codes that should still work right now, grouped as Golden Keys,
+  Cosmetics, Permanent and Other, newest first. Each is a copyable code with
+  its reward and when it expires, where the bot knows. A code counts as
+  current until the end of its expiry date (Pacific time); with no known
+  expiry, for 180 days after the bot first saw it; a permanent code always.
+- **`/shift history days:<1-90, default 14> public:<bool, default false>`**:
+  every SHiFT code the bot has seen within the window, current or not,
+  newest first, each with a copyable code block, first-seen date, source link
+  and details, and marked when it came from a roundup, is old, or has
+  expired.
+
+Both `/shift` commands are only for servers that follow a game SHiFT
+detection covers (Borderlands 4 by default). Long lists page by size, so an
+entry is never cut off.
 
 Command results default to a private (ephemeral) reply; `public:true` shows
 them to the whole channel. Multi-page results get Previous/Next buttons that
@@ -264,8 +275,9 @@ take back:
   one ping-bearing send could ever have landed.
 
 `/newsbot status` shows the server's SHiFT settings and today's ping spend
-against the cap. `/shift codes` lists every code the bot knows about,
-including roundup ones, marked as such.
+against the cap. `/shift history` lists every code the bot knows about,
+including roundup ones, marked as such; `/shift codes` is the shorter list of
+the ones that should still work.
 
 **Discord permission required:** the bot's role needs **View Channel** and
 **Send Messages** in the SHiFT channel, plus **Mention @everyone, @here, and
@@ -275,6 +287,36 @@ just silently drops the notification; the bot checks before every ping,
 posts anyway, and tells that server's admins. `/newsbot shift` also checks
 what's missing the moment it's saved, and the bot checks every server's
 channels once at startup, telling each server only when its problems change.
+
+**What a code unlocks, and when it dies.** Since v3.1.0 an alert can say
+more than the code. The details come from two places: Gearbox's own posts
+(read only when they're plain, like "3 Golden Keys, expires October 14" on a
+post with one code, and ignored when they're not) and
+[mentalmars' Borderlands 4 SHiFT code tables](https://mentalmars.com/game-news/borderlands-4-shift-codes/),
+a community page the bot reads once an hour as a `shift_table` source. That
+page is used only for its tables of codes, rewards and expiry dates. It's
+never stored as news, summarized or shown in a digest, and a code it finds
+first posts without a ping like any other community find (it does count as the
+second source that can earn the follow-up above). For each of reward, kind and
+expiry, Gearbox's value beats mentalmars', and a missing value never erases a
+known one. A code with details gets a line under it:
+`3 Golden Keys · expires Oct 14, 2026 · via mentalmars`. With nothing known,
+the line is left out and the alert looks like it always did.
+
+When details arrive after an alert has posted, the bot edits that message in
+place (for 14 days after it posts; no new message, and no new notification).
+It needs nothing beyond the permissions above. If an edit is refused, the
+server's admins hear about it once, and edits to that server stop until
+`/newsbot shift` is saved again. Alerts posted before v3.1.0 are never edited;
+their details show in `/shift codes`.
+
+Details are only as good as their sources. mentalmars is a community page,
+not an official one, and it may be wrong or late. For your own copy, the source looks like this
+(under the game, with `trust: community`; it's always codes-only):
+
+```yaml
+- {type: shift_table, name: "mentalmars", url: "https://mentalmars.com/game-news/borderlands-4-shift-codes/", trust: community}
+```
 
 ## Architecture
 
@@ -299,7 +341,7 @@ thin adapter on top of it. Three jobs do the real work:
 newsbot/
   config.py        load + validate config.yaml and secrets (pydantic); derives a catalog from a v2 file
   collectors/       one module per source type -> list[RawItem]
-    rss.py  steam.py  bluesky.py  web_search.py
+    rss.py  steam.py  bluesky.py  web_search.py  shift_table.py
   pipeline/
     collect.py      the hourly shared collection, source health, SHiFT hook
     summaries.py    comped summaries, made once per game per cycle and reused
@@ -318,16 +360,19 @@ newsbot/
   shift/            SHiFT code alerts (design.md §12, §15)
     match.py        pure code/Golden Key text matcher, no ReDoS surface
     decide.py       pure planner: what's new, fresh, worth a ping, worth seeding
+    details.py      pure: which source's reward, expiry and category win, and the 180-day clock
+    official.py     reads a reward and expiry out of Gearbox's own posts, or gives up
     fanout.py       release a code once, then deliver it per server
+    edits.py        edit a posted alert in place when its code's details change
     sweep.py        the poster protocol and the retry-without-a-second-ping rule
   lounge/           welcomes and the daily quote (design.md §14), for one server
   store/
-    migrations/     numbered .sql files (001 to 008)
+    migrations/     numbered .sql files (001 to 009)
     db.py           connection, WAL, migration runner (incl. foreign-keys-off rebuilds)
     repo.py         all queries (no SQL anywhere else)
   bot/
     client.py       discord client, scheduler wiring, heartbeat, lifecycle handlers
-    commands.py     /news, /shift codes, /newsbot, /lounge
+    commands.py     /news, /shift codes, /shift history, /newsbot, /lounge
     setup_views.py  the /newsbot setup wizard
     owner_commands.py  /owner servers
     registration.py which commands exist where, synced only when they changed
@@ -440,7 +485,8 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
   per server. Keep Borderlands 4, Palworld and Diablo IV first and in that
   order, because the AI prompt lists a comped server's games in catalog order.
 - **`sources`** (under a game, or in **`shared_sources`** for feeds that cover
-  many games): `rss`, `steam_news` and `bluesky_search`, each with a `trust`
+  many games): `rss`, `steam_news` and `bluesky_search` (plus `shift_table`,
+  under a game only; see "SHiFT code alerts" below), each with a `trust`
   level (`official`, `press`, or `community`), which affects ordering and
   which items survive the per-game cap. A source listed under a game is a
   *dedicated source*: every item it returns is a confident match for that
@@ -521,6 +567,12 @@ comped server following three games:
   inside the collection pass's 120-second budget, so at about 170 or more
   SHiFT-enabled servers a code drop finishes over several hourly passes. If
   the bot ever gets that big, delivery should move into a job of its own.
+- **A SHiFT alert holds fewer codes per message than it used to.** Room for
+  the details line is set aside under every code so that a later edit always
+  fits in Discord's 2,000-character limit, and nothing is ever cut short. With
+  the example catalog a message holds about 4 codes where it used to hold
+  about 18; a big drop just posts as more messages, and only the first one
+  pings.
 - **SHiFT code alerts can miss or delay a code.** Reddit's `/top?t=day`
   sort can take a while to surface a brand new post, so a code posted to a
   subreddit first might not alert until it's climbed the day's top posts

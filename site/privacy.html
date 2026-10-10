@@ -11,7 +11,7 @@
 <p class="nav"><a href="index.html">discord-newsbot</a> · <a href="terms.html">Terms of Service</a></p>
 
 <h1>Privacy Policy</h1>
-<p class="meta">Effective October 1, 2026. Last updated October 4, 2026.</p>
+<p class="meta">Effective October 1, 2026. Last updated October 9, 2026.</p>
 
 <p>This page exists because Discord asks bots to have one, and I'm nothing if not compliant with forms. The honest summary: this bot reads the gaming news so you don't have to, and it is remarkably uninterested in you. It used to serve one server. It now serves any server that installs it, so this page has grown a section about what it remembers per server.</p>
 
@@ -31,25 +31,26 @@
 <li>which tier the server is on (free, or one I cover myself);</li>
 <li>a record of each digest the bot posted (the day, the status, the ids of the messages it sent, a short note if something went wrong, and for the servers with AI summaries, how many tokens the summary used);</li>
 <li>a record of each SHiFT code it posted there (the code, the message id, whether it pinged);</li>
+<li>a record of each SHiFT alert message it posted there, so it can edit the alert when it learns more about a code: the channel id, the message id, the alert's header line (a title such as "New SHiFT code", with the ping in front of it if there was one), and the ping choice. The bot edits an alert for 14 days after it posts, and these records are deleted after 30 days;</li>
 <li>short plain-text notes about problems, such as a channel it couldn't post in (the newest 20 per server, at most 90 days old).</li>
 </ul>
-<p>That's channel ids and settings. There are no member names, no member ids, and no message text from anyone.</p>
+<p>That's channel ids and settings, plus a line of text the bot wrote itself. These alert records are about the server and its channel, not about any person. There are no member names, no member ids, and no message text from anyone.</p>
 
 <h2>Lounge</h2>
 <p>The lounge (a welcome message for new members, and one quote a day) runs on exactly one server, a friend's. If you're not on that server, none of this applies to you. For that server the bot also keeps the channel id, the welcome text the owner wrote, the quote settings and a hash of each quote's text (so a quote isn't repeated until the rest have had a turn). It holds nothing about people.</p>
 
 <h2>What it does collect</h2>
-<p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, Bluesky, and a web search. It keeps those items, and the AI-written summaries made from them, for 90 days, then deletes them. They're shared by every server, since they're public news and not about any server. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice. One subreddit, r/Borderlands4, is read only to spot SHiFT codes: its posts are not kept, are never summarized, and never appear in a digest or in a search. A code that was spotted there is remembered like any other, along with the name of the source and a link back to the post, and its alert may include that link. The database gets backed up nightly; backups are kept for a week.</p>
+<p>Public news: posts from game studios' feeds, Steam announcements, gaming news sites, Bluesky, and a web search. It keeps those items, and the AI-written summaries made from them, for 90 days, then deletes them. They're shared by every server, since they're public news and not about any server. It also remembers every SHiFT code it has seen, forever, so it never announces the same one twice, along with what it has learned about each code (what it unlocks and when it expires). That comes from Gearbox's own posts and from a community list of Borderlands 4 SHiFT codes (mentalmars.com), which the bot reads once an hour only for its tables of codes, rewards and expiry dates. Like the subreddit below, that page is never kept as news, never summarized, and never appears in a digest or a search. One subreddit, r/Borderlands4, is read only to spot SHiFT codes: its posts are not kept, are never summarized, and never appear in a digest or in a search. A code that was spotted there is remembered like any other, along with the name of the source and a link back to the post, and its alert may include that link. The database gets backed up nightly; backups are kept for a week.</p>
 
 <h2>When the bot is removed from a server</h2>
-<p>Everything in "What it stores about each server" and "Lounge" is deleted right away when the bot is removed from the server, and again at the next startup for any server it finds it has left. The shared public news and the SHiFT code list stay, because they were never about a server.</p>
+<p>Everything in "What it stores about each server" and "Lounge" is deleted right away when the bot is removed from the server, and again at the next startup for any server it finds it has left. The shared public news and the SHiFT code list (with the reward and expiry the bot learned for each code) stay, because they were never about a server.</p>
 <p>There is one exception, and I'd rather say it than have you find it. When the bot became a public app, I moved the one server it already served over to the new design, once, and the bot kept a record of that move: that server's id, the ids of the channels it was using, and a few counts (how many games, and so on). That record isn't deleted when the bot is removed, because it's what stops the move from happening twice. It holds no member data. Also, a deleted server's data can sit in the nightly backups for up to a week before the oldest copy rotates out.</p>
 
 <h2>Who else sees what</h2>
 <ul>
 <li><strong>Anthropic</strong> receives the public news text so Claude can summarize it, and only for the servers I cover myself (the free tier gets plain headlines, with no AI in the loop). No information about you or any server is included, because the bot doesn't send any.</li>
 <li><strong>Brave Search</strong> receives a handful of search phrases a day, like "Borderlands 4 news", for the games those same servers follow. The results are public news and can show up in any server's headlines.</li>
-<li><strong>The news sources</strong> (studio feeds, Steam, Reddit for SHiFT codes only, Bluesky, gaming sites and Wikiquote) get ordinary requests from the bot, identified by a contact address so they can reach me. They learn nothing about any server or member.</li>
+<li><strong>The news sources</strong> (studio feeds, Steam, Reddit for SHiFT codes only, a community SHiFT code list, Bluesky, gaming sites and Wikiquote) get ordinary requests from the bot, identified by a contact address so they can reach me. They learn nothing about any server or member.</li>
 <li><strong>Discord</strong> handles everything the bot posts and every command you run, under <a href="https://discord.com/privacy">Discord's own privacy policy</a>.</li>
 <li><strong>DigitalOcean</strong> hosts the server it all runs on, and <strong>GitHub</strong> hosts this page.</li>
 </ul>

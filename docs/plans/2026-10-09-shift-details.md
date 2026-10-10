@@ -677,7 +677,7 @@ The code count is small (hundreds), so it fetches everything.
 
 **Before starting:**
 - Stop any other dev process (`Python -m newsbot` and `docker ps`).
-- Repoint `config.dev.yaml` and `~/newsbot-scratch/config.v3test.yaml` at PacketQueue Dev, remove the dev bot from PacketQueue, start `data/dev.db` fresh (the CLAUDE.md to-do).
+- Repoint `config.dev.yaml` and `~/newsbot-scratch/config.v3test.yaml` at PacketQueue Dev, remove the dev bot from PacketQueue, start `data/dev.db` fresh (the CLAUDE.md to-do). Fresh also because 009 changed during the build: the bot now refuses to start on a database that ran an earlier draft, and says to start it fresh (§9, step 3).
 - Add the mentalmars line under Borderlands 4.
 
 **Steps:**
@@ -688,29 +688,164 @@ The code count is small (hundreds), so it fetches everything.
 
 ## 9. Release and rollout runbook
 
-1. **Before merging:** from the Droplet, `curl -sS -o /dev/null -w '%{http_code}\n' https://mentalmars.com/game-news/borderlands-4-shift-codes/` (expect 200) and `curl -sS https://mentalmars.com/robots.txt`. Then, with the 3.1.0 checkout, `python -m newsbot.pipeline.run --check-sources --game borderlands4 --config <scratch copy>` (it needs no database or credentials).
-2. **Before tagging:** build and check the image locally (start Docker Desktop, build, run `--check-sources` in it, stop Docker Desktop). Tag `v3.1.0` and wait for the tag's CI build (amd64 plus arm64).
-3. **Production** (owner), outside 09:00 to 09:15 and about 07:55 to 08:05 Pacific:
+Everything the owner runs is in a bash block. Updated 2026-10-09 with what the qa pass asked for; the commands were written against the 3.1.0 code, and none of them has been run on the Droplet yet.
+
+1. **Before merging.** From the Droplet, fetch the page once, so a datacenter block shows up before release and not after (Lodestone's did):
+
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}\n' https://mentalmars.com/game-news/borderlands-4-shift-codes/
+   curl -sS https://mentalmars.com/robots.txt
+   ```
+
+   Expect 200, and nothing in `robots.txt` that forbids the page. Then, from a 3.1.0 checkout (it needs no database or credentials):
+
+   ```bash
+   source .venv/bin/activate
+   python -m newsbot.pipeline.run --check-sources --game borderlands4 --config <a scratch copy of config.example.yaml>
+   ```
+
+2. **Before tagging.** Build and check the image locally: start Docker Desktop, build, run `--check-sources` in the image, stop Docker Desktop. Tag `v3.1.0`, then **wait for the tag's CI build** (amd64 plus arm64) before anything on the Droplet pulls it.
+
+3. **Dev bot first** (the checklist is §8). `data/dev.db` has to start fresh. Migration 009 was amended during the build, so a dev database that ran an earlier draft has `user_version` 9 and none of the later columns; the bot now refuses to start on one and says "start the database fresh" (`_check_build_columns` in `store/db.py`). The same goes for any scratch database that ran an earlier build.
+
+4. **Production** (owner), outside 09:00 to 09:15 and about 07:55 to 08:05 Pacific.
+
+   **a. Predict day one.** Take a copy of the live database and ask it who could get a pinged follow-up. Each row is a code that one server posted unpinged in the last 24 hours with a follow-up still allowed (`followup_ok`); if mentalmars lists it, that server gets one pinged "Confirmed by a second source", and the ping counts against its daily cap. Rage Quit Tavern's `@everyone` is the one to watch.
 
    ```bash
    cd /opt/newsbot
-   cp config.yaml config.pre-shift-details.yaml
+   mkdir -p ~/rehearsal
+   sudo sqlite3 data/newsbot.db ".backup '$HOME/rehearsal/newsbot.db'"
+   sudo sqlite3 -readonly ~/rehearsal/newsbot.db "
+     SELECT p.guild_id, p.code, a.first_seen_at
+     FROM guild_code_posts p JOIN alerted_codes a USING (code)
+     WHERE p.status = 'posted' AND p.followup_ok = 1
+       AND a.first_seen_at > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-24 hours');"
    ```
 
-   Add this line under `catalog:` → `borderlands4` → `sources:`, after the `r/Borderlands4` line, in a copy of the config. Validate the copy with `load_config` from a 3.1.0 checkout (never `docker compose ... config`), then `mv` it into place:
+   An empty answer means no pinged follow-up on day one. The hours matter: run this close to the deploy, not the day before.
+
+   **b. Back up the config and make the new one.**
+
+   ```bash
+   cp config.yaml config.pre-shift-details.yaml
+   cp config.yaml config.new.yaml
+   ```
+
+   Add this line under `catalog:` → `borderlands4` → `sources:`, after the `r/Borderlands4` line, in `config.new.yaml`:
 
    ```yaml
          - {type: shift_table, name: "mentalmars", url: "https://mentalmars.com/game-news/borderlands-4-shift-codes/", trust: community}
    ```
 
-   Set `TAG=3.1.0` in `.env` and run `./scripts/deploy.sh`; it takes the database backup and migration 009 runs at startup.
-4. **Check:**
-   - the first pass's log line (rows read, zero skipped);
-   - no SHiFT posts in Rage Quit Tavern from the listing;
-   - `/shift codes` in PacketQueue;
-   - the nightly owner report shows mentalmars healthy.
-   - The new `/shift history` can take up to an hour to appear.
-5. **Rollback:** `cp config.pre-shift-details.yaml config.yaml`, then `TAG=3.0.5` and `./scripts/deploy.sh`. No database restore is needed. Add `config.pre-shift-details.yaml` to the cleanup list after a clean week.
+   **c. Validate with the published 3.1.0 image,** the unchanged `config.yaml` first and then the new copy, so a problem with the image or the host shows up before a problem with the edit. Do it with `docker run` and a read-only mount of the one file, with no env file. Never use `docker compose ... config` (it prints every secret; see CLAUDE.md) and never pass `--env-file`. The first run pulls the image. A warning that `web_search` is disabled for want of a Brave key is expected: that's the missing env file, not a problem.
+
+   ```bash
+   for f in config.yaml config.new.yaml; do
+     docker run --rm --entrypoint python -v "$PWD/$f":/c.yaml:ro \
+       ghcr.io/someclown/discord-newsbot:3.1.0 \
+       -c "import logging; logging.basicConfig(level=logging.WARNING); from newsbot.config import load_config; load_config('/c.yaml'); print('ok')" \
+       || break
+   done
+   docker run --rm -e NEWSBOT_CONTACT='<the contact address .env uses>' \
+     -v "$PWD/config.new.yaml":/c.yaml:ro \
+     ghcr.io/someclown/discord-newsbot:3.1.0 \
+     python -m newsbot.pipeline.run --check-sources --game borderlands4 --config /c.yaml
+   ```
+
+   Expect `ok` twice, then mentalmars in the list with a healthy row and its items left out of the per-game counts (it's codes-only).
+
+   **d. Optional: rehearse on the copy from step a.** It runs one real collection pass into the copy, which migrates the copy to 009 and prints what each server would be sent, delivering nothing and spending no ping. It makes the same real requests an hourly pass does, and Reddit allows the Droplet about one a pass, so run it just after an hourly pass and not just before one. The `ANTHROPIC_API_KEY` is a dummy: collection never calls Claude, but the CLI insists the variable exists.
+
+   ```bash
+   sudo chown -R 10001 ~/rehearsal
+   docker run --rm -e ANTHROPIC_API_KEY=unused -e NEWSBOT_CONTACT='<the contact address .env uses>' \
+     -v "$PWD/config.new.yaml":/c.yaml:ro -v "$HOME/rehearsal":/r \
+     ghcr.io/someclown/discord-newsbot:3.1.0 \
+     python -m newsbot.pipeline.run --collect --config /c.yaml --db /r/newsbot.db
+   sudo rm -rf ~/rehearsal
+   ```
+
+   Look for the mentalmars line in the log (rows read, none or few skipped), no pinged alert for an old code, and no pinged follow-up beyond the ones step a predicted. A row added within 48 hours that the bot has never seen will show as an unpinged new code, which is expected.
+
+   **e. Deploy.** Put the new config in place, set `TAG=3.1.0` in `.env`, and run the script; it takes the database backup, and migration 009 runs at startup.
+
+   ```bash
+   mv config.new.yaml config.yaml
+   ./scripts/deploy.sh
+   ```
+
+5. **Check.**
+   - The first pass's log line (rows read, zero skipped).
+   - `/shift codes` in PacketQueue.
+   - The nightly owner report shows mentalmars healthy.
+   - The new `/shift history` can take up to an hour to appear, because Discord is slow to show a global command change.
+
+   **What day one looks like, so nobody files it as a bug:**
+   - Nothing old alerts or pings: every code on mentalmars' list gets a fresh 180-day clock, and the first listing of each table kind records its undated rows quietly.
+   - Genuinely new codes (a row dated within the last 48 hours that the bot has never seen) may post, unpinged, in every SHiFT server. More than 5 from the one page in one pass go out as a single unpinged roundup.
+   - A community code first seen in the 24 hours before the deploy can get one pinged follow-up when mentalmars lists it (step a predicts which). That's the B+ rule working, not a repeat ping.
+   - `/shift codes` shows older codes for a while: they are inside their 180-day clock or have no known expiry. It isn't a bug; it thins out as expiries arrive and the clocks run down.
+   - Alerts posted before 3.1.0 are never edited (E3). Their details show in `/shift codes`.
+   - A message holds fewer codes than before (about 4 where it held about 18): the room is reserved so a later edit fits.
+
+6. **Rollback.** No database restore is needed, and restoring one is a bad idea after 3.1.0 has posted anything (the once-per-code guard lives in the database, so the older copy would forget codes and could ping for them again). v3.0.5 refuses a config with a `shift_table` source, so the config goes back too:
+
+   ```bash
+   cd /opt/newsbot
+   cp config.pre-shift-details.yaml config.yaml
+   # set TAG=3.0.5 in .env
+   ./scripts/deploy.sh
+   ```
+
+   What to know:
+   - The 009 tables and columns stay and v3.0.5 ignores them. Alerts already edited stay edited.
+   - The first-listing marks (`shift_table_kind_listed:*` in `app_state`) stay. If you upgrade again later, the first listing is no longer quiet: undated rows mentalmars added in between are new to the bot and will post, unpinged. Dated rows still follow the 48-hour rule.
+   - Alerts that v3.0.5 posts in between have no message record, so they won't be edited after a re-upgrade.
+   - `/shift history` disappears, and `/shift codes` takes `days` again, once v3.0.5 syncs its commands (up to an hour).
+   - Add `config.pre-shift-details.yaml` to the Droplet cleanup list (CLAUDE.md) after a clean week.
+
+7. **Purge a bad batch.** For a pass that stored wrong details, or codes that were never real (a layout change on the site, say). The tables below are the ones the schema has; I wrote this from the code and tried the statements on a scratch database, not on the Droplet. Back up first, and stop the bot so it isn't writing while you edit.
+
+   ```bash
+   cd /opt/newsbot
+   # Take the mentalmars line out of config.yaml first, or the next hourly pass writes the same rows again.
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml stop
+   sudo sqlite3 data/newsbot.db ".backup 'data/newsbot.pre-purge.db'"
+   sudo sqlite3 -readonly data/newsbot.db "
+     SELECT code, reward, category, expires_on, first_listed_at FROM code_details
+     WHERE first_listed_at >= '<UTC time of the bad pass>' ORDER BY first_listed_at;"
+   ```
+
+   Real codes with wrong details: delete only their details. The posts and the once-per-code guard are untouched. Alerts already posted keep the wrong text for now, because the bot edits an alert when details change and not when they disappear; once a correct listing brings the details back, the edit pass fixes them.
+
+   ```bash
+   sudo sqlite3 data/newsbot.db "DELETE FROM code_details WHERE code IN ('<CODE>', '<CODE>');"
+   ```
+
+   Codes that were never real: delete the bad alert messages in Discord by hand (the bot can't unpost), then remove the codes. Do not do this for a real code: removing its `alerted_codes` row lets it alert, and ping, again. The first statement marks the messages gone so the edit pass leaves them alone.
+
+   ```bash
+   sudo sqlite3 data/newsbot.db "
+     BEGIN;
+     UPDATE guild_alert_messages SET state = 'gone'
+       WHERE (guild_id, message_id) IN (SELECT guild_id, message_id FROM guild_code_posts
+                                        WHERE code IN ('<CODE>') AND message_id IS NOT NULL);
+     DELETE FROM guild_code_posts WHERE code IN ('<CODE>');
+     DELETE FROM code_sightings WHERE code IN ('<CODE>');
+     DELETE FROM code_details WHERE code IN ('<CODE>');
+     DELETE FROM alerted_codes WHERE code IN ('<CODE>');
+     COMMIT;"
+   ```
+
+   If the bad batch was the first listing and you want the next one to be quiet again, also clear the marks: `DELETE FROM app_state WHERE key LIKE 'shift_table_kind_listed:%';`. Then check the file and start the bot. Put the mentalmars line back in `config.yaml` once the cause is fixed.
+
+   ```bash
+   sudo sqlite3 -readonly data/newsbot.db "PRAGMA integrity_check; PRAGMA foreign_key_check;"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+   ```
+
+   Both checks should print `ok` and nothing else. Delete `data/newsbot.pre-purge.db` after a clean week.
 
 ## 10. Effort (agent time: build, test, review)
 
