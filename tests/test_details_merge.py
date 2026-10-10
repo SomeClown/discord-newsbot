@@ -441,10 +441,15 @@ def test_a_dropped_date_does_not_erase_a_good_one():
     assert after.expires_on == date(2026, 10, 14)
 
 
-def test_the_stamps_never_move_backwards_and_the_clock_never_starts_in_the_future():
+def test_the_change_stamp_always_moves_forward_and_the_clock_never_starts_in_the_future():
     first = merge(None, obs(reward="one"), now=LATER)
     after = merge(first, obs(reward="two"), now=T0)
-    assert (after.details_changed_at, after.updated_at) == (LATER, LATER)
+    # The stamp is strictly forward (a change must look newer than the render that missed it);
+    # `updated_at` is just "last touched", and holds still.
+    assert (after.details_changed_at, after.updated_at) == (
+        LATER + timedelta(microseconds=1),
+        LATER,
+    )
     future = merge(None, obs(reward="x"), first_seen_at=T0 + timedelta(days=3))
     assert future.clock_start == T0
 
@@ -477,6 +482,22 @@ def test_a_batch_with_a_net_change_stamps_it_and_a_new_row_with_nothing_does_not
         None, [obs(origin="Event")], now=T0, first_seen_at=None, details_since=SINCE
     )
     assert quiet.details_changed_at is None
+
+
+def test_a_net_change_made_of_several_readings_is_one_microsecond_ahead_not_several():
+    start = merge(None, obs("table", "B", expires_on=date(2026, 10, 20)), now=LATER)
+    row = merge_observations(
+        start,
+        [
+            obs("table", "A", expires_on=date(2026, 10, 14)),
+            obs("table", "C", expires_on=date(2026, 10, 30)),
+            obs("table", "D", expires_on=date(2026, 11, 3)),
+        ],
+        now=LATER,  # the clock hasn't moved since the last change
+        first_seen_at=None,
+        details_since=SINCE,
+    )
+    assert row.details_changed_at == LATER + timedelta(microseconds=1)
 
 
 def test_merge_observations_needs_something_to_merge():

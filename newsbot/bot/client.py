@@ -95,6 +95,7 @@ from newsbot.shift.fanout import (
     recover_pending_guild_codes,
     reserve_for_config,
 )
+from newsbot.shift.sweep import ChannelGoneError, EditForbiddenError, MessageGoneError
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import GuildSettings, LoungeSettings
@@ -716,6 +717,70 @@ class DiscordCodeAlertPoster:
         return bool(permissions_for(me).mention_everyone)
 
 
+# Discord's JSON error codes an alert edit reads: the message (10008) or its channel (10003)
+# is gone, or the bot can't see the channel (50001) or lacks the permission (50013).
+_EDIT_CHANNEL_GONE_CODE = 10003
+_EDIT_MESSAGE_GONE_CODE = 10008
+_EDIT_FORBIDDEN_CODES = frozenset({50001, 50013})
+
+
+def _classify_edit_error(exc: Exception) -> None:
+    """Classify an alert edit's failure for `DiscordCodeAlertEditor`; always raises.
+
+    A message that's gone is `MessageGoneError`, a channel that's gone `ChannelGoneError`
+    (its subclass, so the pass can finish the whole channel at once), a 403 (or the two permission
+    codes) is `EditForbiddenError`, and everything else goes to `_classify_send_error`:
+    a 429, a 5xx or a network blip becomes a `PublishError`, any other 4xx is re-raised as
+    it came.
+    """
+    if isinstance(exc, discord.HTTPException):
+        if exc.code == _EDIT_CHANNEL_GONE_CODE:
+            raise ChannelGoneError(f"discord says the channel is gone: {exc}") from exc
+        if exc.code == _EDIT_MESSAGE_GONE_CODE:
+            raise MessageGoneError(f"discord says the message is gone: {exc}") from exc
+        if exc.status == 403 or exc.code in _EDIT_FORBIDDEN_CODES:
+            raise EditForbiddenError(f"discord won't let me edit: {exc}") from exc
+    _classify_send_error(exc)
+
+
+class DiscordCodeAlertEditor:
+    """The `CodeAlertEditor` (`shift/sweep.py`) the real bot uses: edit one alert in place.
+
+    The poster's sibling, with its channel resolution and its refusal to touch a channel
+    that isn't in the server. It edits through a partial message (`get_partial_message`),
+    which needs no Read Message History and no fetch of the message first; and every edit
+    goes out with `AllowedMentions.none()`, so the only `everyone=True` in this codebase
+    stays the one on the poster's side (`_PING_EVERYONE`). A channel in the wrong server is
+    reported as `ChannelGoneError`: nothing in it can ever be edited from here, so there's
+    no point in asking again.
+    """
+
+    def __init__(self, client: NewsBot, channel_id: int, guild_id: int | None = None) -> None:
+        self._client = client
+        self._channel_id = channel_id
+        self._guild_id = guild_id
+
+    async def edit(self, message_id: int, content: str) -> None:
+        channel = self._client.get_channel(self._channel_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(self._channel_id)
+            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
+                _classify_edit_error(exc)
+
+        if _foreign_channel(channel, self._guild_id, self._channel_id):
+            raise ChannelGoneError(f"channel {self._channel_id} isn't in this server")
+        get_partial = getattr(channel, "get_partial_message", None)
+        if get_partial is None:
+            raise ChannelGoneError(f"channel {self._channel_id} can't hold messages to edit")
+        try:
+            await get_partial(message_id).edit(
+                content=content, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
+            _classify_edit_error(exc)
+
+
 # How long `is_owner` waits on Discord before saying no.
 _OWNER_LOOKUP_TIMEOUT_S = 10.0
 
@@ -1019,6 +1084,7 @@ class NewsBot(discord.Client):
             notify_guild=router.notify_guild,
             alert_owner=router.alert_owner,
             details_reserve=reserve_for_config(self.cfg),
+            editor_for=self._editor_for,
         )
         # `collectors` is filled fresh before every pass (see `_collection_job`).
         self._collection_deps = CollectionDeps(
@@ -1085,6 +1151,9 @@ class NewsBot(discord.Client):
         self, guild_id: int, channel_id: int, ping: str, notify: Callable[[str], Awaitable[None]]
     ) -> DiscordCodeAlertPoster:
         return DiscordCodeAlertPoster(self, channel_id, ping, notify, guild_id=guild_id)
+
+    def _editor_for(self, guild_id: int, channel_id: int) -> DiscordCodeAlertEditor:
+        return DiscordCodeAlertEditor(self, channel_id, guild_id=guild_id)
 
     def _fail_pending_codes_sync(self) -> list[str]:
         with closing(connect(self.db_path)) as conn:
@@ -2121,6 +2190,7 @@ class GuildLifecycle:
 
 __all__ = [
     "HEARTBEAT",
+    "DiscordCodeAlertEditor",
     "DiscordCodeAlertPoster",
     "DiscordPublisher",
     "GuildLifecycle",

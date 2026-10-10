@@ -8,7 +8,9 @@ produced, in order, whether it went through the initial response or a followup.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -163,3 +165,57 @@ def raw_v2(path):
     import yaml
 
     return _RawConfig.model_validate(yaml.safe_load(Path(path).read_text()))
+
+
+@dataclass(frozen=True)
+class EditCall:
+    """One `edit` the fake editor was asked for, with where it was asked."""
+
+    guild_id: int
+    channel_id: int
+    message_id: int
+    content: str
+
+
+class FakeEditors:
+    """The `FanoutDeps.editor_for` of the edit-pass tests: an editor per channel, one shared log.
+
+    Call it as the factory (`fake(guild_id, channel_id)`); every editor it hands out records into
+    `.calls`. `.fail` scripts errors per message id (a list, raised one per call, in order), and
+    `.on_edit` runs before each call, which is where a test moves its injected clock. Nothing
+    here can say what `allowed_mentions` was; the real editor's own tests check that.
+    `.calls` holds the edits that succeeded; `.attempts` every try, failed ones included.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[EditCall] = []
+        self.attempts: list[EditCall] = []
+        self.fail: dict[int, list[Exception]] = {}
+        self.on_edit: Callable[[EditCall], None] | None = None
+
+    def __call__(self, guild_id: int, channel_id: int) -> _FakeEditor:
+        return _FakeEditor(self, guild_id, channel_id)
+
+    def contents(self, message_id: int, guild_id: int | None = None) -> list[str]:
+        return [
+            c.content
+            for c in self.calls
+            if c.message_id == message_id and guild_id in (None, c.guild_id)
+        ]
+
+
+class _FakeEditor:
+    def __init__(self, owner: FakeEditors, guild_id: int, channel_id: int) -> None:
+        self._owner = owner
+        self._guild_id = guild_id
+        self._channel_id = channel_id
+
+    async def edit(self, message_id: int, content: str) -> None:
+        call = EditCall(self._guild_id, self._channel_id, message_id, content)
+        self._owner.attempts.append(call)
+        if self._owner.on_edit is not None:
+            self._owner.on_edit(call)
+        script = self._owner.fail.get(message_id)
+        if script:
+            raise script.pop(0)
+        self._owner.calls.append(call)

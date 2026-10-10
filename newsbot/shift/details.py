@@ -18,7 +18,9 @@ The rules (design.md §16), field by field for reward, category and expiry:
   being "via" every hour);
 - `details_changed_at` moves only when something an alert shows changes (a value, or
   who supplied it), and only on the net difference, because that timestamp is what sends
-  an edit to a posted message and nobody wants an edit for a change that undid itself.
+  an edit to a posted message and nobody wants an edit for a change that undid itself;
+  it also only moves forward, by at least a microsecond, so a change always looks newer
+  than the message that doesn't show it yet.
 
 The clock is the other half. A code is "current" until its expiry date ends in Pacific
 time, or forever if it's permanent, or (no expiry known) 180 days after its clock
@@ -281,9 +283,15 @@ def merge_details(
         changed = displayed(merged) != displayed(old)
     if not changed:
         return merged
-    # Never backwards: edits look for a stamp newer than the render, and a clock that stepped
-    # back shouldn't hide a change from them.
-    stamp = max(_utc(base.details_changed_at), now) if base.details_changed_at else now
+    # Strictly forward, by at least a microsecond. An edit is due when a code's stamp is
+    # newer than the one its message was rendered with, and "newer" means greater, not equal:
+    # a clock that stepped back, or one that stood still between two real changes, would
+    # otherwise hand the change a stamp the message already shows and the edit would never
+    # come. The microsecond is the price of that, and it's cheap.
+    if base.details_changed_at:
+        stamp = max(_utc(base.details_changed_at) + timedelta(microseconds=1), now)
+    else:
+        stamp = now
     return replace(merged, details_changed_at=stamp)
 
 
@@ -311,6 +319,12 @@ def merge_observations(
         raise ValueError("merge_observations needs at least one observation")
     if old is not None and displayed(row) == displayed(old):
         row = replace(row, details_changed_at=old.details_changed_at)
+    elif row.details_changed_at is not None:
+        # The chain bumped the stamp once per observation; a net change is one change, so it
+        # gets one stamp: strictly after the old one, and `now` when the clock is behaving.
+        previous = old.details_changed_at if old is not None else None
+        stamp = max(_utc(previous) + timedelta(microseconds=1), now) if previous else now
+        row = replace(row, details_changed_at=stamp)
     return row
 
 

@@ -44,6 +44,7 @@ from newsbot.store.models import (
     CompedFollow,
     Coverage,
     DueCandidate,
+    EditTarget,
     GameSummaryRow,
     GuildClaim,
     GuildDigestRow,
@@ -1232,6 +1233,10 @@ def set_shift(
     insert that's already on): "enabling starts from codes found after that
     moment", so re-saving the same settings must not move it. The table's
     CHECKs reject an enabled row with no channel and a malformed `ping`.
+
+    Any save also clears `edits_blocked_at` (design.md §16): a server whose alert edits
+    stopped for a missing permission gets them back by saving its SHiFT settings, even
+    unchanged, because that is the thing an admin does after fixing the permission.
     """
     now_iso = _resolve_now(now)
     with conn:
@@ -1241,7 +1246,8 @@ def set_shift(
             "ON CONFLICT(guild_id) DO UPDATE SET "
             "enabled_at = CASE WHEN excluded.enabled = 1 AND guild_shift.enabled = 0 "
             "THEN excluded.enabled_at ELSE guild_shift.enabled_at END, "
-            "enabled = excluded.enabled, channel_id = excluded.channel_id, ping = excluded.ping",
+            "enabled = excluded.enabled, channel_id = excluded.channel_id, ping = excluded.ping, "
+            "edits_blocked_at = NULL",
             (guild_id, int(enabled), channel_id, ping, int(enabled), now_iso),
         )
 
@@ -2480,6 +2486,205 @@ def mark_table_listed(
         conn.execute(
             "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
             (f"{TABLE_LISTED_PREFIX}{name}", stamp),
+        )
+
+
+# --- Edits in place (design.md §16) ---
+#
+# An alert message is "due" when one of its codes has a `details_changed_at` newer than the
+# message's `rendered_at`. Both are version stamps (the largest `details_changed_at` the
+# message was rendered with, or the epoch), so this is stamps compared with stamps and no
+# clock is involved. Every function here is keyed by `guild_id`: one server's message is
+# never found, edited or blocked through another's.
+
+# An alert is edited for this long after it posts, and not a day more.
+ALERT_EDIT_WINDOW = timedelta(days=14)
+
+# One pass edits at most this many of any one server's messages. The rest are not lost, just
+# next in that server's line; a server with a pile of due messages shouldn't spend the pass.
+ALERT_EDITS_PER_SERVER = 20
+
+
+def alert_messages_to_edit(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    window: timedelta = ALERT_EDIT_WINDOW,
+    limit: int = 200,
+    per_guild: int = ALERT_EDITS_PER_SERVER,
+) -> list[EditTarget]:
+    """Live alert messages posted inside `window` that hold a code with newer details.
+
+    Round-robin across servers: every server's first due message (server id order), then
+    every server's second, and so on, so `limit` and a deadline cut across servers instead of
+    working through one big server before the small ones get a turn. At most `per_guild` of any
+    one server's messages are listed. Inside a server the order is least recently tried first
+    (`edit_tried_at`; never tried counts as oldest), then oldest posted, so a message that keeps
+    failing goes to the back of its own server's line and can't sit at the head forever.
+
+    A server whose edits are blocked (`guild_shift.edits_blocked_at`) isn't listed at all.
+    Roundup codes don't count: their messages have no record, and a roundup code that shares a
+    code with a normal alert only matters through the normal alert's own row.
+
+    A row whose `rendered_at` or `posted_at` isn't a timestamp (people edit databases) is
+    skipped with a warning; it never takes the pass down with it.
+    """
+    # To UTC before the subtraction: `now - window` on a datetime in a named zone is wall-clock
+    # arithmetic, which comes out an hour off across a DST change.
+    cutoff = datetime.fromisoformat(_utc_iso(now)) - window
+    rows = conn.execute(
+        "SELECT guild_id, message_id, channel_id, header, golden_prefix, rendered_at, posted_at "
+        "FROM (SELECT m.guild_id, m.message_id, m.channel_id, m.header, m.golden_prefix, "
+        "m.rendered_at, m.posted_at, ROW_NUMBER() OVER (PARTITION BY m.guild_id "
+        "ORDER BY m.edit_tried_at IS NOT NULL, m.edit_tried_at, m.posted_at, m.message_id) "
+        "AS turn FROM guild_alert_messages m "
+        "JOIN guild_shift s ON s.guild_id = m.guild_id "
+        "WHERE m.state = 'live' AND m.posted_at >= ? AND s.edits_blocked_at IS NULL "
+        "AND EXISTS (SELECT 1 FROM guild_code_posts p JOIN code_details d ON d.code = p.code "
+        "WHERE p.guild_id = m.guild_id AND p.message_id = m.message_id "
+        "AND p.from_roundup = 0 AND d.details_changed_at > m.rendered_at)) "
+        "WHERE turn <= ? ORDER BY turn, guild_id LIMIT ?",
+        (_utc_iso(cutoff), max(per_guild, 0), max(limit, 0)),
+    ).fetchall()
+    targets: list[EditTarget] = []
+    for row in rows:
+        rendered_at = _parse_dt_or_none(row["rendered_at"])
+        if rendered_at is None or _parse_dt_or_none(row["posted_at"]) is None:
+            logger.warning(
+                "a SHiFT alert record has a timestamp I can't read; skipping it",
+                extra={"guild_id": row["guild_id"], "message_id": row["message_id"]},
+            )
+            continue
+        targets.append(
+            EditTarget(
+                guild_id=row["guild_id"],
+                message_id=row["message_id"],
+                channel_id=row["channel_id"],
+                header=row["header"],
+                golden_prefix=bool(row["golden_prefix"]),
+                rendered_at=rendered_at,
+            )
+        )
+    return targets
+
+
+def alert_message_codes(
+    conn: sqlite3.Connection, guild_id: int, message_id: int
+) -> list[QueuedCode]:
+    """The codes one alert message holds, in the order it was packed, with their details.
+
+    Rowid order is release order, and release order is the order `render_code_alerts` packed
+    them in, so re-rendering these gives the message back the way it went out. (They come
+    back as `QueuedCode`s because that is already "a code plus what rendering needs";
+    `queued_at` is the claim time, which an edit has no use for.) Roundup rows never carry a
+    message's record, but the filter says so anyway.
+    """
+    rows = conn.execute(
+        "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
+        "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
+        "WHERE p.guild_id = ? AND p.message_id = ? AND p.status = 'posted' "
+        "AND p.from_roundup = 0 ORDER BY p.rowid",
+        (guild_id, message_id),
+    ).fetchall()
+    details = code_details_for(conn, [row["code"] for row in rows])
+    return [
+        QueuedCode(
+            code=row["code"],
+            source_name=row["source_name"],
+            item_url=row["item_url"],
+            from_roundup=False,
+            golden=bool(row["golden"]),
+            trusted=bool(row["trusted"]),
+            queued_at=datetime.fromisoformat(row["claimed_at"]),
+            details=details.get(row["code"]),
+        )
+        for row in rows
+    ]
+
+
+def mark_alert_message_rendered(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    message_id: int,
+    rendered_at: datetime,
+    tried_at: datetime | None = None,
+) -> None:
+    """Record the version stamp a message now shows (or that we've given up on showing).
+
+    Only ever forward: a stamp that isn't newer than the stored one changes nothing, so a
+    slow edit that finishes after a faster one can't make the message look older than it is.
+    The edit pass also uses this for a message that can't be re-rendered, so that same
+    change doesn't fail again every hour; a newer change is a new stamp and gets its try.
+    `tried_at`, when given, is stored as the message's last attempt either way.
+    """
+    with conn:
+        conn.execute(
+            "UPDATE guild_alert_messages SET rendered_at = ? "
+            "WHERE guild_id = ? AND message_id = ? AND rendered_at < ?",
+            (_utc_iso(rendered_at), guild_id, message_id, _utc_iso(rendered_at)),
+        )
+        if tried_at is not None:
+            _write_tried(conn, guild_id, message_id, tried_at)
+
+
+def mark_alert_message_tried(
+    conn: sqlite3.Connection, guild_id: int, message_id: int, tried_at: datetime
+) -> None:
+    """Note that the edit pass tried this message and it didn't take (it stays due).
+
+    This is what moves a message that keeps failing to the back of its server's line.
+    """
+    with conn:
+        _write_tried(conn, guild_id, message_id, tried_at)
+
+
+def _write_tried(
+    conn: sqlite3.Connection, guild_id: int, message_id: int, tried_at: datetime
+) -> None:
+    conn.execute(
+        "UPDATE guild_alert_messages SET edit_tried_at = ? WHERE guild_id = ? AND message_id = ?",
+        (_utc_iso(tried_at), guild_id, message_id),
+    )
+
+
+def mark_alert_message_gone(conn: sqlite3.Connection, guild_id: int, message_id: int) -> None:
+    """The message (or its channel) no longer exists: never try to edit it again."""
+    with conn:
+        conn.execute(
+            "UPDATE guild_alert_messages SET state = 'gone' WHERE guild_id = ? AND message_id = ?",
+            (guild_id, message_id),
+        )
+
+
+def mark_channel_alert_messages_gone(
+    conn: sqlite3.Connection, guild_id: int, channel_id: int
+) -> int:
+    """Discord says the channel is gone: none of this server's alerts in it can be edited.
+
+    Returns how many live messages that finished off.
+    """
+    with conn:
+        return conn.execute(
+            "UPDATE guild_alert_messages SET state = 'gone' "
+            "WHERE guild_id = ? AND channel_id = ? AND state = 'live'",
+            (guild_id, channel_id),
+        ).rowcount
+
+
+def block_guild_edits(conn: sqlite3.Connection, guild_id: int, now: datetime) -> bool:
+    """Stop editing this server's alerts until its SHiFT settings are saved again.
+
+    Returns True only for the call that did it, so the caller sends its one notice exactly
+    once: a server that's already blocked answers False. `set_shift` clears the flag.
+    """
+    with conn:
+        return (
+            conn.execute(
+                "UPDATE guild_shift SET edits_blocked_at = ? "
+                "WHERE guild_id = ? AND edits_blocked_at IS NULL",
+                (_utc_iso(now), guild_id),
+            ).rowcount
+            > 0
         )
 
 

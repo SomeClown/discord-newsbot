@@ -517,17 +517,18 @@ def test_first_seen_lookups_survive_more_codes_than_one_sqlite_chunk(conn):
     assert {r.clock_start for r in repo.code_details_for(conn, codes).values()} == {seen}
 
 
-def test_the_clock_stepping_backwards_never_moves_the_stamps_backwards(conn):
+def test_the_clock_stepping_backwards_still_moves_the_change_stamp_forward(conn):
     # Edits look for details_changed_at newer than the message's rendered_at. If the system
     # clock steps back between a render and the next change, a stamp that went backwards
-    # would hide the change from them, so the stamps only ever move forward.
+    # would hide the change from them, so the stamp of a real change is always strictly after
+    # the one before it (by a microsecond when the clock is no help).
     repo.upsert_code_details(conn, [obs(reward="one")], now=NOW + timedelta(hours=2))
     assert repo.upsert_code_details(conn, [obs(reward="two")], now=NOW + timedelta(hours=1)) == [
         CODE
     ]
     got = one(conn)
     assert got.reward == "two"
-    assert got.details_changed_at == NOW + timedelta(hours=2)
+    assert got.details_changed_at == NOW + timedelta(hours=2, microseconds=1)
     assert got.updated_at == NOW + timedelta(hours=2)
 
 

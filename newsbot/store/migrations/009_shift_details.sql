@@ -53,6 +53,9 @@ CREATE TABLE code_details (
 -- rendering (the epoch if none had details). A code whose details_changed_at is
 -- newer than that is waiting for an edit.
 -- 'gone' means Discord says the message (or its channel) no longer exists.
+-- `edit_tried_at` is when the edit pass last tried this message, win or lose. It orders
+-- a server's due messages least-recently-tried first, so one that keeps failing goes to the
+-- back of its server's line and can't sit at the head of the queue forever.
 CREATE TABLE guild_alert_messages (
     guild_id INTEGER NOT NULL REFERENCES guilds (guild_id) ON DELETE CASCADE,
     message_id INTEGER NOT NULL CHECK (message_id > 0),
@@ -62,6 +65,7 @@ CREATE TABLE guild_alert_messages (
     posted_at TEXT NOT NULL,
     rendered_at TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'live' CHECK (state IN ('live', 'gone')),
+    edit_tried_at TEXT,
     PRIMARY KEY (guild_id, message_id)
 );
 

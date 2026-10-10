@@ -34,8 +34,9 @@ line. The owner hears about the detector breaking (`pipeline/collect.py` does
 that) and about a roundup too big for the cap, not about someone deleting
 their SHiFT channel.
 
-Posting is injected (`FanoutDeps.poster_for`), so all of this is testable
-without a Discord in sight.
+Posting is injected (`FanoutDeps.poster_for`), and so is editing an alert after the
+fact (`FanoutDeps.editor_for`, run by `shift/edits.py` after the walk), so all of this
+is testable without a Discord in sight.
 """
 
 from __future__ import annotations
@@ -72,7 +73,13 @@ from newsbot.shift.decide import (
     sightings_from_items,
 )
 from newsbot.shift.details import DetailObservation, expired_by_expiry
-from newsbot.shift.sweep import _ROUNDUP_CAP_ALERT, CodeAlertPoster, post_alert_with_retry
+from newsbot.shift.edits import edit_changed_alerts
+from newsbot.shift.sweep import (
+    _ROUNDUP_CAP_ALERT,
+    CodeAlertEditor,
+    CodeAlertPoster,
+    post_alert_with_retry,
+)
 from newsbot.store.db import connect
 from newsbot.store.models import (
     DETAILS_STAMP_FLOOR,
@@ -122,6 +129,8 @@ Notify = Callable[[str], Awaitable[None]]
 # that one channel. The real one builds a `DiscordCodeAlertPoster`.
 PosterFactory = Callable[[int, int, str, Notify], CodeAlertPoster]
 NotifyGuild = Callable[[int, str], Awaitable[None]]
+# (guild_id, channel_id) -> an editor for messages in that one channel (`DiscordCodeAlertEditor`).
+EditorFactory = Callable[[int, int], CodeAlertEditor]
 
 # A breath between servers so a hundred guilds don't become a hundred sends in
 # the same instant; Discord's rate limiter is patient, but not infinitely.
@@ -170,6 +179,9 @@ class FanoutDeps:
     # arrive after it posts (`reserve_for_config`; design.md §16). Zero packs alerts the
     # old way, which is what tests that don't care about details get.
     details_reserve: int = 0
+    # Builds the editor the edit pass uses (`shift/edits.py`). None means no edits at all:
+    # the CLI's mode, and what tests that don't care about edits get.
+    editor_for: EditorFactory | None = None
 
 
 def reserve_for_config(cfg: AppConfig, stored_names: Iterable[str] = ()) -> int:
@@ -903,6 +915,23 @@ def _fail_queued_sync(db_path: str, guild_id: int) -> None:
         fail_queued_guild_followups(conn, guild_id)
 
 
+async def _deliver_then_edit(deps: FanoutDeps, deadline: float) -> None:
+    """One pass's walk: deliveries and follow-ups first, then the edits, all before `deadline`.
+
+    Edits are the lowest priority on purpose: a new code waiting for its alert matters more
+    than a reward line on an old one. They get whatever's left of the walk's budget, and the
+    same hard stop covers both (`detect_and_fan_out` wraps this in one `wait_for`).
+    """
+    await deliver_queued_codes(deps, deadline=deadline)
+    if deps.preview or deps.clock() >= deadline:
+        return
+    try:
+        await edit_changed_alerts(deps, deadline=deadline)
+    except Exception:
+        # A bug in the proofreading is not worth the owner's phone: deliveries are done.
+        logger.exception("SHiFT alert edits failed")
+
+
 async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_ok: bool) -> int:
     """Detect codes in `items` once, queue the new ones, then deliver the queue.
 
@@ -910,7 +939,9 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
     this pass. `items` is everything collected, before dedupe: a code edited
     into an already-seen thread still counts, and the code tables do their own
     dedupe. Delivery runs even when nothing new was found, because the queue
-    may still hold codes from a pass that ran out of time.
+    may still hold codes from a pass that ran out of time. After delivery, within the
+    same time budget, the edit pass brings already-posted alerts up to date with any
+    details learned since (`shift/edits.py`).
 
     Delivery trouble (a timeout, a bug) stays here: the codes are released and
     queued, so reporting it as "detection failed" would be telling the owner
@@ -923,11 +954,12 @@ async def detect_and_fan_out(deps: FanoutDeps, items: list[RawItem], *, seeding_
         return released
     hard_stop = max(started + _WALK_HARD_S - deps.clock(), _WALK_FLOOR_S)
     try:
-        await asyncio.wait_for(
-            deliver_queued_codes(deps, deadline=started + _WALK_STOP_S), timeout=hard_stop
-        )
+        await asyncio.wait_for(_deliver_then_edit(deps, started + _WALK_STOP_S), timeout=hard_stop)
     except TimeoutError:
-        logger.warning("SHiFT delivery timed out; unsent codes stay queued or fail on recovery")
+        logger.warning(
+            "SHiFT delivery timed out; unsent codes stay queued or fail on recovery, "
+            "and unfinished edits stay due"
+        )
     except sqlite3.OperationalError:
         logger.warning("SHiFT delivery hit a busy database; the queue waits for the next pass")
         now = deps.now()

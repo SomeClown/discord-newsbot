@@ -36,7 +36,12 @@ import pytest
 from pydantic import SecretStr
 
 import newsbot.bot.client as client_module
-from newsbot.bot.client import DiscordCodeAlertPoster, DiscordPublisher, NewsBot
+from newsbot.bot.client import (
+    DiscordCodeAlertEditor,
+    DiscordCodeAlertPoster,
+    DiscordPublisher,
+    NewsBot,
+)
 from newsbot.collectors.base import RateLimitState
 from newsbot.collectors.shift_table import PageValidators
 from newsbot.config import Secrets, load_config
@@ -574,6 +579,13 @@ async def test_the_code_poster_factory_carries_the_servers_own_choice(bot):
 
     assert isinstance(poster, DiscordCodeAlertPoster)
     assert (poster._channel_id, poster._ping_choice, poster._notify) == (6, "everyone", notify)
+
+
+async def test_the_code_editor_factory_carries_the_servers_own_channel(bot):
+    editor = bot._fanout_deps.editor_for(5, 6)
+
+    assert isinstance(editor, DiscordCodeAlertEditor)
+    assert (editor._channel_id, editor._guild_id) == (6, 5)
 
 
 class _AdminChannel:

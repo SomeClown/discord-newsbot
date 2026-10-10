@@ -753,3 +753,5 @@ About **8.5 agent days**, plus about half a day of the owner's time for the chec
 - **Queued codes that expire before delivery are skipped** (no post, no ping), with the same believability rule as expired on arrival: a trusted code with only a table's expiry still posts.
 - **`guild_alert_messages.rendered_at` is a version stamp:** the largest `details_changed_at` among the message's codes as rendered (the epoch when none had details), not a clock reading. An edit is due when any code's `details_changed_at` is newer.
 - **The edit reserve covers stored names too:** delivery sizes it over the configured official and table names plus every name already stored in `code_details`, so a renamed source can't overflow an edit.
+- **Edits are fair across servers:** round-robin, at most 20 per server per pass (200 overall), least recently tried first (`guild_alert_messages.edit_tried_at`); a server whose edit fails is skipped for the rest of that pass; a deleted channel marks all its messages gone at once.
+- **A forbidden edit blocks that server's edits until any save of `/newsbot shift`,** including one that changes nothing.

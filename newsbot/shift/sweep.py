@@ -39,6 +39,42 @@ class CodeAlertPoster(Protocol):
         ...
 
 
+class MessageGoneError(Exception):
+    """The alert message (or the channel it was in) no longer exists, or never can be edited.
+
+    Raised by a `CodeAlertEditor`. It's the one "done, quietly" outcome of an edit: a
+    deleted message is the server's business, and nobody needs telling.
+    """
+
+
+class ChannelGoneError(MessageGoneError):
+    """The whole channel is gone, or isn't one this server's alerts can be edited in.
+
+    A kind of `MessageGoneError` that the edit pass answers for every message in the
+    channel at once, so a deleted channel costs one lookup and not one per message.
+    """
+
+
+class EditForbiddenError(Exception):
+    """The bot isn't allowed to see or edit the alert's channel (a 403, 50001 or 50013).
+
+    Raised by a `CodeAlertEditor`. The edit pass tells the server's admins once and stops
+    editing there until the server's SHiFT settings are saved again.
+    """
+
+
+class CodeAlertEditor(Protocol):
+    async def edit(self, message_id: int, content: str) -> None:
+        """Replace one alert message's text, with every mention switched off.
+
+        Raises `MessageGoneError` or `EditForbiddenError` for those two outcomes, and
+        `PublishError` for a failure worth another try later (a 5xx, a timeout, or a 429,
+        whose `retry_after` says how long Discord wants us to wait). Anything else is a bug
+        or an error nobody planned for, and the edit pass logs it and moves on.
+        """
+        ...
+
+
 class PrintCodeAlertPoster:
     """Prints an alert to stdout instead of posting it: the CLI's `--collect` poster."""
 
@@ -154,7 +190,11 @@ _ROUNDUP_CAP_ALERT = (
 
 
 __all__ = [
+    "CodeAlertEditor",
+    "ChannelGoneError",
     "CodeAlertPoster",
+    "EditForbiddenError",
+    "MessageGoneError",
     "PrintCodeAlertPoster",
     "post_alert_with_retry",
 ]
