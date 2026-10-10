@@ -37,6 +37,7 @@ from newsbot.shift.details import (
 )
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
+    AlertMessageRecord,
     AlertState,
     CodeDetailsRow,
     CodeView,
@@ -73,6 +74,10 @@ logger = logging.getLogger(__name__)
 # have to think about the limit or hit it in production with a big batch
 # of collected URLs.
 _SQLITE_VARIABLE_CHUNK = 900
+
+# `guild_alert_messages.header`'s CHECK (migration 009). The longest real header is a role
+# ping plus "**New Golden Key codes**", around 50; this is the table's own limit.
+_ALERT_HEADER_MAX = 200
 
 
 def _resolve_now(now: Callable[[], datetime] | None) -> str:
@@ -1650,13 +1655,20 @@ def queued_guild_ids(conn: sqlite3.Connection) -> list[int]:
 
 
 def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCode]:
-    """This server's `queued` codes in release order, with what the render needs."""
+    """This server's `queued` codes in release order, with what the render needs.
+
+    Each carries its `code_details` row if it has one (design.md §16), so the alert
+    can show a reward and an expiry the moment it's rendered. (Two statements, not a
+    LEFT JOIN: the join would hand me two columns called `code` and a row reader that
+    has to know which is which, and `code_details_for` already knows.)
+    """
     rows = conn.execute(
         "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
         "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
         "WHERE p.guild_id = ? AND p.status = 'queued' ORDER BY p.rowid",
         (guild_id,),
     ).fetchall()
+    details = code_details_for(conn, [row["code"] for row in rows])
     return [
         QueuedCode(
             code=row["code"],
@@ -1666,6 +1678,7 @@ def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCo
             golden=bool(row["golden"]),
             trusted=bool(row["trusted"]),
             queued_at=datetime.fromisoformat(row["claimed_at"]),
+            details=details.get(row["code"]),
         )
         for row in rows
     ]
@@ -1790,20 +1803,94 @@ def _queued_among(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> 
 
 
 def mark_guild_codes_posted(
-    conn: sqlite3.Connection, guild_id: int, codes: list[str], *, message_id: int | None
+    conn: sqlite3.Connection,
+    guild_id: int,
+    codes: list[str],
+    *,
+    message_id: int | None,
+    message: AlertMessageRecord | None = None,
 ) -> None:
     """Flip this guild's `pending` `codes` to `posted`, all sharing one message id.
 
     Only `pending` rows move: a startup recovery that already failed one must
     not have it flipped back by a send that finished late.
+
+    `message` (design.md §16) is what the message looked like when it went out. With a
+    message id and at least one code actually flipped, it's written to
+    `guild_alert_messages` in the same transaction, so a posted code and the record that
+    lets the edit pass find its message land together or not at all. Roundups and
+    follow-ups pass nothing: they're never edited.
+
+    A bookkeeping row isn't worth failing the mark that says the message went out, so the
+    record is skipped (and logged) when the server is already gone or when any column the
+    table CHECKs would refuse it (`_alert_record_problem`). If something I didn't think of
+    gets refused anyway, the insert runs in a savepoint: the row is rolled back alone and
+    the posted flip survives.
     """
     with conn:
+        moved = 0
         for code in codes:
-            conn.execute(
+            moved += conn.execute(
                 "UPDATE guild_code_posts SET status = 'posted', message_id = ? "
                 "WHERE guild_id = ? AND code = ? AND status = 'pending'",
                 (message_id, guild_id, code),
+            ).rowcount
+        if message is None or message_id is None or not moved:
+            return
+        problem = _alert_record_problem(message_id, message)
+        if problem is not None:
+            logger.warning(
+                "SHiFT alert can't be recorded for edits (%s)",
+                problem,
+                extra={"guild_id": guild_id},
             )
+            return
+        conn.execute("SAVEPOINT alert_message")
+        try:
+            conn.execute(
+                "INSERT INTO guild_alert_messages "
+                "(guild_id, message_id, channel_id, header, golden_prefix, posted_at, "
+                "rendered_at) "
+                "SELECT ?, ?, ?, ?, ?, ?, ? "
+                "WHERE EXISTS (SELECT 1 FROM guilds WHERE guild_id = ?) "
+                "ON CONFLICT(guild_id, message_id) DO NOTHING",
+                (
+                    guild_id,
+                    message_id,
+                    message.channel_id,
+                    message.header,
+                    int(message.golden_prefix),
+                    _utc_iso(message.posted_at),
+                    _utc_iso(message.rendered_at),
+                    guild_id,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK TO alert_message")
+            logger.warning(
+                "SHiFT alert record refused by the table; the message is not editable",
+                extra={"guild_id": guild_id},
+            )
+        finally:
+            conn.execute("RELEASE alert_message")
+
+
+_SQLITE_MAX_INT = 2**63 - 1
+
+
+def _alert_record_problem(message_id: int, message: AlertMessageRecord) -> str | None:
+    """Why `guild_alert_messages` would refuse this record, or None if it won't.
+
+    Mirrors the table's CHECKs (ids above zero and inside SQLite's integer, a header of 1
+    to 200 characters) so the usual refusal never has to be an exception.
+    """
+    if not 0 < message_id <= _SQLITE_MAX_INT:
+        return f"message id {message_id}"
+    if not 0 < message.channel_id <= _SQLITE_MAX_INT:
+        return f"channel id {message.channel_id}"
+    if not 1 <= len(message.header) <= _ALERT_HEADER_MAX:
+        return f"header of {len(message.header)} characters"
+    return None
 
 
 def mark_guild_codes_failed(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
@@ -2203,6 +2290,25 @@ def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str
         for row in conn.execute(query, chunk):
             found[row["code"]] = _details_from_row(row)
     return found
+
+
+def stored_detail_source_names(conn: sqlite3.Connection) -> list[str]:
+    """Every source name a `code_details` row can still say "via", whatever the config says now.
+
+    A row keeps the name it was stored with for good, so a source renamed to something
+    shorter leaves its old, longer name behind in old rows. The packing reserve has to cover
+    those too, or a later edit that adds a second name could outgrow its message. One
+    DISTINCT query over a table of a few hundred rows.
+    """
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT reward_from FROM code_details UNION "
+            "SELECT category_from FROM code_details UNION "
+            "SELECT expires_from FROM code_details"
+        )
+        if row[0]
+    ]
 
 
 def _first_seen_for(conn: sqlite3.Connection, codes: list[str]) -> dict[str, datetime]:

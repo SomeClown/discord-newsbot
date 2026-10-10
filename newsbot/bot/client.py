@@ -93,6 +93,7 @@ from newsbot.shift.fanout import (
     deliver_queued_codes,
     make_shift_hook,
     recover_pending_guild_codes,
+    reserve_for_config,
 )
 from newsbot.store import repo
 from newsbot.store.db import connect
@@ -1017,6 +1018,7 @@ class NewsBot(discord.Client):
             poster_for=self._poster_for,
             notify_guild=router.notify_guild,
             alert_owner=router.alert_owner,
+            details_reserve=reserve_for_config(self.cfg),
         )
         # `collectors` is filled fresh before every pass (see `_collection_job`).
         self._collection_deps = CollectionDeps(

@@ -310,7 +310,7 @@ async def _run_collect_cli(
     ping spent, no pending recovery. Delivering for real is the bot's job.
     """
     from newsbot.pipeline.collect import CollectionDeps, run_collection
-    from newsbot.shift.fanout import FanoutDeps, make_shift_hook
+    from newsbot.shift.fanout import FanoutDeps, make_shift_hook, reserve_for_config
     from newsbot.shift.sweep import PrintCodeAlertPoster
 
     fanout = FanoutDeps(
@@ -321,6 +321,7 @@ async def _run_collect_cli(
         notify_guild=_stdout_guild_notice,
         alert_owner=_stdout_alert,
         preview=True,
+        details_reserve=reserve_for_config(cfg),
     )
     async with httpx.AsyncClient(headers=user_agent_headers()) as http:
         deps = CollectionDeps(

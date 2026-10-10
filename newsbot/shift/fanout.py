@@ -44,7 +44,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -52,6 +52,8 @@ from datetime import datetime, timedelta
 from newsbot.bot.format import (
     FOLLOWUP_MAX_CODES,
     RenderedAlert,
+    details_reserve,
+    fit_followup_codes,
     render_code_alerts,
     render_followup_alert,
     render_roundup_alerts,
@@ -72,7 +74,14 @@ from newsbot.shift.decide import (
 from newsbot.shift.details import DetailObservation, expired_by_expiry
 from newsbot.shift.sweep import _ROUNDUP_CAP_ALERT, CodeAlertPoster, post_alert_with_retry
 from newsbot.store.db import connect
-from newsbot.store.models import CodeDetailsRow, GuildSettings, QueuedCode, ShiftSettings
+from newsbot.store.models import (
+    DETAILS_STAMP_FLOOR,
+    AlertMessageRecord,
+    CodeDetailsRow,
+    GuildSettings,
+    QueuedCode,
+    ShiftSettings,
+)
 from newsbot.store.repo import (
     ClaimedCodes,
     claim_guild_codes,
@@ -100,6 +109,7 @@ from newsbot.store.repo import (
     record_silent_codes,
     skip_queued_guild_codes,
     skip_queued_guild_followups,
+    stored_detail_source_names,
     table_kinds_listed,
     table_listed_sources,
     upsert_code_details,
@@ -156,6 +166,36 @@ class FanoutDeps:
     preview: bool = False
     # When the owner was last told the database was too busy to walk the queue.
     busy_alerted_at: datetime | None = None
+    # Room (UTF-16 units) every alert sets aside per code for a details line that may
+    # arrive after it posts (`reserve_for_config`; design.md §16). Zero packs alerts the
+    # old way, which is what tests that don't care about details get.
+    details_reserve: int = 0
+
+
+def reserve_for_config(cfg: AppConfig, stored_names: Iterable[str] = ()) -> int:
+    """The per-code details reservation for `cfg`'s sources (`format.details_reserve`).
+
+    `stored_names` are the "via" names still sitting in `code_details` rows
+    (`stored_detail_source_names`), which can be longer than anything the config says
+    today after a source is renamed. Delivery reads them fresh each turn; this is the
+    same arithmetic for a caller that has them in hand.
+
+    Only a source that can supply details can put its name in a "via" clause: an
+    official source (Gearbox's own posts, read by the official reader) or a
+    `shift_table`. Config caps every source name at 100 characters, so the longest of
+    these is a bounded number and the worst-case line has a worst case.
+    """
+    sources = [*(s for game in cfg.catalog for s in game.sources), *cfg.shared_sources]
+    return details_reserve(
+        [
+            *(
+                s.name
+                for s in sources
+                if getattr(s, "name", None) and (s.type == "shift_table" or s.trust == "official")
+            ),
+            *stored_names,
+        ]
+    )
 
 
 @dataclass(frozen=True)
@@ -217,8 +257,14 @@ async def _post_batch(
     rendered: list[RenderedAlert],
     notify: Notify,
     reasons: set[str] | None = None,
+    record: Callable[[RenderedAlert, bool], AlertMessageRecord] | None = None,
 ) -> tuple[int, int]:
     """Post `rendered` in order to one server; return (posted, failed) code counts.
+
+    `record` (normal alerts only; roundups never pass it) builds the
+    `guild_alert_messages` row for a message that posted, given the alert and whether
+    its ping was stripped on the way. It's written with the posted mark, so the edit
+    pass can find the message later.
 
     Once a message fails for good, everything after it is marked failed
     without being sent: a batch reads in order ("(continued)" is literal), and
@@ -237,16 +283,17 @@ async def _post_batch(
     failed_from_here = False
     for alert in rendered:
         message_id: int | None = None
+        stripped = False
+
+        def _on_stripped() -> None:
+            nonlocal stripped
+            stripped = True
+            if reasons is not None:
+                reasons.add("ping_stripped_after_ambiguous_failure")
+
         if not failed_from_here:
             message_id, error = await post_alert_with_retry(
-                poster,
-                deps.sleep,
-                alert,
-                on_ping_stripped=lambda: (
-                    reasons.add("ping_stripped_after_ambiguous_failure")
-                    if reasons is not None
-                    else None
-                ),
+                poster, deps.sleep, alert, on_ping_stripped=_on_stripped
             )
             if error is not None:
                 failed_from_here = True
@@ -259,8 +306,9 @@ async def _post_batch(
             await _record(deps, _mark_failed_sync, deps.db_path, guild_id, list(alert.codes))
             continue
         posted += len(alert.codes)
+        message = record(alert, stripped) if record is not None else None
         await _record(
-            deps, _mark_posted_sync, deps.db_path, guild_id, list(alert.codes), message_id
+            deps, _mark_posted_sync, deps.db_path, guild_id, list(alert.codes), message_id, message
         )
     if failed_codes:
         await _safe_notify(
@@ -277,10 +325,14 @@ def _mark_failed_sync(db_path: str, guild_id: int, codes: list[str]) -> None:
 
 
 def _mark_posted_sync(
-    db_path: str, guild_id: int, codes: list[str], message_id: int | None
+    db_path: str,
+    guild_id: int,
+    codes: list[str],
+    message_id: int | None,
+    message: AlertMessageRecord | None = None,
 ) -> None:
     with closing(connect(db_path)) as conn:
-        mark_guild_codes_posted(conn, guild_id, codes, message_id=message_id)
+        mark_guild_codes_posted(conn, guild_id, codes, message_id=message_id, message=message)
 
 
 async def _safe_notify(notify: Notify, text: str) -> None:
@@ -348,13 +400,63 @@ def _candidate(queued: QueuedCode) -> CodeCandidate:
     )
 
 
+@dataclass(frozen=True)
+class _Turn:
+    """What a server's turn read once, up front: the clock, the packing reserve, the dead codes."""
+
+    read_at: datetime
+    reserve: int
+    expired: int
+
+
+def _alert_record(
+    alert: RenderedAlert,
+    stripped: bool,
+    channel_id: int,
+    details: dict[str, CodeDetailsRow],
+    *,
+    posted_at: datetime,
+) -> AlertMessageRecord:
+    """What to remember about a posted alert so it can be edited: what went out, not what we meant.
+
+    `rendered_at` is the message's version stamp: the largest `details_changed_at` among its
+    codes' rows as they were read for rendering, or the epoch when none had details. It is
+    compared against other `details_changed_at` values and never against a clock, so a
+    release that took its own `now` a moment before this delivery read (and committed after)
+    can't leave a change that looks older than a render that never saw it.
+
+    A retry that stripped the ping posted a message without the ping prefix, so the
+    stored header loses it too. Re-rendering the old header with the ping on would
+    put `@everyone` back in an edit (harmless, mentions are off, but not what the
+    channel shows).
+    """
+    header = alert.header
+    if stripped and alert.ping_prefix and header.startswith(alert.ping_prefix):
+        header = header[len(alert.ping_prefix) :]
+    return AlertMessageRecord(
+        channel_id=channel_id,
+        header=header,
+        golden_prefix=alert.golden_prefix,
+        posted_at=posted_at,
+        rendered_at=max(
+            (
+                row.details_changed_at
+                for code in alert.codes
+                if (row := details.get(code)) is not None and row.details_changed_at is not None
+            ),
+            default=DETAILS_STAMP_FLOOR,
+        ),
+    )
+
+
 async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     """One server's turn. Raises freely; `deliver_queued_codes` catches it so nobody else waits."""
 
-    def _load_sync() -> tuple[GuildSettings, ShiftSettings, list[QueuedCode]] | int:
+    def _load_sync() -> tuple[GuildSettings, ShiftSettings, list[QueuedCode], _Turn] | int:
         # Current settings, read at this server's turn: they (not the ones from
         # release time) decide whether to post, with which ping, under which cap.
         with closing(connect(deps.db_path)) as conn:
+            read_at = deps.now()
             queued = queued_guild_codes(conn, guild_id)
             state = current_shift_delivery(conn, guild_id, deps.cfg.shift.games)
             if state is None:
@@ -369,21 +471,58 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
             ]
             if stale and not deps.preview:
                 skip_queued_guild_codes(conn, guild_id, [q.code for q in stale])
-            return guild, shift, [q for q in queued if q not in stale]
+            queued = [q for q in queued if q not in stale]
+            # A code can die between its release and this turn (a queued pass, a busy
+            # database). Announcing a code whose known expiry has passed is worse than
+            # silence, so it's skipped like a follow-up would be; the live ones go out.
+            # Same believability rule as release (`_dead_on_arrival`): a table's expiry is a
+            # stranger's typing, so it can't silence a code a trusted source announced; an
+            # official expiry always can. Roundups don't get the check: their details live
+            # in /shift codes.
+            dead = [
+                q.code
+                for q in queued
+                if not q.from_roundup
+                and expired_by_expiry(q.details, read_at)
+                and (
+                    not q.trusted
+                    or (q.details is not None and q.details.expires_source == "official")
+                )
+            ]
+            if dead:
+                if not deps.preview:
+                    skip_queued_guild_codes(conn, guild_id, dead)
+                queued = [q for q in queued if q.code not in dead]
+            # Packing leaves room for the worst "via" line any name in the config, or
+            # still stored on a row, can make; a renamed source mustn't outgrow an edit.
+            # `deps.details_reserve` is the config-only floor, and zero means reserving is
+            # off (tests, mostly), so the stored names only widen a floor that's on.
+            reserve = deps.details_reserve
+            stored_names = stored_detail_source_names(conn) if reserve else []
+            if stored_names:
+                reserve = max(reserve, details_reserve(stored_names))
+            return guild, shift, queued, _Turn(read_at, reserve, 0 if deps.preview else len(dead))
 
     loaded = await asyncio.to_thread(_load_sync)
     if isinstance(loaded, int):
         return GuildOutcome(guild_id, skipped=0 if deps.preview else loaded)
-    guild, shift, queued = loaded
+    guild, shift, queued, turn = loaded
+    read_at, reserve = turn.read_at, turn.reserve
     channel_id = shift.channel_id
-    if channel_id is None or not queued:  # the first can't happen; the second is a stale-only turn
-        return GuildOutcome(guild_id, skipped=0)
+    # The first can't happen; the second is a turn with nothing left to send (all stale, or
+    # all expired by now), and it creates no poster.
+    if channel_id is None or not queued:
+        return GuildOutcome(guild_id, skipped=turn.expired)
 
     async def notify(text: str) -> None:
         await deps.notify_guild(guild_id, text)
 
     normal = [_candidate(q) for q in queued if not q.from_roundup]
     roundup = [_candidate(q) for q in queued if q.from_roundup]
+    details = {q.code: q.details for q in queued if q.details is not None}
+
+    def record(alert: RenderedAlert, stripped: bool) -> AlertMessageRecord:
+        return _alert_record(alert, stripped, channel_id, details, posted_at=deps.now())
 
     # Two servers sending the same batch must not share nonces (Discord may
     # answer the second with the first's message); a retry to the same channel must.
@@ -410,24 +549,33 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
         # under the shorter one. (A row stranded `pending` by a render that
         # blew up afterwards would sit there until it goes stale.)
         rendered = render_code_alerts(
-            normal, ping=want_ping, ping_mention=mention, nonce_scope=scope
+            normal,
+            ping=want_ping,
+            ping_mention=mention,
+            nonce_scope=scope,
+            details=details,
+            now=read_at,
+            reserve=reserve,
         )
         if deps.preview:
+            # Print and carry on: the roundup codes queued beside these get printed too.
             await _print_batch(poster, rendered)
-            return GuildOutcome(guild_id, posted=sum(len(r.codes) for r in rendered))
-        claim = await _claim(
-            deps,
-            guild_id,
-            [c.code for c in normal],
-            pinged=want_ping,
-            ping_codes=trusted_codes,
-            timezone=guild.timezone,
-            from_roundup=False,
-            # D14: a batch with nothing trusted in it, to a server with pinging
-            # on, is the one kind of post a second source can follow up. Not a
-            # mixed batch: its untrusted codes rode the ping, or lost it to the cap.
-            followup_ok=shift.ping != "none" and not trusted_codes,
-        )
+            posted = sum(len(r.codes) for r in rendered)
+            claim = ClaimedCodes([], False)
+        else:
+            claim = await _claim(
+                deps,
+                guild_id,
+                [c.code for c in normal],
+                pinged=want_ping,
+                ping_codes=trusted_codes,
+                timezone=guild.timezone,
+                from_roundup=False,
+                # D14: a batch with nothing trusted in it, to a server with pinging
+                # on, is the one kind of post a second source can follow up. Not a
+                # mixed batch: its untrusted codes rode the ping, or lost it to the cap.
+                followup_ok=shift.ping != "none" and not trusted_codes,
+            )
         if claim.codes:  # codes a concurrent pass took are its to send; ours are the rest
             sent = [c for c in normal if c.code in set(claim.codes)]
             final_ping = claim.pinged
@@ -436,9 +584,17 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                 reasons.add("cap_reached")
             if len(sent) != len(normal) or final_ping != want_ping:
                 rendered = render_code_alerts(
-                    sent, ping=final_ping, ping_mention=mention, nonce_scope=scope
+                    sent,
+                    ping=final_ping,
+                    ping_mention=mention,
+                    nonce_scope=scope,
+                    details=details,
+                    now=read_at,
+                    reserve=reserve,
                 )
-            posted, failed = await _post_batch(deps, guild_id, poster, rendered, notify, reasons)
+            posted, failed = await _post_batch(
+                deps, guild_id, poster, rendered, notify, reasons, record
+            )
             if cap_reached and deps.cfg.shift.max_pings_per_day > 0:
                 await _safe_notify(
                     notify,
@@ -448,25 +604,30 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     if roundup:
         reasons.add("roundup")
         # Never pinged, never counted against the cap; it claims with its own flag.
-        rendered_roundup = render_roundup_alerts(roundup, nonce_scope=scope)
+        rendered_roundup = render_roundup_alerts(
+            roundup, nonce_scope=scope, details=details, now=read_at
+        )
         if deps.preview:
             await _print_batch(poster, rendered_roundup)
-            return GuildOutcome(
-                guild_id, roundup_posted=sum(len(r.codes) for r in rendered_roundup)
+            roundup_posted = sum(len(r.codes) for r in rendered_roundup)
+            claim = ClaimedCodes([], False)
+        else:
+            claim = await _claim(
+                deps,
+                guild_id,
+                [c.code for c in roundup],
+                pinged=False,
+                ping_codes=None,
+                timezone=guild.timezone,
+                from_roundup=True,
             )
-        claim = await _claim(
-            deps,
-            guild_id,
-            [c.code for c in roundup],
-            pinged=False,
-            ping_codes=None,
-            timezone=guild.timezone,
-            from_roundup=True,
-        )
         if claim.codes:
             if len(claim.codes) != len(roundup):
                 rendered_roundup = render_roundup_alerts(
-                    [c for c in roundup if c.code in set(claim.codes)], nonce_scope=scope
+                    [c for c in roundup if c.code in set(claim.codes)],
+                    nonce_scope=scope,
+                    details=details,
+                    now=read_at,
                 )
             roundup_posted, roundup_failed = await _post_batch(
                 deps, guild_id, poster, rendered_roundup, notify, reasons
@@ -480,6 +641,7 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
         posted=posted,
         roundup_posted=roundup_posted,
         failed=failed,
+        skipped=turn.expired,
         pinged=final_ping,
         cap_reached=cap_reached,
         reasons=tuple(sorted(reasons)),
@@ -501,7 +663,9 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     already landed, and a missed nudge isn't worth a notice.
     """
 
-    def _load_sync() -> tuple[GuildSettings, int, str, list[str]] | None:
+    def _load_sync() -> (
+        tuple[GuildSettings, int, str, list[str], dict[str, CodeDetailsRow], datetime] | None
+    ):
         with closing(connect(deps.db_path)) as conn:
             queued = queued_guild_followups(conn, guild_id)
             if not queued:
@@ -521,12 +685,26 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                 skip_queued_guild_followups(conn, guild_id, queued)
                 return None
             guild, shift = state
-            return guild, shift.channel_id, shift.ping, queued[:FOLLOWUP_MAX_CODES]
+            # A follow-up is never edited, so it fits by its real size: as many of the
+            # queued codes as the message holds go now, and the rest wait their turn.
+            codes = fit_followup_codes(
+                queued[:FOLLOWUP_MAX_CODES],
+                ping_mention=_mention_for(shift.ping),
+                details=details,
+                now=now,
+            )
+            if not codes:
+                # Not even one code fits, which takes a ping mention close to 2,000 units.
+                # Retrying it every hour wouldn't change that, so it's skipped, loudly.
+                logger.error("a SHiFT follow-up can't fit one code", extra={"guild_id": guild_id})
+                skip_queued_guild_followups(conn, guild_id, queued)
+                return None
+            return guild, shift.channel_id, shift.ping, codes, details, now
 
     loaded = await asyncio.to_thread(_load_sync)
     if loaded is None:
         return GuildOutcome(guild_id)
-    guild, channel_id, ping, codes = loaded
+    guild, channel_id, ping, codes, details, read_at = loaded
 
     async def notify(text: str) -> None:
         await deps.notify_guild(guild_id, text)
@@ -536,7 +714,9 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     scope = f"{guild_id}|{channel_id}"
     # Render before claiming, for the same reason as the alerts: a claim that
     # a render error strands is a row stuck `pending`.
-    rendered = render_followup_alert(codes, ping_mention=_mention_for(ping), nonce_scope=scope)
+    rendered = render_followup_alert(
+        codes, ping_mention=_mention_for(ping), nonce_scope=scope, details=details, now=read_at
+    )
 
     def _claim_sync() -> list[str]:
         now = deps.now()
@@ -562,7 +742,11 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
         return GuildOutcome(guild_id)
     if claimed != codes:
         rendered = render_followup_alert(
-            claimed, ping_mention=_mention_for(ping), nonce_scope=scope
+            claimed,
+            ping_mention=_mention_for(ping),
+            nonce_scope=scope,
+            details=details,
+            now=read_at,
         )
 
     poster = deps.poster_for(guild_id, channel_id, ping, notify)

@@ -9,7 +9,7 @@ these, it probably belongs in `repo.py` instead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -183,14 +183,26 @@ class CodeDetailsRow:
     details_changed_at: datetime | None = None
 
 
+# What `AlertMessageRecord.rendered_at` is for a message none of whose codes had details when it
+# went out: older than any real change, so the first details a code gets are always "newer".
+DETAILS_STAMP_FLOOR = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 @dataclass(frozen=True)
 class AlertMessageRecord:
     """What a posted SHiFT alert message looked like, so it can be edited later.
 
     One `guild_alert_messages` row (migration 009), minus the guild and message ids the
     caller already has. `header` is exactly the first paragraph that went out (ping
-    prefix included, unless Discord made us strip it), and `rendered_at` is when the
-    details in the message were read.
+    prefix included, unless Discord made us strip it).
+
+    `rendered_at` is a version stamp, not a clock reading (the column kept its name; I
+    didn't think a rename was worth the confusion it would cause the other way): the
+    largest `details_changed_at` among the message's codes as they were read for
+    rendering, or `DETAILS_STAMP_FLOOR` when none had details. A message is due an edit
+    when any of its codes has a `details_changed_at` newer than that. Comparing stamps
+    with stamps means two hooks that took their clocks at different moments can't make a
+    change look older than the render that missed it.
     """
 
     channel_id: int
@@ -202,7 +214,11 @@ class AlertMessageRecord:
 
 @dataclass(frozen=True)
 class EditTarget:
-    """A live alert message with a code whose details changed since it was rendered."""
+    """A live alert message with a code whose details changed since it was rendered.
+
+    `rendered_at` is the message's version stamp (see `AlertMessageRecord`), not a time
+    anyone looked at a clock.
+    """
 
     guild_id: int
     message_id: int

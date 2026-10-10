@@ -750,3 +750,6 @@ About **8.5 agent days**, plus about half a day of the owner's time for the chec
 - **Flood guard:** more than 5 fresh new codes from one table source in one pass go out as a roundup (unpinged, capped at 50, no follow-ups). `TABLE_FLOOD_LIMIT` in `fanout.py`.
 - **Sightings are scoped by item, not URL,** so nothing borrows a table's game match.
 - **Source names:** no control or invisible-only characters, no padding, 100 characters at most; case twins warn. Tables must be community trust.
+- **Queued codes that expire before delivery are skipped** (no post, no ping), with the same believability rule as expired on arrival: a trusted code with only a table's expiry still posts.
+- **`guild_alert_messages.rendered_at` is a version stamp:** the largest `details_changed_at` among the message's codes as rendered (the epoch when none had details), not a clock reading. An edit is due when any code's `details_changed_at` is newer.
+- **The edit reserve covers stored names too:** delivery sizes it over the configured official and table names plus every name already stored in `code_details`, so a renamed source can't overflow an edit.

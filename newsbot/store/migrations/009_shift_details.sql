@@ -48,8 +48,10 @@ CREATE TABLE code_details (
 -- message id but not the channel or the header, and rebuilding those from
 -- today's settings would guess wrong for any server that changed them since.
 -- Alerts posted before 3.1.0 have no row here and are never edited (owner
--- decision E3). `rendered_at` is when the details in the message were read;
--- a code whose details_changed_at is newer than that is waiting for an edit.
+-- decision E3). `rendered_at` is a version stamp, not a wall-clock time: the
+-- largest details_changed_at among the message's codes as they were read for
+-- rendering (the epoch if none had details). A code whose details_changed_at is
+-- newer than that is waiting for an edit.
 -- 'gone' means Discord says the message (or its channel) no longer exists.
 CREATE TABLE guild_alert_messages (
     guild_id INTEGER NOT NULL REFERENCES guilds (guild_id) ON DELETE CASCADE,
