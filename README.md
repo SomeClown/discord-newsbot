@@ -300,8 +300,10 @@ first posts without a ping like any other community find (it does count as the
 second source that can earn the follow-up above). For each of reward, kind and
 expiry, Gearbox's value beats mentalmars', and a missing value never erases a
 known one. A code with details gets a line under it:
-`3 Golden Keys · expires Oct 14, 2026 · via mentalmars`. With nothing known,
-the line is left out and the alert looks like it always did.
+`3 Golden Keys · expires Oct 14, 2026 (in 3 days) · details via mentalmars`.
+The "in 3 days" is a Discord timestamp, so Discord keeps it counting down and
+shows each reader their own time zone. With nothing known, the line is left
+out and the alert looks like it always did.
 
 When details arrive after an alert has posted, the bot edits that message in
 place (for 14 days after it posts; no new message, and no new notification).
