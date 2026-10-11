@@ -15,7 +15,7 @@ The rules (design.md §16), field by field for reward, category and expiry:
   wins, so a fan site can correct itself;
 - a source that merely agrees with what's stored doesn't get its name on it, unless it
   outranks the one that's there (two fan sites repeating each other shouldn't take turns
-  being "via" every hour);
+  being "details via" every hour);
 - `details_changed_at` moves only when something an alert shows changes (a value, or
   who supplied it), and only on the net difference, because that timestamp is what sends
   an edit to a posted message and nobody wants an edit for a change that undid itself;
@@ -54,7 +54,7 @@ RANK: dict[str, int] = {"": 0, "table": 1, "official": 2}
 # reader promise to stay under them, and a promise is a fine thing to double-check.
 _CODE_LENGTH = 29
 _TEXT_MAX = 300
-# Config holds source names to 100 characters (they're printed in alerts as "via ..."), so a
+# Config holds source names to 100 characters (they're printed in alerts as "details via ..."), so a
 # longer one is damage, and the store won't take it.
 _NAME_MAX = 100
 _CATEGORIES = frozenset({"golden", "cosmetic", "permanent", "other"})

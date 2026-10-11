@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from test_shift_delivery_details import (
@@ -46,6 +46,7 @@ from v3_fakes import FakeEditors
 from newsbot.collectors.base import ItemDetails, RawItem
 from newsbot.config import load_config
 from newsbot.pipeline.publisher import PublishError
+from newsbot.shift.details import DetailObservation
 from newsbot.shift.edits import edit_changed_alerts
 from newsbot.shift.fanout import FanoutDeps, deliver_queued_codes, detect_and_fan_out
 from newsbot.shift.sweep import EditForbiddenError, MessageGoneError
@@ -163,7 +164,7 @@ async def test_a_details_change_edits_every_servers_message_with_its_own_header(
 
     body = (
         f"**New SHiFT code**\n\n```\n{CODE_A}\n```\n"
-        f"3 Golden Keys · via {MENTALMARS}\n{GEARBOX} · <https://example.com/AAAA>"
+        f"3 Golden Keys · details via {MENTALMARS}\n{GEARBOX} · <https://example.com/AAAA>"
     )
     assert [(c.guild_id, c.channel_id, c.message_id, c.content) for c in h.editors.calls] == [
         (1, 100, 9001, f"@everyone {body}"),
@@ -196,6 +197,40 @@ async def test_an_edit_is_done_once_not_every_pass(h):
     assert len(h.editors.calls) == 1
 
 
+async def test_the_clock_alone_never_makes_an_alert_due_for_an_edit(h):
+    # An expiry shows as a date and Discord's own live timestamp, so the text never needs
+    # a refresh as the deadline nears (it once said "in 6 hours" and would have had to).
+    add_guild(h.db_path, 1, ping="everyone")
+    await h.run([item(CODE_A)])
+    obs = DetailObservation(
+        CODE_A,
+        ItemDetails(
+            code=CODE_A, rank="table", reward="3 Golden Keys", expires_on=date(2026, 10, 3)
+        ),
+        MENTALMARS,
+        None,
+    )
+    with closing(connect(h.db_path)) as conn:
+        repo.upsert_code_details(conn, [obs], now=NOW + HOUR)
+    h.clock = NOW + 2 * HOUR
+    await h.run([])
+    (call,) = h.editors.calls
+    stamp = int(
+        datetime(2026, 10, 4, 7, 0, tzinfo=UTC).timestamp()
+    )  # Oct 3 ends at Pacific midnight
+    assert f"expires Oct 3, 2026 (<t:{stamp}:R>)" in call.content
+
+    # Two days later, then the final hour, then after the deadline: nothing is due.
+    for moment in (
+        NOW + timedelta(days=2),
+        datetime(2026, 10, 4, 6, 30, tzinfo=UTC),
+        NOW + timedelta(days=9),
+    ):
+        h.clock = moment
+        await h.run([])
+    assert len(h.editors.calls) == 1
+
+
 async def test_a_message_of_several_codes_is_rerendered_whole_in_its_original_order(h):
     add_guild(h.db_path, 1, ping="everyone")
     h.reserve = BIG_RESERVE  # two to a message: A and B, then C
@@ -213,9 +248,9 @@ async def test_a_message_of_several_codes_is_rerendered_whole_in_its_original_or
     assert call.content.index(CODE_A) < call.content.index(CODE_B)
     assert CODE_C not in call.content
     assert f"Golden Key: {GEARBOX}" in call.content  # the batch was mixed, and still is
-    assert f"```\n{CODE_B}\n```\nA skin · via {MENTALMARS}\n{GEARBOX}" in call.content
+    assert f"```\n{CODE_B}\n```\nA skin · details via {MENTALMARS}\n{GEARBOX}" in call.content
     # The same blocks it went out with, plus the one new line.
-    assert call.content.replace(f"A skin · via {MENTALMARS}\n", "") == first_alert.content
+    assert call.content.replace(f"A skin · details via {MENTALMARS}\n", "") == first_alert.content
 
 
 async def test_only_the_servers_holding_the_changed_code_are_touched(h):

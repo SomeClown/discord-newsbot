@@ -187,11 +187,11 @@ class FanoutDeps:
 def reserve_for_config(cfg: AppConfig) -> int:
     """The per-code details reservation for `cfg`'s sources (`format.details_reserve`).
 
-    This is the config's floor. Delivery widens it each turn with the "via" names still
+    This is the config's floor. Delivery widens it each turn with the "details via" names still
     sitting in `code_details` rows (`stored_detail_source_names`), which can be longer than
     anything the config says today after a source is renamed.
 
-    Only a source that can supply details can put its name in a "via" clause: an
+    Only a source that can supply details can put its name in a "details via" clause: an
     official source (Gearbox's own posts, read by the official reader) or a
     `shift_table`. And only one that detection can ever read for a code: a source under a
     game in `shift.games` (empty means every game, the v2 reading), or a shared source that
@@ -520,7 +520,7 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                 if not deps.preview:
                     skip_queued_guild_codes(conn, guild_id, dead)
                 queued = [q for q in queued if q.code not in dead]
-            # Packing leaves room for the worst "via" line any name in the config, or
+            # Packing leaves room for the worst "details via" line any name in the config, or
             # still stored on a row, can make; a renamed source mustn't outgrow an edit.
             # `deps.details_reserve` is the config-only floor, and zero means reserving is
             # off (tests, mostly), so the stored names only widen a floor that's on.

@@ -470,7 +470,7 @@ def test_history_mixes_pre_and_post_3_1_0_codes_on_one_page():
     blocks = embed.description.split("\n\n")
     assert len(blocks) == 3
     assert blocks[0].count("\n") == 3  # fence (3 lines) and the source line, nothing more
-    assert "3 Golden Keys \u00b7 via mentalmars" in blocks[1]
+    assert "3 Golden Keys \u00b7 details via mentalmars" in blocks[1]
     assert "expired" in blocks[2]
 
 

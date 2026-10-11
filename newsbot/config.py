@@ -60,7 +60,7 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 _MAX_TOPICS = 24
 # v3 catalog cap: one Discord select menu holds 25 options, and there's no "All" in it.
 _MAX_CATALOG_GAMES = 25
-# A source's name goes into SHiFT alerts ("via mentalmars"), and an alert has to
+# A source's name goes into SHiFT alerts ("details via mentalmars"), and an alert has to
 # fit Discord's 2000 characters with the longest name we allow in it twice.
 # 100 is generous for a name and keeps that arithmetic from ever mattering.
 _MAX_SOURCE_NAME = 100
@@ -288,7 +288,7 @@ class ShiftTableSource(BaseModel):
     It's always codes-only: the page is read for SHiFT codes and what they
     give, and nothing on it is ever stored as news (`effective_codes_only`; an
     explicit `codes_only: false` is a config error). `name` is required and
-    can't be blank because it's what an alert says in "via mentalmars"; an
+    can't be blank because it's what an alert says in "details via mentalmars"; an
     anonymous table would make for a very confusing alert.
     """
 

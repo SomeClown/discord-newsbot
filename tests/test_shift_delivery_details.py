@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from test_shift_fanout import (
@@ -111,9 +111,13 @@ async def test_the_first_alert_carries_the_details_line(h):
     await h.run([with_details(item(CODE_A), CODE_A, expires_on=tomorrow)])
 
     (alert,) = h.sent(1)
-    assert f"```\n{CODE_A}\n```\n3 Golden Keys · expires tomorrow · via {GEARBOX}\n" in (
-        alert.content
-    )
+    # Oct 2 ends at Pacific midnight, Oct 3 00:00 PDT = 07:00 UTC; no "tomorrow" in the post.
+    stamp = int(datetime(2026, 10, 3, 7, 0, tzinfo=UTC).timestamp())
+    assert (
+        f"```\n{CODE_A}\n```\n3 Golden Keys · expires Oct 2, 2026 (<t:{stamp}:R>)"
+        f" · details via {GEARBOX}\n"
+    ) in alert.content
+    assert "tomorrow" not in alert.content
 
 
 async def test_a_code_without_details_posts_the_old_way(h):
@@ -379,7 +383,8 @@ async def test_a_followup_shows_details_and_writes_no_row(h):
 
     (followup,) = h.sent(1)
     assert followup.content == (
-        f"@everyone Confirmed by a second source:\n`{CODE_A}` · 3 Golden Keys · via {MENTALMARS}"
+        "@everyone Confirmed by a second source:\n"
+        f"`{CODE_A}` · 3 Golden Keys · details via {MENTALMARS}"
     )
     assert message_rows(h.db_path) == before
 

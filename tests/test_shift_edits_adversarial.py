@@ -385,7 +385,7 @@ async def test_an_edit_is_the_original_message_plus_details_lines_whatever_the_r
     for number, original in enumerate(originals):
         edited = h.editors.contents(9001 + number)[0]
         for code in original.codes:
-            edited = edited.replace(f"reward-{code[:1]} · via {MENTALMARS}\n", "")
+            edited = edited.replace(f"reward-{code[:1]} · details via {MENTALMARS}\n", "")
         assert edited == original.content
 
 
@@ -577,7 +577,7 @@ async def test_a_delivery_to_a_server_is_never_edited_before_it_is_recorded(h):
     await h.run([item(CODE_A), table_row(CODE_A, "3 Golden Keys")])
 
     assert h.editors.attempts == []  # the first render already had the line
-    assert "3 Golden Keys · via" in h.sent(1)[0].content
+    assert "3 Golden Keys · details via" in h.sent(1)[0].content
     assert datetime.fromisoformat(message_state(h.db_path)[0][3]) == NOW
 
 
@@ -1204,7 +1204,7 @@ async def test_a_flapping_via_name_is_one_edit_per_message_per_pass_and_a_steady
             [_row_from(x if n % 2 == 0 else y, CODE_A, "1 Key" if n % 2 == 0 else "2 Keys")]
         )
         assert len(h.editors.calls) - before == 2
-    assert f"via {y}" in h.editors.calls[-1].content
+    assert f"details via {y}" in h.editors.calls[-1].content
 
     # Both listed, in the same order every pass: it settles, and settled means silent.
     both = [_row_from(x, CODE_A, "1 Key"), _row_from(y, CODE_A, "2 Keys")]
@@ -1278,7 +1278,7 @@ async def test_a_later_real_change_that_makes_a_failed_message_fit_is_edited(h, 
     await h.run([])
 
     (call,) = h.editors.calls
-    assert call.content.count("short · via") == 8
+    assert call.content.count("short · details via") == 8
     await h.run([])
     assert len(h.editors.calls) == 1
 
@@ -1378,35 +1378,39 @@ def _line_at(h, when: datetime) -> str:
     return next(line for line in text.splitlines() if "expire" in line)
 
 
-async def test_a_relative_phrase_is_frozen_at_post_time_and_goes_on_being_wrong(h):
-    """Pins today's behavior: nothing refreshes "expires in N hours" unless a detail changes.
+async def test_a_posted_expiry_cannot_go_stale_because_discord_keeps_its_timestamp_current(h):
+    """Pins the 3.1.0 wording: a date and a live timestamp, so no edit is ever due for the clock.
 
-    NOW is 05:00 Pacific. The code expires at the end of that same Pacific day, so the alert
-    posts as "expires in 19 hours". The edit pass never runs for it again (no detail changed),
-    so the channel keeps saying 19 hours. How wrong that gets is bounded only by how long the
-    message sits there: after the code has expired it still says "expires in 19 hours", and
-    "expires tomorrow" is just as sticky, for the life of the message. An unrelated change later
-    (the reward arriving) re-renders with the clock of that moment, so it corrects itself then.
+    NOW is 05:00 Pacific. The code expires at the end of that same Pacific day. The alert
+    used to say "expires in 19 hours" and would have said so for the life of the message, since
+    nothing edits for the clock alone. It now says the date and a `<t:...:R>` that every
+    reader's Discord counts down by itself, so the text is the same at 05:00, at 19:00 and 13
+    days later, and there is nothing to go stale. A real change later re-renders the same
+    expiry text next to the new reward.
     """
     add_guild(h.db_path, 1, ping="none")
     await h.run([with_details(item(CODE_A), CODE_A, reward="", expires_on=date(2026, 10, 1))])
-    assert "expires in 19 hours" in h.sent(1)[0].content
+    stamp = int(datetime(2026, 10, 2, 7, 0, tzinfo=UTC).timestamp())  # Oct 1 ends: PDT midnight
+    expiry = f"expires Oct 1, 2026 (<t:{stamp}:R>)"
+    assert expiry in h.sent(1)[0].content
+    assert "expires in" not in h.sent(1)[0].content
 
     for hours in (5, 14, 20, 24 * 3, 24 * 13):
         h.clock = NOW + hours * HOUR
         await h.run([])
-    assert h.editors.attempts == []  # 13 days on, the channel still says "in 19 hours"
+    assert h.editors.attempts == []  # 13 days on, nothing is due and nothing is wrong
 
-    # What the same row would say if anyone asked: the truth drifts, the message does not.
-    assert _line_at(h, NOW + 14 * HOUR).startswith("expires in 5 hours")
-    assert _line_at(h, NOW + 20 * HOUR).startswith("expired")
+    # What the same row says whenever anyone asks: the same thing.
+    assert _line_at(h, NOW + 14 * HOUR).startswith(expiry)
+    assert _line_at(h, NOW + 14 * HOUR) == _line_at(h, NOW + 20 * HOUR)
 
-    # A real change refreshes everything on that line, the phrase included.
+    # A real change re-renders the line with the same expiry beside the new reward.
     learn(h, CODE_A, "3 Golden Keys", at=NOW + 24 * 13 * HOUR + HOUR)
     h.clock = NOW + 24 * 13 * HOUR + 2 * HOUR
     await h.run([])
-    assert "expired" in h.editors.calls[0].content
-    assert "expires in 19 hours" not in h.editors.calls[0].content
+    assert expiry in h.editors.calls[0].content
+    assert "3 Golden Keys" in h.editors.calls[0].content
+    assert "expired" not in h.editors.calls[0].content
 
 
 # =====================================================================================

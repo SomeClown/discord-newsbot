@@ -549,7 +549,7 @@ async def test_mentalmars_confirming_a_community_code_within_a_day_queues_the_on
     # Task 7: a follow-up shows the details as they stand when it's sent.
     assert h.sent(1)[0].content == (
         f"@everyone Confirmed by a second source:\n`{X}` · 3 Golden Keys"
-        " · expires Oct 30, 2026 · via mentalmars"
+        " · expires Oct 30, 2026 (<t:1793430000:R>) · details via mentalmars"
     )
     assert rows(h.db_path, "SELECT guild_id, code, status, pinged FROM guild_code_followups") == [
         (1, X, "posted", 1)

@@ -65,6 +65,11 @@ def _line(now=NOW, **kwargs) -> str | None:
     return details_line(_row(**kwargs), now=now)
 
 
+def _rel(now=NOW, **kwargs) -> str | None:
+    """The `/shift history` flavor of the line: relative wording, fresh on every call."""
+    return details_line(_row(**kwargs), now=now, relative=True)
+
+
 # --- what counts as live ---
 
 _LIVE = {
@@ -275,6 +280,9 @@ def test_known_defusers_still_work_on_the_checker_itself():
 def test_angle_bracket_tokens_other_than_mentions_do_not_render_live(token):
     line = _line(reward=f"2 Golden Keys {token}")
     assert not re.search(r"<(?:t:|a?:\w+:\d+>|id:)", line), line
+    # With an expiry the bot adds its own timestamp, and that one is the only live token.
+    dated = _line(reward=f"2 Golden Keys {token}", expires_on=date(2026, 10, 14))
+    assert re.findall(r"<(?:t:|a?:\w+:\d+>|id:)[^>]*>", dated) == ["<t:1792047600:R>"], dated
 
 
 # --- bidirectional controls ---
@@ -292,7 +300,7 @@ def test_nested_isolates_and_overrides_all_go():
 
 def test_an_unclosed_override_in_front_of_a_family_leaves_the_family_whole():
     line = _line(reward="\u202e" + FAMILY + " keys", reward_from="mentalmars")
-    assert line == FAMILY + " keys \u00b7 via mentalmars"
+    assert line == FAMILY + " keys \u00b7 details via mentalmars"
 
 
 def test_stripping_can_bring_a_reward_back_under_the_cap_without_an_ellipsis():
@@ -405,7 +413,7 @@ def test_the_wording_matches_an_independent_oracle_every_five_minutes(start, exp
     seen = []
     for k in range(0, 4 * 24 * 12):
         now = t + timedelta(minutes=5 * k)
-        phrase = _line(now=now, expires_on=expires)
+        phrase = _rel(now=now, expires_on=expires)
         assert phrase == _oracle(expires, now), now.astimezone(PT).isoformat()
         if not seen or seen[-1] != phrase:
             seen.append(phrase)
@@ -477,22 +485,36 @@ def test_the_wording_matches_an_independent_oracle_every_five_minutes(start, exp
     ],
 )
 def test_wording_at_the_boundaries(now, expires, expected):
-    assert _line(now=now, expires_on=expires) == expected
+    assert _rel(now=now, expires_on=expires) == expected
 
 
 def test_a_passed_expiry_says_expired_with_everything_else_intact():
-    line = _line(
+    line = _rel(
         reward="3 Golden Keys",
         reward_from="mentalmars",
         expires_on=date(2026, 10, 1),
         expires_from="Gearbox Blog",
     )
-    assert line == "3 Golden Keys \u00b7 expired \u00b7 via mentalmars and Gearbox Blog"
+    assert line == "3 Golden Keys \u00b7 expired \u00b7 details via mentalmars and Gearbox Blog"
+    # Persisted messages never say "expired": the date, and Discord's timestamp, do that job.
+    posted = _line(
+        reward="3 Golden Keys",
+        reward_from="mentalmars",
+        expires_on=date(2026, 10, 1),
+        expires_from="Gearbox Blog",
+    )
+    assert posted == (
+        "3 Golden Keys \u00b7 expires Oct 1, 2026 (<t:1790924400:R>)"
+        " \u00b7 details via mentalmars and Gearbox Blog"
+    )
 
 
 def test_a_passed_expiry_alone_is_still_a_line():
+    assert _rel(expires_on=date(2020, 1, 1), expires_from="mentalmars") == (
+        "expired \u00b7 details via mentalmars"
+    )
     assert _line(expires_on=date(2020, 1, 1), expires_from="mentalmars") == (
-        "expired \u00b7 via mentalmars"
+        "expires Jan 1, 2020 (<t:1577952000:R>) \u00b7 details via mentalmars"
     )
 
 
@@ -508,17 +530,26 @@ def test_a_permanent_code_with_any_expiry_says_permanent_and_never_expired(expir
         expires_on=expires,
         expires_from="Gearbox Blog",
     )
-    assert line == "Head \u00b7 permanent \u00b7 via mentalmars"
+    assert line == "Head \u00b7 permanent \u00b7 details via mentalmars"
+    assert line == _rel(
+        reward="Head",
+        reward_from="mentalmars",
+        category="permanent",
+        category_from="mentalmars",
+        expires_on=expires,
+        expires_from="Gearbox Blog",
+    )
 
 
 @pytest.mark.parametrize(
     ("expires", "expected"),
     [
-        (date(2028, 2, 29), "expires Feb 29, 2028"),
-        (date(2026, 12, 31), "expires Dec 31, 2026"),
-        (date(2027, 1, 1), "expires Jan 1, 2027"),
-        (date(2099, 9, 30), "expires Sep 30, 2099"),
-        (date(9999, 12, 31), "expires Dec 31, 9999"),
+        # Each timestamp is the Pacific midnight that ends the day, worked out by hand.
+        (date(2028, 2, 29), "expires Feb 29, 2028 (<t:1835510400:R>)"),  # Mar 1 08:00 UTC
+        (date(2026, 12, 31), "expires Dec 31, 2026 (<t:1798790400:R>)"),  # Jan 1 08:00 UTC
+        (date(2027, 1, 1), "expires Jan 1, 2027 (<t:1798876800:R>)"),
+        (date(2099, 9, 30), "expires Sep 30, 2099 (<t:4094521200:R>)"),  # Oct 1 07:00 UTC
+        (date(9999, 12, 31), "expires Dec 31, 9999"),  # too far out for a token
     ],
 )
 def test_far_dates_read_as_dates(expires, expected):
@@ -561,9 +592,9 @@ def test_followup_lines_use_the_same_wording_as_alerts():
     details = {code: _row(code, reward="r", expires_on=date(2026, 10, 10))}
     fit = fit_followup_codes([code], ping_mention="@everyone", details=details, now=NOW)
     alert = render_followup_alert(fit, ping_mention="@everyone", details=details, now=NOW)
-    assert (
-        alert.content
-        == f"@everyone Confirmed by a second source:\n`{code}` \u00b7 r \u00b7 expires tomorrow"
+    assert alert.content == (
+        "@everyone Confirmed by a second source:\n"
+        f"`{code}` \u00b7 r \u00b7 expires Oct 10, 2026 (<t:1791702000:R>)"
     )
 
 

@@ -33,7 +33,7 @@ from newsbot.bot.format import (
 from newsbot.shift.decide import CodeCandidate
 from newsbot.store.models import CodeDetailsRow
 
-NOW = datetime(2026, 10, 10, 6, 30, tzinfo=UTC)  # 23:30 PDT Oct 9: "expires in under an hour"
+NOW = datetime(2026, 10, 10, 6, 30, tzinfo=UTC)  # 23:30 PDT on Oct 9
 ROLE20 = "<@&" + "1" * 20 + ">"
 FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
 BIDI = "\u202e\u2066"
@@ -103,13 +103,13 @@ def _worst(code: str, name_a: str, name_b: str, reward: str) -> CodeDetailsRow:
         code,
         reward=reward,
         reward_from=name_a,
-        expires_on=date(2026, 10, 9),  # "expires in under an hour" at NOW, the longest phrase
+        expires_on=date(5000, 12, 31),  # the widest date, with an 11-digit timestamp
         expires_from=name_b,
     )
 
 
 def _twin(name: str) -> str:
-    """A different name that is exactly as long once escaped (so "via A and B" is the worst)."""
+    """A different name exactly as long once escaped (so "details via A and B" is the worst)."""
     return name.replace("*", "_").replace("x", "y").replace("e", "i") or name
 
 
@@ -136,9 +136,13 @@ def test_one_unit_past_the_cap_is_cut_to_fit_with_an_ellipsis(reward):
 
 
 def test_the_longest_expiry_phrase_is_what_the_reserve_assumed():
-    line = details_line(_row(_code(0), expires_on=date(2026, 10, 9)), now=NOW)
-    assert line == "expires in under an hour"
-    assert discord_len(line) == 24
+    # A date plus an 11-digit live timestamp: " (<t:", the digits, ":R>)" after the date.
+    line = details_line(_row(_code(0), expires_on=date(5000, 12, 31)), now=NOW)
+    assert line == "expires Dec 31, 5000 (<t:95649148800:R>)"
+    assert discord_len(line) == 40
+    now_ish = details_line(_row(_code(0), expires_on=date(2026, 10, 14)), now=NOW)
+    assert now_ish == "expires Oct 14, 2026 (<t:1792047600:R>)"
+    assert discord_len(now_ish) == 39  # today's timestamps are one digit short of the reserve
 
 
 # --- first render, with the worst details already present ---
@@ -436,4 +440,4 @@ def test_the_same_roundup_with_the_detailed_code_first_already_sheds_the_link():
 def test_reserve_counts_names_as_shown(name):
     shown = discord_len(esc(NAMES[name]))
     assert shown <= 200
-    assert details_reserve([NAMES[name]]) == 1 + 300 + 3 + 24 + 7 + shown + 5 + shown
+    assert details_reserve([NAMES[name]]) == 1 + 300 + 3 + 40 + 15 + shown + 5 + shown

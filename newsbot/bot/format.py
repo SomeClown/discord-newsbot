@@ -381,14 +381,19 @@ def render_story_page(
 # stretch a reservation that was sized in good faith).
 _DETAIL_SHOWN_MAX = 300
 _VIA_NAME_MAX = 100
-# The longest expiry phrase: "expires in under an hour" (24). "expires Sep 30, 2026" is 20.
-_EXPIRY_PHRASE_MAX = 24
+# The longest expiry phrase an alert can carry: "expires Sep 30, 2026" (20), then the live
+# timestamp, " (<t:" and ":R>)" around up to 11 digits. A timestamp today is 10 digits (it
+# stays 10 until the year 2286); the 11th is room I'm keeping in case I'm wrong about that.
+_EXPIRY_DATE_MAX = 20
+_STAMP_OPEN, _STAMP_CLOSE = " (<t:", ":R>)"
+_STAMP_DIGITS_MAX = 11
+_EXPIRY_PHRASE_MAX = _EXPIRY_DATE_MAX + len(_STAMP_OPEN) + _STAMP_DIGITS_MAX + len(_STAMP_CLOSE)
 _DETAIL_SEP = " · "
-_DETAIL_VIA = " · via "
+_DETAIL_VIA = " · details via "
 _DETAIL_AND = " and "
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 # Bidirectional overrides and isolates (U+202A to U+202E, U+2066 to U+2069). A reward
-# that opens one without closing it can make the rest of the line read backwards, "via"
+# that opens one without closing it can make the rest of the line read backwards, "details via"
 # names included. Only these: the zero-width joiner holds emoji sequences together, and
 # the other invisible characters are somebody else's problem.
 _BIDI_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
@@ -451,8 +456,35 @@ def _expiry_phrase(
     return f"expires {_short_date(due)}"
 
 
+def _live_expiry(row: CodeDetailsRow | None) -> str | None:
+    """A code's expiry as a posted message says it: the date, then a live Discord timestamp.
+
+    `expires Oct 14, 2026 (<t:1792047600:R>)`. The date is the Pacific calendar day the
+    sources gave; the timestamp is the instant that day ends (`end_of_day`, Unix seconds),
+    and Discord keeps its "in 6 hours" current for every reader, in their own language, long
+    after the message was written. That is why a posted alert never says "in 6 hours" itself:
+    it would be wrong by lunchtime. A permanent code says "permanent", as it always did.
+
+    The token is built here, from an integer the bot computed, and is never passed through
+    `esc()` (which defuses `<t:` on purpose, so scraped text can't forge one). A date so
+    far out that its timestamp wouldn't fit the reserve's 11 digits (only a hand-edited row
+    gets there; the readers stop at 2100) shows as the date alone.
+    """
+    if row is None:
+        return None
+    if row.category == "permanent":
+        return "permanent"
+    if row.expires_on is None:
+        return None
+    phrase = f"expires {_short_date(row.expires_on)}"
+    stamp = int(end_of_day(row.expires_on).timestamp())
+    if 0 < stamp < 10**_STAMP_DIGITS_MAX:
+        phrase += f"{_STAMP_OPEN}{stamp}{_STAMP_CLOSE}"
+    return phrase
+
+
 def _via_name(name: str) -> str:
-    """A source name as "via" shows it: at most 100 characters, cut with a "…" if it was longer.
+    """A source name as "details via" shows it: 100 characters at most, cut with a "…" if longer.
 
     Config and `clean_observation` both hold names to 100 characters, so this only ever
     trims a row stored under an older, longer name (or edited by hand). It's here because
@@ -466,22 +498,38 @@ def _via_name(name: str) -> str:
 
 
 def details_line(
-    details: CodeDetailsRow | None, *, now: datetime, show_expiry: bool = True
+    details: CodeDetailsRow | None,
+    *,
+    now: datetime,
+    show_expiry: bool = True,
+    relative: bool = False,
 ) -> str | None:
-    """The line under an alert's code: `3 Golden Keys · expires Oct 14, 2026 · via mentalmars`.
+    """The line under a code.
+
+    For example `3 Golden Keys · expires Oct 14, 2026 (<t:1792047600:R>) · details via mentalmars`.
 
     None when there's neither a reward nor an expiry to show, so an alert looks as it
-    always did until details exist. "via" names whoever supplied what's shown (both
+    always did until details exist. "details via" names whoever supplied what's shown (both
     names, in reward-then-expiry order, when they differ); a permanent code's "expiry"
-    credits whoever set its category. Everything scraped goes through `esc()`, and
-    `now` is only used to decide how soon is soon (Pacific time, see `_expiry_phrase`).
-    `show_expiry=False` leaves the expiry (and its "via") out; `/shift history` uses it for a
-    code whose marker already says "expired", so the page says it once.
+    credits whoever set its category. Everything scraped goes through `esc()`; the
+    timestamp is the bot's own and goes in after it (see `_live_expiry`).
+
+    This is the persisted wording: alerts, edits, follow-ups and roundups all stay in a
+    channel for good, so their expiry is a date plus a timestamp Discord keeps current.
+    `relative=True` is for a page drawn fresh on every call (`/shift history`): its expiry
+    reads "expires in 6 hours" or "expires tomorrow" against `now` (Pacific time, see
+    `_expiry_phrase`). `show_expiry=False` leaves the expiry (and its credit) out; history
+    uses it for a code whose marker already says "expired", so the page says it once.
     """
     if details is None:
         return None
     reward = _detail_text(details.reward)
-    expiry = _expiry_phrase(details, now) if show_expiry else None
+    if not show_expiry:
+        expiry = None
+    elif relative:
+        expiry = _expiry_phrase(details, now)
+    else:
+        expiry = _live_expiry(details)
     if not reward and expiry is None:
         return None
     parts: list[str] = []
@@ -505,10 +553,11 @@ def details_reserve(names: Iterable[str]) -> int:
     """The most room (UTF-16 units) one code's details line can ever take, newline included.
 
     `names` is every source name that can supply details (see plan §3.4). The line at its
-    worst is a 300-unit reward, the longest expiry phrase, and "via" two of the longest
-    names. The alert packer sets this much aside per code whether or not the code has
-    details yet, which is what lets an edit land later without the message outgrowing
-    Discord's cap. A test pins `details_line` under this for hostile input.
+    worst is a 300-unit reward, the longest expiry phrase (a date and an 11-digit live
+    timestamp), and "details via" two of the longest names. The alert packer sets this
+    much aside per code whether or not the code has details yet, which is what lets an
+    edit land later without the message outgrowing Discord's cap. A test pins
+    `details_line` under this for hostile input.
     """
     # A name longer than 100 characters is never drawn whole (`_via_name`), so the reserve
     # sizes it at 100 and a stored legacy monster can't inflate every alert's slot.
@@ -565,7 +614,7 @@ def _code_page_block(
     # `/shift history` (it passes `now`) also shows the details line under the source line.
     # It never sheds: it's capped, and it's the point.
     line = (
-        details_line(view.details, now=now, show_expiry=marker != "expired")
+        details_line(view.details, now=now, show_expiry=marker != "expired", relative=True)
         if now is not None
         else None
     )
@@ -1188,8 +1237,8 @@ def render_followup_alert(
     server scope, so Discord can't mistake this for the original alert's send.
 
     When any code has a details line (`details`, read against `now`), the message
-    becomes one line per code, `` `CODE` · 3 Golden Keys · expires tomorrow ``, as the
-    details stand right now. Nothing edits a follow-up, so it isn't given a reserve;
+    becomes one line per code, `` `CODE` · 3 Golden Keys · expires Oct 14, 2026 (<t:...:R>) ``,
+    as the details stand right now. Nothing edits a follow-up, so it isn't given a reserve;
     `fit_followup_codes` picks how many codes fit by their real size.
     """
     if not codes or len(codes) > FOLLOWUP_MAX_CODES:

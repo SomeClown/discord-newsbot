@@ -885,7 +885,7 @@ async def test_hostile_reward_text_never_adds_a_ping_or_breaks_the_fences(h, hos
 # --- 4. the reserve ---
 
 PACIFIC_LATE = datetime(2026, 10, 2, 6, 30, tzinfo=UTC)  # 23:30 on Oct 1 in Los Angeles
-LONGEST_PHRASE_DAY = date(2026, 10, 1)  # "expires in under an hour" at PACIFIC_LATE
+LONGEST_PHRASE_DAY = date(5000, 12, 31)  # the widest date, with an 11-digit timestamp
 
 
 def with_sources(cfg, *, catalog=None, shared=None, trust=None):
@@ -911,7 +911,7 @@ def table_source(name):
 
 
 def worst_row(code, *, reward_from, expires_from, reward=None):
-    """The biggest details row a code can have: 300 shown units, an expiry, two "via" names."""
+    """The biggest details row a code can have: 300 shown units, an expiry, two source names."""
     return repo.CodeDetailsRow(
         code=code,
         clock_start=NOW,
@@ -930,7 +930,7 @@ def test_a_config_with_no_official_or_table_source_still_reserves_a_nameless_lin
     quiet = with_sources(cfg, trust="community")
 
     assert reserve_for_config(quiet) == details_reserve([])
-    assert reserve_for_config(quiet) == 1 + 300 + 3 + 24 + 7 + 5  # every part but the names
+    assert reserve_for_config(quiet) == 1 + 300 + 3 + 40 + 15 + 5  # every part but the names
 
 
 def test_a_config_with_no_sources_at_all_does_not_crash_the_reserve(cfg):
@@ -950,10 +950,10 @@ def test_the_reserve_with_a_100_character_markdown_name_is_exactly_the_worst_lin
 
     reserve = reserve_for_config(wide)
 
-    assert reserve == 1 + 300 + 3 + 24 + 7 + 200 + 5 + 200 == 740
+    assert reserve == 1 + 300 + 3 + 40 + 15 + 200 + 5 + 200 == 764
     row = worst_row(CODE_A, reward_from=STAR_NAME, expires_from=other)
     line = details_line(row, now=PACIFIC_LATE)
-    assert "expires in under an hour" in line
+    assert "expires Dec 31, 5000 (<t:95649148800:R>)" in line
     assert discord_len(line) + 1 == reserve  # tight to the unit: nothing to spare, nothing over
 
 
@@ -1404,21 +1404,23 @@ async def test_details_that_change_between_passes_show_as_they_stand_in_each_fol
     await h.run([])
 
     second = [a for a in h.sent(1) if "Confirmed" in a.content][1]
-    assert f"`{codes[5]}` · Now: 9 Golden Keys · via {MENTALMARS}" in second.content
+    assert f"`{codes[5]}` · Now: 9 Golden Keys · details via {MENTALMARS}" in second.content
     assert f"`{codes[6]}` · {LONG_REWARD}" in second.content
 
 
-async def test_an_expiry_phrase_is_recomputed_for_a_followup_that_waited_a_day(h):
+async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(6)
     await first_pass_and_confirm(h, codes)  # 5 sent at Oct 2 01:00 Pacific; codes[5] waits
-    store_expiry(h.db_path, codes[5], date(2026, 10, 3), now=h.clock)  # "tomorrow" today
+    store_expiry(h.db_path, codes[5], date(2026, 10, 3), now=h.clock)
 
     h.clock += timedelta(days=1, hours=18)  # Oct 3 19:00 Pacific
     await h.run([])
 
     last = [a for a in h.sent(1) if "Confirmed" in a.content][-1]
-    assert "expires in 5 hours" in last.content
+    # Oct 3 ends at Pacific midnight, Oct 4 00:00 PDT = 07:00 UTC; Discord does the counting.
+    assert "expires Oct 3, 2026 (<t:1791097200:R>)" in last.content
+    assert "expires in" not in last.content and "tomorrow" not in last.content
 
 
 async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows(h):
@@ -1434,7 +1436,7 @@ async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows
     assert followup.content == (
         f"<@&{ROLE}> Confirmed by a second source:\n"
         f"`{codes[0]}`\n"
-        f"`{codes[1]}` · A skin · via {MENTALMARS}\n"
+        f"`{codes[1]}` · A skin · details via {MENTALMARS}\n"
         f"`{codes[2]}`"
     )
 

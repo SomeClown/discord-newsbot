@@ -164,11 +164,25 @@ def test_the_year_shows_when_it_is_not_this_pacific_year():
     assert entry.endswith("Skin · expires Jan 3, 2027 (in 86 days)")
 
 
-def test_near_expiries_read_like_the_alerts():
+def test_near_expiries_keep_their_relative_wording_that_alerts_no_longer_have():
     hours = _entry_of(_current(1, {"reward": "x", "expires_on": date(2026, 10, 9)}))
     tomorrow = _entry_of(_current(2, {"reward": "x", "expires_on": date(2026, 10, 10)}))
     assert hours.endswith("x · expires in 12 hours")
     assert tomorrow.endswith("x · expires tomorrow")
+
+
+def test_shift_codes_is_relative_all_the_way_and_has_no_live_timestamp():
+    # `/shift codes` is drawn fresh on every call, so it can say "in 12 hours" and mean it.
+    entries = [
+        _current(1, {"reward": "x", "expires_on": date(2026, 10, 9)}),
+        _current(2, {"reward": "x", "expires_on": date(2026, 10, 10)}),
+        _current(3, {"reward": "x", "expires_on": date(2026, 10, 14)}),
+    ]
+    text = _all_text(_pages(entries))
+    assert "expires in 12 hours" in text
+    assert "expires tomorrow" in text
+    assert "expires Oct 14 (in 5 days)" in text
+    assert "<t:" not in text
 
 
 def test_unknowns_say_so():
@@ -340,8 +354,21 @@ def test_history_shows_the_details_line_under_the_source_line():
     [embed] = _history([view])
     assert embed.description == (
         f"```\n{_code(1)}\n```\nFirst seen 2026-09-25 · Gearbox Blog · <https://e.com/a>\n"
-        "3 Golden Keys · via mentalmars"
+        "3 Golden Keys · details via mentalmars"
     )
+
+
+def test_history_keeps_its_relative_wording_and_has_no_live_timestamp():
+    views = [
+        _view(1, {"reward": "x", "reward_from": "m", "expires_on": date(2026, 10, 9)}),
+        _view(2, {"reward": "x", "reward_from": "m", "expires_on": date(2026, 10, 10)}),
+        _view(3, {"reward": "x", "reward_from": "m", "expires_on": date(2026, 10, 14)}),
+    ]
+    [embed] = _history(views)
+    assert "x · expires in 12 hours · details via m" in embed.description
+    assert "x · expires tomorrow · details via m" in embed.description
+    assert "x · expires Oct 14, 2026 · details via m" in embed.description
+    assert "<t:" not in embed.description
 
 
 def test_history_without_details_looks_like_before():
@@ -420,4 +447,4 @@ def test_history_empty_and_title():
 def test_history_bidi_in_a_reward_is_stripped():
     view = _view(1, {"reward": f"Gold{BIDI}en Key", "reward_from": "m"})
     [embed] = _history([view])
-    assert "Golden Key · via m" in embed.description
+    assert "Golden Key · details via m" in embed.description

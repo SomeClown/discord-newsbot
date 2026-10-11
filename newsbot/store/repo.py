@@ -2527,7 +2527,7 @@ def _details_or_skip(
 
 
 def stored_detail_source_names(conn: sqlite3.Connection) -> list[str]:
-    """Every source name a `code_details` row can still say "via", whatever the config says now.
+    """Every source name a `code_details` row can still credit, whatever the config says now.
 
     A row keeps the name it was stored with for good, so a source renamed to something
     shorter leaves its old, longer name behind in old rows. The packing reserve has to cover

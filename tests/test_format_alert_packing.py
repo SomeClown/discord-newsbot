@@ -10,6 +10,8 @@ loud ValueError and not a quiet "…".
 
 from __future__ import annotations
 
+import random
+import re
 from datetime import UTC, date, datetime
 
 import pytest
@@ -63,7 +65,9 @@ def _worst_row(code: str, name_a: str, name_b: str, *, reward: str = "x" * 300) 
         code,
         reward=reward,
         reward_from=name_a,
-        expires_on=date(2026, 10, 9),  # "expires in under an hour" at NOW, the longest phrase
+        expires_on=date(
+            2026, 10, 9
+        ),  # a real date and timestamp; the reserve is sized for 11 digits
         expires_from=name_b,
     )
 
@@ -75,7 +79,9 @@ def test_details_line_sits_between_the_fence_and_the_source_line():
     c = _candidate()
     row = _row(c.code, reward="3 Golden Keys", reward_from="mentalmars")
     [alert] = render_code_alerts([c], ping=False, details={c.code: row}, now=NOW)
-    assert f"```\n{c.code}\n```\n3 Golden Keys · via mentalmars\nGearbox Blog" in alert.content
+    assert (
+        f"```\n{c.code}\n```\n3 Golden Keys · details via mentalmars\nGearbox Blog" in alert.content
+    )
 
 
 def test_a_code_with_no_details_gets_no_extra_line():
@@ -210,6 +216,107 @@ def test_a_line_bigger_than_the_reserve_is_packed_at_its_real_size():
     assert all(discord_len(a.content) <= 2000 for a in alerts)
 
 
+def test_property_any_edit_with_worst_case_details_fits_the_message_it_was_packed_for():
+    # Random names (markdown-heavy included), rewards, dates (an 11-digit timestamp among
+    # them) and links: whatever the packing decided, the edit has to come out under 2,000.
+    rng = random.Random(20261011)  # noqa: S311 (a seeded shuffle, not a secret)
+    pieces = ["*", "_", "x", "\U0001f600", "@everyone", "<t:1:R>", "[", "](", " ", "Gearbox"]
+    due_dates = [date(2026, 10, 9), date(2026, 12, 31), date(2100, 12, 31), date(5000, 12, 31)]
+    for _ in range(40):
+        names = ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 100)))[:100]] * 2
+        names[1] = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 100)))[:100]
+        reserve = details_reserve(names)
+        batch = [
+            _candidate(
+                i,
+                golden=rng.random() < 0.5,
+                source_name=rng.choice(names),
+                item_url="https://example.com/" + "a" * rng.randint(0, 300),
+            )
+            for i in range(rng.randint(1, 25))
+        ]
+        by_code = {c.code: c for c in batch}
+        ping = rng.random() < 0.5
+        alerts = render_code_alerts(batch, ping=ping, ping_mention=ROLE, reserve=reserve)
+        for alert in alerts:
+            details = {
+                code: _row(
+                    code,
+                    reward="".join(rng.choice(pieces) for _ in range(rng.randint(0, 400))),
+                    reward_from=names[0],
+                    expires_on=rng.choice(due_dates),
+                    expires_from=names[1],
+                )
+                for code in alert.codes
+            }
+            edited = render_alert_edit(
+                alert.header,
+                [by_code[code] for code in alert.codes],
+                golden_prefix=alert.golden_prefix,
+                details=details,
+                now=NOW,
+            )
+            assert discord_len(edited) <= 2000
+
+
+# --- no relative words in anything that stays in a channel ---
+
+TOKEN_RE = re.compile(r"<t:(\d+):R>")
+RELATIVE_WORDS_RE = re.compile(r"expires in|tomorrow|expired|\bhours?\b|\bago\b", re.IGNORECASE)
+
+
+def _dated_rows(codes, due):
+    return {
+        c: _row(c, reward="3 Golden Keys", reward_from="mentalmars", expires_on=due) for c in codes
+    }
+
+
+def test_alerts_edits_followups_and_roundups_carry_a_date_and_a_live_timestamp_only():
+    # Oct 9 is the last day at NOW: the old wording was "expires in under an hour".
+    batch = [_candidate(i) for i in range(2)]
+    codes = [c.code for c in batch]
+    details = _dated_rows(codes, date(2026, 10, 9))
+    stamp = int(datetime(2026, 10, 10, 7, 0, tzinfo=UTC).timestamp())  # Pacific midnight
+    expected = f"3 Golden Keys · expires Oct 9, 2026 (<t:{stamp}:R>) · details via mentalmars"
+
+    [alert] = render_code_alerts(batch, ping=False, details=details, now=NOW)
+    edited = render_alert_edit(alert.header, batch, golden_prefix=False, details=details, now=NOW)
+    followup = render_followup_alert(codes, ping_mention="@everyone", details=details, now=NOW)
+    [roundup] = render_roundup_alerts(
+        [_candidate(i, roundup=True, item_url=POST) for i in range(2)], details=details, now=NOW
+    )
+    for content in (alert.content, edited, followup.content, roundup.content):
+        assert content.count(expected) == 2
+        assert not RELATIVE_WORDS_RE.search(content), content
+        assert TOKEN_RE.findall(content) == [str(stamp)] * 2
+    assert edited == alert.content
+
+
+def test_the_edit_pass_text_does_not_move_with_the_clock():
+    # Nothing in a posted message depends on `now`, so there is no reason to edit it later.
+    c = _candidate()
+    details = _dated_rows([c.code], date(2026, 10, 9))
+    later = datetime(2026, 10, 20, tzinfo=UTC)
+    [soon] = render_code_alerts([c], ping=False, details=details, now=NOW)
+    [past] = render_code_alerts([c], ping=False, details=details, now=later)
+    assert soon.content == past.content
+
+
+def test_a_forged_timestamp_in_a_reward_stays_defused_beside_the_bots_own():
+    c = _candidate()
+    forged = "<t:1:R>"
+    row = _row(
+        c.code,
+        reward=forged,
+        reward_from=forged,
+        expires_on=date(2026, 10, 14),
+        expires_from=forged,
+    )
+    [alert] = render_code_alerts([c], ping=False, details={c.code: row}, now=NOW)
+    assert TOKEN_RE.findall(alert.content) == ["1792047600"]
+    assert "<\u200bt:1:R>" in alert.content
+
+
 # --- shedding ---
 
 
@@ -283,7 +390,7 @@ def test_an_edit_adds_the_details_that_arrived_after_the_post():
     edited = render_alert_edit(
         original.header, [c], golden_prefix=False, details={c.code: row}, now=NOW
     )
-    assert "3 Golden Keys · via mentalmars" in edited
+    assert "3 Golden Keys · details via mentalmars" in edited
     assert "3 Golden Keys" not in original.content
 
 
@@ -317,8 +424,8 @@ def test_roundups_show_details_at_their_real_size_without_a_reserve():
     batch = [_candidate(i, roundup=True, item_url=POST) for i in range(3)]
     details = {batch[0].code: _row(batch[0].code, reward="3 Golden Keys", reward_from="mentalmars")}
     [alert] = render_roundup_alerts(batch, details=details, now=NOW)
-    assert f"```\n{batch[0].code}\n```\n3 Golden Keys · via mentalmars" in alert.content
-    assert alert.content.count("via") == 1
+    assert f"```\n{batch[0].code}\n```\n3 Golden Keys · details via mentalmars" in alert.content
+    assert alert.content.count("details via") == 1
     assert alert.ping is False
     assert alert.header.startswith("**SHiFT codes from a roundup**")
 
@@ -357,7 +464,7 @@ def test_followup_with_details_is_one_line_per_code():
     alert = render_followup_alert(codes, ping_mention=ROLE, details=details, now=NOW)
     assert alert.content == (
         f"{ROLE} Confirmed by a second source:\n"
-        f"`{codes[0]}` · 3 Golden Keys · via mentalmars\n"
+        f"`{codes[0]}` · 3 Golden Keys · details via mentalmars\n"
         f"`{codes[1]}`"
     )
     assert alert.ping is True
