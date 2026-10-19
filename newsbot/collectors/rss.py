@@ -17,7 +17,8 @@ import asyncio
 import calendar
 import ipaddress
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import struct_time
@@ -122,25 +123,57 @@ def _describe_retry_after(response: httpx.Response, seconds: float | None) -> st
     return response.headers.get("retry-after") or "none"
 
 
-async def _fetch_body(
+_CONDITIONAL_HEADERS = frozenset({"if-none-match", "if-modified-since"})
+
+
+def _asked_for_304(request_headers: Mapping[str, str]) -> bool:
+    """Whether the request carried a conditional header, which is what makes a 304 an answer."""
+    return any(name.lower() in _CONDITIONAL_HEADERS for name in request_headers)
+
+
+@dataclass(frozen=True, slots=True)
+class Fetched:
+    """What `_fetch` got back: the status, the (capped) body and the page's cache validators.
+
+    A 304 comes back with an empty `body`; it's an answer, not an error, but only to a
+    caller that sent `If-None-Match` or `If-Modified-Since` (`_asked_for_304`). A 304 to
+    anyone else is a server being strange, and it raises like any other non-2xx.
+    """
+
+    status: int
+    body: bytes
+    etag: str | None
+    last_modified: str | None
+
+
+async def _fetch(
     http: httpx.AsyncClient,
     url: str,
     *,
     sleep: Callable[[float], Awaitable[None]],
     retry_429: bool = True,
     source_name: str | None = None,
-) -> bytes:
-    """Fetch `url`'s body, streamed and capped at `_MAX_RESPONSE_BYTES`, retrying 429s.
+    headers: Mapping[str, str] | None = None,
+) -> Fetched:
+    """Fetch `url`, streamed and capped at `_MAX_RESPONSE_BYTES`, retrying 429s.
 
     With `retry_429` off, a 429 raises `RateLimited` straight away instead of
     asking again: that's Reddit's mode, where the right response to "slow
     down" is to stop for the whole pass, not to try again in three seconds.
+    `headers` are extras laid over the standard identifying ones (the conditional
+    request headers, for the one caller that sends them). A 304 to a request that
+    carried one of those is returned, not raised, with an empty body; to any other
+    request it's an error (`raise_for_status`), because "nothing changed" is an
+    answer to a question nobody asked.
     """
     attempts = 1 + len(_RETRY_BACKOFFS_S) if retry_429 else 1
+    request_headers = {**_HEADERS, **(headers or {})}
     for attempt in range(attempts):
         if attempt:
             await sleep(_RETRY_BACKOFFS_S[attempt - 1])
-        async with http.stream("GET", url, headers=_HEADERS, follow_redirects=True) as response:
+        async with http.stream(
+            "GET", url, headers=request_headers, follow_redirects=True
+        ) as response:
             await _reject_private_redirect(response)
             if response.status_code == 429 and attempt < attempts - 1:
                 continue
@@ -154,6 +187,10 @@ async def _fetch_body(
                     extra={"source_name": source_name, "retry_after_s": retry_after},
                 )
                 raise RateLimited(retry_after)
+            etag = response.headers.get("etag")
+            last_modified = response.headers.get("last-modified")
+            if response.status_code == 304 and _asked_for_304(request_headers):
+                return Fetched(304, b"", etag, last_modified)
             response.raise_for_status()
             chunks = []
             total = 0
@@ -171,8 +208,21 @@ async def _fetch_body(
                     break
                 chunks.append(chunk)
                 total += len(chunk)
-            return b"".join(chunks)
+            return Fetched(response.status_code, b"".join(chunks), etag, last_modified)
     raise AssertionError("unreachable: the loop above always returns or raises")
+
+
+async def _fetch_body(
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    sleep: Callable[[float], Awaitable[None]],
+    retry_429: bool = True,
+    source_name: str | None = None,
+) -> bytes:
+    """`_fetch`, minus everything but the body: what the feed collectors have always wanted."""
+    fetched = await _fetch(http, url, sleep=sleep, retry_429=retry_429, source_name=source_name)
+    return fetched.body
 
 
 def _entry_excerpt(entry: feedparser.FeedParserDict) -> str:

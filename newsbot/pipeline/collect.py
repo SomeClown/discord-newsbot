@@ -55,6 +55,7 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -72,7 +73,7 @@ from newsbot.collectors.base import (
 from newsbot.config import AppConfig, Secrets, WebSearchSource
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import run_lock_or_skip
-from newsbot.pipeline.normalize import canonicalize_items, normalize
+from newsbot.pipeline.normalize import canonicalize, canonicalize_items, normalize
 from newsbot.reddit import is_reddit_url
 from newsbot.store.db import connect
 from newsbot.store.models import StoredItem
@@ -86,6 +87,9 @@ from newsbot.store.repo import (
     store_items,
 )
 from newsbot.text import plain_line
+
+if TYPE_CHECKING:
+    from newsbot.collectors.shift_table import PageValidators
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +139,11 @@ class CollectionDeps:
     # one pass to the next instead of starting a fresh burst every hour.
     rate_limit_state: RateLimitState = field(default_factory=RateLimitState)
     shift_hook: ShiftHook = _no_shift
+    # The SHiFT table pages' ETag and Last-Modified, owned by the bot (the
+    # collectors are rebuilt every pass, so they can't hold them). `run_collection`
+    # commits what the collectors staged once a real SHiFT hook has returned without
+    # raising, which is the nearest point to "the sightings are saved"; see there.
+    page_validators: PageValidators | None = None
     # True once the owner has been told the hook is failing; cleared by the
     # next pass where it succeeds. In memory, like the rate-limit state: a
     # DB write on the failure path could fail too, and a restart re-alerting
@@ -317,9 +326,15 @@ def collection_job_options(cfg: AppConfig) -> dict[str, object]:
     }
 
 
-def build_collection_collectors(cfg: AppConfig, secrets: Secrets) -> list[Collector]:
-    """Every catalog and shared source, and never web search (that's once a day)."""
-    return build_catalog_collectors(cfg, secrets, include_web_search=False)
+def build_collection_collectors(
+    cfg: AppConfig, secrets: Secrets, *, validators: PageValidators | None = None
+) -> list[Collector]:
+    """Every catalog and shared source, and never web search (that's once a day).
+
+    `validators` is the bot's one `PageValidators`, handed to the SHiFT table
+    collectors that get rebuilt every pass (see `CollectionDeps.page_validators`).
+    """
+    return build_catalog_collectors(cfg, secrets, include_web_search=False, validators=validators)
 
 
 def _to_stored_items(grouped: dict[str, list[TopicItem]]) -> list[StoredItem]:
@@ -395,19 +410,24 @@ def _merge_loser_tags(
 
 
 def storable_items(collected: list[RawItem], cfg: AppConfig) -> list[RawItem]:
-    """What may be stored: everything except codes-only sources' items and Reddit links.
+    """What may be stored: everything except codes-only items, Reddit links and SHiFT table pages.
 
     A codes-only source's items exist to be searched for SHiFT codes (the hook
     gets them straight from the collector results, with their URLs for the
     alert's link) and then forgotten. The URL check is the net under the net:
     web search can hand back a reddit.com thread under Brave's name, and Reddit's
-    content doesn't get to ride in on a different source's ticket.
+    content doesn't get to ride in on a different source's ticket. A SHiFT
+    table's page gets the same net: its address is never news, whichever
+    source hands it back (a web search for "Borderlands 4 SHiFT codes" will).
     """
     codes_only = cfg.codes_only_source_names()
+    table_pages = {canonicalize(url) for url in cfg.shift_table_urls()} - {None}
     return [
         item
         for item in collected
-        if item.source_name not in codes_only and not is_reddit_url(item.url)
+        if item.source_name not in codes_only
+        and not is_reddit_url(item.url)
+        and canonicalize(item.url) not in table_pages
     ]
 
 
@@ -587,6 +607,19 @@ async def run_collection(deps: CollectionDeps) -> CollectionOutcome:
                 deps.shift_hook([i for r in results for i in r.items], results),
                 timeout=_SHIFT_HOOK_TIMEOUT_S,
             )
+            # The page's validators are only worth keeping if what we read from it
+            # got saved: with them committed, the next request is conditional, and a
+            # 304 for a page whose codes never made it into the database would hide
+            # those codes until the page happened to change. The hook saves its
+            # sightings before it returns (a detection failure raises out of it, and
+            # a hook that hangs past the timeout is cancelled), so "returned without
+            # raising" is the safe place for this. Anything that blows up before
+            # here, the hook included, leaves them staged and forgotten. The default
+            # no-op hook saves nothing, so it never earns a commit: whoever builds
+            # deps with validators and forgets the real hook gets full fetches, which
+            # is chatty but honest.
+            if deps.page_validators is not None and deps.shift_hook is not _no_shift:
+                deps.page_validators.commit_all()
             deps.shift_hook_alerted = False
         except Exception:
             # Codes are the loud feature, but a detector bug shouldn't cost

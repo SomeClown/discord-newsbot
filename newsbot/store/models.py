@@ -9,12 +9,18 @@ these, it probably belongs in `repo.py` instead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any, Literal
+from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from newsbot.collectors.base import Category
 
 Trust = Literal["official", "press", "community"]
 Label = Literal["official", "reported", "rumor"]
 Tier = Literal["free", "comped"]
+# Who vouched for a stored detail: "official" (Gearbox's own words), "table" (a
+# `shift_table` source) or "" (nobody has said). The order is the precedence.
+DetailSource = Literal["", "table", "official"]
 
 
 @dataclass(frozen=True)
@@ -144,13 +150,108 @@ class AlertStatus:
 
 
 @dataclass(frozen=True)
-class CodeView:
-    """A code as shown to a member through `/shift codes`.
+class CodeDetailsRow:
+    """One `code_details` row (migration 009): what the bot knows about a code besides its text.
 
-    `from_roundup` (migration 003) is the marker `/shift codes` needs to
+    Reward, category and expiry each carry the rank that set them (`*_source`) and the
+    source name that did (`*_from`), because precedence is decided field by field and the
+    alert's "details via ..." wants names. `expires_on` and `added_on` are Pacific calendar dates;
+    every timestamp is an aware UTC datetime. The merge rules that produce one of these live
+    in `shift/details.py`, and this class just holds the result (design.md §16).
+
+    `clock_start` is set once, when the row is created, and never moves.
+    `details_changed_at` moves only when something an alert shows changes (the reward, the
+    expiry, "permanent" for a permanent code, or whose name goes in "details via"), which is what
+    flags an alert for an edit. Every new stamp is later than every other row's, so one
+    message's version stamp (the largest among its codes) is safe to compare with any code's.
+    """
+
+    code: str
+    clock_start: datetime
+    updated_at: datetime
+    reward: str = ""
+    reward_source: DetailSource = ""
+    reward_from: str = ""
+    category: Category | None = None
+    category_source: DetailSource = ""
+    category_from: str = ""
+    expires_on: date | None = None
+    expires_source: DetailSource = ""
+    expires_from: str = ""
+    added_on: date | None = None
+    origin: str = ""
+    first_listed_at: datetime | None = None
+    last_listed_at: datetime | None = None
+    details_changed_at: datetime | None = None
+
+
+# What `AlertMessageRecord.rendered_at` is for a message none of whose codes had details when it
+# went out: older than any real change, so the first details a code gets are always "newer".
+DETAILS_STAMP_FLOOR = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class AlertMessageRecord:
+    """What a posted SHiFT alert message looked like, so it can be edited later.
+
+    One `guild_alert_messages` row (migration 009), minus the guild and message ids the
+    caller already has. `header` is exactly the first paragraph that went out (ping
+    prefix included, unless Discord made us strip it).
+
+    `rendered_at` is a version stamp, not a clock reading (the column kept its name; I
+    didn't think a rename was worth the confusion it would cause the other way): the
+    largest `details_changed_at` among the message's codes as they were read for
+    rendering, or `DETAILS_STAMP_FLOOR` when none had details. A message is due an edit
+    when any of its codes has a `details_changed_at` newer than that. Comparing stamps
+    with stamps means two hooks that took their clocks at different moments can't make a
+    change look older than the render that missed it.
+    """
+
+    channel_id: int
+    header: str
+    golden_prefix: bool
+    posted_at: datetime
+    rendered_at: datetime
+    # The ping choice it went out with: "none", "everyone" or a role id. "none" when the ping
+    # was stripped on the way, since the stored header has no ping prefix then.
+    ping: str = "none"
+
+
+@dataclass(frozen=True)
+class EditTarget:
+    """A live alert message with a code whose details changed since it was rendered.
+
+    `rendered_at` is the message's version stamp (see `AlertMessageRecord`), not a time
+    anyone looked at a clock.
+    """
+
+    guild_id: int
+    message_id: int
+    channel_id: int
+    header: str
+    golden_prefix: bool
+    rendered_at: datetime
+    # What `AlertMessageRecord.ping` stored; the edit sends it back as the message's mentions.
+    ping: str = "none"
+
+
+@dataclass(frozen=True)
+class CurrentCode:
+    """A code that should still work, with its details if the bot has any (`/shift codes`)."""
+
+    code: str
+    first_seen_at: datetime
+    details: CodeDetailsRow | None = None
+
+
+@dataclass(frozen=True)
+class CodeView:
+    """A code as shown to a member through `/shift history`.
+
+    `from_roundup` (migration 003) is the marker `/shift history` needs to
     show "from a roundup" that the `status` column alone can't give it
     once a roundup post's status is just `posted` like everything else
-    (design.md §13): see `repo.query_codes`.
+    (design.md §13): see `repo.history_codes`.
     """
 
     code: str
@@ -159,6 +260,9 @@ class CodeView:
     item_url: str
     status: str
     from_roundup: bool
+    # Migration 009's details, when `/shift history` joins them in; v3.0.5's snapshot
+    # builds this class without the argument, so it needs a default.
+    details: CodeDetailsRow | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +505,13 @@ class QueuedCode:
     golden: bool
     trusted: bool
     queued_at: datetime
+    # Migration 009's details for the code; same story as `CodeView.details` (v3.0.5 builds
+    # this class too).
+    details: CodeDetailsRow | None = None
+    # Whether an official-trust source named the code in the pass that released it
+    # (`alerted_codes.official_seen_at`). Delivery needs it to decide, by the rule release
+    # used, whether a fan site's expiry may silence the code.
+    official_seen: bool = False
 
 
 # --- Per-guild digests (design.md §15, plan task 6) ---

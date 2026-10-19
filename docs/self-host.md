@@ -506,13 +506,33 @@ moment; there's no backlog. A few things to know before choosing a ping:
   it Discord still posts the alert and silently drops the notification.
 - `shift: max_pings_per_day` (default 3) is **per server, per that server's own
   day**. `0` means codes post but never ping, a reasonable way to start quiet;
-  `/shift codes` lists every code the bot has seen either way.
+  `/shift history` lists every code the bot has seen either way.
 - A code seen only by a community source (a Reddit thread, a Bluesky search)
   posts without a ping. If a second independent source, or an official or
   press one, sees it within 24 hours, each server with pinging on gets one
   short follow-up, "Confirmed by a second source", with its chosen ping,
   which spends one of that day's pings. Roundups of many codes post but never
   ping.
+
+**Code details (v3.1.0).** The example config reads one extra source for
+Borderlands 4, a `shift_table` source that turns a community page's tables of
+SHiFT codes into rewards and expiry dates (mentalmars' list, in the example).
+It's optional: without it, alerts look as they did before and `/shift codes`
+shows what Gearbox's own posts gave it. If you add one:
+
+- It goes under its game in `catalog:` (not in `shared_sources:`), and the game
+  must be in `shift.games`.
+- Its `trust` must be `community`. It's always codes-only, so leave
+  `codes_only` out; `false` is an error. Its items are never stored as news.
+- Every source name is capped at 100 characters (and can't be blank, padded or
+  made of invisible characters), because a source's name shows up in alerts
+  ("via mentalmars").
+- The page needs a column whose heading mentions "code"; other columns are
+  found by their headings ("reward", "added", "expire", "source"), in any
+  order. If no code rows turn up, the pass fails and `--check-sources` and the
+  owner report say so ("no SHiFT code tables found").
+- It's fetched once an hour with the same guarded fetch as the RSS sources.
+  Set `NEWSBOT_CONTACT`, so the site can reach you.
 
 `config.example.yaml`'s `shift:` block and the README's "SHiFT code alerts"
 section have the rest of the safeguards (once-per-code, silent seeding, the

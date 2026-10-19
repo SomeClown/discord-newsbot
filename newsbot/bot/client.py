@@ -63,6 +63,7 @@ from newsbot.bot.permissions import (
     sweep_guild_permissions,
 )
 from newsbot.collectors.base import RateLimitState
+from newsbot.collectors.shift_table import PageValidators
 from newsbot.config import AppConfig, QuoteSourceCfg, Secrets
 from newsbot.guilds import lifecycle
 from newsbot.guilds.importer import ImportReport
@@ -92,7 +93,9 @@ from newsbot.shift.fanout import (
     deliver_queued_codes,
     make_shift_hook,
     recover_pending_guild_codes,
+    reserve_for_config,
 )
+from newsbot.shift.sweep import ChannelGoneError, EditForbiddenError, MessageGoneError
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import GuildSettings, LoungeSettings
@@ -714,6 +717,74 @@ class DiscordCodeAlertPoster:
         return bool(permissions_for(me).mention_everyone)
 
 
+# Discord's JSON error codes an alert edit reads: the message (10008) or its channel (10003)
+# is gone, or the bot can't see the channel (50001) or lacks the permission (50013).
+_EDIT_CHANNEL_GONE_CODE = 10003
+_EDIT_MESSAGE_GONE_CODE = 10008
+_EDIT_FORBIDDEN_CODES = frozenset({50001, 50013})
+
+
+def _classify_edit_error(exc: Exception) -> None:
+    """Classify an alert edit's failure for `DiscordCodeAlertEditor`; always raises.
+
+    A message that's gone is `MessageGoneError`, a channel that's gone `ChannelGoneError`
+    (its subclass, so the pass can finish the whole channel at once), a 403 (or the two permission
+    codes) is `EditForbiddenError`, and everything else goes to `_classify_send_error`:
+    a 429, a 5xx or a network blip becomes a `PublishError`, any other 4xx is re-raised as
+    it came.
+    """
+    if isinstance(exc, discord.HTTPException):
+        if exc.code == _EDIT_CHANNEL_GONE_CODE:
+            raise ChannelGoneError(f"discord says the channel is gone: {exc}") from exc
+        if exc.code == _EDIT_MESSAGE_GONE_CODE:
+            raise MessageGoneError(f"discord says the message is gone: {exc}") from exc
+        if exc.status == 403 or exc.code in _EDIT_FORBIDDEN_CODES:
+            raise EditForbiddenError(f"discord won't let me edit: {exc}") from exc
+    _classify_send_error(exc)
+
+
+class DiscordCodeAlertEditor:
+    """The `CodeAlertEditor` (`shift/sweep.py`) the real bot uses: edit one alert in place.
+
+    The poster's sibling, with its channel resolution and its refusal to touch a channel
+    that isn't in the server. It edits through a partial message (`get_partial_message`),
+    which needs no Read Message History and no fetch of the message first.
+
+    Discord rebuilds a message's mentions from each edit's `allowed_mentions`, so an edit
+    that sent none would strip the highlight from an alert that pinged. The caller passes
+    the ping choice the message went out with, and the mentions come from `mentions_for`
+    like every other send: `_PING_EVERYONE` itself, one role, or nobody. The edit pass only
+    passes a choice while the stored header still starts with that ping's own text, so an
+    edit repeats a mention the message already had and never adds one. That keeps this
+    codebase's one `everyone=True` where it has always been. A channel in the wrong server is
+    reported as `ChannelGoneError`: nothing in it can ever be edited from here, so there's
+    no point in asking again.
+    """
+
+    def __init__(self, client: NewsBot, channel_id: int, guild_id: int | None = None) -> None:
+        self._client = client
+        self._channel_id = channel_id
+        self._guild_id = guild_id
+
+    async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
+        channel = self._client.get_channel(self._channel_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(self._channel_id)
+            except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
+                _classify_edit_error(exc)
+
+        if _foreign_channel(channel, self._guild_id, self._channel_id):
+            raise ChannelGoneError(f"channel {self._channel_id} isn't in this server")
+        get_partial = getattr(channel, "get_partial_message", None)
+        if get_partial is None:
+            raise ChannelGoneError(f"channel {self._channel_id} can't hold messages to edit")
+        try:
+            await get_partial(message_id).edit(content=content, allowed_mentions=mentions_for(ping))
+        except Exception as exc:  # noqa: BLE001 (classified and re-raised below)
+            _classify_edit_error(exc)
+
+
 # How long `is_owner` waits on Discord before saying no.
 _OWNER_LOOKUP_TIMEOUT_S = 10.0
 
@@ -788,6 +859,9 @@ class NewsBot(discord.Client):
         # Reddit's cross-call gap is honored across every collection pass,
         # not reset fresh each time one happens to run.
         self._rate_limit_state = RateLimitState()
+        # SHiFT table pages' ETag and Last-Modified: here and not on the collectors,
+        # which are rebuilt every pass. A restart forgets them and fetches in full.
+        self._page_validators = PageValidators()
         # `ensure_imported`'s report, if this start did the import; the first
         # `on_ready` tells the owner once and then forgets it.
         self._import_report = import_report
@@ -1013,6 +1087,8 @@ class NewsBot(discord.Client):
             poster_for=self._poster_for,
             notify_guild=router.notify_guild,
             alert_owner=router.alert_owner,
+            details_reserve=reserve_for_config(self.cfg),
+            editor_for=self._editor_for,
         )
         # `collectors` is filled fresh before every pass (see `_collection_job`).
         self._collection_deps = CollectionDeps(
@@ -1023,6 +1099,7 @@ class NewsBot(discord.Client):
             now=_utcnow,
             alert=router.alert_owner,
             rate_limit_state=self._rate_limit_state,
+            page_validators=self._page_validators,
             shift_hook=make_shift_hook(self._fanout_deps),
         )
         brave = self.secrets.brave_api_key
@@ -1078,6 +1155,9 @@ class NewsBot(discord.Client):
         self, guild_id: int, channel_id: int, ping: str, notify: Callable[[str], Awaitable[None]]
     ) -> DiscordCodeAlertPoster:
         return DiscordCodeAlertPoster(self, channel_id, ping, notify, guild_id=guild_id)
+
+    def _editor_for(self, guild_id: int, channel_id: int) -> DiscordCodeAlertEditor:
+        return DiscordCodeAlertEditor(self, channel_id, guild_id=guild_id)
 
     def _fail_pending_codes_sync(self) -> list[str]:
         with closing(connect(self.db_path)) as conn:
@@ -1373,7 +1453,9 @@ class NewsBot(discord.Client):
             raise RuntimeError("_collection_job() ran before setup_hook() finished")
         pass_over = True
         try:
-            deps.collectors = build_collection_collectors(self.cfg, self.secrets)
+            deps.collectors = build_collection_collectors(
+                self.cfg, self.secrets, validators=self._page_validators
+            )
             outcome = await run_collection(deps)
             if outcome.skipped:
                 # Nothing was collected, so a held digest keeps waiting (for the cap).
@@ -2112,6 +2194,7 @@ class GuildLifecycle:
 
 __all__ = [
     "HEARTBEAT",
+    "DiscordCodeAlertEditor",
     "DiscordCodeAlertPoster",
     "DiscordPublisher",
     "GuildLifecycle",

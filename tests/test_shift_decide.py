@@ -9,9 +9,9 @@ to spend today's ping.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from newsbot.collectors.base import CollectorResult, RawItem
+from newsbot.collectors.base import CollectorResult, ItemDetails, RawItem
 from newsbot.config import Topic
 from newsbot.shift.decide import (
     CodeCandidate,
@@ -731,3 +731,158 @@ def test_two_community_sightings_whose_source_names_differ_only_in_case_are_one_
     assert not aggregate(same_feed, now=NOW, max_age=MAX_AGE)[0].trusted
     other = [_sighting(source_name="r/Borderlands4"), _sighting(source_name="Bluesky search")]
     assert aggregate(other, now=NOW, max_age=MAX_AGE)[0].trusted
+
+
+# --- details on sightings (design.md §16) ---
+
+
+def _table_details(code=CODE_A, **kwargs) -> ItemDetails:
+    defaults = dict(code=code, rank="table", reward="Cosmetic skin", listed=True)
+    defaults.update(kwargs)
+    return ItemDetails(**defaults)
+
+
+def test_a_table_item_keeps_its_details_on_its_one_sighting():
+    details = _table_details()
+    item = _item(title=CODE_A, full_text=CODE_A, details=details)
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.details is details
+
+
+def test_a_table_item_whose_code_doesnt_match_its_details_carries_none():
+    item = _item(title=CODE_A, details=_table_details(code=CODE_B))
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.code == CODE_A
+    assert sighting.details is None
+
+
+def test_a_golden_table_row_sets_the_golden_flag_without_saying_so_in_its_text():
+    item = _item(title=CODE_A, details=_table_details(reward="3 keys", category="golden"))
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.golden
+
+
+def test_a_cosmetic_table_row_is_not_golden():
+    item = _item(title=CODE_A, details=_table_details(category="cosmetic"))
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert not sighting.golden
+
+
+def test_details_dont_change_what_makes_two_sightings_equal():
+    assert _sighting(details=_table_details()) == _sighting()
+
+
+def test_a_single_code_official_post_gets_what_the_reader_can_read():
+    item = _item(
+        trust="official",
+        title=f"New code {CODE_A}",
+        full_text="3 Golden Keys, expires October 14",
+        published_at=NOW,
+    )
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.details == ItemDetails(
+        code=CODE_A,
+        rank="official",
+        reward="3 Golden Keys",
+        category="golden",
+        expires_on=date(2026, 10, 14),
+    )
+    assert sighting.golden
+
+
+def test_an_official_post_the_reader_isnt_sure_about_carries_no_details():
+    item = _item(trust="official", title=f"New code {CODE_A}", full_text="expires 10/14")
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.details is None
+
+
+def test_a_year_less_official_date_falls_back_to_now_without_a_publish_time():
+    item = _item(
+        trust="official", title=f"{CODE_A} expires Sept 10", published_at=None, full_text=""
+    )
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[], now=NOW)
+    assert sighting.details is not None
+    assert sighting.details.expires_on == date(2027, 9, 10)
+
+
+def test_a_multi_code_official_post_still_sights_every_code_but_carries_no_details():
+    item = _item(
+        trust="official",
+        title="Two codes, 3 Golden Keys each, expires October 14",
+        full_text=f"{CODE_A}\n{CODE_B}",
+    )
+    sightings = sightings_from_items([item], topics=[], alert_topics=[])
+    assert [s.code for s in sightings] == [CODE_A, CODE_B]
+    assert all(s.details is None for s in sightings)
+    assert not any(s.roundup for s in sightings)
+
+
+def test_a_community_post_gets_no_reader():
+    item = _item(trust="community", title=f"{CODE_A}: 3 Golden Keys, expires October 14, 2026")
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.details is None
+
+
+def test_a_press_post_gets_no_reader():
+    item = _item(trust="press", title=f"{CODE_A}: 3 Golden Keys, expires October 14, 2026")
+    (sighting,) = sightings_from_items([item], topics=[], alert_topics=[])
+    assert sighting.details is None
+
+
+def test_a_roundup_never_carries_details():
+    codes = [f"AAAA{i}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(1, 7)]
+    official = _item(
+        trust="official", title="3 Golden Keys through 10/14/2026", full_text=" ".join(codes)
+    )
+    sightings = sightings_from_items([official], topics=[], alert_topics=[], max_codes_per_item=5)
+    assert len(sightings) == 6
+    assert all(s.roundup and s.details is None for s in sightings)
+
+
+def test_a_roundup_that_is_also_a_table_item_still_carries_none():
+    # Not a shape the collector makes (a row holds one code), but the rule is "never".
+    codes = [f"AAAA{i}-AAAAA-AAAAA-AAAAA-AAAAA" for i in range(1, 4)]
+    item = _item(title=" ".join(codes), details=_table_details(code=codes[0]))
+    sightings = sightings_from_items([item], topics=[], alert_topics=[], max_codes_per_item=2)
+    assert all(s.details is None for s in sightings)
+
+
+# --- the undated rule for a table's first listing (E1 A) ---
+#
+# A table row from a kind of table its source has never listed here is flagged
+# `first_listing` (`fanout` does it, per source and kind). The old way to say the same thing,
+# a set of source names handed to `aggregate`, is gone.
+
+
+def test_an_undated_sighting_from_a_first_listing_is_not_fresh():
+    undated = _sighting(source_name="mentalmars", published_at=None, first_listing=True)
+    (candidate,) = aggregate([undated], now=NOW, max_age=MAX_AGE)
+    assert not candidate.fresh
+
+
+def test_a_dated_sighting_from_a_first_listing_follows_the_age_rule():
+    recent = _sighting(
+        source_name="mentalmars", published_at=NOW - timedelta(hours=3), first_listing=True
+    )
+    (candidate,) = aggregate([recent], now=NOW, max_age=MAX_AGE)
+    assert candidate.fresh
+
+
+def test_an_undated_sighting_that_is_not_a_first_listing_is_still_fresh():
+    undated = _sighting(source_name="Bluesky", published_at=None)
+    (candidate,) = aggregate([undated], now=NOW, max_age=MAX_AGE)
+    assert candidate.fresh
+
+
+def test_another_sources_fresh_sighting_still_makes_the_code_fresh():
+    sightings = [
+        _sighting(source_name="mentalmars", published_at=None, first_listing=True),
+        _sighting(source_name="Bluesky", published_at=NOW),
+    ]
+    (candidate,) = aggregate(sightings, now=NOW, max_age=MAX_AGE)
+    assert candidate.fresh
+
+
+def test_with_no_flag_an_undated_sighting_is_fresh_as_before():
+    undated = _sighting(source_name="mentalmars", published_at=None)
+    assert aggregate([undated], now=NOW, max_age=MAX_AGE)[0].fresh

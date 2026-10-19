@@ -837,3 +837,225 @@ Where the code settled on something this section leaves open or says differently
 **Tests.** About 7,900, under three minutes, with a network guard that fails a test on any real connection (§10).
 
 **Follow-ups not done.** Moving SHiFT delivery into a job of its own if the bot gets big (delivery runs inside the collection hook's 120-second budget, so at about 170 or more SHiFT-enabled servers a big drop drains over several hourly passes); a local monthly budget for Brave (it has none, and its cost doesn't grow with servers); and a realism note on the load test: only Discord is fake in it (about 50 sends a second overall and 5 per 5 seconds per channel, with a few random 429s), so its timings describe the bot's own pacing and retry against that model and not Discord's real limits. `scripts/loadtest_digests.py` is the real-time version of the same experiment; neither has been tried against the real thing.
+
+## 16. SHiFT code details and a list of current codes (v3.1.0, approved 2026-10-09)
+
+Until now the bot knew a SHiFT code's characters and nothing else: not what it unlocks, not when it dies. `/shift codes` even says so. This release adds both, using a page the owner trusts, mentalmars.com's Borderlands 4 SHiFT code list (https://mentalmars.com/game-news/borderlands-4-shift-codes/), as the gold standard. That page keeps three tables: every code for Golden Keys and other rewards (reward, date added, code, expiry), cosmetic codes (reward, where it came from, code, expiry) and permanent codes (reward, where it came from, code). Expiry is sometimes "Unknown" or "???".
+
+Owner decisions (2026-10-09):
+- **mentalmars is a new source,** read for its tables and nothing else. It's codes-only: the page is never stored as news, summarized or shown in a digest.
+- **It's trusted community** (A). A code it finds first posts without a ping, like any community find, and it counts as the second, independent source that earns a community code its B+ pinged follow-up (§15, D14).
+- **Details are kept per field, and Gearbox outranks everyone, but only where it actually says something.** For each detail (reward, category, expiry), an official source's value wins, then mentalmars', then "unknown". A Gearbox post that gives a code and no details never erases the expiry mentalmars already has.
+- **Details are read from mentalmars' tables and from official posts only,** for now. Reading them out of every source's free text (Reddit, Bluesky search, press) is on the to-do list.
+- **"Current" means:**
+  - not past its expiry;
+  - with no known expiry, within 180 days of when the bot first saw the code;
+  - permanent codes are always current.
+
+  At rollout every code on mentalmars' list starts a fresh 180-day clock. Codes that already pinged are never pinged again.
+- **`/shift codes` becomes the list of current codes** (A), grouped the way mentalmars groups them. The old view (everything seen in the last N days) moves to `/shift history`.
+- **Alerts gain a details line,** and an alert already posted is edited in place when details arrive (A).
+- **Nothing that matters is cut off.** Long text means more messages or more pages, never a shortened reward.
+- **Version 3.1.0.** Images, graphics and color for alerts and `/shift` replies are a larger beautification project of their own, v3.2.0, designed separately.
+
+**The source.** A new source type, `shift_table`, in a catalog entry's `sources` (Borderlands 4's, in practice):
+
+```yaml
+- type: shift_table
+  name: mentalmars
+  url: https://mentalmars.com/game-news/borderlands-4-shift-codes/
+  trust: community
+```
+
+- **Fetching:**
+  - It's fetched with the hourly collection, through the same guarded fetch the RSS collector uses (the User-Agent, the 5 MB cap, the 429 retries, the private-address redirect check).
+  - When the site sends `ETag` or `Last-Modified`, the next request asks "has it changed?". A `304 Not Modified` is a healthy pass with nothing new.
+  - The validators live in memory; the first pass after a restart fetches in full.
+- **`codes_only` is always on** for this type: leaving it out means true, and `false` is a config error.
+- **Reading the page:**
+  - It's parsed with Python's built-in HTML parser (no new dependency).
+  - The collector finds every table with a column whose heading mentions "code", then maps the other columns by their heading words: "reward", "added", "expire", "source". Column order doesn't matter, so a shuffled layout keeps working, and a similar site could be added without new code.
+  - Section headings give a table its kind: a heading that mentions "permanent" makes it the permanent table, one that mentions "cosmetic" the cosmetic table, and anything else the main table.
+  - A cell that holds a valid SHiFT code (the existing `is_code` check) makes its row a code row; rows without one are skipped.
+- **Category:** permanent if the code is in the permanent table, cosmetic if it's in the cosmetic table or its reward mentions a cosmetic, skin or similar, golden if its reward mentions Golden Keys, and otherwise other. A code listed in more than one table takes the most specific: permanent, then cosmetic, then the main table's reading.
+- **Expiry:** dates in the page's formats ("Oct 6, 2026", "Sept 30, 2026", "Dec 31, 2030") become dates. "Unknown", "???", an empty cell and anything that doesn't parse become "no expiry". Unparseable text is logged once per pass as a count, not per row.
+- **Dates and times:**
+  - A code is treated as current through the end of its expiry date in US Pacific time. That's the latest reasonable reading, so a working code is never hidden early.
+  - An "Added" date becomes the row's publish time, the start of that day in Pacific time. That keeps the existing 48-hour rule: a row added more than 48 hours ago is recorded quietly, not alerted.
+- **Each row is one item** holding exactly one code. That keeps a page of 30 codes from tripping the roundup rules, which are meant for one post that dumps many codes. Each item's link is the page's URL, with the section's anchor where there is one.
+- **Health:** a page that yields no code rows at all is a failed pass ("no SHiFT code tables found"), so a layout change shows up in the owner's nightly report the way the Lodestone 403 did. Rows that can't be read are skipped and counted in the log.
+- **Limits:** reward and "where it came from" text is cut to 300 characters when it's read, which is several times anything on the page today. That limit is the security cap: no page, honest or not, can make an entry big enough to break a message. All scraped text is escaped when shown, and every reply and alert keeps mentions switched off, so a reward that reads "@everyone" is just text.
+
+**Details from Gearbox's own posts.** A careful reader looks at items from official-trust sources only, and only at a post holding exactly one code (with several codes, nobody can say which detail belongs to which). It picks out two plain patterns and gives up on anything else:
+- a Golden Key count: "3 Golden Keys", "a Golden Key", "five Golden Keys";
+- an expiry: "expires", "expiring", "valid until" or "through", followed by a date with a month name ("October 14", "Oct 14, 2026") or a full numeric date ("10/14/2026").
+
+When Gearbox releases several codes in one post, every one of them is recorded and alerted as usual; the reader just leaves that post's details alone, and each code's details come from other sources (mentalmars, a later single-code official post) as they turn up, editing the alerts in place. A Golden Key count also sets the category to golden. A date without a year takes the next occurrence of that date after the post's publish time. When it isn't sure, the reader records nothing and mentalmars fills the gap. A wrong expiry is worse than "unknown".
+
+**Data (migration 009, additive).** A new table, `code_details`, one row per code:
+- `code` (primary key, the same 29-character check as `alerted_codes`);
+- `reward` (up to 300 characters, or empty) and `reward_source`;
+- `category` (`golden`, `cosmetic`, `permanent` or `other`) and `category_source`;
+- `expires_on` (a date, or empty) and `expires_source`;
+- `added_on` (mentalmars' "Added" date, if any) and `origin` (the permanent and cosmetic tables' "where it came from" text, up to 300 characters);
+- `clock_start`: when the 180-day clock started;
+- `first_listed_at` and `last_listed_at` (when a `shift_table` source first and last listed it), `updated_at` and `details_changed_at`.
+
+How it works:
+- **Precedence is stored per field.** A `*_source` column records which rank set that field: `official`, `table` (a `shift_table` source) or empty.
+  - A new value replaces the stored one only if its rank is at least as high.
+  - Within the same rank, the newer reading wins, so mentalmars can correct itself.
+  - A missing value never replaces a present one.
+- **The clock.**
+  - On a code's first `shift_table` listing after the migration, `clock_start` is that listing's time. That's the owner's rollout rule: everything on the list counts as new for the clock.
+  - A code the bot first meets anywhere else after this release starts its clock at that first sighting.
+  - A code with no `code_details` row (seen before this release, never listed) uses `alerted_codes.first_seen_at`.
+- **Current until:** never, for a permanent code; otherwise the end of `expires_on` in Pacific time if it's known; otherwise `clock_start` plus 180 days.
+- **Changes that show:** `details_changed_at` moves only when something an alert shows changes: reward, category, expiry, or who supplied one of them (the "via" names; owner, 2026-10-09). That's what triggers the edits below.
+- **What's untouched:** `alerted_codes`, `code_sightings` and the per-server tables keep their meaning. A code still pings at most once, ever, per server, and listing it again changes nothing there.
+- **Rolling back:** v3.0.5 and earlier read a migrated database without trouble (they only ever apply newer files and ignore a table they don't know). That still has to be shown in a test.
+
+**How details move.** Collectors can attach details to an item (only `shift_table` and the official reader do). Detection carries them with the sighting, and the same transaction that records sightings and releases codes upserts `code_details` with the precedence rules above. Codes from a list arrive the way any code does: one the bot hasn't seen is new (and the 48-hour rule decides alert or quiet record), and one it has seen is just another sighting.
+
+**Expired on arrival.** If a code's expiry has already passed when the bot first releases it, it's recorded quietly, not alerted, and `/shift history` marks it expired.
+
+**Alerts.**
+- **The details line.** Each code in an alert gains a line under its code block when anything is known, for example `3 Golden Keys · expires Oct 14, 2026 · via mentalmars`. With no details the line is left out, so alerts look as they do today until details exist.
+  - The "via" names whoever supplied the details shown, by source name: "via mentalmars", or "via mentalmars and Borderlands (Bluesky)" when the reward and the expiry came from different sources.
+  - An expiry within 48 hours reads "expires tomorrow" or "expires in 6 hours".
+- **Packing.** When an alert is first rendered, every code's slot is sized for the largest details line it could ever get, so a later edit always fits. Codes that don't fit go to the next message, as they do today. The "shorten the source name" step goes away; the link is still the first thing to go if a single code can't fit with it, which with the 300-character caps can't happen in practice.
+- **Edits in place.** After each collection pass's deliveries:
+  - **What gets edited.** The bot finds codes whose `details_changed_at` is newer than their last render, then edits every server's alert message holding one of them. The rule is "posted, with a message id, within the last 14 days".
+  - **How.** A message holding several codes is re-rendered whole, from the same codes in the same order, with its ping prefix kept and mentions switched off for the edit (Discord doesn't notify anyone for an edit anyway).
+  - **Pacing.** Edits share the delivery walk's pacing and its time budget, after deliveries and follow-ups. Whatever doesn't fit waits for the next pass.
+  - **When a message is gone.** A deleted message (Discord error 10008) counts as done, quietly.
+  - **When permission is missing.** The server's admin channel gets one notice the first time, not one an hour, and that server's edits stop until its settings change.
+  - **Roundups** (one post that dumped many codes) aren't edited; their details live in `/shift codes`.
+- **Follow-ups.** The B+ pinged follow-up shows each code's details line as it stands when the follow-up is sent.
+- **Pings are unchanged:**
+  - Official finds ping at once.
+  - Community finds, mentalmars' included, post unpinged.
+  - mentalmars confirming a Reddit or Bluesky code within 24 hours earns the one pinged follow-up.
+  - The 3-a-day cap still holds.
+
+**`/shift codes` (current codes).** Ephemeral by default, `public:true` posts it in the channel. Anyone in a server that's finished setup can use it, free or comped, with no cooldown; it only reads the database.
+- **Groups,** in this order: Golden Keys, Cosmetics, Permanent, Other. "Other" holds codes with no details yet and codes whose reward isn't one of the three.
+- **Order within a group:** newest first, by mentalmars' "Added" date, else the bot's first sighting.
+- **Each entry:**
+  - the code in inline code, so it's easy to tap and copy;
+  - then one line: reward (or "reward unknown"), then the expiry ("expires Oct 14 (in 5 days)", "expires tomorrow", "expiry unknown", or for a permanent code its "where it came from" text).
+- **The `type` option:** `all` (the default), `golden`, `cosmetic`, `permanent`.
+- **Paging:** pages fill by size against Discord's embed limit instead of a fixed count of eight, so long entries make more pages and never get cut.
+- **Footer:** "Codes from Gearbox and mentalmars.com · redeem at shift.gearboxsoftware.com".
+- **Empty list:** "No current codes. I'll post new ones in #channel when they show up." The channel part is left out if the server hasn't turned alerts on.
+- **Which game:** codes have no game column, and SHiFT is Borderlands 4 only, so the list is every current code. A second SHiFT game would need a game column first.
+
+**`/shift history`.** Today's `/shift codes`, moved: 1 to 90 days (14 by default), newest first, with its markers. It adds the details line where known, marks expired codes, and gets the same size-based paging.
+
+**Commands.** Both live in the existing `/shift` group. Production syncs them on the next start; Discord can take up to an hour to show the change everywhere. The command help text and the README describe the new meaning of `/shift codes`.
+
+**Testing.**
+- **The page:** a small, hand-made fixture modeled on mentalmars' tables, not a copy of their article. It covers:
+  - the three tables, shuffled columns, "Unknown" and "???";
+  - a code listed twice;
+  - a page with no tables (a failed pass);
+  - HTML and mention tricks in cells, and oversized cells.
+- **Gearbox's posts:** the official reader, including posts where it should give up (two codes, a date it can't read, a community source).
+- **The rules:**
+  - field-by-field precedence;
+  - the clock's three starting points, and current-until;
+  - the rollout with no repeat pings and nothing old alerted;
+  - expired on arrival.
+- **Edits:** the 14-day limit, the deleted message, missing permissions and the single notice, the re-render fitting, budget carry-over.
+- **The commands:** both, including size-based paging with 300-character entries.
+- **Migrations:** 009 on a v3.0.5-shaped database, and v3.0.5 running on a migrated one.
+- **The process:** the usual flow. An adversarial test-engineer round after each task, a qa review at the end, and the gate before every report.
+
+**Rollout.**
+1. **Before merging:** the owner fetches the page once from the Droplet (`curl -sS -o /dev/null -w '%{http_code}\n' <url>`), so a datacenter block shows up before release and not after, as Lodestone's did.
+2. **Before tagging:** the image is built and checked locally.
+3. **Dev bot test:** the dev bot gets a run in PacketQueue Dev, after the repoint that's already on the list.
+4. **Production:**
+   1. The owner adds the `shift_table` block under Borderlands 4 in the production config, after a backup copy (`config.pre-shift-details.yaml`).
+   2. The owner deploys outside the 09:00 and 08:00 windows.
+   3. The owner checks `/shift codes` in PacketQueue.
+
+**Not in this release.**
+- Reading details from community free text (on the to-do list).
+- A game column for codes.
+- Editing roundups.
+- Images, graphics and color (v3.2.0).
+
+### As built (2026-10-09)
+
+Where the code settled on something this section leaves open or says differently, and what the owner decided along the way. The plan, with every task and review round, is `docs/plans/2026-10-09-shift-details.md`. Where this subsection and the approved text above disagree, this one wins; the approved text stays as it was so the history is readable. All of it is on `feat/shift-details` as version 3.1.0. It is built and reviewed, and as of this writing it is not merged, tagged or deployed.
+
+**Corrections to the approved text.** Two sentences above say something the code doesn't do.
+- **"Edits go out with mentions off" is wrong.** An edit repeats the message's original ping choice. Discord rebuilds a message's mentions from each edit's `allowed_mentions`, so an edit that sent none would strip the highlight from an alert that had pinged. The choice is stored with the message (`guild_alert_messages.ping`: `none`, `everyone` or a role id) and goes back only while the stored header still starts with that ping's own text. A header that lost its ping to the ambiguous-failure retry stores `none`, so an edit never adds a mention the message didn't carry. Discord doesn't notify anyone for an edit either way, so this is about how the message looks and not about who gets buzzed. The single `AllowedMentions(everyone=True, ...)` is still `_PING_EVERYONE`, and `tests/test_mentions_tripwire.py` still holds.
+- **"Every reply and alert keeps mentions switched off" is wrong for alerts.** Replies (`/shift codes` and `/shift history`, public or not) go out with mentions off. Alerts keep the server's ping choice, with the cap and the D13 rules, exactly as before. What keeps a scraped reward of "@everyone" harmless is the escaping at render time (`esc()`), so it shows as plain text and pings nobody. Code-shaped text in a reward is replaced by `[code]` when it's read (`defuse_codes`).
+
+**Expiry wording in posted alerts (owner, 2026-10-11: option A).** Alerts, edits, follow-ups and roundups show the date plus a Discord live timestamp, for example `expires Oct 14, 2026 (<t:1792047600:R>)`, which each reader sees counting down in their own client. The instant is the code's real end, the start of the next Pacific day. The bot adds the token after escaping, from a number it computes; `esc()` still defuses `<t:` in anything scraped. Nothing in a posted message says "in 6 hours" or "tomorrow" any more, so nothing goes stale. `/shift codes` and `/shift history` are rendered fresh on each call and keep their relative wording. The credit reads "details via" (owner, same day), so a follow-up's "Confirmed by a second source" isn't read as "mentalmars confirmed it". The longer line raises the edit reserve to about 400 units with the example catalog, still about 4 codes per message.
+
+**What was built.**
+- **Migration 009** (additive): `code_details` (one row per code, per-field source rank and the name that supplied it, plus the clock and the change stamp), `guild_alert_messages` (one row per posted alert), indexes on `guild_alert_messages(posted_at)`, `guild_code_posts(guild_id, message_id)` and `guild_code_posts(code)`, `alerted_codes.official_seen_at` and `alerted_codes.table_silenced_at`, `guild_shift.edits_blocked_at`, and the `shift_details_since` row in `app_state`. v3.0.5 and v2.2.0 open a migrated file without trouble (`tests/test_migration_009_v305_compat.py` runs v3.0.5's own `repo.py` against it), but v3.0.5 refuses a config that contains a `shift_table` source, so a rollback also restores the config.
+- **The collector** (`collectors/shift_table.py`), the reader for Gearbox's posts (`shift/official.py`), the merge rules (`shift/details.py`), the edit pass (`shift/edits.py`), the details line and the page renderers (`bot/format.py`), and both commands (`bot/commands.py`). No new dependency.
+- **Prod's reserve.** With the example catalog the longest source name that can appear in a "via" clause is 19 characters, so the reservation is 378 units per code. Measured with a Reddit link on every code, a message holds 4 codes where it held 18 before. Anyone who notices should know it's the price of "never truncate" and not a bug: a message holds fewer codes so that a later edit always fits.
+
+**Flags raised in planning, and how they resolved.** (Numbers are the plan's section 1.)
+- **Table rows would have collapsed into one item (1).** Canonicalizing drops the URL fragment, so thirty rows of one page all had the same address and the dedupe kept one. Items that carry details are canonicalized one by one and skip the batch dedupe (`_canonical_batch`). Sightings are scoped by item and not by URL, so a code never borrows another row's game match.
+- **No section anchors in links (2, owner decision E2).** An alert's link is the page's URL. Teaching `_safe_link` to keep a fragment was a change to the most security-sensitive line in `format.py` for a cosmetic gain. This replaces "with the section's anchor where there is one".
+- **Undated rows at rollout (3, owner decision E1).** The cosmetic and permanent tables have no "Added" column, and an undated item counts as fresh, so the first listing would have alerted every one of them. As built, the first successful listing of a table kind by a source records its undated rows quietly (`too_old`). After that, an undated row that's new to the bot is fresh and posts unpinged like any community find. Dated rows always follow the 48-hour rule. "First listing" is tracked per table kind and not per source (`app_state` keys `shift_table_kind_listed:<kind>:<name>`), so a first page that came back with only its main table, or a site that adds a table later, can't flood.
+- **"Via" needs names, not ranks (4).** 009 adds `reward_from`, `category_from` and `expires_from` next to the `*_source` ranks. A change in who supplied a displayed value counts as a change that edits alerts (owner, 2026-10-09). Agreeing sources of the same rank don't swap the name; a higher rank that confirms a value takes it.
+- **Not one transaction (5).** `_plan_and_record_sync` is one connection running several short transactions. Sightings are recorded first, then the details upsert (its own `BEGIN IMMEDIATE`), then planning and the release records. A crash between steps loses nothing that the next pass doesn't redo.
+- **The clock starts once (6).** `clock_start` is set when the row is created and never moves. A code first seen at or after the `shift_details_since` marker keeps that first sighting (never a time in the future). Any older code gets the time of its first listing, which is the owner's rollout rule, and so does an older code that a single-code Gearbox post mentions again. This replaces the reading where a later listing restarts the clock.
+- **Source names are bounded (7).** Config rejects a source name over 100 characters, one with control, bidirectional or invisible-only characters, and one with padding; names that differ only in case get a warning. That makes the worst-case details line a real number, which is what let the "shorten the source name" step go. A `shift_table` source must be `community` trust: `official` is the rank a detail earns when Gearbox says it, and official trust would let the table's new codes ping on their own, which a community list hasn't earned.
+- **The 300-character cap is measured as shown (8).** Reward and origin are cut when read so that their escaped form is at most 300 UTF-16 units (`cap_shown`), because escaping can nearly double a string full of markdown. Any code-shaped text inside a reward or origin is replaced by `[code]`, so a second code in a reward cell can't look redeemable in an alert.
+- **A multi-code follow-up with details can't hold 20 codes (9).** Follow-ups are never edited, so they fit by their real size (`fit_followup_codes`): as many queued codes as fit go out, and the rest wait for the next pass.
+- **`/shift codes` stays gated (10).** The approved text says "anyone in a server that's finished setup". As built it needs the server to follow a SHiFT game, same as before; a server that doesn't gets the old "doesn't follow" message.
+- **E3 and E4.** Alerts posted before 3.1.0 have no message record and are never edited; their details show in `/shift codes`. `config.example.yaml` ships the mentalmars source under Borderlands 4, and the example's codes-only set is `{"r/Borderlands4", "mentalmars"}`.
+
+**The record of each alert.** `guild_alert_messages` holds, per posted alert: the server, the channel and message ids, the header text (ping prefix included), whether it used the "Golden Key:" prefix, the ping choice, when it posted, and a version stamp. Alerts are found again through `guild_code_posts` by (server, message), in release order, which is the order they were packed. Roundups and follow-ups write no row. The rows are kept for 30 days (`ALERT_MESSAGE_RETENTION`) though edits stop at 14, and they go at once when a server is removed. `rendered_at` is a version stamp and not a clock reading: the largest `details_changed_at` among the message's codes as rendered, or the epoch if none had details. An edit is due when any of its codes has a newer one, so two passes with clocks a few milliseconds apart can't disagree about it, and every new `details_changed_at` is set above the table-wide maximum.
+
+**Edits, as built.**
+- **Fair across servers.** The queue is round-robin: each server's first due message, then each server's second, and so on, at most 20 per server per pass and 200 overall, least recently tried first (`guild_alert_messages.edit_tried_at`). A server whose edit fails is skipped for the rest of that pass.
+- **Outcomes.** Discord 10008 (message gone) marks it gone, quietly. 10003 (channel gone) marks all of that channel's messages gone at once. A 403 blocks that server's edits (`edits_blocked_at`) with one notice, and any save of `/newsbot shift`, even one that changes nothing, unblocks them. A 5xx or a timeout leaves the message due for the next pass. A 429 is retried up to three times in all when the wait fits the walk's budget.
+- **A message that won't render** (a config that grew a longer source name than the message was packed for) is logged and its stamp advances, so it isn't retried every hour.
+- **Servers with SHiFT alerts off are skipped.** Someone who turned the feature off hasn't asked to have old messages tended.
+- **The reserve counts stored names too.** Delivery sizes a message over the configured official and table source names under `shift.games`, plus every name already stored in `code_details`, so a renamed source can't overflow a later edit.
+
+**Rules for what counts.**
+- **Dead on arrival.** A code whose expiry has passed when it is first released is recorded `too_old`, with three exceptions: a permanent code is never expired on arrival; a table's expiry can't silence a code Gearbox named in the same pass (only an official expiry can); and a code silenced only by a table's data (an expiry already past, or an "Added" date over 48 hours old) is released, once, if an official source names it within 72 hours of the bot first seeing it (`alerted_codes.table_silenced_at`). Delivery applies the same rule to a queued code at send time (`silenced_by_expiry`, fed by `official_seen_at`), so release and delivery can't disagree.
+- **No pinged follow-up for a code known to be expired,** at queue time and again at send time. It is skipped and spends no ping.
+- **Flood guard (owner, 2026-10-09).** More than 5 fresh, new codes introduced by one table source in one pass (`TABLE_FLOOD_LIMIT`) go out the way a roundup does: unpinged, capped at 50, no follow-ups.
+- **What `/shift codes` lists.** A code that was only ever recorded quietly (roundup, `too_old`, seeded) is listed only when something besides one stranger's say-so stands behind it: a details row from a table or an official post, a trusted sighting, or two different source names. `/shift history` is the unfiltered view.
+- **Via names count as shown.** `displayed()` mirrors exactly what the details line prints, and `details_changed_at` moves only when that changes.
+
+**The official reader, as built.** It reads only near the code (its own paragraph, about 200 characters either side), and gives up on any of the following, recording nothing:
+- a bare "through" (only "valid through", "redeemable through" and "good through" count), a negation before the keyword ("not valid until"), a past tense ("was valid until"), the word "expired" nearby, or a post that says when something starts ("starts", "valid from");
+- a range or an alternative after the date ("Oct 14 - Oct 21", "Oct 14 or 15"), a weekday that doesn't match its date, or two different dates;
+- an expiry dated before the post's own Pacific day, and a date with no year that fell in the week before the post (more likely a typo than a deadline eleven months out);
+- a Golden Key count that disagrees with its noun ("1 Golden Keys"), is glued to other text, follows a name or a date ("Borderlands 4 Golden Keys", "Oct 14 Golden Keys"), modifies a noun ("a Golden Key code"), or differs by platform ("5 for PC and 3 for console");
+- a code named more than 10 times.
+
+**The collector, as built.**
+- **Rows.** A code row has exactly one code in its code cell. Anything else is skipped and counted. A table whose section heading says "expired" is skipped whole. An "Added" date more than a day in the future is treated as no date (a site ahead of Pacific time is on tomorrow's date honestly) and counted. More than 500 codes from one source in one pass fails the pass ("too many rows") instead of being truncated or believed. Row and cell limits (1,000 rows a table, 4,000 characters a cell, nesting and colspan bounds) apply while reading.
+- **The page never becomes news.** `storable_items` drops any item whose URL is a configured `shift_table` page, whichever source carried it, because a web search for "Borderlands 4 SHiFT codes" will return it.
+- **Conditional fetches.** The ETag and Last-Modified are staged by the collector and committed only after the SHiFT hook has saved what it read (`PageValidators`), so a failure after the parse can't leave the next request asking "has it changed?" about codes that were never recorded. They are stored only after a parse that found rows. A 304 counts as healthy only when the request was conditional.
+
+**Rendering and commands, as built.**
+- **Relative phrases follow the Pacific day.** "Expires in N hours" is the same Pacific date as now, "expires tomorrow" the next one, "expired" after that. `/shift codes` adds "(in 5 days)" and drops the year when it's this year.
+- **Footer.** "Codes from Gearbox and <hosts>" takes its hosts from the configured `shift_table` pages (three at most, 300 characters at most), so a self-hoster who never added mentalmars isn't told the codes came from there. For prod it reads "Codes from Gearbox and mentalmars.com · redeem at shift.gearboxsoftware.com".
+- **Empty list.** "No current codes." (or "No current golden codes." and so on for a `type`), plus "I'll post new ones in #channel when they show up." when the server's alerts are on and the channel still exists.
+- **`/shift history`** says "expired" once: a code whose marker already says so leaves the expiry out of its details line.
+- **`esc()` is wider.** It now also defuses `<:name:id>` and `<a:name:id>` (custom emoji), `<t:...>` (timestamps, which can pose as a real date) and `<id:...>` (guild navigation), along with the channel and command links it already covered.
+- **`PagerView` clamps.** Two fast clicks on a button Discord had already disabled can no longer walk off either end of the list.
+- **Registration.** `commands_hash` picks the change up by itself: the first 3.1.0 start syncs once. Prod registers globally, so Discord can take up to an hour to show it.
+
+**Startup refuses a database from an earlier draft of 009.** 009 was amended in place during the build (the edit-tracking, ping and silencing columns and one index were added), which is fine because no released database has it. A development database that ran an earlier draft can't be upgraded: `migrate` checks for the later columns and index (`_BUILD_COLUMNS`, `_BUILD_INDEXES` in `store/db.py`) and raises a `StoreError` that says to start the database fresh. That applies to the dev bot's `data/dev.db`.
+
+**Known limits.**
+- The SSRF redirect check in the shared fetch (`_reject_private_redirect`) runs after redirects are followed, as it always has, so it catches a bad destination but doesn't stop the request from being made. That predates 3.1.0; the new collector shares it.
+- Delivery and edits still run inside the collection hook's 120-second budget (deliveries first). The edit reserve makes alerts bigger and so spreads a big drop over more messages, which means the old estimate of "about 170 SHiFT servers" for a drop to drain over several passes now comes sooner. Moving SHiFT delivery into a job of its own is the fix and is still on the to-do list.
+- Details are read only from mentalmars' tables and Gearbox's own posts. Reddit, Bluesky search and press free text are on the to-do list.
+
+**Tests.** About 11,500, in about five minutes. Two files are snapshots tied to this build and are meant to be retired after merge: `tests/fixtures/format_pre_details_snapshot.txt` and `tests/fixtures/fanout_pre_delivery_snapshot.txt` (checked by `test_format_backcompat_snapshot.py` and `test_shift_delivery_backcompat_snapshot.py`). They pin the pre-3.1.0 output so the build couldn't change it by accident; once it has merged they only stop later work. `tests/fixtures/v305_repo_snapshot.txt` stays, because the rollback test depends on it.

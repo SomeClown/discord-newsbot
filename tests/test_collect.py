@@ -15,8 +15,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+import newsbot.pipeline.collect as collect_mod
 from newsbot.collectors.base import CollectorResult, QuotaExceeded, RateLimitState, RawItem
-from newsbot.config import GameCfg, Secrets, load_config
+from newsbot.collectors.shift_table import PageValidators, ShiftTableCollector, Validators
+from newsbot.config import GameCfg, Secrets, ShiftTableSource, load_config
 from newsbot.pipeline.collect import (
     SOURCE_FAILURE_ALERT_THRESHOLD,
     CollectionDeps,
@@ -321,6 +323,123 @@ async def test_a_shift_hook_bug_does_not_cost_the_stored_items(cfg, db_path, htt
     outcome = await run_collection(make_deps(cfg, db_path, http, [c], alerts, shift_hook=hook))
     assert outcome.new_items == 1
     assert len(alerts) == 1 and "SHiFT" in alerts[0]
+
+
+# --- page validators: committed only once the SHiFT hook has saved the sightings ---
+#
+# A SHiFT table page that sends an ETag is asked about it next time, and a 304
+# means "nothing new". That's only safe if what we read from the last 200 was
+# saved, so the collector stages the validators and `run_collection` commits
+# them after the hook returns without raising. The hook is where the sightings
+# are saved (design.md §16); Task 5's detection wiring lives inside it, so
+# "the hook returned" stays the commit point.
+
+TABLE_URL = "https://codes.example/borderlands-4-shift-codes/"
+TABLE_PAGE = (
+    "<html><body><h2>Codes</h2><table><tr><th>SHiFT Code</th><th>Reward</th></tr>"
+    "<tr><td>K4M7P-2QXZR-9TLWB-6NHVC-J3FDS</td><td>3 Golden Keys</td></tr></table></body></html>"
+)
+ETAG = Validators('"v1"', None)
+
+
+class _Page:
+    """A MockTransport handler for the table page that remembers what it was asked."""
+
+    def __init__(self) -> None:
+        self.if_none_match: list[str | None] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.if_none_match.append(request.headers.get("If-None-Match"))
+        return httpx.Response(200, content=TABLE_PAGE.encode(), headers={"ETag": '"v1"'})
+
+
+def _table_deps(cfg, db_path, client, alerts, validators, **kw):
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    source = ShiftTableSource(
+        type="shift_table", name="mentalmars", url=TABLE_URL, trust="community"
+    )
+    collector = ShiftTableCollector(source, validators=validators, sleep=no_sleep)
+    return make_deps(cfg, db_path, client, [collector], alerts, page_validators=validators, **kw)
+
+
+async def test_a_hook_that_returns_commits_the_staged_validators(cfg, db_path, alerts):
+    page = _Page()
+    validators = PageValidators()
+
+    async def hook(items, results):
+        # Staged by the collector, not yet what the next request sends.
+        assert validators == {} and validators.pending == {TABLE_URL: ETAG}
+        return 0
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(page)) as client:
+        await run_collection(_table_deps(cfg, db_path, client, alerts, validators, shift_hook=hook))
+        assert validators == {TABLE_URL: ETAG} and validators.pending == {}
+        await run_collection(_table_deps(cfg, db_path, client, alerts, validators, shift_hook=hook))
+    assert page.if_none_match == [None, '"v1"']
+
+
+async def test_a_hook_failure_leaves_the_validators_uncommitted(cfg, db_path, alerts):
+    page = _Page()
+    validators = PageValidators()
+
+    async def hook(items, results):
+        raise RuntimeError("the sightings never made it")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(page)) as client:
+        deps = _table_deps(cfg, db_path, client, alerts, validators, shift_hook=hook)
+        await run_collection(deps)
+        # Nothing committed, so the next request is a full one and the codes get a second look.
+        assert validators == {} and validators.pending == {TABLE_URL: ETAG}
+        await run_collection(deps)
+    assert page.if_none_match == [None, None]
+    assert len(alerts) == 1 and "SHiFT" in alerts[0]
+
+
+async def test_a_hook_that_hangs_leaves_the_validators_uncommitted(
+    cfg, db_path, alerts, monkeypatch
+):
+    monkeypatch.setattr(collect_mod, "_SHIFT_HOOK_TIMEOUT_S", 0.05)
+
+    async def hook(items, results):
+        await asyncio.sleep(3600)
+        return 1
+
+    validators = PageValidators()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_Page())) as client:
+        await run_collection(_table_deps(cfg, db_path, client, alerts, validators, shift_hook=hook))
+    assert validators == {} and validators.pending == {TABLE_URL: ETAG}
+
+
+async def test_a_failure_before_the_hook_leaves_the_validators_uncommitted(
+    cfg, db_path, alerts, monkeypatch
+):
+    def boom(*_args):
+        raise RuntimeError("the store fell over")
+
+    monkeypatch.setattr(collect_mod, "_store_sync", boom)
+    called = []
+
+    async def hook(items, results):
+        called.append(True)
+        return 0
+
+    validators = PageValidators()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_Page())) as client:
+        deps = _table_deps(cfg, db_path, client, alerts, validators, shift_hook=hook)
+        with pytest.raises(RuntimeError, match="the store fell over"):
+            await run_collection(deps)
+    assert called == [] and validators == {}
+
+
+async def test_a_pass_without_validators_still_runs_its_hook(cfg, db_path, http, alerts):
+    # The CLI's --collect builds no PageValidators; there's simply nothing to commit.
+    c = FakeCollector("A", [item("https://ex.com/1", "Palworld news")])
+    deps = make_deps(cfg, db_path, http, [c], alerts)
+    assert deps.page_validators is None
+    outcome = await run_collection(deps)
+    assert outcome.sources_ok == 1
 
 
 async def test_the_pass_is_recorded(cfg, db_path, http, alerts):

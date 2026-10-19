@@ -129,8 +129,13 @@ def world(conn):
                 (f"story of {gid}", digest_id),
             )
             conn.execute(
-                "INSERT INTO guild_code_posts (guild_id, code, status, claimed_at) "
-                "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA1', 'posted', 'n')",
+                "INSERT INTO guild_code_posts (guild_id, code, status, message_id, claimed_at) "
+                "VALUES (?, 'AAAAA-AAAAA-AAAAA-AAAAA-AAAA1', 'posted', 555, 'n')",
+                (gid,),
+            )
+            conn.execute(  # the record of that posted message, for the edit pass (migration 009)
+                "INSERT INTO guild_alert_messages (guild_id, message_id, channel_id, header, "
+                "golden_prefix, posted_at, rendered_at) VALUES (?, 555, 80, 'h', 0, 'n', 'n')",
                 (gid,),
             )
             conn.execute(  # claim_guild_codes moves queued rows, so each guild has one queued
@@ -160,6 +165,7 @@ _PER_GUILD_TABLES = [
     "guild_games",
     "guild_shift",
     "guild_code_posts",
+    "guild_alert_messages",
     "guild_code_followups",
     "guild_lounge",
     "guild_notices",
@@ -249,6 +255,15 @@ _MUTATIONS = {
         c, g, ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
     ),
     "fail_queued_guild_followups": lambda c, g: repo.fail_queued_guild_followups(c, g),
+    "block_guild_edits": lambda c, g: repo.block_guild_edits(c, g, T0),
+    "mark_alert_message_rendered": lambda c, g: repo.mark_alert_message_rendered(
+        c, g, 555, T0 + timedelta(days=1)
+    ),
+    "mark_alert_message_gone": lambda c, g: repo.mark_alert_message_gone(c, g, 555),
+    "mark_alert_message_tried": lambda c, g: repo.mark_alert_message_tried(c, g, 555, T0),
+    "mark_channel_alert_messages_gone": lambda c, g: repo.mark_channel_alert_messages_gone(
+        c, g, 80
+    ),
     "abandon_guild_digest": lambda c, g: repo.abandon_guild_digest(
         c, g, date(2026, 9, 30), max_attempts=0, now=_clock()
     ),
@@ -287,6 +302,7 @@ _OTHER_COVERAGE = {
     "backfill_lounge_quotes_guild",
     "queued_guild_codes",  # likewise, and it returns codes rather than guild ids
     "queued_guild_followups",  # likewise (test just below)
+    "alert_message_codes",  # likewise, for one alert message (test just below)
     # The per-guild digest reads: tests/test_repo_guild_digest.py pins that each
     # only sees its own guild's rows (items_for_window through guild_games,
     # last_window_end and get_guild_digest through the digests guild_id).
@@ -347,6 +363,18 @@ def test_queued_guild_followups_only_reports_that_guilds_queue(world):
         world.execute("DELETE FROM guild_code_followups WHERE guild_id = ?", (G2,))
     assert repo.queued_guild_followups(world, G1) == ["AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"]
     assert repo.queued_guild_followups(world, G2) == []
+
+
+def test_alert_message_codes_only_reports_that_guilds_message(world):
+    with world:
+        world.execute("UPDATE guild_code_posts SET claimed_at = '2026-09-30T00:00:00+00:00'")
+        world.execute(
+            "DELETE FROM guild_code_posts WHERE guild_id = ? AND status = 'posted'", (G2,)
+        )
+    assert [q.code for q in repo.alert_message_codes(world, G1, 555)] == [
+        "AAAAA-AAAAA-AAAAA-AAAAA-AAAA1"
+    ]
+    assert repo.alert_message_codes(world, G2, 555) == []
 
 
 def test_the_sweep_knows_about_every_repo_function_that_takes_a_guild_id():

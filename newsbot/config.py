@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -59,6 +60,10 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)\Z")
 _MAX_TOPICS = 24
 # v3 catalog cap: one Discord select menu holds 25 options, and there's no "All" in it.
 _MAX_CATALOG_GAMES = 25
+# A source's name goes into SHiFT alerts ("details via mentalmars"), and an alert has to
+# fit Discord's 2000 characters with the longest name we allow in it twice.
+# 100 is generous for a name and keeps that arithmetic from ever mattering.
+_MAX_SOURCE_NAME = 100
 
 
 class ConfigError(Exception):
@@ -277,6 +282,31 @@ class WebSearchSource(BaseModel):
     codes_only: bool | None = None
 
 
+class ShiftTableSource(BaseModel):
+    """A web page of SHiFT code tables, read for codes and their details (design.md §16).
+
+    It's always codes-only: the page is read for SHiFT codes and what they
+    give, and nothing on it is ever stored as news (`effective_codes_only`; an
+    explicit `codes_only: false` is a config error). `name` is required and
+    can't be blank because it's what an alert says in "details via mentalmars"; an
+    anonymous table would make for a very confusing alert.
+    """
+
+    type: Literal["shift_table"]
+    name: str
+    url: HttpUrl
+    topics: list[str] | None = None
+    trust: Trust
+    codes_only: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("a shift_table source needs a name")
+        return v
+
+
 def is_reddit_source(source: object) -> bool:
     """True for an RSS source whose host is reddit.com (or a subdomain of it)."""
     url = getattr(source, "url", None)
@@ -284,15 +314,21 @@ def is_reddit_source(source: object) -> bool:
 
 
 def effective_codes_only(source: object) -> bool:
-    """Whether `source` is codes-only: what it says, or true for a Reddit feed that's silent."""
+    """Whether `source` is codes-only: what it says, or true for a Reddit feed or a SHiFT table.
+
+    Both of those are codes-only whether they say so or not. (Saying `false`
+    on either is a config error, so "silent" and "true" are the only two
+    spellings that survive `load_config`.)
+    """
     explicit = getattr(source, "codes_only", None)
     if explicit is not None:
         return explicit
-    return is_reddit_source(source)
+    return isinstance(source, ShiftTableSource) or is_reddit_source(source)
 
 
 Source = Annotated[
-    RssSource | SteamSource | BlueskySource | WebSearchSource, Field(discriminator="type")
+    RssSource | SteamSource | BlueskySource | ShiftTableSource | WebSearchSource,
+    Field(discriminator="type"),
 ]
 
 
@@ -310,10 +346,11 @@ class SharedBlueskySource(BlueskySource, extra="forbid"):
     games: list[str] | None = None
 
 
-# `web_search` is in this union only so a stray one parses far enough for
-# load_config to say where it belongs, instead of pydantic's union-tag error.
+# `web_search` and `shift_table` are in this union only so a stray one parses
+# far enough for load_config to say where it belongs, instead of pydantic's
+# union-tag error. (A SHiFT table has to name its game, so it can't be shared.)
 SharedSourceCfg = Annotated[
-    SharedRssSource | SharedSteamSource | SharedBlueskySource | WebSearchSource,
+    SharedRssSource | SharedSteamSource | SharedBlueskySource | ShiftTableSource | WebSearchSource,
     Field(discriminator="type"),
 ]
 
@@ -664,6 +701,12 @@ class AppConfig(BaseModel):
         """Names of the codes-only sources: collected for SHiFT detection, never stored."""
         sources = [s for g in self.catalog for s in g.sources] + list(self.shared_sources)
         return frozenset(s.name for s in sources if s.name and effective_codes_only(s))
+
+    def shift_table_urls(self) -> list[str]:
+        """The page addresses of every shift_table source, as written in the config."""
+        return [
+            str(s.url) for g in self.catalog for s in g.sources if isinstance(s, ShiftTableSource)
+        ]
 
     def configured_source_names(self) -> frozenset[str]:
         """Every source name the current config would collect from, shared ones included.
@@ -1019,15 +1062,8 @@ def _v3_shift_games(cfg: AppConfig, raw: dict) -> tuple[AppConfig, list[str]]:
     return cfg.model_copy(update={"shift": shift}), []
 
 
-def _codes_only_problems(cfg: AppConfig) -> list[str]:
-    """Mistakes in `codes_only`: a Reddit feed that opts out, or a web search that opts in.
-
-    A Reddit feed can't be `codes_only: false`: Reddit's terms bar sharing its
-    content, and the Data API request that would have allowed it was denied,
-    so a Reddit post that reaches a digest is the one thing this release exists
-    to prevent. Web search can't be `codes_only: true` because it never goes
-    through SHiFT detection, so the flag would just throw its results away.
-    """
+def _labelled_sources(cfg: AppConfig) -> list[tuple[str, object]]:
+    """Every source in the file, each with the place a message should say it was found."""
     labelled: list[tuple[str, object]] = []
     labelled += [(f"sources[{i}]", s) for i, s in enumerate(cfg.sources)]
     for i, game in enumerate(cfg.catalog):
@@ -1035,9 +1071,22 @@ def _codes_only_problems(cfg: AppConfig) -> list[str]:
             (f"catalog[{i}] ({game.key}).sources[{j}]", s) for j, s in enumerate(game.sources)
         ]
     labelled += [(f"shared_sources[{j}]", s) for j, s in enumerate(cfg.shared_sources)]
+    return labelled
 
+
+def _codes_only_problems(cfg: AppConfig) -> list[str]:
+    """Mistakes in `codes_only`: a Reddit feed or SHiFT table opts out, or a web search opts in.
+
+    A Reddit feed can't be `codes_only: false`: Reddit's terms bar sharing its
+    content, and the Data API request that would have allowed it was denied,
+    so a Reddit post that reaches a digest is the one thing this release exists
+    to prevent. A SHiFT table can't either: its page is read for codes and
+    their details, and a table row has no business in a digest. Web search
+    can't be `codes_only: true` because it never goes through SHiFT detection,
+    so the flag would just throw its results away.
+    """
     problems = []
-    for where, source in labelled:
+    for where, source in _labelled_sources(cfg):
         explicit = getattr(source, "codes_only", None)
         name = getattr(source, "name", None)
         if isinstance(source, WebSearchSource):
@@ -1052,7 +1101,136 @@ def _codes_only_problems(cfg: AppConfig) -> list[str]:
                 "denied this bot's Data API request and forbids sharing its content, so Reddit "
                 "feeds are only read to spot SHiFT codes; remove the setting or set it to true"
             )
+        elif explicit is False and isinstance(source, ShiftTableSource):
+            problems.append(
+                f"{where} ({name}): codes_only can't be false for a shift_table source; "
+                "it's read only for SHiFT codes and their details. Remove the setting "
+                "or set it to true"
+            )
     return problems
+
+
+def _name_shown(name: str) -> str:
+    """A name safe to print in an error: escaped (no raw control characters) and short."""
+    return repr(name[:40]) + ("..." if len(name) > 40 else "")
+
+
+def _source_names(cfg: AppConfig) -> list[str]:
+    """Every source name in the file (the Brave block's included), v2 sources counted once.
+
+    Run before the v2 shape is regrouped into a catalog, or a v2 source would
+    be counted again as a derived one.
+    """
+    names = [s.name for s in cfg.sources]
+    names += [s.name for game in cfg.catalog for s in game.sources]
+    names += [s.name for s in cfg.shared_sources]
+    if cfg.web_search is not None:
+        names.append(cfg.web_search.name)
+    return [name for name in names if name is not None]
+
+
+# U+202A to U+202E (embeddings, overrides and their pop) and U+2066 to U+2069 (isolates), written as
+# escapes so the source stays honest about what it contains.
+_BIDI_CONTROL_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+
+def _name_problem(name: str) -> str | None:
+    """Why `name` can't be shown in an alert and saved in the database, or None if it can.
+
+    YAML lets a file spell things Python can't encode (`"\\uD83D"` is half an
+    emoji), and a name goes into source health, the sightings and every alert
+    it helped with. A name that fails to encode would fail every pass; one that
+    is a newline or invisible would print as nothing at all.
+    """
+    shown = _name_shown(name)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"source name {shown} has a character that can't be saved (a lone surrogate)"
+    if any(unicodedata.category(c) == "Cc" for c in name):
+        return f"source name {shown} has a control character (a newline or tab, say)"
+    # Bidi controls reorder what's around them, and the line and paragraph separators break
+    # a line the way a newline would; neither is a Cc, and both end up in front of members.
+    if _BIDI_CONTROL_RE.search(name) or any(unicodedata.category(c) in ("Zl", "Zp") for c in name):
+        return f"source name {shown} has a text-direction control or a line or paragraph separator"
+    if not any(not c.isspace() and unicodedata.category(c) != "Cf" for c in name):
+        return f"source name {shown} is empty or only invisible characters"
+    if name != name.strip():
+        return f"source name {shown} has spaces at the start or end; remove them"
+    return None
+
+
+def _source_name_problems(cfg: AppConfig) -> list[str]:
+    """Names that are too long, or can't be encoded or seen, wherever a source can live."""
+    problems = []
+    for name in _source_names(cfg):
+        problem = _name_problem(name)
+        if problem:
+            problems.append(f"{problem}; it's shown in SHiFT alerts")
+        elif len(name) > _MAX_SOURCE_NAME:
+            problems.append(
+                f"source name {name!r} is {len(name)} characters; the limit is "
+                f"{_MAX_SOURCE_NAME} (it's shown in SHiFT alerts)"
+            )
+    return problems
+
+
+def _warn_case_twins(cfg: AppConfig, log: logging.Logger) -> None:
+    """Warn about names that differ only by case, once per clash.
+
+    The B+ rule compares names casefolded, so `mentalmars` and `MentalMars`
+    count as one source when confirming a code, while source health and the
+    owner report keep them apart. It's not an error (a config that loads today
+    has to keep loading), but two of them won't confirm each other.
+    """
+    twins: dict[str, list[str]] = {}
+    for name in _source_names(cfg):
+        group = twins.setdefault(name.casefold(), [])
+        if name not in group:
+            group.append(name)
+    for group in twins.values():
+        if len(group) > 1:
+            log.warning(
+                "source names %s differ only by case; the code-confirmation rule counts them "
+                "as one source, so they won't confirm each other's codes",
+                " and ".join(repr(name[:40]) for name in group),
+            )
+
+
+def _shift_table_trust_problems(cfg: AppConfig) -> list[str]:
+    """A shift_table source that claims more than community trust.
+
+    The page is a community list. `official` is the rank a code's details earn
+    when Gearbox itself says them, and `official` trust would also let the
+    table's new codes ping on their own, which a community list hasn't earned.
+    """
+    return [
+        f"{where} ({source.name}): a shift_table source's trust must be community "
+        f"(it's a community list, and not {source.trust})"
+        for where, source in _labelled_sources(cfg)
+        if isinstance(source, ShiftTableSource) and source.trust != "community"
+    ]
+
+
+def _shift_table_game_problems(cfg: AppConfig) -> list[str]:
+    """A shift_table source under a game that isn't in `shift.games`.
+
+    Its rows only ever feed SHiFT detection, so under any other game it would
+    be fetched every hour for nothing. An empty `shift.games` is the v2 reading
+    ("every game"), so nothing is wrong then. Run after `_v3_shift_games` has
+    filled in the default, or every v3 file that leaves `shift:` out would trip it.
+    """
+    shift_games = set(cfg.shift.games)
+    if not shift_games:
+        return []
+    return [
+        f"catalog[{i}] ({game.key}).sources[{j}] ({source.name}): shift_table only feeds "
+        f"SHiFT detection, and {game.key} isn't in shift.games"
+        for i, game in enumerate(cfg.catalog)
+        if game.key not in shift_games
+        for j, source in enumerate(game.sources)
+        if isinstance(source, ShiftTableSource)
+    ]
 
 
 def _skip_pointless_reddit(cfg: AppConfig) -> AppConfig:
@@ -1134,6 +1312,11 @@ def _v3_problems(cfg: AppConfig) -> list[str]:
         if isinstance(shared, WebSearchSource):
             errors.append(
                 f"shared_sources[{j}]: web_search goes in the top-level web_search: block"
+            )
+            continue
+        if isinstance(shared, ShiftTableSource):
+            errors.append(
+                f"shared_sources[{j}] ({shared.name}): shift_table goes under its game in catalog:"
             )
             continue
         if shared.topics is not None:
@@ -1318,6 +1501,9 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
     errors += _codes_only_problems(cfg)
+    errors += _shift_table_trust_problems(cfg)
+    errors += _source_name_problems(cfg)
+    _warn_case_twins(cfg, log)
 
     if is_v3:
         errors += _v3_problems(cfg)
@@ -1327,7 +1513,23 @@ def load_config(path: str | Path) -> AppConfig:
         # Derive mode: no catalog, so build one from the v2 keys, before the
         # web_search filter below throws the Brave source away for lack of a
         # key. Blocks the file spells out itself win over the derived ones.
-        games, shared, web_search = _derive_catalog(cfg.topics, cfg.sources)
+        # A shift_table source has to name its game (there's no shared kind of it,
+        # and `_derive_catalog` would KeyError looking for one), so the ones that
+        # can't be placed are reported here and kept out of the regrouping. A
+        # lone topic that isn't a known one gets the usual unknown-topic error below.
+        derivable = []
+        for source in cfg.sources:
+            if isinstance(source, ShiftTableSource):
+                scope = source.topics or []
+                if len(scope) != 1:
+                    errors.append(
+                        f"source {source.name!r}: a shift_table source must name exactly one topic"
+                    )
+                    continue
+                if scope[0] not in seen_keys:
+                    continue
+            derivable.append(source)
+        games, shared, web_search = _derive_catalog(cfg.topics, derivable)
         if "shared_sources" in raw:
             errors.append("shared_sources needs a catalog: (the v2 shape derives its own)")
         update: dict[str, object] = {"catalog": games, "shared_sources": shared}
@@ -1364,6 +1566,8 @@ def load_config(path: str | Path) -> AppConfig:
             for g in cfg.shift.games:
                 if g not in known_keys:
                     errors.append(f"shift.games names unknown game {g!r}")
+
+    errors += _shift_table_game_problems(cfg)
 
     cfg = _skip_pointless_reddit(cfg)
 

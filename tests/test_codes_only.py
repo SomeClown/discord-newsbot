@@ -288,7 +288,8 @@ def test_the_example_config_keeps_only_r_borderlands4_and_marks_it_codes_only():
     reddit = [s for s in sources if is_reddit_source(s)]
     assert [s.name for s in reddit] == ["r/Borderlands4"]
     assert reddit[0].codes_only is True  # spelled out in the file, not just the default
-    assert cfg.codes_only_source_names() == {"r/Borderlands4"}
+    # mentalmars is the other codes-only source: a shift_table page, read for codes and details.
+    assert cfg.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
     # And the file itself has no other Reddit source for the loader to be quietly skipping.
     assert EXAMPLE.read_text().count("reddit.com/r/") == 1
 

@@ -15,8 +15,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Protocol
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import httpx
 
@@ -26,10 +26,15 @@ from newsbot.config import (
     GameInfo,
     RssSource,
     Secrets,
+    ShiftTableSource,
     SteamSource,
     Trust,
     WebSearchSource,
 )
+
+if TYPE_CHECKING:
+    # The collector imports this module, so the real import waits inside `build_catalog_collectors`.
+    from newsbot.collectors.shift_table import PageValidators
 
 # Default gap between requests that share a `rate_limit_key`. Reddit still
 # 429s a burst of requests from a single well-behaved client even from a
@@ -72,6 +77,45 @@ class RateLimited(QuotaExceeded):
         self.retry_after_s = retry_after_s
 
 
+# Who vouches for a detail: Gearbox's own words ("official") or a community
+# table such as mentalmars' ("table"). Official outranks table, field by field
+# (design.md §16); the merging itself is a later module's problem.
+DetailRank = Literal["official", "table"]
+Category = Literal["golden", "cosmetic", "permanent", "other"]
+# Which kind of table on a code page a row came from, by its heading.
+TableKind = Literal["main", "cosmetic", "permanent"]
+
+
+@dataclass(frozen=True, slots=True)
+class ItemDetails:
+    """What a source knows about one SHiFT code besides its characters (design.md §16).
+
+    Only `shift_table` rows and single-code official posts carry these. An
+    empty `reward`, a `None` category or a `None` date means "this source
+    didn't say", never "there is none", so a later merge can fill the gap
+    without erasing anything. `reward` and `origin` are already cut so their
+    escaped form (`format.esc`, in UTF-16 units) is at most 300; the cut
+    happens where the text is read, because that's the only place that knows
+    the text came from a stranger's web page. `expires_on` and `added_on` are
+    Pacific calendar dates. `listed` is True when the details came from a
+    listing page, which is what `first_listed_at` and `last_listed_at` track.
+    `listed_in` names every kind of table the code was listed in on that page
+    (a code can sit in two); detection uses it to tell a table kind it has
+    read before from one it is meeting for the first time.
+    """
+
+    code: str
+    rank: DetailRank
+    reward: str = ""
+    category: Category | None = None
+    expires_on: date | None = None
+    added_on: date | None = None  # table only
+    origin: str = ""  # table only
+    listed: bool = False
+    # Bookkeeping for detection, so it stays out of equality like `RawItem.details` does.
+    listed_in: tuple[TableKind, ...] = field(default=(), compare=False)  # table only
+
+
 @dataclass(frozen=True, slots=True)
 class RawItem:
     """One collected item, before normalization, dedupe or topic matching.
@@ -87,6 +131,10 @@ class RawItem:
     equality checks and log lines, and `StoredItem` (what actually reaches
     the database) has no field for it at all, so there's no code path that
     could persist it or hand it to the LLM even by accident.
+
+    `details` (design.md §16) rides along the same way, for the same reasons:
+    it's SHiFT-detection business, so it stays out of equality checks and log
+    lines, and `StoredItem` has no field for it either.
     """
 
     url: str
@@ -97,6 +145,7 @@ class RawItem:
     published_at: datetime | None
     topics: tuple[str, ...] | None = None
     full_text: str | None = field(default=None, compare=False, repr=False)
+    details: ItemDetails | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -262,6 +311,7 @@ def build_catalog_collectors(
     *,
     include_web_search: bool = True,
     web_search_games: Sequence[GameInfo] | None = None,
+    validators: PageValidators | None = None,
 ) -> list[Collector]:
     """Build a collector for every catalog and shared source, each tagged with its game.
 
@@ -273,9 +323,15 @@ def build_catalog_collectors(
     Web search is built only if `BRAVE_API_KEY` is set (same second line of
     defense as above), and searches `web_search_games`, which defaults to
     the whole catalog; the daily job narrows it to comped servers' games.
+
+    `validators` is where SHiFT table pages keep their ETag and Last-Modified.
+    Collectors are rebuilt every pass, so whoever calls this every pass owns
+    the one `PageValidators` and hands it in each time; left out, every
+    collector starts with an empty one and the page is fetched in full.
     """
     from newsbot.collectors.bluesky import BlueskyCollector, BlueskySession
     from newsbot.collectors.rss import RssCollector
+    from newsbot.collectors.shift_table import ShiftTableCollector
     from newsbot.collectors.steam import SteamCollector
     from newsbot.collectors.web_search import WebSearchCollector
 
@@ -285,11 +341,15 @@ def build_catalog_collectors(
             secrets.bluesky_handle, secrets.bluesky_app_password.get_secret_value()
         )
 
-    def one(source: RssSource | SteamSource | BlueskySource) -> Collector:
+    def one(source: RssSource | SteamSource | BlueskySource | ShiftTableSource) -> Collector:
         if isinstance(source, RssSource):
             return RssCollector(source)
         if isinstance(source, SteamSource):
             return SteamCollector(source)
+        # Explicit, because the `else` below is Bluesky and would happily try
+        # to search for a SHiFT table. It would not go well.
+        if isinstance(source, ShiftTableSource):
+            return ShiftTableCollector(source, validators=validators)
         return BlueskyCollector(source, bluesky_session)
 
     collectors: list[Collector] = []

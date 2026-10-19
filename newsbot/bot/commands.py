@@ -32,6 +32,7 @@ import zoneinfo
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -43,8 +44,9 @@ from newsbot.bot.format import (
     _report_jump_link,
     _truncate_utf16,
     esc,
-    render_code_page,
+    render_current_pages,
     render_guild_overview,
+    render_history_pages,
     render_item_page,
     render_story_page,
 )
@@ -66,16 +68,17 @@ from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import (
     CodeView,
+    CurrentCode,
     GuildGame,
     GuildSettings,
     ItemView,
     LoungeSettings,
+    ShiftSettings,
     StoryView,
     Tier,
 )
 from newsbot.store.repo import (
     get_lounge_state,
-    query_codes,
     query_stories,
     search_stories,
 )
@@ -84,11 +87,6 @@ from newsbot.text import plain_line
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 6
-# design.md §13: /shift codes' own page size: a code's block is smaller
-# than a story's (no headline, no summary, just a code and a source line),
-# so a page holds a couple more of them before it'd risk the embed's
-# 4096-unit cap.
-_SHIFT_PAGE_SIZE = 8
 _GAME_ALL = "all"
 _LABEL_CHOICES = ("official", "reported", "rumor")
 
@@ -154,14 +152,20 @@ def _quote_posted_today_sync(db_path: str, day: str, guild_id: int | None = None
     return last is not None and last >= day
 
 
-def _query_codes_sync(
-    db_path: str, since: datetime, limit: int, offset: int
-) -> tuple[list[CodeView], int]:
+def _current_codes_sync(
+    db_path: str, guild_id: int, now: datetime
+) -> tuple[list[CurrentCode], ShiftSettings | None]:
+    """The codes that should still work, and this server's alert settings (for the empty page)."""
     with closing(connect(db_path)) as conn:
-        return query_codes(conn, since, limit, offset)
+        return repo.current_codes(conn, now=now), repo.get_shift(conn, guild_id)
 
 
-# --- Paging glue shared by /news recent, /news search, and /shift codes ---
+def _history_codes_sync(db_path: str, since: datetime) -> list[CodeView]:
+    with closing(connect(db_path)) as conn:
+        return repo.history_codes(conn, since)
+
+
+# --- Paging glue: /news recent and /news search page by row count, /shift by size ---
 
 _Fetch = Callable[[int, int], tuple[list, int]]
 _Render = Callable[[list, int, int], discord.Embed]
@@ -180,10 +184,9 @@ async def _first_page_and_view(
     `functools.partial`); every call, including this first one, goes
     through `asyncio.to_thread` so a slow query never blocks the gateway.
     `render(items, page, pages)` turns one page's worth of rows into an
-    embed: generalized (design.md §13) so `/shift codes` can share this
-    with `/news recent`/`/news search` instead of each command re-doing
-    the same "query, embed page 1, wire up Prev/Next" dance with its own
-    fixed call to `render_story_page`.
+    embed: generalized (design.md §13) so `/news recent` and `/news search`
+    don't each redo the "query, embed page 1, wire up Prev/Next" dance
+    with their own fixed call to `render_story_page`.
     """
     items, total = await asyncio.to_thread(fetch, page_size, 0)
     pages = _page_count(total, page_size)
@@ -195,6 +198,22 @@ async def _first_page_and_view(
 
     view = PagerView(owner_id, render_page=render_page, total_pages=pages)
     return embed, view
+
+
+def _pages_view(owner_id: int, embeds: Sequence[discord.Embed]) -> tuple[discord.Embed, PagerView]:
+    """Page 1 and a `PagerView` over embeds that are already drawn (design.md §16).
+
+    `/shift codes` and `/shift history` page by size: the only way to know where a page
+    ends is to lay out the whole list, so both render everything up front and the pager
+    just hands out the next embed. The list is a few hundred entries at the outside, and
+    holding it for the view's ten minutes costs less than querying and laying it out again
+    on every click. The renderers always return at least one embed (the empty page counts).
+    """
+
+    async def render_page(page: int) -> discord.Embed:
+        return embeds[page - 1]
+
+    return embeds[0], PagerView(owner_id, render_page=render_page, total_pages=len(embeds))
 
 
 async def _cooldown_message(
@@ -644,14 +663,86 @@ def _topics_by_key(cfg: AppConfig) -> dict[str, Topic]:
     return {game.key: game for game in cfg.catalog}
 
 
-def make_member_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
-    """Build v3's `/shift codes`: the shared list of known SHiFT codes.
+_CODES_TYPES = ("all", "golden", "cosmetic", "permanent")
+_CODES_REDEEM = "redeem at shift.gearboxsoftware.com"
+_CODES_FOOTER_HOSTS = 3
+_HISTORY_DAYS_DEFAULT = 14
+_HISTORY_DAYS_MAX = 90
+_CODES_FOOTER_MAX = 300
+# What an empty `/shift codes type:<kind>` calls itself; "all" has no adjective.
+_CODES_KIND_WORD = {"golden": "golden ", "cosmetic": "cosmetic ", "permanent": "permanent "}
 
-    The list is global (a code is a code), but the command is only for servers that
-    follow a game the SHiFT detection covers: `shift.games`, or any game if that's empty.
+
+def _codes_footer(cfg: AppConfig) -> str:
+    """`/shift codes`' footer: who the codes come from, and where to redeem them.
+
+    "Gearbox" is always on the list (its posts are the official source). The rest are the
+    hosts of whatever `shift_table` pages the config reads, so a self-hoster who never added
+    mentalmars isn't told the codes came from there. For prod it reads: Codes from Gearbox
+    and mentalmars.com · redeem at shift.gearboxsoftware.com.
+
+    It's config text going into an embed footer, so it has limits: three hosts at most, and
+    the whole line at most 300 characters (a footer holds 2,048, and "Page i of n" rides
+    along). Hosts that don't fit are dropped from the end, never cut in half.
+    """
+    hosts: list[str] = []
+    for url in cfg.shift_table_urls():
+        host = (urlsplit(url).hostname or "").removeprefix("www.")
+        if host and host not in hosts:
+            hosts.append(host)
+    for count in range(min(len(hosts), _CODES_FOOTER_HOSTS), -1, -1):
+        sources = ["Gearbox", *hosts[:count]]
+        listed = sources[0] if len(sources) == 1 else f"{', '.join(sources[:-1])} and {sources[-1]}"
+        footer = f"Codes from {listed} · {_CODES_REDEEM}"
+        if len(footer) <= _CODES_FOOTER_MAX:
+            return footer
+    return f"Codes from Gearbox · {_CODES_REDEEM}"
+
+
+def _codes_empty_text(
+    kind: str, shift: ShiftSettings | None, guild: discord.Guild | None = None
+) -> str:
+    """The `/shift codes` page for an empty list, pointing at the alerts channel if there is one.
+
+    The channel mention is built here from the server's own saved setting (an integer from
+    our database), never from anything scraped. The reply goes out with mentions off anyway.
+    If the server's cache says the channel is gone (deleted since the setting was saved), the
+    mention would be a dead link, so it's left out; with no guild to ask, we trust the setting.
+    """
+    text = f"No current {_CODES_KIND_WORD.get(kind, '')}codes."
+    if shift is None or not shift.enabled or not shift.channel_id:
+        return text
+    if guild is not None and guild.get_channel(shift.channel_id) is None:
+        return text
+    return text + f" I'll post new ones in <#{shift.channel_id}> when they show up."
+
+
+def _history_days(days: object) -> int:
+    """`/shift history`'s window: 1 to 90 days whatever arrives, 14 for anything not a whole number.
+
+    Discord checks the range before it delivers an interaction, and discord.py doesn't check
+    it again, so this is for the payload that skipped the client. It narrows or defaults; it
+    never widens the window past the 90 days the command promises, and never raises.
+    """
+    if isinstance(days, bool) or not isinstance(days, int):
+        return _HISTORY_DAYS_DEFAULT
+    return min(max(days, 1), _HISTORY_DAYS_MAX)
+
+
+def make_member_shift_group(
+    cfg: AppConfig, db_path: str, *, now: Callable[[], datetime] | None = None
+) -> app_commands.Group:
+    """Build v3's `/shift codes` (what works right now) and `/shift history` (everything seen).
+
+    Both read the shared code list, which is global (a code is a code), but the commands
+    are only for servers that follow a game the SHiFT detection covers: `shift.games`, or
+    any game if that's empty. They need no cooldown (they only read the database) and they
+    page by size, not by count; see `format.render_current_pages`. `now` is for tests that
+    want a fixed clock; the real bot leaves it alone.
     """
     names = {game.key: game.name for game in cfg.catalog}
     eligible = set(cfg.shift.games) or set(names)
+    clock = now or (lambda: datetime.now(UTC))
     group = app_commands.Group(
         name="shift",
         description="SHiFT codes the bot has seen.",
@@ -659,21 +750,14 @@ def make_member_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
         allowed_installs=_GUILD_INSTALL,
     )
 
-    @group.command(name="codes", description="List known SHiFT codes.")
-    @app_commands.describe(
-        days="How many days back to look (1-90)",
-        public="Show the result to the whole channel instead of just you",
-    )
-    async def codes(
+    async def shift_context(
         interaction: discord.Interaction,
-        days: app_commands.Range[int, 1, 90] = 14,
-        public: bool = False,
-    ) -> None:
-        await interaction.response.defer(ephemeral=not public)
+    ) -> tuple[GuildSettings, list[GuildGame]] | None:
+        """The member context, or None after saying why a server can't use the /shift commands."""
         context = await _member_context(interaction, db_path)
         if context is None:
-            return
-        guild, games = context
+            return None
+        _guild, games = context
         if not any(g.game_key in eligible for g in games):
             covered = ", ".join(esc(names.get(key, key)) for key in cfg.shift.games)
             await _say(
@@ -682,18 +766,67 @@ def make_member_shift_group(cfg: AppConfig, db_path: str) -> app_commands.Group:
                 if covered
                 else "This server doesn't follow any games yet.",
             )
+            return None
+        return context
+
+    @group.command(name="codes", description="SHiFT codes that should still work right now.")
+    @app_commands.describe(
+        type="Which kind of codes to show",
+        public="Show the result to the whole channel instead of just you",
+    )
+    @app_commands.choices(type=[Choice(name=kind, value=kind) for kind in _CODES_TYPES])
+    async def codes(
+        interaction: discord.Interaction,
+        type: str = "all",
+        public: bool = False,
+    ) -> None:
+        await interaction.response.defer(ephemeral=not public)
+        context = await shift_context(interaction)
+        if context is None:
             return
-        timezone = resolve_timezone(guild.timezone) or "UTC"
-        since = datetime.now(UTC) - timedelta(days=days)
-        fetch = functools.partial(_query_codes_sync, db_path, since)
-        title = "/shift codes"
-
-        def render(codes: list[CodeView], page: int, pages: int) -> discord.Embed:
-            return render_code_page(codes, title=title, page=page, pages=pages, timezone=timezone)
-
-        embed, view = await _first_page_and_view(
-            interaction.user.id, _SHIFT_PAGE_SIZE, fetch, render
+        # The value is a Discord choice, so a stranger can't send anything else. A near miss
+        # (capitals, stray spaces) means what it looks like; anything else gets the whole list
+        # instead of an exception.
+        kind = type.strip().casefold() if isinstance(type, str) else "all"
+        if kind not in _CODES_TYPES:
+            kind = "all"
+        moment = clock()
+        entries, shift = await asyncio.to_thread(
+            _current_codes_sync, db_path, interaction.guild_id, moment
         )
+        embeds = render_current_pages(
+            entries,
+            kind=kind,
+            now=moment,
+            footer=_codes_footer(cfg),
+            empty=_codes_empty_text(kind, shift, interaction.guild),
+        )
+        embed, view = _pages_view(interaction.user.id, embeds)
+        await interaction.followup.send(
+            embed=embed, view=view, ephemeral=not public, allowed_mentions=_none_mentions()
+        )
+
+    @group.command(name="history", description="Every SHiFT code seen in the last few days.")
+    @app_commands.describe(
+        days="How many days back to look (1-90)",
+        public="Show the result to the whole channel instead of just you",
+    )
+    async def history(
+        interaction: discord.Interaction,
+        days: app_commands.Range[int, 1, 90] = 14,
+        public: bool = False,
+    ) -> None:
+        await interaction.response.defer(ephemeral=not public)
+        context = await shift_context(interaction)
+        if context is None:
+            return
+        guild, _games = context
+        timezone = resolve_timezone(guild.timezone) or "UTC"
+        moment = clock()
+        since = moment - timedelta(days=_history_days(days))
+        views = await asyncio.to_thread(_history_codes_sync, db_path, since)
+        embeds = render_history_pages(views, timezone=timezone, now=moment, title="/shift history")
+        embed, view = _pages_view(interaction.user.id, embeds)
         await interaction.followup.send(
             embed=embed, view=view, ephemeral=not public, allowed_mentions=_none_mentions()
         )

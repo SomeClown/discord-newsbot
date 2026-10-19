@@ -172,28 +172,53 @@ def test_test_alert_is_never_registered_whatever_the_config_says(v3_cfg, allow_t
     assert "test-alert" not in {c.name for c in group.commands}
 
 
-# --- /shift codes (design.md §13, plan step 6) ---
+# --- /shift codes and /shift history (design.md §16, plan task 9) ---
 #
 # This file stays at the same "cheap object-level checks" level as everything
 # else here: option bounds and defaults, given a group the factory always builds.
 
 
-def test_shift_group_has_one_codes_command(v3_cfg):
+def test_shift_group_has_codes_and_history(v3_cfg):
     group = make_member_shift_group(v3_cfg, ":memory:")
-    assert {c.name for c in group.commands} == {"codes"}
+    assert {c.name for c in group.commands} == {"codes", "history"}
 
 
-def test_shift_codes_days_option_bounds_are_one_to_ninety(v3_cfg):
+def test_shift_codes_means_current_codes_and_history_means_the_old_list(v3_cfg):
     group = make_member_shift_group(v3_cfg, ":memory:")
-    days = _param(_command(group, "codes"), "days")
-    assert days.min_value == 1
-    assert days.max_value == 90
-    assert days.default == 14
+    assert _command(group, "codes").description == "SHiFT codes that should still work right now."
+    assert _command(group, "history").description == "Every SHiFT code seen in the last few days."
+
+
+def test_shift_codes_has_no_days_option(v3_cfg):
+    group = make_member_shift_group(v3_cfg, ":memory:")
+    assert {p.name for p in _command(group, "codes").parameters} == {"type", "public"}
+
+
+def test_shift_codes_type_offers_four_choices_and_defaults_to_all(v3_cfg):
+    group = make_member_shift_group(v3_cfg, ":memory:")
+    kind = _param(_command(group, "codes"), "type")
+    assert [c.value for c in kind.choices] == ["all", "golden", "cosmetic", "permanent"]
+    assert kind.default == "all"
+    assert kind.required is False
 
 
 def test_shift_codes_public_option_defaults_false(v3_cfg):
     group = make_member_shift_group(v3_cfg, ":memory:")
     public = _param(_command(group, "codes"), "public")
+    assert public.default is False
+
+
+def test_shift_history_days_option_bounds_are_one_to_ninety(v3_cfg):
+    group = make_member_shift_group(v3_cfg, ":memory:")
+    days = _param(_command(group, "history"), "days")
+    assert days.min_value == 1
+    assert days.max_value == 90
+    assert days.default == 14
+
+
+def test_shift_history_public_option_defaults_false(v3_cfg):
+    group = make_member_shift_group(v3_cfg, ":memory:")
+    public = _param(_command(group, "history"), "public")
     assert public.default is False
 
 

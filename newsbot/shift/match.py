@@ -85,6 +85,17 @@ def find_codes(text: str) -> list[str]:
     return codes
 
 
+def defuse_codes(text: str) -> str:
+    """`text` with every code-shaped substring replaced by "[code]".
+
+    For scraped reward and origin text that ends up in an alert next to a real code: a
+    reward cell that holds a second code would be one more thing in the channel that looks
+    redeemable (and a thing a later `find_codes` over rendered text could pick up). Every
+    `CODE_RE` match goes, digit or not, since a placeholder-shaped one is no better.
+    """
+    return CODE_RE.sub("[code]", text)
+
+
 def is_code(value: str) -> bool:
     """Whether `value` is, on its own, exactly one standalone SHiFT code.
 

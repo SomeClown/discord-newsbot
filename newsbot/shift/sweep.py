@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
@@ -35,6 +36,68 @@ class CodeAlertPoster(Protocol):
         Raises `PublishError` for a failure worth retrying (a 5xx, a
         timeout); anything else raised is treated as final: see
         `post_alert_with_retry`.
+        """
+        ...
+
+
+class MessageGoneError(Exception):
+    """The alert message (or the channel it was in) no longer exists, or never can be edited.
+
+    Raised by a `CodeAlertEditor`. It's the one "done, quietly" outcome of an edit: a
+    deleted message is the server's business, and nobody needs telling.
+    """
+
+
+class ChannelGoneError(MessageGoneError):
+    """The whole channel is gone, or isn't one this server's alerts can be edited in.
+
+    A kind of `MessageGoneError` that the edit pass answers for every message in the
+    channel at once, so a deleted channel costs one lookup and not one per message.
+    """
+
+
+class EditForbiddenError(Exception):
+    """The bot isn't allowed to see or edit the alert's channel (a 403, 50001 or 50013).
+
+    Raised by a `CodeAlertEditor`. The edit pass tells the server's admins once and stops
+    editing there until the server's SHiFT settings are saved again.
+    """
+
+
+# The text a ping puts in front of an alert's header, by the server's ping choice: "everyone",
+# or a role id (a snowflake, 17 to 20 digits). Same shape rule as `client.mentions_for`.
+_ROLE_ID = re.compile(r"[0-9]{17,20}", re.ASCII)
+
+
+def ping_prefix_for(choice: object) -> str:
+    """The prefix ("@everyone " or "<@&id> ") an alert carries for ping `choice`; "" for none.
+
+    Anything that isn't "everyone" or a role id (including "none", garbage and a non-string)
+    is "": it pings nobody, so no header starts with it.
+    """
+    if type(choice) is not str:
+        return ""
+    if choice == "everyone":
+        return _PING_PREFIX
+    if _ROLE_ID.fullmatch(choice):
+        return f"<@&{choice}> "
+    return ""
+
+
+class CodeAlertEditor(Protocol):
+    async def edit(self, message_id: int, content: str, *, ping: str = "none") -> None:
+        """Replace one alert message's text, keeping the mentions it already had.
+
+        `ping` is the choice the message went out with ("none", "everyone" or a role id),
+        sent back as the edit's mentions because Discord rebuilds a message's mentions from
+        the edit: an edit with none would strip the highlight from an alert that pinged. The
+        caller only passes a choice when the message's own text still starts with that ping,
+        so an edit never adds a mention the message didn't have.
+
+        Raises `MessageGoneError` or `EditForbiddenError` for those two outcomes, and
+        `PublishError` for a failure worth another try later (a 5xx, a timeout, or a 429,
+        whose `retry_after` says how long Discord wants us to wait). Anything else is a bug
+        or an error nobody planned for, and the edit pass logs it and moves on.
         """
         ...
 
@@ -154,7 +217,11 @@ _ROUNDUP_CAP_ALERT = (
 
 
 __all__ = [
+    "CodeAlertEditor",
+    "ChannelGoneError",
     "CodeAlertPoster",
+    "EditForbiddenError",
+    "MessageGoneError",
     "PrintCodeAlertPoster",
     "post_alert_with_retry",
 ]

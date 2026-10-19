@@ -54,7 +54,49 @@ def migrate(conn: sqlite3.Connection) -> int:
             continue
         current = _apply(conn, path, version, current)
 
+    _check_build_columns(conn, current)
     return current
+
+
+# Columns migration 009 gained while v3.1.0 was being built, as (table, column). 009 was
+# amended in place because no released database has it, which leaves exactly one kind of
+# database it can't help: a development one that ran an earlier draft. `user_version` says
+# 9, `migrate` applies nothing, and the first edit or release that names a missing column
+# dies with "no such column" in the middle of a pass. Better to say so at the door.
+_BUILD_COLUMNS = (
+    ("guild_alert_messages", "edit_tried_at"),
+    ("guild_alert_messages", "ping"),
+    ("alerted_codes", "official_seen_at"),
+    ("alerted_codes", "table_silenced_at"),
+)
+# And the one index it grew: without it the follow-up check scans guild_code_posts for every
+# code of every pass. Nothing breaks, it just gets slowly and quietly worse, which is the
+# kind of stale I'd rather hear about now.
+_BUILD_INDEXES = ("idx_guild_code_posts_code",)
+
+
+def _check_build_columns(conn: sqlite3.Connection, version: int) -> None:
+    """Raise `StoreError` if a version 9+ database lacks a column or index 009 grew in the build."""
+    if version < 9:
+        return
+    missing = []
+    for table, column in _BUILD_COLUMNS:
+        # The table name is one of the constants above, never input; PRAGMA can't bind it.
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            missing.append(f"{table}.{column}")
+    for name in _BUILD_INDEXES:
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)
+        ).fetchone()
+        if found is None:
+            missing.append(f"index {name}")
+    if missing:
+        raise StoreError(
+            "This database has migration 009 from an earlier draft of v3.1.0 "
+            f"(missing {', '.join(missing)}). 009 was amended before release and there is "
+            "no upgrade path for a database that ran the old one: start the database fresh."
+        )
 
 
 _FK_OFF_HEADER = "-- newsbot: foreign-keys-off"

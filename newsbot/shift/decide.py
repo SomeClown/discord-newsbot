@@ -17,13 +17,14 @@ digest itself uses, not a separate keyword check invented for this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from newsbot.collectors.base import CollectorResult, RawItem, Trust
+from newsbot.collectors.base import CollectorResult, ItemDetails, RawItem, Trust
 from newsbot.config import Topic
 from newsbot.pipeline.filter import filter_items
 from newsbot.shift.match import find_codes, mentions_golden_key
+from newsbot.shift.official import read_official_details
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 
@@ -46,6 +47,18 @@ class CodeSighting:
     `roundup` (owner decision, 2026-09-25) marks a sighting from an item
     that named more than `cfg.alerts.max_codes_per_item` distinct codes:
     a roundup or megathread post, not a genuine single-code announcement.
+
+    `details` (design.md §16) is what the item said about this one code
+    besides its characters: a table row's reward and expiry, or what the
+    official reader could make of a single-code Gearbox post. It rides along
+    for whoever records it (`shift/details.py` does the merging) and is left
+    out of equality, since two sightings of a code are the same sighting
+    whatever each one happened to know.
+
+    `first_listing` marks a table row whose table kind this database has never
+    seen that source list (design.md §16, E1, per table kind). An undated one
+    can't be told from a code that's sat there for a year, so `aggregate` won't
+    call it fresh.
     """
 
     code: str
@@ -55,6 +68,8 @@ class CodeSighting:
     trust: Trust
     published_at: datetime | None
     roundup: bool = False
+    details: ItemDetails | None = field(default=None, compare=False)
+    first_listing: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,6 +129,7 @@ def sightings_from_items(
     topics: list[Topic],
     alert_topics: list[str],
     max_codes_per_item: int = 5,
+    now: datetime | None = None,
 ) -> list[CodeSighting]:
     """Every code found in `items`, restricted to `alert_topics` (A6).
 
@@ -134,6 +150,19 @@ def sightings_from_items(
     every sighting it produces is marked `roundup=True` (owner decision,
     2026-09-25); `aggregate` is what actually decides what that means for
     each code.
+
+    Details (design.md §16) attach to a sighting of an item's only code, never
+    to a roundup's: an item that carries its own `details` (a table row) keeps
+    them if they're about the code the item names, and an official-trust item
+    holding exactly one code gets whatever `read_official_details` can read
+    out of its text, which is often nothing. A multi-code official post still
+    yields every sighting; it just yields no details. `now` is only the
+    fallback for a year-less expiry date on an official post with no publish
+    time.
+
+    Scope is decided item by item, not URL by URL: every row of a code table
+    shares the page's URL, and an unrelated item that happens to share it
+    mustn't ride the table's game match into the alert scope.
     """
     scoped_items = items
     if alert_topics:
@@ -141,13 +170,13 @@ def sightings_from_items(
         # which items matched at all, never the cap that trims what the
         # digest shows: a code from item #61 in a busy topic still counts.
         grouped = filter_items(items, topics, max(len(items), 1))
-        matched_urls = {
-            topic_item.item.url
+        matched = {
+            id(topic_item.item)
             for topic_key in alert_topics
             for topic_item in grouped.get(topic_key, [])
             if not topic_item.uncertain
         }
-        scoped_items = [item for item in items if item.url in matched_urls]
+        scoped_items = [item for item in items if id(item) in matched]
 
     sightings: list[CodeSighting] = []
     for item in scoped_items:
@@ -155,8 +184,14 @@ def sightings_from_items(
         codes = find_codes(text)
         if not codes:
             continue
-        golden = mentions_golden_key(text)
         is_roundup = len(codes) > max_codes_per_item
+        details = None
+        if not is_roundup and len(codes) == 1:
+            if item.details is not None and item.details.code == codes[0]:
+                details = item.details
+            elif item.trust == "official":
+                details = read_official_details(text, codes[0], item.published_at, now=now)
+        golden = mentions_golden_key(text) or (details is not None and details.category == "golden")
         for code in codes:
             sightings.append(
                 CodeSighting(
@@ -167,6 +202,7 @@ def sightings_from_items(
                     trust=item.trust,
                     published_at=item.published_at,
                     roundup=is_roundup,
+                    details=details,
                 )
             )
     return sightings
@@ -183,9 +219,11 @@ def _sighting_key(sighting: CodeSighting) -> tuple[int, float]:
 
 def _is_fresh(sighting: CodeSighting, now: datetime, max_age: timedelta) -> bool:
     # Undated items are treated as fresh (SPEC-DEV 4's rule, carried over
-    # here per A11): there's no date to judge them stale by.
+    # here per A11): there's no date to judge them stale by. The exception is
+    # a table on its very first listing (design.md §16, E1): every undated
+    # row of a table we've never read before is "already around", not news.
     if sighting.published_at is None:
-        return True
+        return not sighting.first_listing
     return sighting.published_at >= now - max_age
 
 
@@ -219,6 +257,11 @@ def aggregate(
     code whose *every* sighting is `roundup` gets `roundup=True`; nothing
     else on the candidate matters once that's true, since `plan_alerts`
     never posts one.
+
+    A sighting flagged `first_listing` (`fanout` sets it) is a table row from a kind of
+    table its source has never listed here: where a row with no "added" date can't be told
+    from one that's been on the page for a year, so an undated one doesn't count as fresh.
+    Dated sightings follow the usual age rule, and so do undated ones from everywhere else.
     """
     order: list[str] = []
     by_code: dict[str, list[CodeSighting]] = {}

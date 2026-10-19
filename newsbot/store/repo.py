@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -26,13 +27,28 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
+from newsbot.shift.details import (
+    CLOCK_DAYS,
+    SHIFT_TZ,
+    DetailObservation,
+    after,
+    clean_observation,
+    displayed,
+    expired_by_expiry,
+    merge_observations,
+    sort_observations,
+)
 from newsbot.store.db import StoreError
 from newsbot.store.models import (
+    AlertMessageRecord,
     AlertState,
+    CodeDetailsRow,
     CodeView,
     CompedFollow,
     Coverage,
+    CurrentCode,
     DueCandidate,
+    EditTarget,
     GameSummaryRow,
     GuildClaim,
     GuildDigestRow,
@@ -56,11 +72,17 @@ from newsbot.store.models import (
     Usage,
 )
 
+logger = logging.getLogger(__name__)
+
 # SQLite caps a single statement at 999 (or 32766 on newer builds, but we
 # don't get to pick) bound parameters. Chunking here means callers never
 # have to think about the limit or hit it in production with a big batch
 # of collected URLs.
 _SQLITE_VARIABLE_CHUNK = 900
+
+# `guild_alert_messages.header`'s CHECK (migration 009). The longest real header is a role
+# ping plus "**New Golden Key codes**", around 50; this is the table's own limit.
+_ALERT_HEADER_MAX = 200
 
 
 def _resolve_now(now: Callable[[], datetime] | None) -> str:
@@ -113,6 +135,38 @@ def _immediate(conn: sqlite3.Connection) -> Iterator[None]:
         raise
     finally:
         conn.isolation_level = old_isolation
+
+
+@contextmanager
+def _read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run the body in one read transaction, so several SELECTs see the same moment.
+
+    In WAL mode a deferred `BEGIN` pins the database as of its first read, and writers
+    (the collection hook) carry on without waiting for us. Without it, two statements on an
+    autocommit connection are two snapshots, and a commit between them hands you a code that
+    qualified on its old details drawn with its new ones. If the connection is already in a
+    transaction, that transaction is the snapshot and we leave it alone.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    old_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            conn.execute("COMMIT")
+    finally:
+        conn.isolation_level = old_isolation
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """`moment` in UTC; a naive one is taken to already be UTC, like the rest of the store."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _utc_iso(moment: datetime) -> str:
@@ -249,6 +303,10 @@ def record_source_result(
     return consecutive_failures
 
 
+# How long a posted alert's message record is kept (migration 009). Edits stop at 14 days.
+ALERT_MESSAGE_RETENTION = timedelta(days=30)
+
+
 def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, int]:
     """Delete items and stories older than `cutoff`. Returns (items_deleted, stories_deleted).
 
@@ -268,15 +326,29 @@ def purge_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, i
     return items_deleted, stories_deleted
 
 
-def purge_guild_data_older_than(conn: sqlite3.Connection, cutoff: datetime) -> tuple[int, int]:
+def purge_guild_data_older_than(
+    conn: sqlite3.Connection,
+    cutoff: datetime,
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> tuple[int, int]:
     """Delete shared summaries and server notices older than `cutoff`.
 
     Returns (summaries_deleted, notices_deleted). The public app's half of
     retention, next to `purge_older_than`: the stories a summary owns are
     already gone by the same age (they're purged by `created_at` too), and any
     that aren't have their `summary_id` nulled by the foreign key, not orphaned.
+
+    It also drops `guild_alert_messages` rows posted more than
+    `ALERT_MESSAGE_RETENTION` before `now` (30 days, not the cutoff's 90: an alert
+    stops being edited at 14, and the record is only worth keeping a while past
+    that). Those aren't counted in the return value; nobody has needed the number yet.
     """
     cutoff_iso = _utc_iso(cutoff)
+    # To UTC first: subtracting days from a datetime in a named zone is wall-clock arithmetic,
+    # which comes out an hour off across a DST change.
+    moment = datetime.fromisoformat(_utc_iso((now or (lambda: datetime.now(UTC)))()))
+    messages_cutoff = _utc_iso(moment - ALERT_MESSAGE_RETENTION)
     with conn:
         summaries = conn.execute(
             "DELETE FROM game_summaries WHERE created_at < ?", (cutoff_iso,)
@@ -284,6 +356,7 @@ def purge_guild_data_older_than(conn: sqlite3.Connection, cutoff: datetime) -> t
         notices = conn.execute(
             "DELETE FROM guild_notices WHERE created_at < ?", (cutoff_iso,)
         ).rowcount
+        conn.execute("DELETE FROM guild_alert_messages WHERE posted_at < ?", (messages_cutoff,))
     return summaries, notices
 
 
@@ -364,6 +437,7 @@ def record_silent_codes(
     *,
     now: Callable[[], datetime] | None = None,
     mark_seeded: bool,
+    table_silenced: Collection[str] = (),
 ) -> None:
     """Record codes without posting them: `(code, source_name, item_url, status, from_roundup)`.
 
@@ -381,15 +455,29 @@ def record_silent_codes(
     recorded. `mark_seeded=True` sets the `seeded_at` marker, but only
     if it isn't already set, since the marker means "the first sweep
     after enabling has run", not "the most recent healthy sweep ran".
+
+    `table_silenced` names the `'too_old'` codes that were silenced only by a fan site's data
+    (an expiry already past, an "Added" date over 48 hours old). Those get
+    `table_silenced_at`, which is what lets an official source's later sighting release them
+    after all (`table_silenced_codes`, `record_released_codes`). Any other status ignores it.
     """
     now_iso = _resolve_now(now)
     with conn:
         for code, source_name, item_url, status, from_roundup in rows:
             conn.execute(
                 "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, status, from_roundup) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
-                (code, now_iso, source_name, item_url, status, int(from_roundup)),
+                "(code, first_seen_at, source_name, item_url, status, from_roundup, "
+                "table_silenced_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING",
+                (
+                    code,
+                    now_iso,
+                    source_name,
+                    item_url,
+                    status,
+                    int(from_roundup),
+                    now_iso if status == "too_old" and code in table_silenced else None,
+                ),
             )
         if mark_seeded:
             conn.execute(
@@ -427,46 +515,162 @@ def record_sweep(
         _set_alert_state(conn, "last_sweep_summary", summary)
 
 
-def query_codes(
-    conn: sqlite3.Connection, since: datetime, limit: int, offset: int
-) -> tuple[list[CodeView], int]:
-    """Known SHiFT codes for `/shift codes`, newest first.
-
-    Excludes `'pending'` (still being claimed/posted, not confirmed yet)
-    and `'failed'` (claimed but never actually landed in Discord): a
-    member paging through known codes shouldn't see either half-state.
-    Everything else (`'seeded'`, `'too_old'`, `'roundup'`, `'posted'`)
-    is fair game; `format.render_code_page` is what turns `from_roundup`
-    and `status` into the "from a roundup" / "old post" / "already
-    around when alerts started" markers (D5). Ties in `first_seen_at`
-    (plausible: a batch claimed together shares one timestamp) break on
-    `rowid`, so paging never reorders rows between calls.
-    """
-    since_iso = _utc_iso(since)
-    total = conn.execute(
-        "SELECT COUNT(*) FROM alerted_codes "
-        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ?",
-        (since_iso,),
-    ).fetchone()[0]
-    rows = conn.execute(
-        "SELECT code, first_seen_at, source_name, item_url, status, from_roundup "
-        "FROM alerted_codes "
-        "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ? "
-        "ORDER BY first_seen_at DESC, rowid ASC "
-        "LIMIT ? OFFSET ?",
-        (since_iso, limit, offset),
-    ).fetchall()
-    return [
-        CodeView(
-            code=row["code"],
-            first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
-            source_name=row["source_name"],
-            item_url=row["item_url"],
-            status=row["status"],
-            from_roundup=bool(row["from_roundup"]),
+def _warn_unreadable(what: str, bad: list[str]) -> None:
+    """One warning per call about the rows a member command skipped, however many there were."""
+    if bad:
+        logger.warning(
+            "%s: skipped %d code(s) with unreadable stored dates (first: %r)",
+            what,
+            len(bad),
+            bad[0],
         )
-        for row in rows
-    ], total
+
+
+def history_codes(conn: sqlite3.Connection, since: datetime) -> list[CodeView]:
+    """Every known SHiFT code first seen at or after `since`, newest first, for `/shift history`.
+
+    The window query behind `/shift history`, which pages by size, which means rendering
+    the whole window first and cutting it into pages afterwards, so there's no LIMIT to
+    pass. Same exclusions (`'pending'` and `'failed'` never show) and the same tie-break on
+    `rowid`. Each code carries its `code_details` row when it has one, which is what lets
+    the page mark a dead code "expired" whatever status it was recorded with. A window is
+    at most 90 days, so "everything" means hundreds of rows, not millions.
+
+    Both reads share one snapshot. A row with a date that won't parse (a hand-edited
+    database, a bug from some other day) is skipped with a single warning for the call, so
+    one bad code can't take the command down for every server.
+    """
+    since_iso = _utc_iso(_as_utc(since))
+    bad: list[str] = []
+    with _read_snapshot(conn):
+        rows = conn.execute(
+            "SELECT code, first_seen_at, source_name, item_url, status, from_roundup "
+            "FROM alerted_codes "
+            "WHERE status NOT IN ('pending', 'failed') AND first_seen_at >= ? "
+            "ORDER BY first_seen_at DESC, rowid ASC",
+            (since_iso,),
+        ).fetchall()
+        details = _details_or_skip(conn, [row["code"] for row in rows], bad)
+    views = []
+    for row in rows:
+        if row["code"] in bad:
+            continue
+        try:
+            first_seen = datetime.fromisoformat(row["first_seen_at"])
+        except ValueError:
+            bad.append(row["code"])
+            continue
+        views.append(
+            CodeView(
+                code=row["code"],
+                first_seen_at=first_seen,
+                source_name=row["source_name"],
+                item_url=row["item_url"],
+                status=row["status"],
+                from_roundup=bool(row["from_roundup"]),
+                details=details.get(row["code"]),
+            )
+        )
+    _warn_unreadable("history_codes", bad)
+    return views
+
+
+def _named_by_two_sources(conn: sqlite3.Connection, codes: list[str]) -> set[str]:
+    """Which of `codes` have sightings under two or more different source names (casefolded)."""
+    names: dict[str, set[str]] = {}
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, source_name FROM code_sightings "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            names.setdefault(row["code"], set()).add(row["source_name"].casefold())
+    return {code for code, seen in names.items() if len(seen) >= 2}
+
+
+def current_codes(conn: sqlite3.Connection, *, now: datetime) -> list[CurrentCode]:
+    """The codes that should still work at `now`, for `/shift codes` (design.md §16).
+
+    Every released code (not `'pending'`, not `'failed'`) is judged by the same three
+    rules as `shift.details.is_current`, written out in SQL so the database throws the
+    dead ones away before Python ever sees them: a permanent code is current; a known
+    expiry is current through the end of that Pacific day (`expires_on >= today there`);
+    otherwise the clock decides, 180 days from the details row's `clock_start`, or from
+    `first_seen_at` for a code that has no row. A test holds the two spellings to the same
+    answer at every boundary, because two spellings of one rule is exactly the sort of
+    thing that agrees right up until it doesn't.
+
+    `now` is turned into UTC first (a naive one is read as UTC), and only then are 180
+    days taken off it: subtracting days from a zoned datetime is wall-clock arithmetic and
+    lands an hour off across a daylight saving change. The filter and the details come from
+    one snapshot, so a commit in between can't pair a code with details it didn't qualify
+    on. A row with an unreadable date is skipped, with one warning for the call.
+
+    Unvetted codes stay off the list. A code that was only ever recorded quietly (`'roundup'`,
+    `'too_old'`, `'seeded'`) or that came from a roundup post is something nobody told a
+    channel about, and the list shouldn't be the first place a member meets it unless
+    something besides one stranger's say-so stands behind it: a details row set by a fan
+    site's table or an official post, a trusted (official or press) sighting, or two
+    different sources (compared casefolded) having named it. A posted code that wasn't a
+    roundup is as vetted as it needs to be. `/shift history` is the unfiltered view, with
+    markers, and doesn't do this.
+
+    Newest sighting first, ties on `rowid`; the page renderer does the grouping and its
+    own "Added" ordering. The list isn't paged: it's whatever is current, which is a
+    few dozen codes on a busy week.
+    """
+    now = _as_utc(now)
+    today = now.astimezone(SHIFT_TZ).date().isoformat()
+    cutoff = _utc_iso(now - timedelta(days=CLOCK_DAYS))
+    bad: list[str] = []
+    with _read_snapshot(conn):
+        rows = conn.execute(
+            "SELECT a.code, a.first_seen_at, "
+            "(a.status IN ('roundup', 'too_old', 'seeded') OR a.from_roundup = 1) AS quiet, "
+            "(EXISTS (SELECT 1 FROM code_details v WHERE v.code = a.code AND "
+            "         (v.reward_source != '' OR v.category_source != '' "
+            "          OR v.expires_source != '')) "
+            " OR EXISTS (SELECT 1 FROM code_sightings t WHERE t.code = a.code "
+            "            AND t.trusted = 1)) AS vetted "
+            "FROM alerted_codes a LEFT JOIN code_details d ON d.code = a.code "
+            "WHERE a.status NOT IN ('pending', 'failed') "
+            "AND (d.category = 'permanent' "
+            "     OR (d.expires_on IS NOT NULL AND d.expires_on >= ?) "
+            "     OR (d.expires_on IS NULL AND COALESCE(d.clock_start, a.first_seen_at) > ?)) "
+            "ORDER BY a.first_seen_at DESC, a.rowid ASC",
+            (today, cutoff),
+        ).fetchall()
+        # What SQL can't judge: "two different sources" is a casefold, and SQLite's lower()
+        # only knows ASCII. Only the quiet, not-yet-vetted rows are asked.
+        #
+        # Every sighting counts here, roundup ones included, and that is deliberate: a
+        # megathread naming a code is a fair reason to put it on a list a member asks for. It
+        # is not a fair reason to ping a server, so `queue_confirmed_followups` only counts
+        # non-roundup sightings. Two rules, two jobs; please don't "fix" one to match the other.
+        doubtful = [row["code"] for row in rows if row["quiet"] and not row["vetted"]]
+        corroborated = _named_by_two_sources(conn, doubtful)
+        rows = [
+            row for row in rows if not row["quiet"] or row["vetted"] or row["code"] in corroborated
+        ]
+        details = _details_or_skip(conn, [row["code"] for row in rows], bad)
+    current = []
+    for row in rows:
+        if row["code"] in bad:
+            continue
+        try:
+            first_seen = datetime.fromisoformat(row["first_seen_at"])
+        except ValueError:
+            bad.append(row["code"])
+            continue
+        current.append(
+            CurrentCode(
+                code=row["code"], first_seen_at=first_seen, details=details.get(row["code"])
+            )
+        )
+    _warn_unreadable("current_codes", bad)
+    return current
 
 
 # --- Lounge (design.md §14) ---
@@ -1196,6 +1400,10 @@ def set_shift(
     insert that's already on): "enabling starts from codes found after that
     moment", so re-saving the same settings must not move it. The table's
     CHECKs reject an enabled row with no channel and a malformed `ping`.
+
+    Any save also clears `edits_blocked_at` (design.md §16): a server whose alert edits
+    stopped for a missing permission gets them back by saving its SHiFT settings, even
+    unchanged, because that is the thing an admin does after fixing the permission.
     """
     now_iso = _resolve_now(now)
     with conn:
@@ -1205,7 +1413,8 @@ def set_shift(
             "ON CONFLICT(guild_id) DO UPDATE SET "
             "enabled_at = CASE WHEN excluded.enabled = 1 AND guild_shift.enabled = 0 "
             "THEN excluded.enabled_at ELSE guild_shift.enabled_at END, "
-            "enabled = excluded.enabled, channel_id = excluded.channel_id, ping = excluded.ping",
+            "enabled = excluded.enabled, channel_id = excluded.channel_id, ping = excluded.ping, "
+            "edits_blocked_at = NULL",
             (guild_id, int(enabled), channel_id, ping, int(enabled), now_iso),
         )
 
@@ -1503,6 +1712,8 @@ def record_released_codes(
     now: Callable[[], datetime] | None = None,
     queue_for_games: list[str] | None = None,
     flags: Mapping[str, tuple[bool, bool]] | None = None,
+    official: Collection[str] = (),
+    revive: Collection[str] = (),
 ) -> list[str]:
     """Record globally-new codes as released: `(code, source_name, item_url, from_roundup)`.
 
@@ -1517,18 +1728,36 @@ def record_released_codes(
     same transaction, so who hears about a code is decided at the moment it's
     released and not by whoever happens to be reachable before a timeout.
     `flags` maps a code to its `(golden, trusted)` for the later render.
+
+    `official` names the codes an official-trust source saw in this pass
+    (`official_seen_at`, which delivery reads). `revive` names codes that are already
+    recorded as `'too_old'` because of a fan site's data, and that an official source has
+    now named: they are released by an UPDATE to `'posted'` (the status CHECK is never
+    touched, and the original `first_seen_at` stays) instead of an INSERT. The UPDATE only
+    lands on a row that is still `'too_old'` and still flagged, in the same transaction as
+    the queueing below, so two passes racing for the same code have exactly one winner and
+    a crash between the two statements is not a thing that can happen.
     """
     moment = (now or (lambda: datetime.now(UTC)))()
     now_iso = moment.isoformat()
     inserted: list[str] = []
     with conn:
         for code, source_name, item_url, from_roundup in rows:
-            cur = conn.execute(
-                "INSERT INTO alerted_codes "
-                "(code, first_seen_at, source_name, item_url, pinged, from_roundup, status) "
-                "VALUES (?, ?, ?, ?, 0, ?, 'posted') ON CONFLICT(code) DO NOTHING",
-                (code, now_iso, source_name, item_url, int(from_roundup)),
-            )
+            seen_official = now_iso if code in official else None
+            if code in revive:
+                cur = conn.execute(
+                    "UPDATE alerted_codes SET status = 'posted', source_name = ?, "
+                    "item_url = ?, from_roundup = ?, official_seen_at = ? "
+                    "WHERE code = ? AND status = 'too_old' AND table_silenced_at IS NOT NULL",
+                    (source_name, item_url, int(from_roundup), seen_official, code),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO alerted_codes (code, first_seen_at, source_name, item_url, "
+                    "pinged, from_roundup, status, official_seen_at) "
+                    "VALUES (?, ?, ?, ?, 0, ?, 'posted', ?) ON CONFLICT(code) DO NOTHING",
+                    (code, now_iso, source_name, item_url, int(from_roundup), seen_official),
+                )
             if cur.rowcount == 1:
                 inserted.append(code)
         if queue_for_games is None or not inserted:
@@ -1619,13 +1848,21 @@ def queued_guild_ids(conn: sqlite3.Connection) -> list[int]:
 
 
 def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCode]:
-    """This server's `queued` codes in release order, with what the render needs."""
+    """This server's `queued` codes in release order, with what the render needs.
+
+    Each carries its `code_details` row if it has one (design.md §16), so the alert
+    can show a reward and an expiry the moment it's rendered. (Two statements, not a
+    LEFT JOIN: the join would hand me two columns called `code` and a row reader that
+    has to know which is which, and `code_details_for` already knows.)
+    """
     rows = conn.execute(
         "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
-        "p.claimed_at FROM guild_code_posts p JOIN alerted_codes a ON a.code = p.code "
+        "p.claimed_at, a.official_seen_at FROM guild_code_posts p "
+        "JOIN alerted_codes a ON a.code = p.code "
         "WHERE p.guild_id = ? AND p.status = 'queued' ORDER BY p.rowid",
         (guild_id,),
     ).fetchall()
+    details = code_details_for(conn, [row["code"] for row in rows])
     return [
         QueuedCode(
             code=row["code"],
@@ -1635,6 +1872,8 @@ def queued_guild_codes(conn: sqlite3.Connection, guild_id: int) -> list[QueuedCo
             golden=bool(row["golden"]),
             trusted=bool(row["trusted"]),
             queued_at=datetime.fromisoformat(row["claimed_at"]),
+            details=details.get(row["code"]),
+            official_seen=row["official_seen_at"] is not None,
         )
         for row in rows
     ]
@@ -1759,20 +1998,100 @@ def _queued_among(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> 
 
 
 def mark_guild_codes_posted(
-    conn: sqlite3.Connection, guild_id: int, codes: list[str], *, message_id: int | None
+    conn: sqlite3.Connection,
+    guild_id: int,
+    codes: list[str],
+    *,
+    message_id: int | None,
+    message: AlertMessageRecord | None = None,
 ) -> None:
     """Flip this guild's `pending` `codes` to `posted`, all sharing one message id.
 
     Only `pending` rows move: a startup recovery that already failed one must
     not have it flipped back by a send that finished late.
+
+    `message` (design.md §16) is what the message looked like when it went out. With a
+    message id and at least one code actually flipped, it's written to
+    `guild_alert_messages` in the same transaction, so a posted code and the record that
+    lets the edit pass find its message land together or not at all. Roundups and
+    follow-ups pass nothing: they're never edited.
+
+    A bookkeeping row isn't worth failing the mark that says the message went out, so the
+    record is skipped (and logged) when the server is already gone or when any column the
+    table CHECKs would refuse it (`_alert_record_problem`). If something I didn't think of
+    gets refused anyway, the insert runs in a savepoint: the row is rolled back alone and
+    the posted flip survives.
     """
     with conn:
+        moved = 0
         for code in codes:
-            conn.execute(
+            moved += conn.execute(
                 "UPDATE guild_code_posts SET status = 'posted', message_id = ? "
                 "WHERE guild_id = ? AND code = ? AND status = 'pending'",
                 (message_id, guild_id, code),
+            ).rowcount
+        if message is None or message_id is None or not moved:
+            return
+        problem = _alert_record_problem(message_id, message)
+        if problem is not None:
+            logger.warning(
+                "SHiFT alert can't be recorded for edits (%s)",
+                problem,
+                extra={"guild_id": guild_id},
             )
+            return
+        conn.execute("SAVEPOINT alert_message")
+        try:
+            conn.execute(
+                "INSERT INTO guild_alert_messages "
+                "(guild_id, message_id, channel_id, header, golden_prefix, posted_at, "
+                "rendered_at, ping) "
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+                "WHERE EXISTS (SELECT 1 FROM guilds WHERE guild_id = ?) "
+                "ON CONFLICT(guild_id, message_id) DO NOTHING",
+                (
+                    guild_id,
+                    message_id,
+                    message.channel_id,
+                    message.header,
+                    int(message.golden_prefix),
+                    _utc_iso(message.posted_at),
+                    _utc_iso(message.rendered_at),
+                    # A choice the table would refuse is stored as "none": an edit that can't
+                    # ping is a much better outcome than a record that can't be written.
+                    message.ping if _PING_CHOICE_RE.fullmatch(message.ping) else "none",
+                    guild_id,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK TO alert_message")
+            logger.warning(
+                "SHiFT alert record refused by the table; the message is not editable",
+                extra={"guild_id": guild_id},
+            )
+        finally:
+            conn.execute("RELEASE alert_message")
+
+
+_SQLITE_MAX_INT = 2**63 - 1
+
+# `guild_alert_messages.ping`'s CHECK: "none", "everyone" or a role id (17 to 20 digits).
+_PING_CHOICE_RE = re.compile(r"none|everyone|[0-9]{17,20}", re.ASCII)
+
+
+def _alert_record_problem(message_id: int, message: AlertMessageRecord) -> str | None:
+    """Why `guild_alert_messages` would refuse this record, or None if it won't.
+
+    Mirrors the table's CHECKs (ids above zero and inside SQLite's integer, a header of 1
+    to 200 characters) so the usual refusal never has to be an exception.
+    """
+    if not 0 < message_id <= _SQLITE_MAX_INT:
+        return f"message id {message_id}"
+    if not 0 < message.channel_id <= _SQLITE_MAX_INT:
+        return f"channel id {message.channel_id}"
+    if not 1 <= len(message.header) <= _ALERT_HEADER_MAX:
+        return f"header of {len(message.header)} characters"
+    return None
 
 
 def mark_guild_codes_failed(conn: sqlite3.Connection, guild_id: int, codes: list[str]) -> None:
@@ -1897,9 +2216,16 @@ def queue_confirmed_followups(
     queued for every server whose original post of it is `posted` and stamped
     `followup_ok`. A (server, code) that already has a follow-up row, in any
     state, is left alone, so calling this every pass is safe (and is how a
-    second pass that races the first sends nothing extra).
+    second pass that races the first sends nothing extra). A code whose known expiry
+    has passed (Pacific end of day; never a permanent one) is not confirmed at all.
+
+    Every code in every pass comes through here, and a table lists dozens of them hour
+    after hour, so a code whose window has already closed (`first_seen_at + window` is in
+    the past) is dropped before anything else is read about it. Its follow-ups, if it was
+    ever going to have any, were queued in the pass that confirmed it.
     """
     now_iso = _resolve_now(now)
+    moment = datetime.fromisoformat(now_iso)
     queued = 0
     with conn:
         for code in dict.fromkeys(codes):
@@ -1909,6 +2235,12 @@ def queue_confirmed_followups(
             if first is None:
                 continue
             deadline = datetime.fromisoformat(first["first_seen_at"]) + window
+            if _as_utc(deadline) < _as_utc(moment):
+                continue
+            # A code whose known expiry has already passed isn't worth a pinged "confirmed":
+            # the second source is probably just a table still listing yesterday's news.
+            if expired_by_expiry(code_details_for(conn, [code]).get(code), moment):
+                continue
             sightings = [
                 row
                 for row in conn.execute(
@@ -2097,6 +2429,576 @@ def claim_guild_followups(
     finally:
         conn.isolation_level = old_isolation
     return claimed
+
+
+# --- SHiFT code details (design.md §16, migration 009) ---
+#
+# `code_details` holds what the bot knows about a code besides its characters: reward,
+# category, expiry, and who said so. The precedence rules and the clock are one pure
+# function (`shift/details.py: merge_details`); this section reads the rows, runs the
+# function, and stores what it hands back. It never decides anything itself, on purpose.
+# The rollout marker (`app_state['shift_details_since']`) is written by the migration.
+
+DETAILS_SINCE_KEY = "shift_details_since"
+# The real rule (owner, 2026-10-09): one key per source *and* table kind,
+# `shift_table_kind_listed:<kind>:<source name>`. The kind comes first because it is one of
+# three fixed words and a source name can hold any character, colons included.
+TABLE_KIND_LISTED_PREFIX = "shift_table_kind_listed:"
+TABLE_KINDS = ("main", "cosmetic", "permanent")
+
+_DETAILS_COLUMNS = (
+    "code, reward, reward_source, reward_from, category, category_source, category_from, "
+    "expires_on, expires_source, expires_from, added_on, origin, clock_start, "
+    "first_listed_at, last_listed_at, updated_at, details_changed_at"
+)
+
+
+def _date_or_none(value: str | None) -> date | None:
+    return date.fromisoformat(value) if value else None
+
+
+def _details_from_row(row: sqlite3.Row) -> CodeDetailsRow:
+    return CodeDetailsRow(
+        code=row["code"],
+        reward=row["reward"],
+        reward_source=row["reward_source"],
+        reward_from=row["reward_from"],
+        category=row["category"],
+        category_source=row["category_source"],
+        category_from=row["category_from"],
+        expires_on=_date_or_none(row["expires_on"]),
+        expires_source=row["expires_source"],
+        expires_from=row["expires_from"],
+        added_on=_date_or_none(row["added_on"]),
+        origin=row["origin"],
+        clock_start=datetime.fromisoformat(row["clock_start"]),
+        first_listed_at=_parse_dt(row["first_listed_at"]),
+        last_listed_at=_parse_dt(row["last_listed_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        details_changed_at=_parse_dt(row["details_changed_at"]),
+    )
+
+
+def _read_details(
+    conn: sqlite3.Connection, codes: Iterable[str], unreadable: list[str] | None
+) -> dict[str, CodeDetailsRow]:
+    """`code_details_for`'s loop; with `unreadable`, a row that won't parse is skipped, listed."""
+    code_list = list(dict.fromkeys(codes))
+    found: dict[str, CodeDetailsRow] = {}
+    for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = code_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # Literal "?"s sized to the chunk and a constant column list; the codes are bound.
+        query = (
+            f"SELECT {_DETAILS_COLUMNS} FROM code_details "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            try:
+                found[row["code"]] = _details_from_row(row)
+            except ValueError:
+                if unreadable is None:
+                    raise
+                unreadable.append(row["code"])
+    return found
+
+
+def code_details_for(conn: sqlite3.Connection, codes: Iterable[str]) -> dict[str, CodeDetailsRow]:
+    """The stored details for whichever of `codes` have a row, keyed by code.
+
+    A row whose dates won't parse raises ValueError, which is right for delivery: it
+    should hear about damage.
+    """
+    return _read_details(conn, codes, None)
+
+
+def _details_or_skip(
+    conn: sqlite3.Connection, codes: list[str], unreadable: list[str]
+) -> dict[str, CodeDetailsRow]:
+    """`code_details_for` for the member commands, which would rather lose one code than all.
+
+    The strict read goes first (it's the one tests and the hot path share); only if it
+    trips over damage do we read again, skipping the bad rows and listing their codes.
+    """
+    try:
+        return code_details_for(conn, codes)
+    except ValueError:
+        return _read_details(conn, codes, unreadable)
+
+
+def stored_detail_source_names(conn: sqlite3.Connection) -> list[str]:
+    """Every source name a `code_details` row can still credit, whatever the config says now.
+
+    A row keeps the name it was stored with for good, so a source renamed to something
+    shorter leaves its old, longer name behind in old rows. The packing reserve has to cover
+    those too, or a later edit that adds a second name could outgrow its message. One
+    DISTINCT query over a table of a few hundred rows.
+    """
+    return [
+        row[0]
+        for row in conn.execute(
+            "SELECT reward_from FROM code_details UNION "
+            "SELECT category_from FROM code_details UNION "
+            "SELECT expires_from FROM code_details"
+        )
+        if row[0]
+    ]
+
+
+def _first_seen_for(conn: sqlite3.Connection, codes: list[str]) -> dict[str, datetime]:
+    """`alerted_codes.first_seen_at` for whichever of `codes` the bot has released."""
+    found: dict[str, datetime] = {}
+    for i in range(0, len(codes), _SQLITE_VARIABLE_CHUNK):
+        chunk = codes[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, first_seen_at FROM alerted_codes "  # noqa: S608
+            f"WHERE code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            found[row["code"]] = datetime.fromisoformat(row["first_seen_at"])
+    return found
+
+
+def _write_details(conn: sqlite3.Connection, row: CodeDetailsRow) -> None:
+    def stamp(moment: datetime | None) -> str | None:
+        return _utc_iso(moment) if moment is not None else None
+
+    conn.execute(
+        f"INSERT INTO code_details ({_DETAILS_COLUMNS}) "  # noqa: S608
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(code) DO UPDATE SET "
+        "reward = excluded.reward, reward_source = excluded.reward_source, "
+        "reward_from = excluded.reward_from, category = excluded.category, "
+        "category_source = excluded.category_source, category_from = excluded.category_from, "
+        "expires_on = excluded.expires_on, expires_source = excluded.expires_source, "
+        "expires_from = excluded.expires_from, added_on = excluded.added_on, "
+        "origin = excluded.origin, clock_start = excluded.clock_start, "
+        "first_listed_at = excluded.first_listed_at, last_listed_at = excluded.last_listed_at, "
+        "updated_at = excluded.updated_at, details_changed_at = excluded.details_changed_at",
+        (
+            row.code,
+            row.reward,
+            row.reward_source,
+            row.reward_from,
+            row.category,
+            row.category_source,
+            row.category_from,
+            row.expires_on.isoformat() if row.expires_on else None,
+            row.expires_source,
+            row.expires_from,
+            row.added_on.isoformat() if row.added_on else None,
+            row.origin,
+            _utc_iso(row.clock_start),
+            stamp(row.first_listed_at),
+            stamp(row.last_listed_at),
+            _utc_iso(row.updated_at),
+            stamp(row.details_changed_at),
+        ),
+    )
+
+
+def upsert_code_details(
+    conn: sqlite3.Connection, observations: Iterable[DetailObservation], *, now: datetime
+) -> list[str]:
+    """Fold a pass's detail observations into `code_details`; return the codes that changed.
+
+    One `BEGIN IMMEDIATE`: read the existing rows, each code's `first_seen_at` and the rollout
+    marker, run each code's observations through `merge_observations` (oldest first, so inside a
+    rank the newer reading wins), then write each touched row once. The returned codes are the
+    ones whose shown details (a value, or who supplied it) differ between the stored row and the
+    final one: the net change, however many observations it took to get there, and whatever
+    `now` is. That is what flags an alert for an edit (`details_changed_at`); the list is for
+    the log.
+
+    An observation the store would refuse (a reward over 300 characters as shown, a category
+    outside the four) is skipped with a warning and doesn't sink the rest. A missing or garbled
+    marker (it's a migration's job, but people edit databases) reads as "now", which gives older
+    codes a fresh clock and is the safe direction.
+    """
+    ordered = sort_observations(observations)
+    by_code: dict[str, list[DetailObservation]] = {}
+    for obs in ordered:
+        try:
+            clean = clean_observation(obs)
+        except ValueError as exc:
+            logger.warning("skipped details for a code: %s", exc)
+            continue
+        by_code.setdefault(clean.code, []).append(clean)
+    if not by_code:
+        return []
+    codes = list(by_code)
+    with _immediate(conn):
+        before = code_details_for(conn, codes)
+        first_seen = _first_seen_for(conn, codes)
+        marker = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?", (DETAILS_SINCE_KEY,)
+        ).fetchone()
+        since = _parse_dt_or_none(marker["value"]) if marker else None
+        if marker and since is None:
+            logger.warning("%s isn't a timestamp; reading it as now", DETAILS_SINCE_KEY)
+        # Every new stamp has to be later than every stamp already in the table, not just
+        # later than its own row's. A message's version stamp is the largest among its codes,
+        # so a code whose change got a stamp below that of a sibling it shares a message with
+        # would be a change the message "already shows". A clock that stepped back, or two
+        # changes in one pass at the same `now`, are enough to get there.
+        floor = _stamp_floor(conn)
+        changed: list[str] = []
+        for code, group in by_code.items():
+            old = before.get(code)
+            merged = merge_observations(
+                old,
+                group,
+                now=now,
+                first_seen_at=first_seen.get(code),
+                details_since=since or now,
+            )
+            shown_change = displayed(merged) != displayed(old)
+            if shown_change and merged.details_changed_at is not None:
+                stamp = _as_utc(merged.details_changed_at)
+                if floor is not None and stamp <= floor:
+                    stamp = after(floor)
+                floor = stamp
+                merged = replace(merged, details_changed_at=stamp)
+            if merged != old:
+                _write_details(conn, merged)
+            if shown_change:
+                changed.append(code)
+    return changed
+
+
+# What `_utc_iso` writes, as SQLite sees it. Text order is time order among these ('+' sorts
+# before '.', so a whole second comes before its fractions), which is what lets an index-friendly
+# ORDER BY stand in for parsing the whole table.
+_UTC_STAMP_GLOB = "????-??-??T??:??:??*+00:00"
+# How many rows of each kind `_stamp_floor` will look at. A healthy table has no odd ones at all.
+_STAMP_SCAN_LIMIT = 200
+
+
+def _stamp_moment(text: str) -> datetime | None:
+    try:
+        return _as_utc(datetime.fromisoformat(text))
+    except ValueError, OverflowError:
+        return None
+
+
+def _stamp_floor(conn: sqlite3.Connection) -> datetime | None:
+    """The latest `details_changed_at` in the whole table that is a timestamp, or None.
+
+    Writers always store UTC, so the stamps spelled the way they write them are ordered by
+    text and the newest one that parses wins (a garbled row that happens to sort last, like
+    "2026-13-45T00:00:00+00:00", is stepped over). Whatever isn't spelled that way (an odd
+    offset, a hand edit, plain junk) is parsed one by one and compared as the instant it
+    is; junk is ignored with a warning. Both looks are bounded, so a table that has grown
+    for years costs about what it did on day one. A stamp that can't be read can't be a
+    floor, and the safe direction is that the stamps below it just stay as they were.
+    """
+    best: datetime | None = None
+    unreadable = 0
+    for (text,) in conn.execute(
+        "SELECT details_changed_at FROM code_details WHERE details_changed_at GLOB ? "
+        "ORDER BY details_changed_at DESC LIMIT ?",
+        (_UTC_STAMP_GLOB, _STAMP_SCAN_LIMIT),
+    ):
+        moment = _stamp_moment(text)
+        if moment is None:
+            unreadable += 1
+            continue
+        best = moment
+        break
+    for (text,) in conn.execute(
+        "SELECT details_changed_at FROM code_details "
+        "WHERE details_changed_at IS NOT NULL AND details_changed_at NOT GLOB ? LIMIT ?",
+        (_UTC_STAMP_GLOB, _STAMP_SCAN_LIMIT),
+    ):
+        moment = _stamp_moment(text)
+        if moment is None:
+            unreadable += 1
+        elif best is None or moment > best:
+            best = moment
+    if unreadable:
+        logger.warning("a code_details.details_changed_at isn't a timestamp; ignoring it")
+    return best
+
+
+# An official source naming a code that a fan site's data silenced counts as the code's real
+# announcement for this long after the bot first saw it (design.md §16).
+TABLE_SILENCE_WINDOW = timedelta(hours=72)
+
+
+def table_silenced_codes(
+    conn: sqlite3.Connection,
+    codes: Iterable[str],
+    *,
+    now: datetime,
+    window: timedelta = TABLE_SILENCE_WINDOW,
+) -> set[str]:
+    """Which of `codes` are recorded `'too_old'` only for a fan site's data, and still young enough.
+
+    "Young enough" is `first_seen_at` within `window` of `now`. These are the codes an
+    official sighting may release after all (`record_released_codes(revive=...)`); a code
+    silenced by an official expiry, or by anything a fan site didn't say alone, is never in
+    here.
+    """
+    code_list = list(dict.fromkeys(codes))
+    cutoff = _as_utc(now) - window
+    found: set[str] = set()
+    for i in range(0, len(code_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = code_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = (
+            "SELECT code, first_seen_at FROM alerted_codes "  # noqa: S608
+            "WHERE status = 'too_old' AND table_silenced_at IS NOT NULL "
+            f"AND code IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            first = _parse_dt_or_none(row["first_seen_at"])
+            if first is not None and _as_utc(first) >= cutoff:
+                found.add(row["code"])
+    return found
+
+
+def table_kinds_listed(conn: sqlite3.Connection, names: Iterable[str]) -> set[tuple[str, str]]:
+    """Which `(source name, table kind)` pairs among `names` have had a successful listing.
+
+    A source that showed us only its main table once hasn't "listed" its cosmetic or
+    permanent ones, and a site that adds a table later is a table we've never read. Both
+    get a quiet first listing (owner decision E1, per table kind).
+    """
+    by_key = {
+        f"{TABLE_KIND_LISTED_PREFIX}{kind}:{name}": (name, kind)
+        for name in dict.fromkeys(names)
+        for kind in TABLE_KINDS
+    }
+    keys = list(by_key)
+    found: set[tuple[str, str]] = set()
+    for i in range(0, len(keys), _SQLITE_VARIABLE_CHUNK):
+        chunk = keys[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        query = f"SELECT key FROM app_state WHERE key IN ({placeholders})"  # noqa: S608
+        found.update(by_key[row["key"]] for row in conn.execute(query, chunk))
+    return found
+
+
+def mark_table_listed(
+    conn: sqlite3.Connection, name: str, now: datetime, kinds: Iterable[str] = ()
+) -> None:
+    """Remember that the `shift_table` source `name` has listed codes, in these table `kinds`.
+
+    One `app_state` key per kind, in one transaction; the first time sticks.
+    """
+    stamp = _utc_iso(now)
+    with conn:
+        for kind in dict.fromkeys(kinds):
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                (f"{TABLE_KIND_LISTED_PREFIX}{kind}:{name}", stamp),
+            )
+
+
+# --- Edits in place (design.md §16) ---
+#
+# An alert message is "due" when one of its codes has a `details_changed_at` newer than the
+# message's `rendered_at`. Both are version stamps (the largest `details_changed_at` the
+# message was rendered with, or the epoch), so this is stamps compared with stamps and no
+# clock is involved. Every function here is keyed by `guild_id`: one server's message is
+# never found, edited or blocked through another's.
+
+# An alert is edited for this long after it posts, and not a day more.
+ALERT_EDIT_WINDOW = timedelta(days=14)
+
+# One pass edits at most this many of any one server's messages. The rest are not lost, just
+# next in that server's line; a server with a pile of due messages shouldn't spend the pass.
+ALERT_EDITS_PER_SERVER = 20
+
+
+def alert_messages_to_edit(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    window: timedelta = ALERT_EDIT_WINDOW,
+    limit: int = 200,
+    per_guild: int = ALERT_EDITS_PER_SERVER,
+) -> list[EditTarget]:
+    """Live alert messages posted inside `window` that hold a code with newer details.
+
+    Round-robin across servers: every server's first due message (server id order), then
+    every server's second, and so on, so `limit` and a deadline cut across servers instead of
+    working through one big server before the small ones get a turn. At most `per_guild` of any
+    one server's messages are listed. Inside a server the order is least recently tried first
+    (`edit_tried_at`; never tried counts as oldest), then oldest posted, so a message that keeps
+    failing goes to the back of its own server's line and can't sit at the head forever.
+
+    A server whose edits are blocked (`guild_shift.edits_blocked_at`), or that has switched its
+    SHiFT alerts off, isn't listed at all: someone who turned the feature off has not asked to
+    have its old messages tended, and an edit is a thing the bot does in their channel.
+    Roundup codes don't count: their messages have no record, and a roundup code that shares a
+    code with a normal alert only matters through the normal alert's own row.
+
+    A row whose `rendered_at` or `posted_at` isn't a timestamp (people edit databases) is
+    skipped with a warning; it never takes the pass down with it.
+    """
+    # To UTC before the subtraction: `now - window` on a datetime in a named zone is wall-clock
+    # arithmetic, which comes out an hour off across a DST change.
+    cutoff = datetime.fromisoformat(_utc_iso(now)) - window
+    rows = conn.execute(
+        "SELECT guild_id, message_id, channel_id, header, golden_prefix, rendered_at, posted_at, "
+        "ping FROM (SELECT m.guild_id, m.message_id, m.channel_id, m.header, m.golden_prefix, "
+        "m.rendered_at, m.posted_at, m.ping, ROW_NUMBER() OVER (PARTITION BY m.guild_id "
+        "ORDER BY m.edit_tried_at IS NOT NULL, m.edit_tried_at, m.posted_at, m.message_id) "
+        "AS turn FROM guild_alert_messages m "
+        "JOIN guild_shift s ON s.guild_id = m.guild_id "
+        "WHERE m.state = 'live' AND m.posted_at >= ? AND s.edits_blocked_at IS NULL "
+        "AND s.enabled = 1 "
+        "AND EXISTS (SELECT 1 FROM guild_code_posts p JOIN code_details d ON d.code = p.code "
+        "WHERE p.guild_id = m.guild_id AND p.message_id = m.message_id "
+        "AND p.from_roundup = 0 AND d.details_changed_at > m.rendered_at)) "
+        "WHERE turn <= ? ORDER BY turn, guild_id LIMIT ?",
+        (_utc_iso(cutoff), max(per_guild, 0), max(limit, 0)),
+    ).fetchall()
+    targets: list[EditTarget] = []
+    for row in rows:
+        rendered_at = _parse_dt_or_none(row["rendered_at"])
+        if rendered_at is None or _parse_dt_or_none(row["posted_at"]) is None:
+            logger.warning(
+                "a SHiFT alert record has a timestamp I can't read; skipping it",
+                extra={"guild_id": row["guild_id"], "message_id": row["message_id"]},
+            )
+            continue
+        targets.append(
+            EditTarget(
+                guild_id=row["guild_id"],
+                message_id=row["message_id"],
+                channel_id=row["channel_id"],
+                header=row["header"],
+                golden_prefix=bool(row["golden_prefix"]),
+                rendered_at=rendered_at,
+                ping=row["ping"],
+            )
+        )
+    return targets
+
+
+def alert_message_codes(
+    conn: sqlite3.Connection, guild_id: int, message_id: int
+) -> list[QueuedCode]:
+    """The codes one alert message holds, in the order it was packed, with their details.
+
+    Rowid order is release order, and release order is the order `render_code_alerts` packed
+    them in, so re-rendering these gives the message back the way it went out. (They come
+    back as `QueuedCode`s because that is already "a code plus what rendering needs";
+    `queued_at` is the claim time, which an edit has no use for.) Roundup rows never carry a
+    message's record, but the filter says so anyway.
+    """
+    rows = conn.execute(
+        "SELECT p.code, a.source_name, a.item_url, p.from_roundup, p.golden, p.trusted, "
+        "p.claimed_at, a.official_seen_at FROM guild_code_posts p "
+        "JOIN alerted_codes a ON a.code = p.code "
+        "WHERE p.guild_id = ? AND p.message_id = ? AND p.status = 'posted' "
+        "AND p.from_roundup = 0 ORDER BY p.rowid",
+        (guild_id, message_id),
+    ).fetchall()
+    details = code_details_for(conn, [row["code"] for row in rows])
+    return [
+        QueuedCode(
+            code=row["code"],
+            source_name=row["source_name"],
+            item_url=row["item_url"],
+            from_roundup=False,
+            golden=bool(row["golden"]),
+            trusted=bool(row["trusted"]),
+            queued_at=datetime.fromisoformat(row["claimed_at"]),
+            details=details.get(row["code"]),
+            official_seen=row["official_seen_at"] is not None,
+        )
+        for row in rows
+    ]
+
+
+def mark_alert_message_rendered(
+    conn: sqlite3.Connection,
+    guild_id: int,
+    message_id: int,
+    rendered_at: datetime,
+    tried_at: datetime | None = None,
+) -> None:
+    """Record the version stamp a message now shows (or that we've given up on showing).
+
+    Only ever forward: a stamp that isn't newer than the stored one changes nothing, so a
+    slow edit that finishes after a faster one can't make the message look older than it is.
+    The edit pass also uses this for a message that can't be re-rendered, so that same
+    change doesn't fail again every hour; a newer change is a new stamp and gets its try.
+    `tried_at`, when given, is stored as the message's last attempt either way.
+    """
+    with conn:
+        conn.execute(
+            "UPDATE guild_alert_messages SET rendered_at = ? "
+            "WHERE guild_id = ? AND message_id = ? AND rendered_at < ?",
+            (_utc_iso(rendered_at), guild_id, message_id, _utc_iso(rendered_at)),
+        )
+        if tried_at is not None:
+            _write_tried(conn, guild_id, message_id, tried_at)
+
+
+def mark_alert_message_tried(
+    conn: sqlite3.Connection, guild_id: int, message_id: int, tried_at: datetime
+) -> None:
+    """Note that the edit pass tried this message and it didn't take (it stays due).
+
+    This is what moves a message that keeps failing to the back of its server's line.
+    """
+    with conn:
+        _write_tried(conn, guild_id, message_id, tried_at)
+
+
+def _write_tried(
+    conn: sqlite3.Connection, guild_id: int, message_id: int, tried_at: datetime
+) -> None:
+    conn.execute(
+        "UPDATE guild_alert_messages SET edit_tried_at = ? WHERE guild_id = ? AND message_id = ?",
+        (_utc_iso(tried_at), guild_id, message_id),
+    )
+
+
+def mark_alert_message_gone(conn: sqlite3.Connection, guild_id: int, message_id: int) -> None:
+    """The message (or its channel) no longer exists: never try to edit it again."""
+    with conn:
+        conn.execute(
+            "UPDATE guild_alert_messages SET state = 'gone' WHERE guild_id = ? AND message_id = ?",
+            (guild_id, message_id),
+        )
+
+
+def mark_channel_alert_messages_gone(
+    conn: sqlite3.Connection, guild_id: int, channel_id: int
+) -> int:
+    """Discord says the channel is gone: none of this server's alerts in it can be edited.
+
+    Returns how many live messages that finished off.
+    """
+    with conn:
+        return conn.execute(
+            "UPDATE guild_alert_messages SET state = 'gone' "
+            "WHERE guild_id = ? AND channel_id = ? AND state = 'live'",
+            (guild_id, channel_id),
+        ).rowcount
+
+
+def block_guild_edits(conn: sqlite3.Connection, guild_id: int, now: datetime) -> bool:
+    """Stop editing this server's alerts until its SHiFT settings are saved again.
+
+    Returns True only for the call that did it, so the caller sends its one notice exactly
+    once: a server that's already blocked answers False. `set_shift` clears the flag.
+    """
+    with conn:
+        return (
+            conn.execute(
+                "UPDATE guild_shift SET edits_blocked_at = ? "
+                "WHERE guild_id = ? AND edits_blocked_at IS NULL",
+                (_utc_iso(now), guild_id),
+            ).rowcount
+            > 0
+        )
 
 
 # --- Free servers' /news: item headlines (design.md §15, owner decision D2) ---

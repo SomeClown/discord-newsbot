@@ -11,8 +11,9 @@ for the friend's server as before, only with more games on the shelf.
 
 The sources are the one place the answer is "more, not identical": the catalog
 brings the example's own sources for the friend's three games (official Bluesky
-accounts, two more press feeds), so health continuity is a superset check, and
-the one source that vanishes is named below so nobody finds out the hard way.
+accounts, two more press feeds, the mentalmars code tables), so health continuity is
+a superset check, and the one source that vanishes is named below so nobody finds out
+the hard way.
 """
 
 from __future__ import annotations
@@ -320,7 +321,7 @@ def test_the_sources_the_catalog_adds_for_the_friends_games_are_named(before, af
         for key in FRIENDS_GAMES
     }
     assert added == {
-        "borderlands4": ["Borderlands Bluesky", "GamesRadar+", "PCGamesN"],
+        "borderlands4": ["Borderlands Bluesky", "GamesRadar+", "PCGamesN", "mentalmars"],
         "palworld": ["Bluesky: Palworld", "GamesRadar+", "PCGamesN", "Palworld Bluesky"],
         "diablo4": ['Bluesky: "Diablo 4"', "Diablo Bluesky", "GamesRadar+", "PCGamesN"],
     }
@@ -336,7 +337,9 @@ def test_r_borderlands4_is_still_codes_only_and_a_shift_source(before, after):
         assert len(reddit) == 1
         assert "borderlands4" in cfg.shift.games
         assert "r/Borderlands4" in cfg.codes_only_source_names()
-        assert cfg.codes_only_source_names() == {"r/Borderlands4"}
+    assert before.codes_only_source_names() == {"r/Borderlands4"}
+    # The catalog step also brings mentalmars (a shift_table source, always codes-only).
+    assert after.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
 
 
 def test_no_other_reddit_feed_comes_back(after):

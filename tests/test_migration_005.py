@@ -51,12 +51,16 @@ OLD_DIGEST_COLUMNS = (
     "input_tokens, output_tokens, created_at, updated_at"
 )
 OLD_STORY_COLUMNS = "id, topic_key, headline, summary, label, is_update_of, digest_id, created_at"
+# alerted_codes as it was before 009 added its two trailing flags (QA batch 1).
+OLD_CODE_COLUMNS = (
+    "code, first_seen_at, source_name, item_url, message_id, pinged, status, from_roundup"
+)
 
 
 def test_fresh_db_reaches_the_latest_user_version(tmp_path):
     with closing(connect(tmp_path / "n.db")) as conn:
-        assert migrate(conn) == 8
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert migrate(conn) == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_digests_and_stories_keep_their_ids_and_data(v4_db):
@@ -67,11 +71,11 @@ def test_digests_and_stories_keep_their_ids_and_data(v4_db):
         links_before = _dump(conn, "SELECT * FROM story_items ORDER BY 1, 2")
         items_before = _dump(conn, "SELECT * FROM items ORDER BY id")
         topics_before = _dump(conn, "SELECT * FROM item_topics ORDER BY 1, 2")
-        codes_before = _dump(conn, "SELECT * FROM alerted_codes ORDER BY code")
+        codes_before = _dump(conn, f"SELECT {OLD_CODE_COLUMNS} FROM alerted_codes ORDER BY code")
         lounge_before = _dump(conn, "SELECT * FROM lounge_quotes_used ORDER BY 1, 2")
         assert len(digests_before) == 4 and len(stories_before) == 5
 
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
 
         assert (
             _dump(conn, f"SELECT {OLD_DIGEST_COLUMNS} FROM digests ORDER BY id") == digests_before
@@ -80,7 +84,10 @@ def test_digests_and_stories_keep_their_ids_and_data(v4_db):
         assert _dump(conn, "SELECT * FROM story_items ORDER BY 1, 2") == links_before
         assert _dump(conn, "SELECT * FROM items ORDER BY id") == items_before
         assert _dump(conn, "SELECT * FROM item_topics ORDER BY 1, 2") == topics_before
-        assert _dump(conn, "SELECT * FROM alerted_codes ORDER BY code") == codes_before
+        assert (
+            _dump(conn, f"SELECT {OLD_CODE_COLUMNS} FROM alerted_codes ORDER BY code")
+            == codes_before
+        )
         assert (
             _dump(
                 conn, "SELECT source_key, quote_hash, used_at FROM lounge_quotes_used ORDER BY 1, 2"
@@ -121,9 +128,12 @@ def test_new_tables_exist_and_start_empty(v22_db):
             "guild_lounge",
             "guild_notices",
             "game_summaries",
-            "app_state",
         ):
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        # app_state starts with exactly one row: 009's rollout marker.
+        assert [r["key"] for r in conn.execute("SELECT key FROM app_state")] == [
+            "shift_details_since"
+        ]
         indexes = {
             r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
@@ -264,10 +274,10 @@ def test_items_fts_is_backfilled_and_its_triggers_work(v22_db):
 
 def test_migrate_is_idempotent_and_changes_nothing_the_second_time(v4_db):
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
         snapshot = _dump(conn, "SELECT type, name, sql FROM sqlite_master ORDER BY 1, 2")
         rows = _dump(conn, "SELECT * FROM digests ORDER BY id")
-        assert migrate(conn) == migrate(conn) == 8
+        assert migrate(conn) == migrate(conn) == 9
         assert _dump(conn, "SELECT type, name, sql FROM sqlite_master ORDER BY 1, 2") == snapshot
         assert _dump(conn, "SELECT * FROM digests ORDER BY id") == rows
 
@@ -292,7 +302,7 @@ def test_several_processes_opening_a_v4_file_at_once_all_end_up_on_the_latest_ve
         t.join(timeout=30)
 
     assert errors == []
-    assert versions == [8] * 6
+    assert versions == [9] * 6
     with closing(connect(v4_db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 4
         assert conn.execute("SELECT COUNT(*) FROM stories").fetchone()[0] == 5
@@ -347,7 +357,7 @@ def test_a_failure_mid_rebuild_leaves_the_database_at_v4_and_intact(
     # The real migration then applies cleanly on top of the survivor.
     monkeypatch.undo()
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

@@ -61,7 +61,10 @@ class PagerView(discord.ui.View):
         self.next_button.disabled = self.page >= self.total_pages
 
     async def _turn_page(self, interaction: discord.Interaction, delta: int) -> None:
-        self.page += delta
+        # A button Discord already knew to disable can still be clicked twice before the first
+        # edit lands (two fast clicks, one slow network). The second one has nowhere to go, so
+        # it stays on the page it was on instead of walking off either end of the list.
+        self.page = min(max(self.page + delta, 1), self.total_pages)
         self._sync_buttons()
         embed = await self._render_page(self.page)
         # Explicit, not just relying on NewsBot's own default: /shift

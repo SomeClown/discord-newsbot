@@ -33,8 +33,8 @@ def _build_v3(conn):
 
 def test_fresh_db_reaches_the_latest_user_version(db_path):
     with closing(connect(db_path)) as conn:
-        assert migrate(conn) == 8
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert migrate(conn) == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_lounge_tables_exist(db_path):
@@ -81,7 +81,7 @@ def test_migrate_is_idempotent_and_keeps_lounge_rows(db_path):
             (HASH,),
         )
         conn.commit()
-        assert migrate(conn) == migrate(conn) == 8
+        assert migrate(conn) == migrate(conn) == 9
         assert conn.execute("SELECT COUNT(*) FROM lounge_quotes_used").fetchone()[0] == 1
 
 
@@ -100,7 +100,7 @@ def test_002_and_003_data_survive_the_upgrade_from_3_to_4(db_path):
         )
         conn.commit()
 
-        assert migrate(conn) == 8
+        assert migrate(conn) == 9
 
         row = conn.execute("SELECT status, from_roundup FROM alerted_codes").fetchone()
         assert (row["status"], row["from_roundup"]) == ("roundup", 1)
