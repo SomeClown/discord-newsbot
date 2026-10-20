@@ -43,3 +43,17 @@ code {
 
 .nav, .meta, .sig { color: var(--muted); font-size: 0.9rem; }
 .sig { margin-top: 2.5rem; font-style: italic; }
+
+.button {
+  display: inline-block;
+  background: #5865f2;
+  color: #fff;
+  font: 600 1rem/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  padding: 0.8em 1.4em;
+  border-radius: 6px;
+  text-decoration: none;
+}
+.button:hover, .button:focus-visible { background: #4752c4; }
+.button:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+
+ol li { margin-bottom: 0.5rem; }
