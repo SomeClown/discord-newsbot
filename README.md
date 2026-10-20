@@ -14,9 +14,23 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** Production runs v3.0.5, and the bot isn't open to the public yet.
-v3.1.0 (SHiFT code details, `/shift codes` as a list of current codes, and
-`/shift history`) is built and waiting for release.
+**Status.** The bot is public, and production runs v3.1.0.
+
+## Add it to your server
+
+[**Add to Discord**](https://discord.com/oauth2/authorize?client_id=1553075538220941402)
+(you need the Manage Server permission in the server you pick). Then:
+
+1. Run `/newsbot setup`. It asks for your time zone, the time you want the
+   daily digest, the games you follow, and the channel to post in. Run it
+   again any time to change your answers.
+2. If you want Borderlands 4 SHiFT code alerts, run `/newsbot shift` to turn
+   them on, pick their channel, and decide whether they ping a role,
+   everyone, or nobody (nobody is the default).
+
+Members then have `/news recent`, `/news search` and `/shift codes`. There's
+nothing to build or host: the maintainer runs the bot, and your server just
+uses it. The same steps are on the [project page](https://someclown.github.io/discord-newsbot/).
 
 ## Free and comped servers
 

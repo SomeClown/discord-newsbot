@@ -9,7 +9,21 @@
 <body>
 <main>
 <h1>discord-newsbot</h1>
-<p>A Discord bot that reads the news for the games your server follows every morning so nobody has to, and can announce new SHiFT codes when one turns up. Pick from a catalog of games with <code>/newsbot setup</code>.</p>
+<p>A Discord bot that reads the news for the games your server follows every morning so nobody has to, and can announce new Borderlands 4 SHiFT codes when one turns up, with what each code unlocks and when it expires.</p>
+
+<p><a class="button" href="https://discord.com/oauth2/authorize?client_id=1553075538220941402">Add to Discord</a></p>
+
+<h2>Getting started</h2>
+<ol>
+<li><strong>Add it.</strong> Click the button and pick your server. You need the Manage Server permission there; Discord won't list servers where you don't have it.</li>
+<li><strong>Set it up.</strong> Run <code>/newsbot setup</code>. It asks for your time zone, the time you want the daily digest, the games you follow, and the channel to post in. Run it again any time to change your answers.</li>
+<li><strong>SHiFT codes (optional).</strong> Run <code>/newsbot shift</code> to turn on Borderlands 4 code alerts, pick their channel, and decide whether they ping a role, everyone, or nobody. Nobody is the default. If you pick a ping, the bot tells you the one extra permission it needs.</li>
+</ol>
+<p>After that, members can use <code>/news recent</code> and <code>/news search</code> for the stored headlines, and <code>/shift codes</code> for the SHiFT codes that should still work.</p>
+
+<h2>What it costs</h2>
+<p>Nothing. Every server gets a headline digest for each game it follows, plus SHiFT alerts if they're turned on. No AI is involved, and nothing about your members is collected beyond what the <a href="privacy.html">privacy policy</a> describes. If you'd rather run a copy of your own, the source code explains how.</p>
+
 <ul>
 <li><a href="privacy.html">Privacy Policy</a></li>
 <li><a href="terms.html">Terms of Service</a></li>
