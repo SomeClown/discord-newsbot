@@ -145,12 +145,12 @@ def test_the_markers_appear_once_and_cut_out_no_top_level_key_prod_already_has()
 # --- 1 and 2: it loads, friend's games first ---
 
 
-def test_it_loads_with_sixteen_games_and_the_friends_three_first_in_v2_order(before, after):
+def test_it_loads_with_twenty_one_games_and_the_friends_three_first_in_v2_order(before, after):
     assert [g.key for g in before.catalog] == FRIENDS_GAMES
     keys = [g.key for g in after.catalog]
-    assert len(keys) == 16
+    assert len(keys) == 21
     assert keys[:3] == ["borderlands4", "palworld", "diablo4"]
-    assert keys[-1] == "arcraiders"
+    assert keys[-1] == "tarkov"
     assert [g.name for g in after.catalog[:3]] == ["Borderlands 4", "Palworld", "Diablo IV"]
 
 
