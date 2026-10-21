@@ -17,11 +17,16 @@ delete every server's settings, and I'd like not to learn that in production.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping
+import re
+import unicodedata
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import discord
+
+from newsbot.bot.format import discord_len, esc
+from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +45,11 @@ FIRST_CONTACT_TEXT = (
 # stuck one.
 HELLO_TIMEOUT = 15.0
 FETCH_TIMEOUT = 15.0
+# A server picks its own name, so the owner's alert gets at most this many
+# characters of it (the ellipsis counts), and the offline summaries list at
+# most this many servers before they say "and K more".
+NAME_CAP = 100
+LIST_CAP = 10
 # When the valve trips, the bot asks Discord about this many stale rows per
 # start, one at a time with a short pause between, so a mass offline kick
 # clears itself over a few restarts without hammering the API.
@@ -50,6 +60,82 @@ VALVE_CHECK_PAUSE = 0.25
 VALVE_MIN_DELETES = 3
 # Above this share of all rows, a cleanup is treated as a bad guild list.
 VALVE_FRACTION = 0.10
+
+
+# Control characters (newlines and tabs included; `plain_line` turns those into
+# spaces first) plus the bidi overrides and isolates, which can make a name read
+# backwards over the text after it. Nobody's server is called that on purpose.
+_NAME_JUNK_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+# A lone surrogate can't be encoded, and Discord's own client would choke on it.
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+# Characters that print nothing but aren't format characters or spaces: the
+# Hangul and Khmer fillers, the braille blank, the combining grapheme joiner and
+# the variation selectors. Only used to decide whether a name is "(unnamed)";
+# a visible name keeps its joiners, or every family emoji would fall apart.
+_INVISIBLE_EXTRA = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0") | frozenset(
+    chr(c) for c in (*range(0x180B, 0x180F), *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0))
+)
+
+# Longest name a summary shows per server. Ten of them, escaped, plus ids has to
+# fit in one message, so the summaries are stricter than a lone join alert.
+SUMMARY_NAME_CAP = 60
+# A summary is trimmed to this many UTF-16 units, a little under Discord's 2,000,
+# so "Now in N servers." always survives the router's own cut.
+SUMMARY_LIMIT = 1900
+
+
+def _is_invisible(ch: str) -> bool:
+    return ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf") or ch in _INVISIBLE_EXTRA
+
+
+def guild_label(guild: Any, *, comped: bool = False, cap: int = NAME_CAP) -> str:
+    """`Name (id)` for the owner's alerts, or `Name (id, comped)`. Safe to paste into a message.
+
+    The name is untrusted text: lone surrogates replaced, junk characters out,
+    whitespace collapsed, capped at `cap` shown characters, then run through
+    `esc` so mentions, links and markdown can't come alive in the owner's
+    channel. A name with nothing visible in it (spaces, zero-width characters,
+    fillers) shows as "(unnamed)", same as a server with no name at all. Reading
+    `guild.name` can raise on a strange guild; that's the caller's to catch.
+    """
+    raw = _LONE_SURROGATE_RE.sub("\ufffd", str(getattr(guild, "name", None) or ""))
+    raw = _NAME_JUNK_RE.sub(" ", raw)
+    name = plain_line(raw, cap)
+    if all(_is_invisible(ch) for ch in name):
+        name = "(unnamed)"
+    else:
+        name = esc(name)
+    return f"{name} ({guild.id}, comped)" if comped else f"{name} ({guild.id})"
+
+
+def servers(count: int) -> str:
+    """`1 server`, `0 servers`, `12 servers`."""
+    return f"{count} server" if count == 1 else f"{count} servers"
+
+
+def summary_text(
+    prefix: str, labels: Sequence[str], tail: str, *, limit: int = SUMMARY_LIMIT
+) -> str:
+    """`prefix` + the labels + `tail`, listing at most `LIST_CAP` and fitting in `limit` units.
+
+    Labels go in one at a time until the next would push the whole text past
+    `limit` (measured the way Discord measures), and the rest become "and K
+    more". `tail` is never cut, which is the point: it carries the count.
+    """
+
+    def build(shown: Sequence[str]) -> str:
+        rest = len(labels) - len(shown)
+        body = ", ".join(shown)
+        if rest:
+            body = f"{body}, and {rest} more" if shown else f"{rest} in all"
+        return f"{prefix}{body}.{tail}"
+
+    shown: list[str] = []
+    for label in labels[:LIST_CAP]:
+        if discord_len(build([*shown, label])) > limit:
+            break
+        shown.append(label)
+    return build(shown)
 
 
 def can_speak_in(channel: Any, me: Any) -> bool:
