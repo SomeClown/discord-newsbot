@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import closing
 from datetime import datetime
@@ -95,9 +96,15 @@ def client_sender(client: discord.Client) -> ClientSender:
     return ClientSender(client)
 
 
+# A lone surrogate is a half of an emoji that lost its other half on the way in.
+# It can't be encoded, and the length check below encodes, so it goes first.
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
 def _safe_text(text: str) -> str:
-    """Defuse mentions and NULs, then cap at Discord's limit."""
-    text = discord.utils.escape_mentions(text.replace("\x00", ""))
+    """Defuse mentions, NULs and lone surrogates, then cap at Discord's limit."""
+    text = _LONE_SURROGATE_RE.sub("\ufffd", text.replace("\x00", ""))
+    text = discord.utils.escape_mentions(text)
     return _truncate_utf16(text, _ALERT_CONTENT_LIMIT, suffix="…")
 
 
@@ -119,12 +126,29 @@ class Router:
         self._home_guild_id = home_guild_id
         self._now = now
 
-    async def alert_owner(self, text: str) -> None:
-        """Bot-wide news, to the owner's admin channel only. Never raises."""
+    async def alert_owner(self, text: str, *, log_text: bool = True) -> None:
+        """Bot-wide news, to the owner's admin channel only. Never raises.
+
+        `log_text=False` is for alerts that carry a server's name: if the alert
+        has nowhere to go, or its delivery blows up, the log says so without
+        quoting the text or the exception's message. The default logs both, as
+        it always has.
+        """
         if self._owner_channel_id is None:
-            logger.warning("owner alert with no owner channel configured: %.200s", text)
+            if log_text:
+                logger.warning("owner alert with no owner channel configured: %.200s", text)
+            else:
+                logger.warning(
+                    "owner alert dropped, no owner channel configured (%d characters)", len(text)
+                )
             return
-        await self._deliver(self._owner_channel_id, text, guild_id=self._home_guild_id, owner=True)
+        await self._deliver(
+            self._owner_channel_id,
+            text,
+            guild_id=self._home_guild_id,
+            owner=True,
+            log_text=log_text,
+        )
 
     async def notify_guild(self, guild_id: int, text: str) -> None:
         """Record a notice for `guild_id` and post it to that guild's admin channel, if set.
@@ -150,9 +174,19 @@ class Router:
         await self._deliver(admin_channel_id, text, guild_id=guild_id)
 
     async def _deliver(
-        self, channel_id: int, text: str, *, guild_id: int | None = None, owner: bool = False
+        self,
+        channel_id: int,
+        text: str,
+        *,
+        guild_id: int | None = None,
+        owner: bool = False,
+        log_text: bool = True,
     ) -> bool:
-        """One send: blank dropped, timed out, guild-checked if the sender can. False on failure."""
+        """One send: blank dropped, timed out, guild-checked if the sender can. False on failure.
+
+        With `log_text` off, a failure logs the exception's type and nothing
+        else (an error message that quotes its payload would quote the text).
+        """
         text = _safe_text(text)
         if not text.strip():
             logger.debug("dropping a blank routed message", extra={"channel_id": channel_id})
@@ -170,8 +204,15 @@ class Router:
                 _SEND_TIMEOUT_S,
                 extra={"channel_id": channel_id},
             )
-        except Exception:
-            logger.exception("couldn't send a routed message", extra={"channel_id": channel_id})
+        except Exception as exc:
+            if log_text:
+                logger.exception("couldn't send a routed message", extra={"channel_id": channel_id})
+            else:
+                logger.error(
+                    "couldn't send a routed message (%s)",
+                    type(exc).__name__,
+                    extra={"channel_id": channel_id},
+                )
         return False
 
     def _record(self, guild_id: int, text: str) -> int | None:

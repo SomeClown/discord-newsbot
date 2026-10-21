@@ -79,11 +79,16 @@ _LINKY_MENTION_RE = re.compile(r"<(?=[#/:]|a:|t:|id:)", re.IGNORECASE)
 # whatever the first layer's regex didn't quite cover): a zero-width
 # space right after the scheme's colon defuses "https://" into
 # "https:/\u200b/", which reads identically to a person and autolinks to
-# nobody.
-_URL_SCHEME_RE = re.compile(r"\b([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
+# nobody. No `\b` on purpose: an underscore counts as a word character, so
+# "_https://evil.example" slipped past it and Discord linked the URL right after
+# the escaped underscore. The lookbehind starts a match only at the front of a
+# run of scheme characters (so a million letters in a row are scanned once, not
+# once per letter), and anything that isn't a scheme character, "_" included,
+# may come before it.
+_URL_SCHEME_RE = re.compile(r"(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*):(?=//)", re.IGNORECASE)
 # Discord makes invite links clickable even without a scheme, because of
-# course it does.
-_BARE_INVITE_RE = re.compile(r"\b(discord\.gg|discord(?:app)?\.com/invite)/", re.IGNORECASE)
+# course it does. Same rule as above: no `\b`, so "_discord.gg/abc" is defused too.
+_BARE_INVITE_RE = re.compile(r"(discord\.gg|discord(?:app)?\.com/invite)/", re.IGNORECASE)
 
 # A fixed, arbitrary 6-color palette (Discord's own brand blurple plus five
 # others that read fine against dark and light themes). Which topic gets

@@ -332,7 +332,10 @@ async def test_a_disjoint_small_database_is_verified_not_wiped(v3_db, life, aler
     assert plan.valve_tripped
     assert client.fetched == [1, 2, 3]
     assert _ids(v3_db) == [1, 2, 3, 99]
-    assert len(alerts) == 1
+    # The valve's alert, plus the v3.1.1 summary for the server it did create.
+    assert len(alerts) == 2
+    assert alerts[0].startswith("Startup cleanup paused")
+    assert alerts[1].startswith("Joined while I was offline")
 
 
 async def test_a_guild_that_rejoins_while_the_valve_verifies_keeps_its_row(v3_db, life):

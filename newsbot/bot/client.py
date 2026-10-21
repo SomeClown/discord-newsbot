@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import inspect
 import logging
 import random
 import re
@@ -1967,7 +1968,11 @@ class GuildLifecycle:
     these and forwards the events to it.
 
     `alert_owner` is the owner alert path (`Router.alert_owner`). Logs carry
-    guild ids only; a server's name is its own business.
+    guild ids only; a server's name is its own business, which is why it goes
+    in the owner's alert and nowhere else (not even in an exception message:
+    see `_send_alert`). Every owner alert here is best effort and runs as a
+    background task, so a slow or broken Discord send can't hold up a join, a
+    removal or startup.
     """
 
     def __init__(
@@ -1979,6 +1984,9 @@ class GuildLifecycle:
         self.db_path = db_path
         self.cfg = cfg
         self._alert_owner = alert_owner
+        # Owner alerts in flight. The loop only keeps a weak reference to a task,
+        # so without this set a pending alert can be garbage collected mid-send.
+        self._alert_tasks: set[asyncio.Task[None]] = set()
 
     def _create_row(self, guild_id: int) -> bool:
         """Insert the guild's row (comped if `comped_guild_ids` lists it). True if it's new."""
@@ -1986,11 +1994,63 @@ class GuildLifecycle:
         with closing(connect(self.db_path)) as conn:
             return repo.create_guild(conn, guild_id, tier=tier)
 
-    async def on_guild_join(self, guild: discord.Guild) -> bool:
+    def _guild_count(self) -> int | None:
+        """How many servers have a row right now, or None if the database won't say."""
+        try:
+            with closing(connect(self.db_path)) as conn:
+                return len(repo.list_guilds(conn))
+        except Exception:
+            logger.exception("lifecycle: could not count the guild rows")
+            return None
+
+    def _tell_owner(self, compose: Callable[[], str]) -> None:
+        """Build one owner alert and start sending it in the background. Never raises.
+
+        `compose` runs here, right now, inside the same net as the send: the
+        text (and the server count in it) describes the moment this was called,
+        which keeps a removal alert from overtaking its own join alert, and a
+        guild whose attributes blow up costs the owner one alert and nobody
+        anything else. The send starts at once (it runs until its first real
+        wait) and then carries on beside the caller.
+        """
+        try:
+            text = compose()
+        except Exception as exc:
+            logger.warning("lifecycle: could not build an owner alert (%s)", type(exc).__name__)
+            return
+        task = asyncio.create_task(self._send_alert(text), eager_start=True)
+        self._alert_tasks.add(task)
+        task.add_done_callback(self._alert_tasks.discard)
+
+    async def _send_alert(self, text: str) -> None:
+        """One best-effort owner alert, timed out. Logs the failure's type and swallows it.
+
+        Not a word of `text` goes in a log line, and neither does the
+        exception's message: an error that quotes its payload would quote a
+        server's name. Cancellation (shutdown) passes through; a dropped alert
+        at shutdown is fine.
+        """
+        send = self._alert_owner
+        try:
+            # `Router.alert_owner` can be told not to log the text; a plain
+            # callable (a test's list.append) can't, and isn't asked to.
+            if "log_text" in inspect.signature(send).parameters:
+                send = functools.partial(send, log_text=False)
+        except TypeError, ValueError:
+            pass
+        try:
+            async with asyncio.timeout(lifecycle.HELLO_TIMEOUT):
+                await send(text)
+        except Exception as exc:
+            logger.warning("lifecycle: the owner alert failed (%s)", type(exc).__name__)
+
+    async def on_guild_join(self, guild: discord.Guild, *, announce: bool = True) -> bool:
         """Create the row and, only if it was new, say hello once. True if the row was new.
 
         A duplicate join event finds the row and sends nothing. A removal
         deletes the row, so a real re-join is new again and gets one hello.
+        The owner hears about a new row too, unless `announce` is off; reconcile
+        turns it off and sends one summary for all the servers it catches up on.
         """
         try:
             created = self._create_row(guild.id)
@@ -2003,8 +2063,26 @@ class GuildLifecycle:
             self._comp_one(guild.id)
             return False
         logger.info("guild join: new server %d", guild.id, extra={"guild_id": guild.id})
+        # The alert goes first: its text and count are taken at the insert, and
+        # the hello can take up to HELLO_TIMEOUT, in which time the server may
+        # have kicked us again. A removal alert should never beat its own join.
+        if announce:
+            self._tell_owner(lambda: self._join_alert(guild))
         await self._say_hello(guild)
         return True
+
+    def _join_alert(self, guild: discord.Guild) -> str:
+        """The owner's one-line note about a new server. Name escaped and capped, count fresh."""
+        members = getattr(guild, "member_count", None)
+        text = f"Joined a new server: {lifecycle.guild_label(guild)}"
+        if members is not None:
+            text += f", {members} {'member' if members == 1 else 'members'}"
+        count = self._guild_count()
+        if count is not None:
+            text += f". Now in {lifecycle.servers(count)}"
+        if guild.id in self.cfg.comped_guild_ids:
+            text += "; comped"
+        return text + "."
 
     async def _say_hello(self, guild: discord.Guild) -> None:
         """One attempt at the hello. Logs and swallows any failure (cancellation excepted)."""
@@ -2035,6 +2113,19 @@ class GuildLifecycle:
             logger.exception("guild remove: delete failed", extra={"guild_id": guild.id})
             return
         logger.info("guild remove: %d (rows deleted: %s)", guild.id, deleted)
+        if not deleted:
+            # No row, so nothing was deleted and "its settings were deleted"
+            # would be a fib. A join that never wrote its row lands here.
+            return
+        self._tell_owner(lambda: self._removal_alert(guild))
+
+    def _removal_alert(self, guild: discord.Guild) -> str:
+        """The owner's note about a server that is gone. Same care as the join alert."""
+        text = f"Removed from {lifecycle.guild_label(guild)}. Its settings were deleted."
+        count = self._guild_count()
+        if count is not None:
+            text += f" Now in {lifecycle.servers(count)}."
+        return text
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         """If a saved setting used this channel, add one notice naming the use.
@@ -2105,19 +2196,61 @@ class GuildLifecycle:
         for guild_id in plan.to_confirm:
             if await self._confirmed_gone(client, guild_id):
                 deletes.append(guild_id)
-        for guild_id in deletes:
-            self._delete_if_still_gone(client, guild_id)
+        removed = [g for g in deletes if self._delete_if_still_gone(client, g)]
+        joined: list[discord.Guild] = []
         for guild_id in plan.to_create:
             try:
                 guild = client.get_guild(guild_id)
                 if guild is None:
                     logger.info("reconcile: server %d left mid-run; no row created", guild_id)
                     continue
-                await self.on_guild_join(guild)
+                if await self.on_guild_join(guild, announce=False):
+                    joined.append(guild)
             except Exception:
                 logger.exception("reconcile: create failed", extra={"guild_id": guild_id})
         self._apply_comping()
+        self._offline_summaries(joined, removed)
         return plan
+
+    def _offline_summaries(self, joined: list[discord.Guild], removed: list[int]) -> None:
+        """One owner alert for the joins and one for the removals reconcile caught up on.
+
+        `removed` is only what reconcile deleted on its own say-so. The valve's
+        self-heal deletions are already counted in the valve alert, and telling
+        the owner twice about the same servers is how alerts get muted. Nobody
+        keeps a removed server's name (the row never held one and the guild is
+        gone from the cache), so those are listed by id. Both texts are trimmed
+        to fit one Discord message with "Now in N servers." intact.
+        """
+        if joined:
+            self._tell_owner(lambda: self._summary("Joined while I was offline: ", joined=joined))
+        if removed:
+            self._tell_owner(
+                lambda: self._summary(
+                    "Removed while I was offline: ", ids=[str(g) for g in removed]
+                )
+            )
+
+    def _summary(
+        self,
+        prefix: str,
+        *,
+        joined: list[discord.Guild] | None = None,
+        ids: list[str] | None = None,
+    ) -> str:
+        """The text of one startup summary: labels (or bare ids), then the server count."""
+        count = self._guild_count()
+        tail = f" Now in {lifecycle.servers(count)}." if count is not None else ""
+        if joined is not None:
+            labels = [
+                lifecycle.guild_label(
+                    g, comped=g.id in self.cfg.comped_guild_ids, cap=lifecycle.SUMMARY_NAME_CAP
+                )
+                for g in joined
+            ]
+        else:
+            labels = ids or []
+        return lifecycle.summary_text(prefix, labels, tail)
 
     async def _self_heal(
         self, client: discord.Client, stale: tuple[int, ...]
