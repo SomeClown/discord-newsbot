@@ -341,14 +341,14 @@ sources:
 def test_example_config_loads(monkeypatch):
     # config.example.yaml is what the owner copies to config.yaml on day one;
     # if this doesn't load, the README's setup instructions are lying. It's the v3
-    # shape: a catalog of 16 games, the first three in the order the comped prompt
+    # shape: a catalog of 21 games, the first three in the order the comped prompt
     # depends on, and no server in it (servers are set up from Discord).
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(EXAMPLE)
     keys = [g.key for g in cfg.catalog]
-    assert len(keys) == 16
+    assert len(keys) == 21
     assert keys[:3] == ["borderlands4", "palworld", "diablo4"]
-    assert keys[-1] == "arcraiders"
+    assert keys[-6:] == ["arcraiders", "valheim", "scum", "dayz", "activematter", "tarkov"]
     assert cfg.legacy is None
 
 

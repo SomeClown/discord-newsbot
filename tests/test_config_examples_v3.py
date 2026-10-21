@@ -51,14 +51,14 @@ def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order()
     # three would change the friend's prompt (and need an owner-reviewed /newsbot preview).
     cfg = load_config(EXAMPLE)
     assert [g.key for g in cfg.catalog][:3] == ["borderlands4", "palworld", "diablo4"]
-    assert len(cfg.catalog) == 16
+    assert len(cfg.catalog) == 21
 
 
-def test_arc_raiders_is_the_last_catalog_entry_with_steam_as_its_only_source():
+def test_arc_raiders_keeps_steam_as_its_only_source():
     # Added 2026-10-04 at the end so the first three keep their order. Steam is its only
     # source (no official feed or Bluesky exists, and Reddit is codes only), and the studio
     # isn't an entity because Embark's other game is THE FINALS.
-    game = load_config(EXAMPLE).catalog[-1]
+    game = next(g for g in load_config(EXAMPLE).catalog if g.key == "arcraiders")
     assert (game.key, game.name) == ("arcraiders", "ARC Raiders")
     assert game.aliases == ["ArcRaiders"] and game.entities == []
     assert game.match_name is True
@@ -66,6 +66,43 @@ def test_arc_raiders_is_the_last_catalog_entry_with_steam_as_its_only_source():
         ("steam_news", "ARC Raiders Steam", 1808500, "official")
     ]
     assert len(game.search_queries) == 2
+
+
+def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
+    # Added 2026-10-21 for a friend's new server, after ARC Raiders so the first three keep
+    # their order. Each has its official Steam news; Valheim alone also has a verified,
+    # official Bluesky account. None of the studios offers a usable feed (JavaScript sites,
+    # and DayZ's answers a datacenter with a Cloudflare 403), so Steam is the backbone.
+    games = load_config(EXAMPLE).catalog[-5:]
+    assert [(g.key, g.name) for g in games] == [
+        ("valheim", "Valheim"),
+        ("scum", "SCUM"),
+        ("dayz", "DayZ"),
+        ("activematter", "Active Matter"),
+        ("tarkov", "Escape from Tarkov"),
+    ]
+    steam = {g.key: [s.app_id for s in g.sources if s.type == "steam_news"] for g in games}
+    assert steam == {
+        "valheim": [892970],
+        "scum": [513710],
+        "dayz": [221100],
+        "activematter": [2887580],
+        "tarkov": [3932890],
+    }
+    assert all(s.trust == "official" for g in games for s in g.sources)
+    valheim = games[0]
+    assert [s.name for s in valheim.sources] == ["Valheim Steam", "Valheim Bluesky"]
+    # Studios whose other games would flood a free server's headlines stay out.
+    assert {g.key: g.entities for g in games} == {
+        "valheim": ["Iron Gate"],
+        "scum": ["Gamepires"],
+        "dayz": [],
+        "activematter": [],
+        "tarkov": ["Battlestate Games", "Nikita Buyanov"],
+    }
+    assert games[4].aliases == ["Tarkov", "EFT", "EscapeFromTarkov"]
+    # "active matter" on Bluesky is physics, so that game must never get a Bluesky search.
+    assert all(s.type != "bluesky_search" for s in games[3].sources)
 
 
 def test_the_catalog_fits_under_every_discord_cap():

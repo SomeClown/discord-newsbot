@@ -511,6 +511,83 @@ catalog:
     sources:
       - {type: steam_news, name: "ARC Raiders Steam", app_id: 1808500, trust: official}
 
+  - key: valheim
+    name: "Valheim"
+    aliases: []
+    # Iron Gate makes nothing else. Coffee Stain, the publisher, is left out:
+    # its name would also match Satisfactory, Goat Simulator and Deep Rock.
+    entities: ["Iron Gate"]
+    search_queries:
+      - "Valheim news"
+      - "Valheim update OR patch OR biome"
+    # valheimgame.com is a JavaScript page with no feed. The Bluesky account is
+    # verified and linked from the official site; it posts about five times a
+    # week, merchandise and fan art included.
+    sources:
+      - {type: steam_news, name: "Valheim Steam", app_id: 892970, trust: official}
+      - {type: rss, name: "Valheim Bluesky", url: "https://bsky.app/profile/did:plc:562oi2mmnowyvvyqfl5fkgbv/rss", trust: official}
+
+  - key: scum
+    name: "SCUM"
+    aliases: []
+    # Jagex published it once and doesn't any more, and its name would bring in
+    # RuneScape. Gamepires is the developer and makes nothing else these days.
+    # Bare "scum" also matches insults and a Darktide class; if press headlines
+    # turn noisy, set match_name: false and rely on Gamepires.
+    entities: ["Gamepires"]
+    search_queries:
+      - "SCUM game news"
+      - "SCUM Gamepires update OR patch OR hotfix"
+    # Steam only. scumgame.com's feed holds a lone WordPress "Hello world!" and
+    # there's no official Bluesky.
+    sources:
+      - {type: steam_news, name: "SCUM Steam", app_id: 513710, trust: official}
+
+  - key: dayz
+    name: "DayZ"
+    # The press writes "DayZ"; "Day Z" is too generic to be worth the noise.
+    aliases: []
+    # Bohemia Interactive is left out, the way Embark is for ARC Raiders: it
+    # would bring in every Arma headline.
+    entities: []
+    search_queries:
+      - "DayZ news"
+      - "DayZ update OR Badlands OR patch"
+    # Steam only. dayz.com answers automated requests with a Cloudflare 403
+    # even from a home connection, and the DayZ Bluesky account says it is a
+    # copy of the X feed run by a third party. Badlands news lands on the main app.
+    sources:
+      - {type: steam_news, name: "DayZ Steam", app_id: 221100, trust: official}
+
+  - key: activematter
+    name: "Active Matter"
+    aliases: ["ActiveMatter"]
+    # Gaijin is left out: it would match War Thunder, and "gaijin" is a word.
+    # Never give this game a Bluesky search: "active matter" there is physics.
+    entities: []
+    search_queries:
+      - "\"Active Matter\" Gaijin"
+      - "\"Active Matter\" extraction shooter update OR patch"
+    # Steam only, and busy: about five posts a week, nearly all build notes.
+    # The official site has no feed and there's no official Bluesky.
+    sources:
+      - {type: steam_news, name: "Active Matter Steam", app_id: 2887580, trust: official}
+
+  - key: tarkov
+    name: "Escape from Tarkov"
+    # Whole-word matching keeps "Tarkov" out of "Tarkovsky". "EFT" is also a
+    # bank transfer; drop it if it ever misfires on a games feed.
+    aliases: ["Tarkov", "EFT", "EscapeFromTarkov"]
+    entities: ["Battlestate Games", "Nikita Buyanov"]
+    search_queries:
+      - "\"Escape from Tarkov\" news"
+      - "Tarkov patch OR wipe OR update"
+    # Steam only (on Steam since the 1.0 launch, November 2025). The official
+    # site and forum have no feeds, and the Bluesky accounts are either
+    # unofficial or quiet since March.
+    sources:
+      - {type: steam_news, name: "Escape from Tarkov Steam", app_id: 3932890, trust: official}
+
 # <<< catalog-step: end
 
 # --- Single-server keys (needed only for the lounge) ---
