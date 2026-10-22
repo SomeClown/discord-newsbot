@@ -551,7 +551,7 @@ def test_an_expired_code_with_a_reward_says_expired_once_in_its_marker():
     assert text.count("expired") == 1
     assert "(expired)" in text
     assert text.endswith(
-        "\n3 Golden Keys · details via mentalmars"
+        "\n`reward` 3 Golden Keys · `via` mentalmars"
     )  # the expiry's credit went with it
 
 
@@ -572,7 +572,7 @@ def test_a_live_code_still_shows_its_expiry_in_the_line():
         )
     )
     assert "(expired)" not in text
-    assert "3 Golden Keys · expires Oct 14, 2026 · details via mentalmars" in text
+    assert "`reward` 3 Golden Keys · `expires` Oct 14, 2026 · `via` mentalmars" in text
 
 
 def test_a_permanent_code_is_never_marked_expired_and_keeps_its_line():
@@ -587,7 +587,7 @@ def test_a_permanent_code_is_never_marked_expired_and_keeps_its_line():
         )
     )
     assert "expired" not in text
-    assert "Skin · permanent · details via m" in text
+    assert "`reward` Skin · `expires` never · `via` m" in text
 
 
 # =====================================================================================

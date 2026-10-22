@@ -63,7 +63,6 @@ _COVERAGE_FOOTER_LIMIT = 512
 # faint background behind text that makes triple-clicking to select it a
 # worse experience than it needs to be.
 _ALERT_CONTENT_LIMIT = 2000
-_CONTINUATION_HEADER = "**(continued)**"
 
 _LABEL_ORDER = {"official": 0, "reported": 1, "rumor": 2}
 _LABEL_MARKER = {"official": "🟢 OFFICIAL", "reported": "🟡 REPORTED", "rumor": "🔴 RUMOR"}
@@ -387,19 +386,23 @@ def render_story_page(
 # stretch a reservation that was sized in good faith).
 _DETAIL_SHOWN_MAX = 300
 _VIA_NAME_MAX = 100
-# The longest expiry phrase an alert can carry: "expires Sep 30, 2026" (20), then the live
-# timestamp, " (<t:" and ":R>)" around up to 11 digits. A timestamp today is 10 digits (it
-# stays 10 until the year 2286); the 11th is room I'm keeping in case I'm wrong about that.
-_EXPIRY_DATE_MAX = 20
+# The longest expiry value an alert can carry: "Sep 30, 2026" (12), then the live timestamp,
+# " (<t:" and ":R>)" around up to 11 digits. A timestamp today is 10 digits (it stays 10 until
+# the year 2286); the 11th is room I'm keeping in case I'm wrong about that. The `expires` label
+# is counted separately, in `details_reserve`.
 _STAMP_OPEN, _STAMP_CLOSE = " (<t:", ":R>)"
 _STAMP_DIGITS_MAX = 11
-_EXPIRY_PHRASE_MAX = _EXPIRY_DATE_MAX + len(_STAMP_OPEN) + _STAMP_DIGITS_MAX + len(_STAMP_CLOSE)
+_EXPIRY_VALUE_MAX = 32
 _DETAIL_SEP = " · "
-_DETAIL_VIA = " · details via "
 _DETAIL_AND = " and "
+# The label chips that lead each part of the line, each with the space that follows it.
+_REWARD_LEAD = terminal.label(terminal.REWARD) + " "
+_EXPIRES_LEAD = terminal.label(terminal.EXPIRES) + " "
+_VIA_LEAD = terminal.label(terminal.VIA) + " "
+_SRC_LEAD = terminal.label(terminal.SRC) + " "
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 # Bidirectional overrides and isolates (U+202A to U+202E, U+2066 to U+2069). A reward
-# that opens one without closing it can make the rest of the line read backwards, "details via"
+# that opens one without closing it can make the rest of the line read backwards, the `via`
 # names included. Only these: the zero-width joiner holds emoji sequences together, and
 # the other invisible characters are somebody else's problem.
 _BIDI_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
@@ -427,49 +430,50 @@ def _short_date(d: date, *, with_year: bool = True) -> str:
     return f"{_MONTHS[d.month - 1]} {d.day}{year}"
 
 
-def _expiry_phrase(
+def _expiry_value(
     row: CodeDetailsRow | None, now: datetime, *, with_days: bool = False
-) -> str | None:
-    """How a code's expiry reads at `now`, or None when nothing is known.
+) -> tuple[str, str] | None:
+    """How a code's expiry reads at `now`, as `(label word, value)`, or None when nothing is known.
 
-    A permanent code says "permanent" (whatever date a stray table row left on it). A
+    A permanent code is `expires` "never" (whatever date a stray table row left on it). A
     known expiry is a Pacific calendar day that lasts until the next midnight there:
-    on that day it's "expires in N hours", the day before it's "expires tomorrow", after
-    it's "expired", otherwise a date. `with_days` is `/shift codes`' flavor of the
-    date: no year unless it's another year, plus "(in 5 days)".
+    on that day it's "in 5 hours", the day before it's "tomorrow", otherwise a date. After
+    it, the label swaps to `expired` and the value is the date. `with_days` is
+    `/shift codes`' flavor of the date: no year unless it's another year, plus "(in 5 days)".
     """
     if row is None:
         return None
     if row.category == "permanent":
-        return "permanent"
+        return terminal.EXPIRES, "never"
     if row.expires_on is None:
         return None
     now = _aware(now)
     today = now.astimezone(SHIFT_TZ).date()
     due = row.expires_on
     if due < today:
-        return "expired"
+        return terminal.EXPIRED, _short_date(due)
     if due == today:
         hours = int((end_of_day(due) - now).total_seconds() // 3600)
         if hours < 1:
-            return "expires in under an hour"
-        return f"expires in {hours} hour{'s' if hours != 1 else ''}"
+            return terminal.EXPIRES, "in under an hour"
+        return terminal.EXPIRES, f"in {hours} hour{'s' if hours != 1 else ''}"
     if due == today + timedelta(days=1):
-        return "expires tomorrow"
+        return terminal.EXPIRES, "tomorrow"
     if with_days:
         shown = _short_date(due, with_year=due.year != today.year)
-        return f"expires {shown} (in {(due - today).days} days)"
-    return f"expires {_short_date(due)}"
+        return terminal.EXPIRES, f"{shown} (in {(due - today).days} days)"
+    return terminal.EXPIRES, _short_date(due)
 
 
-def _live_expiry(row: CodeDetailsRow | None) -> str | None:
+def _live_expiry_value(row: CodeDetailsRow | None) -> str | None:
     """A code's expiry as a posted message says it: the date, then a live Discord timestamp.
 
-    `expires Oct 14, 2026 (<t:1792047600:R>)`. The date is the Pacific calendar day the
-    sources gave; the timestamp is the instant that day ends (`end_of_day`, Unix seconds),
-    and Discord keeps its "in 6 hours" current for every reader, in their own language, long
-    after the message was written. That is why a posted alert never says "in 6 hours" itself:
-    it would be wrong by lunchtime. A permanent code says "permanent", as it always did.
+    `Oct 14, 2026 (<t:1792047600:R>)`, for the `expires` label to sit in front of. The date is
+    the Pacific calendar day the sources gave; the timestamp is the instant that day ends
+    (`end_of_day`, Unix seconds), and Discord keeps its "in 6 hours" current for every reader,
+    in their own language, long after the message was written. That is why a posted alert
+    never says "in 6 hours" itself: it would be wrong by lunchtime. A permanent code is
+    "never".
 
     The token is built here, from an integer the bot computed, and is never passed through
     `esc()` (which defuses `<t:` on purpose, so scraped text can't forge one). A date so
@@ -479,18 +483,18 @@ def _live_expiry(row: CodeDetailsRow | None) -> str | None:
     if row is None:
         return None
     if row.category == "permanent":
-        return "permanent"
+        return "never"
     if row.expires_on is None:
         return None
-    phrase = f"expires {_short_date(row.expires_on)}"
+    value = _short_date(row.expires_on)
     stamp = int(end_of_day(row.expires_on).timestamp())
     if 0 < stamp < 10**_STAMP_DIGITS_MAX:
-        phrase += f"{_STAMP_OPEN}{stamp}{_STAMP_CLOSE}"
-    return phrase
+        value += f"{_STAMP_OPEN}{stamp}{_STAMP_CLOSE}"
+    return value
 
 
 def _via_name(name: str) -> str:
-    """A source name as "details via" shows it: 100 characters at most, cut with a "…" if longer.
+    """A source name as the `via` part shows it: 100 characters at most, cut with a "…" if longer.
 
     Config and `clean_observation` both hold names to 100 characters, so this only ever
     trims a row stored under an older, longer name (or edited by hand). It's here because
@@ -512,55 +516,63 @@ def details_line(
 ) -> str | None:
     """The line under a code.
 
-    For example `3 Golden Keys · expires Oct 14, 2026 (<t:1792047600:R>) · details via mentalmars`.
+    For example `` `reward` 3 Golden Keys · `expires` Oct 14, 2026 (<t:1792047600:R>) · `via`
+    mentalmars `` (the labels are chips; see `terminal`).
 
     None when there's neither a reward nor an expiry to show, so an alert looks as it
-    always did until details exist. "details via" names whoever supplied what's shown (both
+    always did until details exist. `via` names whoever supplied what's shown (both
     names, in reward-then-expiry order, when they differ); a permanent code's "expiry"
-    credits whoever set its category. Everything scraped goes through `esc()`; the
-    timestamp is the bot's own and goes in after it (see `_live_expiry`).
+    credits whoever set its category. Everything scraped goes through `esc()`, and nothing
+    scraped ever goes inside a chip; the timestamp is the bot's own and goes in after it
+    (see `_live_expiry_value`).
 
     This is the persisted wording: alerts, edits, follow-ups and roundups all stay in a
     channel for good, so their expiry is a date plus a timestamp Discord keeps current.
     `relative=True` is for a page drawn fresh on every call (`/shift history`): its expiry
-    reads "expires in 6 hours" or "expires tomorrow" against `now` (Pacific time, see
-    `_expiry_phrase`). `show_expiry=False` leaves the expiry (and its credit) out; history
-    uses it for a code whose marker already says "expired", so the page says it once.
+    reads "in 6 hours" or "tomorrow" against `now` (Pacific time, see `_expiry_value`), and
+    a date that has passed swaps the label to `expired`. `show_expiry=False` leaves the
+    expiry (and its credit) out; history uses it for a code whose marker already says
+    "expired", so the page says it once.
     """
     if details is None:
         return None
     reward = _detail_text(details.reward)
+    expiry: tuple[str, str] | None
     if not show_expiry:
         expiry = None
     elif relative:
-        expiry = _expiry_phrase(details, now)
+        expiry = _expiry_value(details, now)
     else:
-        expiry = _live_expiry(details)
+        value = _live_expiry_value(details)
+        expiry = None if value is None else (terminal.EXPIRES, value)
     if not reward and expiry is None:
         return None
     parts: list[str] = []
     sources: list[str] = []
     if reward:
-        parts.append(esc(reward))
+        parts.append(f"{_REWARD_LEAD}{esc(reward)}")
         sources.append(details.reward_from)
     if expiry is not None:
-        parts.append(expiry)
+        word, value = expiry
+        parts.append(f"{terminal.label(word)} {value}")
         sources.append(
             details.category_from if details.category == "permanent" else details.expires_from
         )
-    line = _DETAIL_SEP.join(parts)
     names = list(dict.fromkeys(name for name in sources if name))
     if names:
-        line += _DETAIL_VIA + _DETAIL_AND.join(esc(_via_name(name)) for name in names)
-    return line
+        parts.append(_VIA_LEAD + _DETAIL_AND.join(esc(_via_name(name)) for name in names))
+    return _DETAIL_SEP.join(parts)
 
 
 def details_reserve(names: Iterable[str]) -> int:
     """The most room (UTF-16 units) one code's details line can ever take, newline included.
 
     `names` is every source name that can supply details (see plan §3.4). The line at its
-    worst is a 300-unit reward, the longest expiry phrase (a date and an 11-digit live
-    timestamp), and "details via" two of the longest names. The alert packer sets this
+    worst is a 300-unit reward, the longest expiry value (a date and an 11-digit live
+    timestamp), and `via` two of the longest names, each part behind its label chip. That
+    comes to `369 + 2L` for names of `L` units: 1 + 9 + 300 + 3 + 10 + 32 + 3 + 6 + L + 5 + L,
+    which is the newline, `` `reward` ``, the reward, a separator, `` `expires` ``, the value,
+    a separator, `` `via` ``, a name, " and ", and the other name. The alert packer sets this
     much aside per code whether or not the code has details yet, which is what lets an
     edit land later without the message outgrowing Discord's cap. A test pins
     `details_line` under this for hostile input.
@@ -570,10 +582,13 @@ def details_reserve(names: Iterable[str]) -> int:
     longest = max((discord_len(esc(name[:_VIA_NAME_MAX])) for name in names), default=0)
     return (
         1  # the newline that puts the line under its code
+        + len(_REWARD_LEAD)
         + _DETAIL_SHOWN_MAX
         + len(_DETAIL_SEP)
-        + _EXPIRY_PHRASE_MAX
-        + len(_DETAIL_VIA)
+        + len(_EXPIRES_LEAD)
+        + _EXPIRY_VALUE_MAX
+        + len(_DETAIL_SEP)
+        + len(_VIA_LEAD)
         + longest
         + len(_DETAIL_AND)
         + longest
@@ -853,7 +868,15 @@ def _current_entry(code: CurrentCode, now: datetime) -> str:
         origin = _detail_text(d.origin)
         tail = esc(origin) if origin else "permanent"
     else:
-        tail = _expiry_phrase(d, now, with_days=True) or "expiry unknown"
+        # Task 4 restyles this entry; until then it says what it always said, built from
+        # the same value producer the new details line uses.
+        expiry = _expiry_value(d, now, with_days=True)
+        if expiry is None:
+            tail = "expiry unknown"
+        elif expiry[0] == terminal.EXPIRED:
+            tail = "expired"
+        else:
+            tail = f"expires {expiry[1]}"
     return f"`{code.code}`\n{esc(reward) if reward else 'reward unknown'}{_DETAIL_SEP}{tail}"
 
 
@@ -940,11 +963,21 @@ class RenderedAlert:
     golden_prefix: bool = False
 
 
-def _alert_title(candidates: list[CodeCandidate], *, plural: bool) -> str:
+def _alert_header(candidates: list[CodeCandidate], *, plural: bool, test: bool = False) -> str:
+    """The prompt chip that heads a new-code alert: `> new SHiFT codes ▌` and its kin.
+
+    "Golden Key" when every code in the batch is golden, "SHiFT" otherwise; the plural
+    follows the batch, because the header has to be fixed before packing (it's part of the
+    budget). A test alert says `[test]` so it can't pass for a real one.
+    """
+    kind = "Golden Key" if all(c.golden for c in candidates) else "SHiFT"
     suffix = "s" if plural else ""
-    if all(c.golden for c in candidates):
-        return f"New Golden Key code{suffix}"
-    return f"New SHiFT code{suffix}"
+    return terminal.prompt(f"{'[test] ' if test else ''}new {kind} code{suffix}")
+
+
+def _continuation_header(*, test: bool = False) -> str:
+    """The header on every message after a batch's first: never pinged, `[test]` if the batch is."""
+    return terminal.prompt(f"{'[test] ' if test else ''}new SHiFT codes (continued)")
 
 
 def _alert_block(
@@ -954,7 +987,7 @@ def _alert_block(
     link: bool = True,
     line: str | None = None,
 ) -> str:
-    """One code's entry: its fence, the details line if there is one, then its source and link.
+    """One code's entry: its fence, the details line if there is one, then `src` and its link.
 
     The details line sits right under the fence (design.md §16). `link=False` is the
     one thing an entry sheds when it's too big: the code is the point, the source is
@@ -975,7 +1008,7 @@ def _alert_block(
     lines = [f"```\n{candidate.code}\n```"]
     if line:
         lines.append(line)
-    lines.append(f"{prefix}{esc(candidate.source_name)}{shown_link}")
+    lines.append(f"{_SRC_LEAD}{prefix}{esc(candidate.source_name)}{shown_link}")
     return "\n".join(lines)
 
 
@@ -1010,11 +1043,12 @@ def render_code_alerts(
 
     One ping covers the whole batch (A4): only the first message's header
     carries `@everyone` (and only if `ping` is true to begin with); every
-    continuation starts with `_CONTINUATION_HEADER` instead and never
+    continuation starts with `_continuation_header` instead and never
     pings, no matter how many messages the batch spills into. Mixed
-    golden/non-golden batches (A3) keep the plain "New SHiFT code(s)"
+    golden/non-golden batches (A3) keep the plain "new SHiFT code(s)"
     title but prefix each golden entry with "Golden Key:" so it doesn't
-    read as an ordinary code.
+    read as an ordinary code. Headers are prompt chips (`terminal.prompt`);
+    the shapes are in design.md §17.
 
     `ping_mention` is the text a ping starts with: `"@everyone"` (the
     default, which is all v2 ever used) or a role mention like `"<@&123>"`
@@ -1040,9 +1074,8 @@ def render_code_alerts(
 
     ping_prefix = f"{ping_mention or '@everyone'} " if ping else ""
     mixed = any(c.golden for c in candidates) and not all(c.golden for c in candidates)
-    title = _alert_title(candidates, plural=len(candidates) > 1)
-    test_prefix = "[TEST] " if test else ""
-    first_header = ping_prefix + f"**{test_prefix}{title}**"
+    first_header = ping_prefix + _alert_header(candidates, plural=len(candidates) > 1, test=test)
+    continuation = _continuation_header(test=test)
 
     # The most room any one entry can ever count on: alone in its own
     # message, under whichever header is longer (always the first
@@ -1050,7 +1083,7 @@ def render_code_alerts(
     # cheap insurance against that assumption changing later) plus the
     # "\n\n" joining the header to the block.
     solo_budget = (
-        _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER)) - 2
+        _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(continuation)) - 2
     )
     # Each entry is (code, content, slot). The content carries the real details line;
     # the slot is what packing counts: the block without any line, plus the reserve.
@@ -1084,7 +1117,7 @@ def render_code_alerts(
     current: list[tuple[str, str]] = []
     current_len = 0
     for code, block, slot in entries:
-        header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+        header_len = discord_len(first_header if not batches else continuation)
         block_len = slot + 2  # "\n\n" joining it to the header/prior block
         if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
             batches.append(current)
@@ -1097,7 +1130,7 @@ def render_code_alerts(
 
     rendered = []
     for i, batch in enumerate(batches):
-        header = first_header if i == 0 else _CONTINUATION_HEADER
+        header = first_header if i == 0 else continuation
         content = "\n\n".join([header, *(block for _, block in batch)])
         # Belt-and-suspenders on the packing loop above: nothing should
         # ever reach here over the cap, but a RenderedAlert that snuck
@@ -1185,6 +1218,8 @@ def render_alert_edit(
 
 
 _ROUNDUP_HEADER_PREFIX = "**SHiFT codes from a roundup**"
+# Roundups still wear v3.1's continuation header; they get the terminal one in Task 3.
+_CLASSIC_CONTINUATION = "**(continued)**"
 
 
 def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = None) -> str:
@@ -1244,7 +1279,7 @@ def render_roundup_alerts(
     codes into one or more messages under Discord's 2000-unit cap exactly
     like `render_code_alerts` does for a normal batch: the first message
     of a group carries that group's header, any continuation uses
-    `_CONTINUATION_HEADER`, and no group's codes ever share a message with
+    `_CLASSIC_CONTINUATION`, and no group's codes ever share a message with
     another group's (a header names one specific roundup post; mixing two
     posts' codes under one header would misattribute them).
 
@@ -1277,7 +1312,7 @@ def render_roundup_alerts(
         )
         solo_budget = (
             _ALERT_CONTENT_LIMIT
-            - max(discord_len(first_header), discord_len(_CONTINUATION_HEADER))
+            - max(discord_len(first_header), discord_len(_CLASSIC_CONTINUATION))
             - 2
         )
         # This is now a belt-and-suspenders check, not the mechanism that
@@ -1293,7 +1328,7 @@ def render_roundup_alerts(
         current: list[tuple[str, str]] = []
         current_len = 0
         for code, block in entries:
-            header_len = discord_len(first_header if not batches else _CONTINUATION_HEADER)
+            header_len = discord_len(first_header if not batches else _CLASSIC_CONTINUATION)
             block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
             if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
                 batches.append(current)
@@ -1305,7 +1340,7 @@ def render_roundup_alerts(
             batches.append(current)
 
         for i, batch in enumerate(batches):
-            header = first_header if i == 0 else _CONTINUATION_HEADER
+            header = first_header if i == 0 else _CLASSIC_CONTINUATION
             content = "\n\n".join([header, *(block for _, block in batch)])
             if discord_len(content) > _ALERT_CONTENT_LIMIT:
                 raise ValueError(
@@ -1373,9 +1408,9 @@ def render_followup_alert(
     server scope, so Discord can't mistake this for the original alert's send.
 
     When any code has a details line (`details`, read against `now`), the message
-    becomes one line per code, `` `CODE` · 3 Golden Keys · expires Oct 14, 2026 (<t:...:R>) ``,
-    as the details stand right now. Nothing edits a follow-up, so it isn't given a reserve;
-    `fit_followup_codes` picks how many codes fit by their real size.
+    becomes one line per code, `` `CODE` · `reward` 3 Golden Keys · `expires` Oct 14, 2026 ``
+    and so on, as the details stand right now. Nothing edits a follow-up, so it isn't given
+    a reserve; `fit_followup_codes` picks how many codes fit by their real size.
     """
     if not codes or len(codes) > FOLLOWUP_MAX_CODES:
         raise ValueError(f"a follow-up names 1 to {FOLLOWUP_MAX_CODES} codes, got {len(codes)}")

@@ -518,10 +518,10 @@ async def test_history_marks_expired_codes_and_wins_over_the_other_markers(v3_cf
     assert "(expired)" in blocks[3] and "(from a roundup)" not in blocks[3]
     # The details line sits under the source line, and the marker has already said "expired",
     # so the line doesn't say it again (QA batch 1, fix 16).
-    assert blocks[1].endswith("\n1 Golden Key")
+    assert blocks[1].endswith("\n`reward` 1 Golden Key")
     assert "1 Golden Key ·" not in blocks[1]
     assert blocks[1].count("expired") == 1
-    assert blocks[3].endswith("\nCosmetic") and blocks[3].count("expired") == 1
+    assert blocks[3].endswith("\n`reward` Cosmetic") and blocks[3].count("expired") == 1
 
 
 async def test_history_is_the_old_list_with_its_own_title_and_gating(v3_cfg, v3_db):

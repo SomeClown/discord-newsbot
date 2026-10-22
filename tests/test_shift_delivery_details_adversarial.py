@@ -326,7 +326,7 @@ async def test_a_partial_claim_that_removes_the_only_golden_code_drops_the_golde
     await h.run([golden, plain])
 
     ((_g, _m, _c, header, golden_prefix, *_),) = message_rows(h.db_path)
-    assert header == "@everyone **New SHiFT code**"
+    assert header == "@everyone `> new SHiFT code ▌`"
     assert golden_prefix == 0  # the batch that posted wasn't mixed any more
     assert "Golden Key: " not in h.delivered[0].alert.content
     assert_records_match_what_posted(h)
@@ -341,7 +341,7 @@ async def test_a_partial_claim_that_removes_the_plain_code_stores_the_golden_tit
     await h.run([golden, plain])
 
     ((_g, _m, _c, header, golden_prefix, *_),) = message_rows(h.db_path)
-    assert header == f"<@&{ROLE}> **New Golden Key code**"
+    assert header == f"<@&{ROLE}> `> new Golden Key code ▌`"
     assert golden_prefix == 0
     assert_records_match_what_posted(h)
 
@@ -355,9 +355,9 @@ async def test_a_multi_message_batch_gets_one_record_per_message_with_its_own_co
 
     got = message_rows(h.db_path)
     assert len(got) == len(h.delivered) >= 4
-    assert [r[3] for r in got] == [f"<@&{ROLE}> **New SHiFT codes**"] + ["**(continued)**"] * (
-        len(got) - 1
-    )
+    assert [r[3] for r in got] == [f"<@&{ROLE}> `> new SHiFT codes ▌`"] + [
+        "`> new SHiFT codes (continued) ▌`"
+    ] * (len(got) - 1)
     # Disjoint, in release order, and all of them: nobody's code lives in two records.
     per_message = [posts_of(h.db_path, 1, r[1]) for r in got]
     assert [c for group in per_message for c in group] == codes
@@ -404,8 +404,8 @@ async def test_a_channel_and_role_changed_after_the_load_leave_the_record_of_wha
     # The poster was built for channel 100 and pinging @everyone before the change; the
     # record says so for every message of the batch, not what the settings say now.
     assert {r[2] for r in got} == {100}
-    assert got[0][3] == "@everyone **New SHiFT codes**"
-    assert got[1][3] == "**(continued)**"
+    assert got[0][3] == "@everyone `> new SHiFT codes ▌`"
+    assert got[1][3] == "`> new SHiFT codes (continued) ▌`"
     assert shift_row(h.db_path, 1).channel_id == 999
     assert_records_match_what_posted(h)
 
@@ -424,7 +424,7 @@ async def test_a_ping_switched_off_after_the_load_still_records_the_ping_that_we
     await h.run([item(CODE_A)])
 
     ((_g, _m, _c, header, *_),) = message_rows(h.db_path)
-    assert header == "@everyone **New SHiFT code**"
+    assert header == "@everyone `> new SHiFT code ▌`"
     assert h.delivered[0].alert.ping is True
 
 
@@ -480,7 +480,7 @@ async def test_two_alerts_given_the_same_message_id_keep_the_first_record_and_do
     await h.run(distinct(CODE_A, CODE_B, CODE_C))
 
     assert len(message_rows(h.db_path)) == 1
-    assert message_rows(h.db_path)[0][3] == "@everyone **New SHiFT codes**"
+    assert message_rows(h.db_path)[0][3] == "@everyone `> new SHiFT codes ▌`"
     assert {s for (s,) in rows(h.db_path, "SELECT status FROM guild_code_posts")} == {"posted"}
 
 
@@ -527,7 +527,7 @@ async def test_the_longest_real_header_fits_with_room_to_spare(h):
     await h.run(golden)
 
     ((_g, _m, _c, header, *_),) = message_rows(h.db_path)
-    assert header == f"<@&{'1' * 20}> **New Golden Key codes**"
+    assert header == f"<@&{'1' * 20}> `> new Golden Key codes ▌`"
     assert len(header) < 60
 
 
@@ -673,12 +673,12 @@ def assert_ping_integrity(rig: Rig):
 @pytest.mark.parametrize(
     ("script", "stored_header", "message_pinged"),
     [
-        ([AMBIGUOUS], "**New SHiFT codes**", False),
-        ([refused(), AMBIGUOUS], "**New SHiFT codes**", False),
-        ([AMBIGUOUS, refused()], "**New SHiFT codes**", False),
-        ([refused(), refused()], "@everyone **New SHiFT codes**", True),
-        ([refused(), AMBIGUOUS, refused()], "**New SHiFT codes**", False),
-        ([], "@everyone **New SHiFT codes**", True),
+        ([AMBIGUOUS], "`> new SHiFT codes ▌`", False),
+        ([refused(), AMBIGUOUS], "`> new SHiFT codes ▌`", False),
+        ([AMBIGUOUS, refused()], "`> new SHiFT codes ▌`", False),
+        ([refused(), refused()], "@everyone `> new SHiFT codes ▌`", True),
+        ([refused(), AMBIGUOUS, refused()], "`> new SHiFT codes ▌`", False),
+        ([], "@everyone `> new SHiFT codes ▌`", True),
     ],
     ids=["timeout", "429-then-timeout", "timeout-then-429", "two-429s", "429-timeout-429", "clean"],
 )
@@ -694,7 +694,7 @@ async def test_the_stored_header_matches_the_ping_the_first_message_really_carri
     got = message_rows(h.db_path)
     assert got[0][3] == stored_header
     assert carries_a_ping(h.delivered[0].alert.content) is message_pinged
-    assert got[1][3] == "**(continued)**"
+    assert got[1][3] == "`> new SHiFT codes (continued) ▌`"
     assert sum(carries_a_ping(d.alert.content) for d in h.delivered) == int(message_pinged)
     assert_ping_integrity(h)
     assert_records_match_what_posted(h)
@@ -707,7 +707,7 @@ async def test_a_role_ping_stripped_after_a_timeout_is_stripped_from_the_record_
     await h.run([item(CODE_A)])
 
     ((_g, _m, _c, header, *_),) = message_rows(h.db_path)
-    assert header == "**New SHiFT code**"
+    assert header == "`> new SHiFT code ▌`"
     assert ROLE not in header and ROLE not in h.delivered[0].alert.content
     assert_ping_integrity(h)
 
@@ -720,7 +720,10 @@ async def test_a_timeout_on_a_continuation_message_has_no_ping_to_strip_and_reco
     await h.run(distinct(CODE_A, CODE_B, CODE_C))
 
     got = message_rows(h.db_path)
-    assert [r[3] for r in got] == ["@everyone **New SHiFT codes**", "**(continued)**"]
+    assert [r[3] for r in got] == [
+        "@everyone `> new SHiFT codes ▌`",
+        "`> new SHiFT codes (continued) ▌`",
+    ]
     assert_ping_integrity(h)
     assert_records_match_what_posted(h)
 
@@ -746,7 +749,7 @@ async def test_a_second_message_that_fails_leaves_the_first_recorded_and_only_th
     await h.run(distinct(CODE_A, CODE_B, CODE_C))
 
     got = message_rows(h.db_path)
-    assert len(got) == 1 and got[0][3] == "@everyone **New SHiFT codes**"
+    assert len(got) == 1 and got[0][3] == "@everyone `> new SHiFT codes ▌`"
     assert dict(rows(h.db_path, "SELECT code, status FROM guild_code_posts")) == {
         CODE_A: "posted",
         CODE_B: "posted",
@@ -762,7 +765,7 @@ async def test_a_cap_hit_before_a_multi_message_batch_stores_unpinged_headers_th
     await h.run(distinct(CODE_A, CODE_B, CODE_C))
 
     got = message_rows(h.db_path)
-    assert [r[3] for r in got] == ["**New SHiFT codes**", "**(continued)**"]
+    assert [r[3] for r in got] == ["`> new SHiFT codes ▌`", "`> new SHiFT codes (continued) ▌`"]
     assert not any(carries_a_ping(d.alert.content) for d in h.delivered)
     assert shift_row(h.db_path, 1).ping_count == 3
     assert_ping_integrity(h)
@@ -776,7 +779,7 @@ async def test_the_cap_runs_out_between_two_batches_and_the_second_stores_no_pin
     await h.run([item(CODE_B)])  # the cap
 
     got = message_rows(h.db_path)
-    assert [r[3] for r in got] == ["@everyone **New SHiFT code**", "**New SHiFT code**"]
+    assert [r[3] for r in got] == ["@everyone `> new SHiFT code ▌`", "`> new SHiFT code ▌`"]
     assert shift_row(h.db_path, 1).ping_count == 3
     assert_ping_integrity(h)
     assert_records_match_what_posted(h)
@@ -790,7 +793,7 @@ async def test_a_cap_of_zero_never_pings_and_never_stores_one(db_path, cfg):
 
     await rig.run([item(CODE_A)])
 
-    assert [r[3] for r in message_rows(db_path)] == ["**New SHiFT code**"]
+    assert [r[3] for r in message_rows(db_path)] == ["`> new SHiFT code ▌`"]
     assert_ping_integrity(rig)
 
 
@@ -801,8 +804,8 @@ async def test_untrusted_codes_and_ping_off_both_store_the_plain_header(h):
     await h.run([item(CODE_A, trust="community")])
 
     assert sorted((r[0], r[3]) for r in message_rows(h.db_path)) == [
-        (1, "**New SHiFT code**"),
-        (2, "**New SHiFT code**"),
+        (1, "`> new SHiFT code ▌`"),
+        (2, "`> new SHiFT code ▌`"),
     ]
     assert_ping_integrity(h)
 
@@ -930,7 +933,7 @@ def test_a_config_with_no_official_or_table_source_still_reserves_a_nameless_lin
     quiet = with_sources(cfg, trust="community")
 
     assert reserve_for_config(quiet) == details_reserve([])
-    assert reserve_for_config(quiet) == 1 + 300 + 3 + 40 + 15 + 5  # every part but the names
+    assert reserve_for_config(quiet) == 369  # every part but the names
 
 
 def test_a_config_with_no_sources_at_all_does_not_crash_the_reserve(cfg):
@@ -950,10 +953,10 @@ def test_the_reserve_with_a_100_character_markdown_name_is_exactly_the_worst_lin
 
     reserve = reserve_for_config(wide)
 
-    assert reserve == 1 + 300 + 3 + 40 + 15 + 200 + 5 + 200 == 764
+    assert reserve == 369 + 200 + 200 == 769
     row = worst_row(CODE_A, reward_from=STAR_NAME, expires_from=other)
     line = details_line(row, now=PACIFIC_LATE)
-    assert "expires Dec 31, 5000 (<t:95649148800:R>)" in line
+    assert "`expires` Dec 31, 5000 (<t:95649148800:R>)" in line
     assert discord_len(line) + 1 == reserve  # tight to the unit: nothing to spare, nothing over
 
 
@@ -1230,7 +1233,7 @@ async def test_a_send_cancelled_mid_batch_leaves_no_record_and_is_never_resent(h
         await deliver_after_release(h)
 
     # The first message is posted and recorded; the cancelled one is `pending` with no record.
-    assert [r[3] for r in message_rows(h.db_path)] == ["@everyone **New SHiFT codes**"]
+    assert [r[3] for r in message_rows(h.db_path)] == ["@everyone `> new SHiFT codes ▌`"]
     assert dict(rows(h.db_path, "SELECT code, status FROM guild_code_posts")) == {
         CODE_A: "posted",
         CODE_B: "posted",
@@ -1404,8 +1407,8 @@ async def test_details_that_change_between_passes_show_as_they_stand_in_each_fol
     await h.run([])
 
     second = [a for a in h.sent(1) if "Confirmed" in a.content][1]
-    assert f"`{codes[5]}` · Now: 9 Golden Keys · details via {MENTALMARS}" in second.content
-    assert f"`{codes[6]}` · {LONG_REWARD}" in second.content
+    assert f"`{codes[5]}` · `reward` Now: 9 Golden Keys · `via` {MENTALMARS}" in second.content
+    assert f"`{codes[6]}` · `reward` {LONG_REWARD}" in second.content
 
 
 async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(h):
@@ -1419,8 +1422,8 @@ async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(
 
     last = [a for a in h.sent(1) if "Confirmed" in a.content][-1]
     # Oct 3 ends at Pacific midnight, Oct 4 00:00 PDT = 07:00 UTC; Discord does the counting.
-    assert "expires Oct 3, 2026 (<t:1791097200:R>)" in last.content
-    assert "expires in" not in last.content and "tomorrow" not in last.content
+    assert "`expires` Oct 3, 2026 (<t:1791097200:R>)" in last.content
+    assert "`expires` in" not in last.content and "tomorrow" not in last.content
 
 
 async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows(h):
@@ -1436,7 +1439,7 @@ async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows
     assert followup.content == (
         f"<@&{ROLE}> Confirmed by a second source:\n"
         f"`{codes[0]}`\n"
-        f"`{codes[1]}` · A skin · details via {MENTALMARS}\n"
+        f"`{codes[1]}` · `reward` A skin · `via` {MENTALMARS}\n"
         f"`{codes[2]}`"
     )
 
@@ -1905,7 +1908,7 @@ async def test_the_cap_spent_by_someone_else_between_render_and_claim_stores_no_
     await h.run([item(CODE_A)])
 
     assert not carries_a_ping(h.delivered[0].alert.content)
-    assert [r[3] for r in message_rows(h.db_path)] == ["**New SHiFT code**"]
+    assert [r[3] for r in message_rows(h.db_path)] == ["`> new SHiFT code ▌`"]
     assert shift_row(h.db_path, 1).ping_count == 3
     assert_ping_integrity(h)
 
@@ -1919,7 +1922,7 @@ async def test_the_only_trusted_code_claimed_elsewhere_drops_the_ping_from_heade
     await h.run([trusted, untrusted])
 
     assert [d.alert.codes for d in h.delivered] == [[CODE_B]]
-    assert [r[3] for r in message_rows(h.db_path)] == ["**New SHiFT code**"]
+    assert [r[3] for r in message_rows(h.db_path)] == ["`> new SHiFT code ▌`"]
     assert shift_row(h.db_path, 1).ping_count == 0
     assert_ping_integrity(h)
     assert_records_match_what_posted(h)

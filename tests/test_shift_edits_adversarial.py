@@ -175,6 +175,7 @@ def bulk_world(db_path, per_guild: dict[int, int], *, reward: str = "3 Golden Ke
                     "VALUES (?, ?, 'posted', ?, 0, 0, 0, 1, ?)",
                     (guild_id, code, message_id, posted),
                 )
+                # The stored header is v3.1's, so edits of these go through the classic layout.
                 conn.execute(
                     "INSERT INTO guild_alert_messages (guild_id, message_id, channel_id, header, "
                     "golden_prefix, posted_at, rendered_at) VALUES (?, ?, ?, ?, 0, ?, ?)",
@@ -246,9 +247,9 @@ async def test_every_edit_path_repeats_the_mention_the_message_had_and_never_add
     assert [r.id for r in role_mentions.roles] == [int(ROLE)]
     assert all_mentions_off(by_channel[300])
     contents = {cid: kw["content"] for cid, _mid, kw in sent}
-    assert contents[100].startswith("@everyone **New SHiFT code**")
-    assert contents[200].startswith(f"<@&{ROLE}> **New SHiFT code**")
-    assert contents[300].startswith("**New SHiFT code**")
+    assert contents[100].startswith("@everyone `> new SHiFT code ▌`")
+    assert contents[200].startswith(f"<@&{ROLE}> `> new SHiFT code ▌`")
+    assert contents[300].startswith("`> new SHiFT code ▌`")
 
 
 def _calls_named_edit(tree: ast.AST) -> list[ast.Call]:
@@ -303,7 +304,7 @@ async def test_an_alert_whose_ping_was_stripped_is_edited_without_the_ping(h, pi
     await h.run([])
 
     (call,) = h.editors.calls
-    assert call.content.startswith("**New SHiFT code**")
+    assert call.content.startswith("`> new SHiFT code ▌`")
     assert "@everyone" not in call.content and "<@&" not in call.content
 
 
@@ -318,7 +319,7 @@ async def test_a_ping_that_was_refused_and_retried_stays_in_the_header_as_text(h
     h.clock = NOW + 2 * HOUR
     await h.run([])
 
-    assert h.editors.calls[0].content.startswith("@everyone **New SHiFT code**")
+    assert h.editors.calls[0].content.startswith("@everyone `> new SHiFT code ▌`")
 
 
 HOSTILE_REWARD = (
@@ -385,7 +386,7 @@ async def test_an_edit_is_the_original_message_plus_details_lines_whatever_the_r
     for number, original in enumerate(originals):
         edited = h.editors.contents(9001 + number)[0]
         for code in original.codes:
-            edited = edited.replace(f"reward-{code[:1]} · details via {MENTALMARS}\n", "")
+            edited = edited.replace(f"`reward` reward-{code[:1]} · `via` {MENTALMARS}\n", "")
         assert edited == original.content
 
 
@@ -403,7 +404,7 @@ async def test_an_alert_is_edited_in_the_channel_and_header_it_posted_with_not_t
 
     (call,) = h.editors.calls
     assert (call.channel_id, call.message_id) == (100, 9001)
-    assert call.content.startswith("@everyone **New SHiFT code**")
+    assert call.content.startswith("@everyone `> new SHiFT code ▌`")
 
 
 async def test_a_code_can_hold_only_one_message_per_server(h):
@@ -577,7 +578,7 @@ async def test_a_delivery_to_a_server_is_never_edited_before_it_is_recorded(h):
     await h.run([item(CODE_A), table_row(CODE_A, "3 Golden Keys")])
 
     assert h.editors.attempts == []  # the first render already had the line
-    assert "3 Golden Keys · details via" in h.sent(1)[0].content
+    assert "`reward` 3 Golden Keys · `via`" in h.sent(1)[0].content
     assert datetime.fromisoformat(message_state(h.db_path)[0][3]) == NOW
 
 
@@ -1204,7 +1205,7 @@ async def test_a_flapping_via_name_is_one_edit_per_message_per_pass_and_a_steady
             [_row_from(x if n % 2 == 0 else y, CODE_A, "1 Key" if n % 2 == 0 else "2 Keys")]
         )
         assert len(h.editors.calls) - before == 2
-    assert f"details via {y}" in h.editors.calls[-1].content
+    assert f"`via` {y}" in h.editors.calls[-1].content
 
     # Both listed, in the same order every pass: it settles, and settled means silent.
     both = [_row_from(x, CODE_A, "1 Key"), _row_from(y, CODE_A, "2 Keys")]
@@ -1278,7 +1279,7 @@ async def test_a_later_real_change_that_makes_a_failed_message_fit_is_edited(h, 
     await h.run([])
 
     (call,) = h.editors.calls
-    assert call.content.count("short · details via") == 8
+    assert call.content.count("`reward` short · `via`") == 8
     await h.run([])
     assert len(h.editors.calls) == 1
 
@@ -1365,7 +1366,7 @@ def _line_at(h, when: datetime) -> str:
     with closing(connect(h.db_path)) as conn:
         row = repo.code_details_for(conn, [CODE_A])[CODE_A]
     text = render_alert_edit(
-        "**New SHiFT code**",
+        "`> new SHiFT code ▌`",
         [
             CodeCandidate(
                 CODE_A, golden=False, source_name=GEARBOX, item_url="", fresh=True, trusted=True
@@ -1391,9 +1392,9 @@ async def test_a_posted_expiry_cannot_go_stale_because_discord_keeps_its_timesta
     add_guild(h.db_path, 1, ping="none")
     await h.run([with_details(item(CODE_A), CODE_A, reward="", expires_on=date(2026, 10, 1))])
     stamp = int(datetime(2026, 10, 2, 7, 0, tzinfo=UTC).timestamp())  # Oct 1 ends: PDT midnight
-    expiry = f"expires Oct 1, 2026 (<t:{stamp}:R>)"
+    expiry = f"`expires` Oct 1, 2026 (<t:{stamp}:R>)"
     assert expiry in h.sent(1)[0].content
-    assert "expires in" not in h.sent(1)[0].content
+    assert "`expires` in" not in h.sent(1)[0].content
 
     for hours in (5, 14, 20, 24 * 3, 24 * 13):
         h.clock = NOW + hours * HOUR

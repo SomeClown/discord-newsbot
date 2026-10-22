@@ -201,11 +201,12 @@ def displayed(row: CodeDetailsRow | None) -> tuple:
     """What an alert's details line shows for `row`, as a value that compares equal when it does.
 
     Mirrors `format.details_line`, and nothing more: the reward and, if there is one, who
-    supplied it; for a permanent code the word "permanent" and who set the category; for any
-    other code the expiry and who supplied it. A category that never reaches the line
-    (golden, cosmetic, other) isn't in here, so changing it doesn't send an edit to every
-    message that holds the code. None, like a row with nothing to show, is the all-empty
-    tuple, which is what makes "the first details" a change.
+    supplied it; for a permanent code `expires` never (v3.1 said "the word permanent"; the
+    tuple never held the wording, which is why the restyle sends no edits) and who set the
+    category; for any other code the expiry and who supplied it. A category that never
+    reaches the line (golden, cosmetic, other) isn't in here, so changing it doesn't send
+    an edit to every message that holds the code. None, like a row with nothing to show, is
+    the all-empty tuple, which is what makes "the first details" a change.
     """
     if row is None:
         return ("", "", False, "", None, "")

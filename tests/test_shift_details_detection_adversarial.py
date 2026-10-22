@@ -887,8 +887,8 @@ async def test_a_code_found_by_mentalmars_and_confirmed_by_bluesky_gets_one_foll
     assert len(h.followups(1)) == 1
     # Task 7: mentalmars' row gave the code details, and the follow-up shows them.
     assert h.followups(1)[0].content == (
-        f"@everyone {FOLLOWUP_TEXT}:\n`{X}` · 3 Golden Keys"
-        " · expires Oct 30, 2026 (<t:1793430000:R>) · details via mentalmars"
+        f"@everyone {FOLLOWUP_TEXT}:\n`{X}` · `reward` 3 Golden Keys"
+        " · `expires` Oct 30, 2026 (<t:1793430000:R>) · `via` mentalmars"
     )
 
     # A third source, and a fourth, change nothing.

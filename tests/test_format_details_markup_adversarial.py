@@ -26,6 +26,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from chip_check import ALLOWED_CHIPS
 
 from newsbot.bot.format import (
     details_line,
@@ -65,6 +66,12 @@ def _line(now=NOW, **kwargs) -> str | None:
     return details_line(_row(**kwargs), now=now)
 
 
+def _shown(**kwargs) -> str | None:
+    """The line with its leading `reward` chip taken off, for tests about the reward's own text."""
+    line = _line(**kwargs)
+    return None if line is None else line.removeprefix("`reward` ")
+
+
 def _rel(now=NOW, **kwargs) -> str | None:
     """The `/shift history` flavor of the line: relative wording, fresh on every call."""
     return details_line(_row(**kwargs), now=now, relative=True)
@@ -97,6 +104,10 @@ def _set_aside(text: str, *, codes=(), extra=()) -> str:
     for piece in extra:
         text = text.replace(piece, "")
     text = re.sub(r"<https://e\.com/[^>\s]*>", "", text)
+    # The fixed chips are the look's own markup (a hostile backtick is escaped, so it can't
+    # spell one of these); longest first, so "first seen" can't lose to a shorter neighbor.
+    for chip in sorted(ALLOWED_CHIPS, key=len, reverse=True):
+        text = text.replace(f"`{chip}`", "")
     return re.sub(r"\*\*[^*\n]+\*\*", "", text)
 
 
@@ -289,38 +300,38 @@ def test_angle_bracket_tokens_other_than_mentions_do_not_render_live(token):
 
 
 def test_an_override_between_zwj_and_the_next_emoji_keeps_the_sequence_joined():
-    line = _line(reward="\U0001f468\u200d\u202e\U0001f469")
+    line = _shown(reward="\U0001f468\u200d\u202e\U0001f469")
     assert line == "\U0001f468\u200d\U0001f469"
 
 
 def test_nested_isolates_and_overrides_all_go():
     reward = "\u2066\u2067\u2068\u202e\u202bx\u202c\u202c\u2069\u2069\u2069"
-    assert _line(reward=reward) == "x"
+    assert _shown(reward=reward) == "x"
 
 
 def test_an_unclosed_override_in_front_of_a_family_leaves_the_family_whole():
-    line = _line(reward="\u202e" + FAMILY + " keys", reward_from="mentalmars")
-    assert line == FAMILY + " keys \u00b7 details via mentalmars"
+    line = _shown(reward="\u202e" + FAMILY + " keys", reward_from="mentalmars")
+    assert line == FAMILY + " keys \u00b7 `via` mentalmars"
 
 
 def test_stripping_can_bring_a_reward_back_under_the_cap_without_an_ellipsis():
     reward = "x" * 250 + "\u202e" * 100  # 350 units raw, 250 shown
-    assert _line(reward=reward) == "x" * 250
+    assert _shown(reward=reward) == "x" * 250
 
 
 def test_an_override_exactly_at_the_cap_does_not_push_the_reward_over():
     reward = "x" * 300 + "\u202e"
-    assert _line(reward=reward) == "x" * 300
+    assert _shown(reward=reward) == "x" * 300
 
 
 def test_an_override_in_the_middle_of_a_reward_that_is_one_unit_too_long_is_cut_after_stripping():
     reward = "x" * 299 + "\u202e" + "yy"  # 301 units once stripped
-    assert _line(reward=reward) == "x" * 299 + "\u2026"
+    assert _shown(reward=reward) == "x" * 299 + "\u2026"
 
 
 def test_a_cut_never_lands_inside_a_surrogate_pair():
     reward = "x" * 299 + "\U0001f600"  # the emoji would straddle unit 300
-    line = _line(reward=reward)
+    line = _shown(reward=reward)
     assert discord_len(line) <= 300
     line.encode("utf-16-le")  # a lone surrogate would raise here
     assert "\U0001f600" not in line
@@ -328,7 +339,7 @@ def test_a_cut_never_lands_inside_a_surrogate_pair():
 
 def test_a_mention_split_by_an_override_is_still_defused_and_the_count_still_holds():
     reward = "@\u202eeveryone" * 33  # 330 characters raw
-    line = _line(reward=reward)
+    line = _shown(reward=reward)
     assert "@everyone" not in line
     assert discord_len(line) <= 300
 
@@ -339,7 +350,7 @@ def test_bidi_heavy_rewards_never_outgrow_the_cap():
     pieces += list(BIDI_CONTROLS)
     for _ in range(600):
         reward = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 700)))
-        line = _line(reward=reward)
+        line = _shown(reward=reward)
         if line is not None:
             assert discord_len(line) <= 300, reward
             assert not any(ch in line for ch in BIDI_CONTROLS)
@@ -386,16 +397,16 @@ def _oracle(d: date, now: datetime) -> str:
     end = _end_of_day(d)
     today = now.astimezone(PT).date()
     if now >= end:
-        return "expired"
+        return f"`expired` {d.strftime('%b')} {d.day}, {d.year}"
     if today == d:
         remaining = end - now
         if remaining < timedelta(hours=1):
-            return "expires in under an hour"
+            return "`expires` in under an hour"
         hours = remaining // timedelta(hours=1)
-        return f"expires in {hours} hour{'' if hours == 1 else 's'}"
+        return f"`expires` in {hours} hour{'' if hours == 1 else 's'}"
     if today + timedelta(days=1) == d:
-        return "expires tomorrow"
-    return f"expires {d.strftime('%b')} {d.day}, {d.year}"
+        return "`expires` tomorrow"
+    return f"`expires` {d.strftime('%b')} {d.day}, {d.year}"
 
 
 @pytest.mark.parametrize(
@@ -420,13 +431,13 @@ def test_the_wording_matches_an_independent_oracle_every_five_minutes(start, exp
 
     # It only ever walks forward: a date, tomorrow, N hours (counting down), under an hour, expired.
     def stage(phrase):
-        if phrase == "expires tomorrow":
+        if phrase == "`expires` tomorrow":
             return 1
-        if phrase == "expires in under an hour":
+        if phrase == "`expires` in under an hour":
             return 3
-        if phrase == "expired":
+        if phrase.startswith("`expired` "):
             return 4
-        return 2 if re.fullmatch(r"expires in \d+ hours?", phrase) else 0
+        return 2 if re.fullmatch(r"`expires` in \d+ hours?", phrase) else 0
 
     stages = [stage(p) for p in seen]
     assert stages == sorted(stages)
@@ -439,48 +450,56 @@ def test_the_wording_matches_an_independent_oracle_every_five_minutes(start, exp
     ("now", "expires", "expected"),
     [
         # Exact second boundaries around the end of the day.
-        (datetime(2026, 10, 10, 6, 0, 0, tzinfo=UTC), date(2026, 10, 9), "expires in 1 hour"),
+        (datetime(2026, 10, 10, 6, 0, 0, tzinfo=UTC), date(2026, 10, 9), "`expires` in 1 hour"),
         (
             datetime(2026, 10, 10, 6, 0, 1, tzinfo=UTC),
             date(2026, 10, 9),
-            "expires in under an hour",
+            "`expires` in under an hour",
         ),
         (
             datetime(2026, 10, 10, 6, 59, 59, 999999, tzinfo=UTC),
             date(2026, 10, 9),
-            "expires in under an hour",
+            "`expires` in under an hour",
         ),
-        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 9), "expired"),
-        (datetime(2026, 10, 10, 5, 0, 0, tzinfo=UTC), date(2026, 10, 9), "expires in 2 hours"),
-        (datetime(2026, 10, 10, 5, 0, 1, tzinfo=UTC), date(2026, 10, 9), "expires in 1 hour"),
+        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 9), "`expired` Oct 9, 2026"),
+        (datetime(2026, 10, 10, 5, 0, 0, tzinfo=UTC), date(2026, 10, 9), "`expires` in 2 hours"),
+        (datetime(2026, 10, 10, 5, 0, 1, tzinfo=UTC), date(2026, 10, 9), "`expires` in 1 hour"),
         # Pacific midnight turns the day, not UTC's.
-        (datetime(2026, 10, 10, 6, 59, 59, tzinfo=UTC), date(2026, 10, 10), "expires tomorrow"),
-        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 10), "expires in 24 hours"),
-        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 11), "expires tomorrow"),
-        (datetime(2026, 10, 10, 6, 59, 59, tzinfo=UTC), date(2026, 10, 11), "expires Oct 11, 2026"),
+        (datetime(2026, 10, 10, 6, 59, 59, tzinfo=UTC), date(2026, 10, 10), "`expires` tomorrow"),
+        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 10), "`expires` in 24 hours"),
+        (datetime(2026, 10, 10, 7, 0, 0, tzinfo=UTC), date(2026, 10, 11), "`expires` tomorrow"),
+        (
+            datetime(2026, 10, 10, 6, 59, 59, tzinfo=UTC),
+            date(2026, 10, 11),
+            "`expires` Oct 11, 2026",
+        ),
         # UTC already tomorrow, Pacific still today.
-        (datetime(2026, 10, 10, 3, 0, 0, tzinfo=UTC), date(2026, 10, 9), "expires in 4 hours"),
+        (datetime(2026, 10, 10, 3, 0, 0, tzinfo=UTC), date(2026, 10, 9), "`expires` in 4 hours"),
         # Spring forward: Mar 8 is 23 hours long.
-        (datetime(2026, 3, 8, 8, 0, 0, tzinfo=UTC), date(2026, 3, 8), "expires in 23 hours"),
-        (datetime(2026, 3, 8, 10, 0, 0, tzinfo=UTC), date(2026, 3, 8), "expires in 21 hours"),
-        (datetime(2026, 3, 8, 7, 59, 59, tzinfo=UTC), date(2026, 3, 8), "expires tomorrow"),
-        (datetime(2026, 3, 8, 7, 59, 59, tzinfo=UTC), date(2026, 3, 7), "expires in under an hour"),
+        (datetime(2026, 3, 8, 8, 0, 0, tzinfo=UTC), date(2026, 3, 8), "`expires` in 23 hours"),
+        (datetime(2026, 3, 8, 10, 0, 0, tzinfo=UTC), date(2026, 3, 8), "`expires` in 21 hours"),
+        (datetime(2026, 3, 8, 7, 59, 59, tzinfo=UTC), date(2026, 3, 8), "`expires` tomorrow"),
+        (
+            datetime(2026, 3, 8, 7, 59, 59, tzinfo=UTC),
+            date(2026, 3, 7),
+            "`expires` in under an hour",
+        ),
         # Fall back: Nov 1 is 25 hours long, and 01:30 happens twice.
-        (datetime(2026, 11, 1, 7, 0, 0, tzinfo=UTC), date(2026, 11, 1), "expires in 25 hours"),
-        (datetime(2026, 11, 1, 8, 30, 0, tzinfo=UTC), date(2026, 11, 1), "expires in 23 hours"),
-        (datetime(2026, 11, 1, 9, 30, 0, tzinfo=UTC), date(2026, 11, 1), "expires in 22 hours"),
-        (datetime(2026, 11, 1, 6, 59, 59, tzinfo=UTC), date(2026, 11, 1), "expires tomorrow"),
+        (datetime(2026, 11, 1, 7, 0, 0, tzinfo=UTC), date(2026, 11, 1), "`expires` in 25 hours"),
+        (datetime(2026, 11, 1, 8, 30, 0, tzinfo=UTC), date(2026, 11, 1), "`expires` in 23 hours"),
+        (datetime(2026, 11, 1, 9, 30, 0, tzinfo=UTC), date(2026, 11, 1), "`expires` in 22 hours"),
+        (datetime(2026, 11, 1, 6, 59, 59, tzinfo=UTC), date(2026, 11, 1), "`expires` tomorrow"),
         (
             datetime(2026, 11, 2, 7, 59, 59, tzinfo=UTC),
             date(2026, 11, 1),
-            "expires in under an hour",
+            "`expires` in under an hour",
         ),
-        (datetime(2026, 11, 2, 8, 0, 0, tzinfo=UTC), date(2026, 11, 1), "expired"),
+        (datetime(2026, 11, 2, 8, 0, 0, tzinfo=UTC), date(2026, 11, 1), "`expired` Nov 1, 2026"),
         # A clock in another zone is the same instant.
         (
             datetime(2026, 10, 10, 20, 30, tzinfo=ZoneInfo("Pacific/Kiritimati")),
             date(2026, 10, 9),
-            "expires in under an hour",
+            "`expires` in under an hour",
         ),
     ],
 )
@@ -495,8 +514,11 @@ def test_a_passed_expiry_says_expired_with_everything_else_intact():
         expires_on=date(2026, 10, 1),
         expires_from="Gearbox Blog",
     )
-    assert line == "3 Golden Keys \u00b7 expired \u00b7 details via mentalmars and Gearbox Blog"
-    # Persisted messages never say "expired": the date, and Discord's timestamp, do that job.
+    assert line == (
+        "`reward` 3 Golden Keys \u00b7 `expired` Oct 1, 2026"
+        " \u00b7 `via` mentalmars and Gearbox Blog"
+    )
+    # Persisted messages never say `expired`: the date, and Discord's timestamp, do that job.
     posted = _line(
         reward="3 Golden Keys",
         reward_from="mentalmars",
@@ -504,24 +526,24 @@ def test_a_passed_expiry_says_expired_with_everything_else_intact():
         expires_from="Gearbox Blog",
     )
     assert posted == (
-        "3 Golden Keys \u00b7 expires Oct 1, 2026 (<t:1790924400:R>)"
-        " \u00b7 details via mentalmars and Gearbox Blog"
+        "`reward` 3 Golden Keys \u00b7 `expires` Oct 1, 2026 (<t:1790924400:R>)"
+        " \u00b7 `via` mentalmars and Gearbox Blog"
     )
 
 
 def test_a_passed_expiry_alone_is_still_a_line():
     assert _rel(expires_on=date(2020, 1, 1), expires_from="mentalmars") == (
-        "expired \u00b7 details via mentalmars"
+        "`expired` Jan 1, 2020 \u00b7 `via` mentalmars"
     )
     assert _line(expires_on=date(2020, 1, 1), expires_from="mentalmars") == (
-        "expires Jan 1, 2020 (<t:1577952000:R>) \u00b7 details via mentalmars"
+        "`expires` Jan 1, 2020 (<t:1577952000:R>) \u00b7 `via` mentalmars"
     )
 
 
 @pytest.mark.parametrize(
     "expires", [date(2020, 1, 1), date(2026, 10, 9), date(2026, 10, 10), date(2099, 1, 1), None]
 )
-def test_a_permanent_code_with_any_expiry_says_permanent_and_never_expired(expires):
+def test_a_permanent_code_with_any_expiry_says_never_and_is_never_expired(expires):
     line = _line(
         reward="Head",
         reward_from="mentalmars",
@@ -530,7 +552,7 @@ def test_a_permanent_code_with_any_expiry_says_permanent_and_never_expired(expir
         expires_on=expires,
         expires_from="Gearbox Blog",
     )
-    assert line == "Head \u00b7 permanent \u00b7 details via mentalmars"
+    assert line == "`reward` Head \u00b7 `expires` never \u00b7 `via` mentalmars"
     assert line == _rel(
         reward="Head",
         reward_from="mentalmars",
@@ -545,11 +567,11 @@ def test_a_permanent_code_with_any_expiry_says_permanent_and_never_expired(expir
     ("expires", "expected"),
     [
         # Each timestamp is the Pacific midnight that ends the day, worked out by hand.
-        (date(2028, 2, 29), "expires Feb 29, 2028 (<t:1835510400:R>)"),  # Mar 1 08:00 UTC
-        (date(2026, 12, 31), "expires Dec 31, 2026 (<t:1798790400:R>)"),  # Jan 1 08:00 UTC
-        (date(2027, 1, 1), "expires Jan 1, 2027 (<t:1798876800:R>)"),
-        (date(2099, 9, 30), "expires Sep 30, 2099 (<t:4094521200:R>)"),  # Oct 1 07:00 UTC
-        (date(9999, 12, 31), "expires Dec 31, 9999"),  # too far out for a token
+        (date(2028, 2, 29), "`expires` Feb 29, 2028 (<t:1835510400:R>)"),  # Mar 1 08:00 UTC
+        (date(2026, 12, 31), "`expires` Dec 31, 2026 (<t:1798790400:R>)"),  # Jan 1 08:00 UTC
+        (date(2027, 1, 1), "`expires` Jan 1, 2027 (<t:1798876800:R>)"),
+        (date(2099, 9, 30), "`expires` Sep 30, 2099 (<t:4094521200:R>)"),  # Oct 1 07:00 UTC
+        (date(9999, 12, 31), "`expires` Dec 31, 9999"),  # too far out for a token
     ],
 )
 def test_far_dates_read_as_dates(expires, expected):
@@ -594,7 +616,7 @@ def test_followup_lines_use_the_same_wording_as_alerts():
     alert = render_followup_alert(fit, ping_mention="@everyone", details=details, now=NOW)
     assert alert.content == (
         "@everyone Confirmed by a second source:\n"
-        f"`{code}` \u00b7 r \u00b7 expires Oct 10, 2026 (<t:1791702000:R>)"
+        f"`{code}` \u00b7 `reward` r \u00b7 `expires` Oct 10, 2026 (<t:1791702000:R>)"
     )
 
 

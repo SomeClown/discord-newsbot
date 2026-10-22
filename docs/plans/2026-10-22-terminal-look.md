@@ -448,13 +448,18 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-22-termi
 Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees the preview screenshots after Task 5, before the qa review (Tasks 7 and 8 here are run-plan's qa pass and docs step).
 
 ### Progress
+- Task 2: complete (from 8c03cac; gate exit 0, 13132 passed; spec check PASS with 3 notes; adversarial: 697 tests, 0 bugs)
 - Task 1: complete (from 1fcd04b; gate exit 0, 12340 passed; spec check: 2 minor gaps, accepted; adversarial: 418 tests incl. a byte-for-byte differential against v3.1.4's format.py, 0 bugs)
 
 ### Decisions made during the build
+- Ruling (Task 2): a lone entry now tops out at 1,997 UTF-16 units instead of 2,000, because the plain continuation header (33) is longer than the pinged single-code header (30) and `solo_budget` takes the larger, as §1 predicts. `test_batch_at_exactly_the_2000_unit_boundary_does_not_split` was retargeted to 1,997. If wrong: an entry between 1,998 and 2,000 units can't go out alone; the 300-unit caps make that unreachable in practice.
+- Ruling (Task 2 spec check): the comment-only rewording in `fanout.py` and `repo.py` (outside the brief's file list) is accepted; it keeps the comments true.
 - Ruling (setup): briefs cut by heading with `brief.py` in the work dir, because the plan's nested fence samples (§1) flip the Foundry `task-brief` script's fence tracking and it can't find any task. Why: same text, by heading. If wrong: none for this build; the script wants a fix in the Foundry (count fence length, or ignore fences that open mid-sample).
 - Ruling (Task 1 spec check): the classic edit branch no longer raises when `details` is non-empty and `now` is None (the old `_line_for` guard). Accepted: the classic line uses the live Discord timestamp and never needs a clock, and `render_alert_edit` is typed and always called with `now`. If wrong: a caller passing `now=None` gets a classic render instead of a ValueError.
 - Ruling (Task 1 spec check): `PAGE_TITLE_CURRENT` / `PAGE_TITLE_HISTORY` in `terminal.py` ratified (§1 puts page titles there); Task 4 adds the per-`type:` titles beside them.
 
 ### Parked
+- Task 2 (adversarial, pre-existing, for the qa pass): `esc()` leaves a "1. " numbered-list start after a newline unescaped and `_detail_text` keeps newlines, so a reward holding "\n1. x" draws a list item; bidi controls are stripped from rewards but not source names (config-controlled); `escape_mentions` only defuses 17–20 digit ids (`allowed_mentions` is the backstop); a reward line starting with spaces then `> ` isn't escaped. All live in shared helpers the classic layout depends on, so changing them is a v3.1 behavior change too.
+- Task 2 (spec check): comments and docstrings that still say "details via" (`newsbot/config.py:63,291`, `newsbot/shift/details.py:18,57`, the `CodeDetailsRow` docstring in `newsbot/store/models.py`). Comment-only; for the docs task.
 - Task 1: the differential tests in `tests/test_terminal_task1_adversarial.py` load v3.1.4's `format.py` from commit 1fcd04b and skip when git or that commit isn't reachable (CI's shallow checkout, or after the branch is gone). Fine for now; they and the classic layout both go when the classic section is deleted.
 

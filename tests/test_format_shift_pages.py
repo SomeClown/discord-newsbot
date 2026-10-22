@@ -354,7 +354,7 @@ def test_history_shows_the_details_line_under_the_source_line():
     [embed] = _history([view])
     assert embed.description == (
         f"```\n{_code(1)}\n```\nFirst seen 2026-09-25 · Gearbox Blog · <https://e.com/a>\n"
-        "3 Golden Keys · details via mentalmars"
+        "`reward` 3 Golden Keys · `via` mentalmars"
     )
 
 
@@ -365,9 +365,9 @@ def test_history_keeps_its_relative_wording_and_has_no_live_timestamp():
         _view(3, {"reward": "x", "reward_from": "m", "expires_on": date(2026, 10, 14)}),
     ]
     [embed] = _history(views)
-    assert "x · expires in 12 hours · details via m" in embed.description
-    assert "x · expires tomorrow · details via m" in embed.description
-    assert "x · expires Oct 14, 2026 · details via m" in embed.description
+    assert "`reward` x · `expires` in 12 hours · `via` m" in embed.description
+    assert "`reward` x · `expires` tomorrow · `via` m" in embed.description
+    assert "`reward` x · `expires` Oct 14, 2026 · `via` m" in embed.description
     assert "<t:" not in embed.description
 
 
@@ -399,7 +399,7 @@ def test_a_code_that_has_not_expired_keeps_its_old_marker():
     view = _view(1, {"expires_on": date(2026, 10, 9)}, status="seeded")
     [embed] = _history([view])
     assert "(already around when alerts started)" in embed.description
-    assert "expired" not in embed.description.replace("expires in", "")
+    assert "expired" not in embed.description
 
 
 def test_a_permanent_code_is_never_expired_in_history():
@@ -447,4 +447,4 @@ def test_history_empty_and_title():
 def test_history_bidi_in_a_reward_is_stripped():
     view = _view(1, {"reward": f"Gold{BIDI}en Key", "reward_from": "m"})
     [embed] = _history([view])
-    assert "Golden Key · details via m" in embed.description
+    assert "`reward` Golden Key · `via` m" in embed.description
