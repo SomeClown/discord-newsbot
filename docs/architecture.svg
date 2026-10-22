@@ -1,0 +1,251 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1100" width="1600" height="1100" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>discord-newsbot: how it fits together</title>
+  <style>
+    .bg { fill: #ffffff; }
+    .h1 { font-size: 28px; font-weight: 700; fill: #1d2733; }
+    .h2 { font-size: 15px; fill: #5a6573; }
+    .panel { font-size: 14px; font-weight: 700; fill: #3a4554; letter-spacing: 0.3px; }
+    .t { font-size: 15px; font-weight: 700; fill: #1d2733; }
+    .s { font-size: 12.5px; fill: #3f4b5a; }
+    .note { font-size: 11.5px; fill: #5a6573; font-style: italic; }
+    .foot { font-size: 13px; fill: #4a5563; }
+    .arrow { stroke: #4a5563; stroke-width: 1.8; fill: none; marker-end: url(#head); }
+    .arrow-dash { stroke: #4a5563; stroke-width: 1.6; fill: none; stroke-dasharray: 6 4; marker-end: url(#head); }
+    .tick { stroke: #4a5563; stroke-width: 1.8; fill: none; }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5563"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1100"/>
+  <text class="h1" x="30" y="52">discord-newsbot: how it fits together</text>
+  <text class="h2" x="30" y="80">v3.1.4, October 2026. One public Discord bot: a morning news digest for the games a server follows, plus Borderlands 4 SHiFT code alerts.</text>
+
+  <!-- ===== Sources ===== -->
+  <rect x="30" y="110" width="310" height="640" rx="10" fill="#f3f6fb" stroke="#c9d4e5" stroke-width="1.5"/>
+  <text class="panel" x="45" y="134">WHERE THE NEWS COMES FROM</text>
+
+  <rect x="45" y="145" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="169">Steam news</text>
+  <text class="s" x="58" y="189">announcements for every catalog game</text>
+
+  <rect x="45" y="229" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="253">RSS feeds</text>
+  <text class="s" x="58" y="273">official sites, Bluesky accounts,</text>
+  <text class="s" x="58" y="289">gaming press (PC Gamer, Eurogamer…)</text>
+
+  <rect x="45" y="313" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="337">Bluesky search</text>
+  <text class="s" x="58" y="357">public posts that name a game</text>
+
+  <rect x="45" y="397" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="421">Reddit r/Borderlands4</text>
+  <text class="s" x="58" y="441">read for SHiFT codes only;</text>
+  <text class="s" x="58" y="457">posts are never stored</text>
+
+  <rect x="45" y="481" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="505">mentalmars SHiFT tables</text>
+  <text class="s" x="58" y="525">codes, with rewards and expiry dates</text>
+
+  <rect x="45" y="565" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="589">Brave Search</text>
+  <text class="s" x="58" y="609">web results for comped servers'</text>
+  <text class="s" x="58" y="625">games, just before a summary</text>
+
+  <rect x="45" y="649" width="280" height="74" rx="7" fill="#ffffff" stroke="#9fb3cf"/>
+  <text class="t" x="58" y="673">Wikiquote, or a quotes file</text>
+  <text class="s" x="58" y="693">the lounge's daily quote</text>
+
+  <!-- bus from the first five sources into collection -->
+  <path class="tick" d="M325,182 H345 M325,266 H345 M325,350 H345 M325,434 H345 M325,518 H345 M345,182 V518"/>
+  <path class="arrow" d="M345,245 H418"/>
+  <!-- Brave into summaries -->
+  <path class="arrow" d="M325,602 H357 V365 H418"/>
+  <!-- quotes into the lounge -->
+  <path class="arrow" d="M325,686 H369 V475 H418"/>
+
+  <!-- ===== Droplet ===== -->
+  <rect x="380" y="110" width="820" height="700" rx="12" fill="#eef7f1" stroke="#7fb894" stroke-width="2"/>
+  <text class="panel" x="398" y="134">DIGITALOCEAN DROPLET · UBUNTU 24.04 · DOCKER</text>
+
+  <rect x="400" y="148" width="780" height="522" rx="10" fill="#ffffff" stroke="#4f9a6c" stroke-width="2"/>
+  <text class="panel" x="418" y="172">NEWSBOT CONTAINER · PYTHON 3.14 · ONE PROCESS: DISCORD.PY + APSCHEDULER</text>
+
+  <!-- row 1 -->
+  <rect x="420" y="190" width="240" height="110" rx="8" fill="#e8f1fb" stroke="#5b8bd0" stroke-width="1.5"/>
+  <text class="t" x="433" y="214">Collection pass</text>
+  <text class="s" x="433" y="234">every hour</text>
+  <text class="s" x="433" y="250">fetch every source, clean up</text>
+  <text class="s" x="433" y="266">links, drop repeats, store</text>
+  <text class="s" x="433" y="282">what's new</text>
+
+  <path class="arrow" d="M660,245 H688"/>
+
+  <rect x="690" y="190" width="470" height="110" rx="8" fill="#fff4e0" stroke="#d99a2b" stroke-width="1.5"/>
+  <text class="t" x="703" y="214">SHiFT code path (runs inside each collection pass)</text>
+  <text class="s" x="703" y="234">spot a code in any source → weigh who posted it → release it once</text>
+  <text class="s" x="703" y="250">→ alert every server that turned alerts on, with its own ping rules</text>
+  <text class="s" x="703" y="266">rewards and expiry from mentalmars and Gearbox's own posts;</text>
+  <text class="s" x="703" y="282">alerts are edited in place for 14 days as details arrive</text>
+
+  <!-- row 2 -->
+  <rect x="420" y="320" width="360" height="90" rx="8" fill="#f1ebfb" stroke="#8a67c9" stroke-width="1.5"/>
+  <text class="t" x="433" y="344">Summaries · every 5 minutes</text>
+  <text class="s" x="433" y="364">30 minutes before a comped server's digest:</text>
+  <text class="s" x="433" y="380">web search, then Claude writes the stories;</text>
+  <text class="s" x="433" y="396">one summary per game, shared across servers</text>
+
+  <path class="arrow" d="M780,365 H798"/>
+
+  <rect x="800" y="320" width="360" height="90" rx="8" fill="#e8f1fb" stroke="#5b8bd0" stroke-width="1.5"/>
+  <text class="t" x="813" y="344">Digests · every minute</text>
+  <text class="s" x="813" y="364">each server at its own time, in its time zone</text>
+  <text class="s" x="813" y="380">free: headlines · comped: Claude's stories</text>
+  <text class="s" x="813" y="396">plus a run report for the server's admins</text>
+
+  <!-- row 3 -->
+  <rect x="420" y="430" width="240" height="90" rx="8" fill="#e8f1fb" stroke="#5b8bd0" stroke-width="1.5"/>
+  <text class="t" x="433" y="454">Lounge</text>
+  <text class="s" x="433" y="474">a daily quote, per server</text>
+  <text class="s" x="433" y="490">a welcome for new members</text>
+  <text class="s" x="433" y="506">(servers that turn it on)</text>
+
+  <rect x="670" y="430" width="235" height="90" rx="8" fill="#e8f1fb" stroke="#5b8bd0" stroke-width="1.5"/>
+  <text class="t" x="683" y="454">Slash commands</text>
+  <text class="s" x="683" y="474">/newsbot setup, status, preview</text>
+  <text class="s" x="683" y="490">/news recent, /news search</text>
+  <text class="s" x="683" y="506">/shift codes, /shift history</text>
+
+  <rect x="915" y="430" width="245" height="90" rx="8" fill="#e8f1fb" stroke="#5b8bd0" stroke-width="1.5"/>
+  <text class="t" x="928" y="454">Owner and upkeep</text>
+  <text class="s" x="928" y="474">a report every day at 9 p.m. PT</text>
+  <text class="s" x="928" y="490">alerts: servers joining or leaving</text>
+  <text class="s" x="928" y="506">nightly cleanup (90 days)</text>
+
+  <!-- database -->
+  <text class="note" x="772" y="535" text-anchor="end">every job reads and writes here</text>
+  <path class="arrow" d="M787,521 V541"/>
+  <path d="M560,555 V643 A230,12 0 0 0 1020,643 V555" fill="#fdf3d7" stroke="#c9a227" stroke-width="1.8"/>
+  <ellipse cx="790" cy="555" rx="230" ry="12" fill="#fbe9b4" stroke="#c9a227" stroke-width="1.8"/>
+  <text class="t" x="790" y="590" text-anchor="middle">newsbot.db · SQLite, WAL mode</text>
+  <text class="s" x="790" y="610" text-anchor="middle">items and stories · each server's settings · Claude summaries</text>
+  <text class="s" x="790" y="626" text-anchor="middle">SHiFT codes, details and posted alerts · lounge state</text>
+
+  <!-- droplet, outside the container -->
+  <rect x="400" y="685" width="250" height="110" rx="8" fill="#ffffff" stroke="#7fb894" stroke-width="1.5"/>
+  <text class="t" x="413" y="709">config.yaml and .env</text>
+  <text class="s" x="413" y="729">the game catalog and sources,</text>
+  <text class="s" x="413" y="745">comped servers, owner channel;</text>
+  <text class="s" x="413" y="761">secrets for Discord, Anthropic,</text>
+  <text class="s" x="413" y="777">Brave</text>
+
+  <rect x="665" y="685" width="250" height="110" rx="8" fill="#ffffff" stroke="#7fb894" stroke-width="1.5"/>
+  <text class="t" x="678" y="709">Backups</text>
+  <text class="s" x="678" y="729">a systemd timer copies the</text>
+  <text class="s" x="678" y="745">database at 8:30 a.m. PT,</text>
+  <text class="s" x="678" y="761">plus one before every deploy</text>
+
+  <g opacity="0.55">
+    <rect x="930" y="685" width="250" height="110" rx="8" fill="#ffffff" stroke="#9aa5b1" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text class="t" x="943" y="709">pool-league-scheduler</text>
+    <text class="s" x="943" y="729">a separate app in its own</text>
+    <text class="s" x="943" y="745">container on the same Droplet</text>
+  </g>
+
+  <!-- ===== Anthropic ===== -->
+  <rect x="1240" y="110" width="330" height="110" rx="10" fill="#f8efe8" stroke="#c96f3b" stroke-width="1.8"/>
+  <text class="panel" x="1255" y="134">ANTHROPIC API</text>
+  <text class="t" x="1255" y="160">Claude Haiku 5.5, low effort</text>
+  <text class="s" x="1255" y="180">writes the stories for comped servers;</text>
+  <text class="s" x="1255" y="196">free servers never reach it</text>
+
+  <!-- summaries to Claude, through the gap between rows 1 and 2 -->
+  <path class="arrow" d="M600,320 V310 H1213 V292 A6,6 0 0 1 1213,280 V165 H1238"/>
+  <text class="note" x="1220" y="238">Claude call</text>
+
+  <!-- ===== Discord ===== -->
+  <rect x="1240" y="250" width="330" height="560" rx="10" fill="#eef0fd" stroke="#7b83eb" stroke-width="1.8"/>
+  <text class="panel" x="1255" y="274">DISCORD</text>
+  <text class="note" x="1325" y="274">events in, posts out</text>
+
+  <rect x="1255" y="298" width="300" height="92" rx="8" fill="#ffffff" stroke="#a3a9f0"/>
+  <text class="t" x="1268" y="321">Free servers</text>
+  <text class="s" x="1268" y="341">a headline digest for each game</text>
+  <text class="s" x="1268" y="357">SHiFT alerts if they turn them on</text>
+  <text class="s" x="1268" y="373">the slash commands</text>
+
+  <rect x="1255" y="400" width="300" height="110" rx="8" fill="#ffffff" stroke="#a3a9f0"/>
+  <text class="t" x="1268" y="424">Comped servers</text>
+  <text class="s" x="1268" y="444">everything above, with stories Claude</text>
+  <text class="s" x="1268" y="460">writes; the owner covers the cost</text>
+  <text class="s" x="1268" y="476">today: Rage Quit Tavern and a</text>
+  <text class="s" x="1268" y="492">survival-games server</text>
+
+  <rect x="1255" y="525" width="300" height="95" rx="8" fill="#ffffff" stroke="#a3a9f0"/>
+  <text class="t" x="1268" y="549">In each server</text>
+  <text class="s" x="1268" y="569">a channel per game it follows,</text>
+  <text class="s" x="1268" y="585">a SHiFT codes channel, and a</text>
+  <text class="s" x="1268" y="601">lounge channel if it wants one</text>
+
+  <rect x="1255" y="635" width="300" height="110" rx="8" fill="#ffffff" stroke="#a3a9f0"/>
+  <text class="t" x="1268" y="659">Home server: PacketQueue</text>
+  <text class="s" x="1268" y="679">#prod-alerts gets the owner's</text>
+  <text class="s" x="1268" y="695">daily report, new and departed</text>
+  <text class="s" x="1268" y="711">servers, and anything that broke</text>
+
+  <!-- into Discord -->
+  <path class="arrow" d="M1160,286 H1253"/>
+  <text class="note" x="1166" y="279">alerts</text>
+  <path class="arrow" d="M1160,365 H1253"/>
+  <text class="note" x="1170" y="358">digests</text>
+  <path class="arrow" d="M1160,475 H1228 V690 H1253"/>
+  <text class="note" x="1166" y="468">owner</text>
+
+  <!-- ===== GitHub ===== -->
+  <rect x="30" y="850" width="1170" height="170" rx="10" fill="#f5f5f6" stroke="#bdbdc3" stroke-width="1.5"/>
+  <text class="panel" x="45" y="874">GITHUB · HOW A NEW VERSION GETS TO THE DROPLET</text>
+
+  <rect x="50" y="890" width="250" height="110" rx="8" fill="#ffffff" stroke="#9a9aa3"/>
+  <text class="t" x="63" y="914">Repository</text>
+  <text class="s" x="63" y="934">SomeClown/discord-newsbot</text>
+  <text class="s" x="63" y="950">Apache 2.0; changes land</text>
+  <text class="s" x="63" y="966">through reviewed PRs</text>
+
+  <path class="arrow" d="M300,945 H328"/>
+
+  <rect x="330" y="890" width="270" height="110" rx="8" fill="#ffffff" stroke="#9a9aa3"/>
+  <text class="t" x="343" y="914">GitHub Actions</text>
+  <text class="s" x="343" y="934">about 11,800 tests on every</text>
+  <text class="s" x="343" y="950">push and pull request; builds</text>
+  <text class="s" x="343" y="966">the image when a version is tagged</text>
+
+  <path class="arrow" d="M600,945 H628"/>
+
+  <rect x="630" y="890" width="270" height="110" rx="8" fill="#ffffff" stroke="#9a9aa3"/>
+  <text class="t" x="643" y="914">Container registry (GHCR)</text>
+  <text class="s" x="643" y="934">one image per version,</text>
+  <text class="s" x="643" y="950">amd64 and arm64</text>
+
+  <path class="arrow" d="M900,945 H928"/>
+
+  <rect x="930" y="890" width="250" height="110" rx="8" fill="#ffffff" stroke="#9a9aa3"/>
+  <text class="t" x="943" y="914">deploy.sh on the Droplet</text>
+  <text class="s" x="943" y="934">pulls the tagged image, backs</text>
+  <text class="s" x="943" y="950">up the database, restarts, and</text>
+  <text class="s" x="943" y="966">waits for a healthy container</text>
+
+  <path class="arrow" d="M1055,890 V812"/>
+
+  <rect x="1240" y="890" width="330" height="110" rx="10" fill="#f5f5f6" stroke="#bdbdc3" stroke-width="1.5"/>
+  <text class="t" x="1255" y="914">GitHub Pages site</text>
+  <text class="s" x="1255" y="934">the Add to Discord link and</text>
+  <text class="s" x="1255" y="950">getting-started steps, the</text>
+  <text class="s" x="1255" y="966">privacy policy and the terms</text>
+  <path class="arrow-dash" d="M1405,890 V812"/>
+  <text class="note" x="1413" y="855">install link</text>
+
+  <text class="foot" x="30" y="1058">Free servers get a headline digest; comped servers get stories Claude writes from the day's items, and the owner pays for those calls.</text>
+  <text class="foot" x="30" y="1078">Everything runs in one container, and the whole state is one SQLite file on the Droplet. Slash commands and server joins arrive as Discord events.</text>
+</svg>

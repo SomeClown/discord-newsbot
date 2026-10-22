@@ -337,6 +337,11 @@ not an official one, and it may be wrong or late. For your own copy, the source 
 
 ## Architecture
 
+![How discord-newsbot fits together](docs/architecture.svg)
+
+The same picture as a one-page PDF, for anyone without the repo handy:
+[`docs/architecture.pdf`](docs/architecture.pdf).
+
 A single container runs a single Python process: one `discord.py` client
 that also drives the jobs on an in-process `APScheduler` scheduler. The
 work is plain functions with no Discord dependency, so it can run headless
