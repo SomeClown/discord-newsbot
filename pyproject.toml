@@ -13,7 +13,7 @@ dependencies = [
   "pydantic>=2,<3",
   "anthropic>=1.11.0,<2",
   "pyyaml>=6,<7",
-  "tzdata>=2024.1",
+  "tzdata>=2026.5",
 ]
 
 [build-system]
