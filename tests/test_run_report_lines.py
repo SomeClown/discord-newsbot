@@ -225,7 +225,7 @@ def test_a_fraction_of_a_cent_is_not_free():
 
 def test_rows_fold_into_a_summed_cost_and_an_unknown_one_adds_nothing():
     done = report_claude_from_rows(
-        [(20_000, 4_000, PREPARED), (0, 0, PREPARED), (10_000, 0, None)], shared=False
+        [(200_000, 40_000, PREPARED), (0, 0, PREPARED), (100_000, 0, None)], shared=False
     )
     assert done is not None and done.cost_usd == pytest.approx(0.04 + 0.01)
     assert list(done.prepared_at) == [PREPARED, PREPARED]
@@ -319,7 +319,7 @@ def test_the_claude_and_header_lines_survive_every_stage_but_the_flat_cut():
 # --- end to end ---
 
 
-def seed_summary(world: World, game: str, *, tokens=(20_000, 4_000), url=None):
+def seed_summary(world: World, game: str, *, tokens=(200_000, 40_000), url=None):
     """A stored `ok` summary for `game` with one story, written at PREPARED."""
     url = url or f"https://example.com/{game}/story"
     world.add_item(game, f"{game} source item", in_window(3), url=url)

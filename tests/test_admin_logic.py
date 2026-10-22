@@ -113,4 +113,5 @@ def test_estimate_spend_usd_small_counts_round_via_plain_float_arithmetic():
     # arithmetic (no decimal.Decimal rounding): pinning the actual
     # value here so a future switch to Decimal, if it ever happens,
     # doesn't happen by accident.
-    assert estimate_spend_usd(1, 1) == pytest.approx(0.000_006, abs=1e-12)
+    # Haiku 5.5's list prices: $0.10 in plus $0.50 out, per million tokens.
+    assert estimate_spend_usd(1, 1) == pytest.approx(0.000_000_6, abs=1e-15)

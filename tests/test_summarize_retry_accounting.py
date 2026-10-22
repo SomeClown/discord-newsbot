@@ -297,3 +297,30 @@ async def test_exactly_three_attempts_before_giving_up():
     summary = await summarize_topic(llm, DIABLO4, items, [], sleep=_no_sleep)
     assert summary.fallback is True
     assert len(llm.calls) == 3
+
+
+# --- AnthropicLLM: the request itself (v3.1.3, Haiku 5.5) ---
+
+
+async def test_the_request_names_haiku_5_5_sets_effort_and_sends_no_sampling_params():
+    # Haiku 5.5 refuses temperature/top_p/top_k outright, and so does API version
+    # 2026-10-21 on every model. One stray `extra_body={"temperature": ...}` would turn
+    # every comped digest into headlines, and the fakes elsewhere would never notice.
+    from newsbot.pipeline import summarize
+
+    llm = _llm()
+    seen: dict = {}
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+        return _parsed_message(parsed_output=StoriesOut(stories=[]))
+
+    llm._client.messages.parse = _capture
+    await llm.emit_stories("sys", "user")
+
+    assert seen["model"] == "claude-haiku-5-5"
+    assert seen["output_config"] == {"effort": summarize.EFFORT}
+    assert seen["max_tokens"] >= 16000  # room for thinking as well as the answer
+    sampling = {"temperature", "top_p", "top_k"}
+    assert not sampling & set(seen)
+    assert not sampling & set(seen.get("extra_body") or {})
