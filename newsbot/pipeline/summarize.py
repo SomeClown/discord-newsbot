@@ -30,26 +30,34 @@ from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.prompts import build_prompt
 from newsbot.store.models import Label, PriorStory, Usage
 
-# Model id per the current SDK docs, not the dated snapshot in the original
-# plan: Anthropic's convention is to alias the undated name to whatever
-# the current Haiku 4.5 build is, so this stays current without a code
-# change every time they cut a new snapshot.
-MODEL = "claude-haiku-4-5"
+# Haiku 5.5 since v3.1.3; Haiku 4.5 before that. The id has no date suffix
+# and no separate alias, so there's nothing to keep current.
+MODEL = "claude-haiku-5-5"
 
-# $/million tokens, Haiku 4.5, as of this writing. Verify against the
+# How hard the model thinks before it answers. Haiku 5.5 thinks by default
+# (Haiku 4.5 never did), and effort is the dial: "low" is the cheapest and
+# fastest, "medium" is the model's own default. Turning a pile of headlines
+# into a few stories isn't hard reasoning. Read at call time, so the
+# comparison script can try other levels without a code change.
+EFFORT = "low"
+
+# $/million tokens, Haiku 5.5, for prompts of 100K tokens or fewer (ours
+# are a few thousand; past 100K the rate is $0.50/$2.50). Verify against the
 # current pricing page before trusting the spend estimate in `/newsbot
 # status` for anything more important than a rough sense of the bill.
-PRICE_IN_PER_MTOK = 1.00
-PRICE_OUT_PER_MTOK = 5.00
+PRICE_IN_PER_MTOK = 0.10
+PRICE_OUT_PER_MTOK = 0.50
 
-_MAX_TOKENS = 4096
-_TEMPERATURE = 0.2
+# Thinking counts against this cap, and a story list that runs out of room
+# mid-thought comes back as stop_reason=max_tokens: a retry, then headlines.
+# 4096 was plenty when the model only wrote the answer.
+_MAX_TOKENS = 16000
 _BACKOFF_S = (1.0, 2.0, 4.0)
 _FALLBACK_NOTE = "Summary unavailable; showing headlines."
 
 
 def estimate_spend_usd(input_tokens: int, output_tokens: int) -> float:
-    """Rough running Claude spend from token counts, at Haiku 4.5 list pricing.
+    """Rough running Claude spend from token counts, at Haiku 5.5 list pricing.
 
     "Rough" is doing some work in that sentence: this is list price times
     tokens, not an invoice. Good enough to notice "why is this $40" long
@@ -162,12 +170,10 @@ class AnthropicLLM:
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 output_format=StoriesOut,
-                # `temperature` isn't a `messages.parse()` kwarg anymore (SDK
-                # 1.x dropped sampling params from the method signatures
-                # entirely, not just for the newer models that reject them
-                # outright): `extra_body` is the escape hatch for a model,
-                # like Haiku 4.5, that still honors it.
-                extra_body={"temperature": _TEMPERATURE},
+                # No temperature: Haiku 5.5 refuses anything but the default,
+                # and so does API version 2026-10-21 on every model. Haiku 4.5
+                # got 0.2 for steadier output; the prompt does that job now.
+                output_config={"effort": EFFORT},
             )
         except anthropic.RateLimitError as exc:
             raise LLMError(f"rate limited: {exc}") from exc

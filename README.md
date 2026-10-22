@@ -532,8 +532,9 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
 Rough running cost against `config.example.yaml`'s source list, for one
 comped server following three games:
 
-- **Claude (Haiku 4.5)**: about 3 summarization calls per day (one per
-  game with items), roughly **2 cents per day**. Summaries are made once per
+- **Claude (Haiku 5.5, low effort)**: about 3 summarization calls per day
+  (one per game with items), well **under a cent per day**: about a seventh
+  of what Haiku 4.5 cost on the same news (measured 2026-10-22). Summaries are made once per
   game per cycle and shared, so a second comped server on the same schedule
   costs next to nothing extra; servers on different schedules get their own.
   Free servers cost nothing here.
