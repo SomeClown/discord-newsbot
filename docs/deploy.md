@@ -801,7 +801,7 @@ sweep simply stops running.
 
 ## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04)
 
-**Done 2026-09-27:** `cockwomble` is on 24.04. This section is kept as
+**Done 2026-09-27:** the Droplet is on 24.04. This section is kept as
 the record of how, including the three things that went sideways (the
 mirror, DNS, and IPv6), in case another Droplet ever needs the same trip.
 
