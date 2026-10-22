@@ -109,6 +109,12 @@ class FakePublisher:
 class World:
     def __init__(self, tmp_path, monkeypatch, cfg_name="config_v3.yaml", now=None) -> None:
         monkeypatch.setenv("BRAVE_API_KEY", "k")
+        # In the bot a caller waiting on somebody else's claim checks 300 times, 2 s apart: ten
+        # minutes. Here the sleeps only yield, so those 300 checks are just 300 trips to a thread
+        # and back, and a fast CI runner got through all of them while a test was still holding
+        # the claim's owner on a gate (twice on 2026-10-09). The waiter gave up and got None.
+        # A budget nobody can spend by accident; a test that wants the give-up sets its own.
+        monkeypatch.setattr(summaries, "_MAX_POLLS", 20_000)
         self.db_path = str(tmp_path / "t.db")
         with closing(connect(self.db_path)) as conn:
             migrate(conn)

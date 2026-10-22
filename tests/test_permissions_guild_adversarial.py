@@ -465,7 +465,10 @@ async def test_sweep_skips_guilds_that_are_not_set_up_and_guilds_the_bot_cannot_
 
 
 async def test_a_hanging_lookup_does_not_stall_the_whole_sweep(db_path, monkeypatch):
-    monkeypatch.setattr(permissions, "_GUILD_TIMEOUT_S", 0.1)  # the real one is a minute
+    # The real limit is a minute. A tenth of a second was too tight for the healthy guild:
+    # on a busy CI runner its database write alone outlasted it, so both guilds counted as
+    # failed (2026-10-01, -02 and -07). One second still makes the hung guild time out.
+    monkeypatch.setattr(permissions, "_GUILD_TIMEOUT_S", 1.0)
     _add_guild(db_path, 1, [10])
     _add_guild(db_path, 2, [20])
     client = FakeClient(guilds={1: FakeGuild(1), 2: FakeGuild(2)}, hang=[10])
@@ -474,7 +477,7 @@ async def test_a_hanging_lookup_does_not_stall_the_whole_sweep(db_path, monkeypa
     async def notify(guild_id, text):
         told.append(guild_id)
 
-    result = await asyncio.wait_for(sweep_guild_permissions(client, db_path, notify), timeout=2)
+    result = await asyncio.wait_for(sweep_guild_permissions(client, db_path, notify), timeout=10)
     assert 2 in told
     assert result.failed == 1  # the hung guild is counted, not skipped
 
