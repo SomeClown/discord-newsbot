@@ -439,3 +439,22 @@ Hits in `test_shift_official*`, `test_details_merge*`, `test_repo_code_details*`
 1. **The `site/privacy.html` example.** It describes the stored header as "a title such as "New SHiFT code"". The stored data hasn't changed, only the title's wording. My recommendation is to leave the page alone, since editing it moves its "last updated" date for a cosmetic difference. Otherwise update the example to `` `> new SHiFT code ▌` `` and bump the date. Only the owner can change the policy's text.
 
 Nothing else needs the owner; every other open point in §17's "Left to the builder" is settled in §1 above.
+
+## Build log
+
+Gate: `source .venv/bin/activate && ruff check . && ruff format --check . && pytest -q` (expect: only the 2 APScheduler xfails; exit code 0)
+Branch: feat/terminal-look, from 1fcd04b
+Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-22-terminal-look
+Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees the preview screenshots after Task 5, before the qa review (Tasks 7 and 8 here are run-plan's qa pass and docs step).
+
+### Progress
+- Task 1: complete (from 1fcd04b; gate exit 0, 12340 passed; spec check: 2 minor gaps, accepted; adversarial: 418 tests incl. a byte-for-byte differential against v3.1.4's format.py, 0 bugs)
+
+### Decisions made during the build
+- Ruling (setup): briefs cut by heading with `brief.py` in the work dir, because the plan's nested fence samples (§1) flip the Foundry `task-brief` script's fence tracking and it can't find any task. Why: same text, by heading. If wrong: none for this build; the script wants a fix in the Foundry (count fence length, or ignore fences that open mid-sample).
+- Ruling (Task 1 spec check): the classic edit branch no longer raises when `details` is non-empty and `now` is None (the old `_line_for` guard). Accepted: the classic line uses the live Discord timestamp and never needs a clock, and `render_alert_edit` is typed and always called with `now`. If wrong: a caller passing `now=None` gets a classic render instead of a ValueError.
+- Ruling (Task 1 spec check): `PAGE_TITLE_CURRENT` / `PAGE_TITLE_HISTORY` in `terminal.py` ratified (§1 puts page titles there); Task 4 adds the per-`type:` titles beside them.
+
+### Parked
+- Task 1: the differential tests in `tests/test_terminal_task1_adversarial.py` load v3.1.4's `format.py` from commit 1fcd04b and skip when git or that commit isn't reachable (CI's shallow checkout, or after the branch is gone). Fine for now; they and the classic layout both go when the classic section is deleted.
+

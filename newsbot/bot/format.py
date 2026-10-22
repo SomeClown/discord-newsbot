@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 
+from newsbot.bot import terminal
 from newsbot.config import GameInfo, Topic
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, estimate_spend_usd
@@ -579,6 +580,119 @@ def details_reserve(names: Iterable[str]) -> int:
     )
 
 
+# --- the v3.1 ("classic") alert layout, kept for edits of pre-3.2.0 alerts ---
+#
+# DEPRECATED: delete in the first release more than 14 days after v3.2.0 is deployed;
+# nothing can edit a pre-3.2.0 alert after that.
+#
+# An alert is editable for 14 days, so for two weeks after v3.2.0 goes out there are
+# messages in channels that were packed in the v3.1 layout, and an edit has to put them
+# back the way they were: the 3.1 header, "details via", no `src` chip. Re-rendering one
+# in the new look would be a bigger message than the one the packer sized, and a message
+# one unit over 2,000 is a message Discord refuses. So the three pieces that make up that
+# layout live on here as frozen copies of v3.1.4's, with their own string constants, so
+# the shared ones can be restyled without touching a word of this. `render_alert_edit`
+# decides which layout a message gets from its stored header (see its docstring). Nothing
+# else calls these, and nothing here should ever be "improved". It is a museum exhibit.
+
+_CLASSIC_DETAIL_SEP = " · "
+_CLASSIC_DETAIL_VIA = " · details via "
+_CLASSIC_DETAIL_AND = " and "
+_CLASSIC_EXPIRES = "expires "
+_CLASSIC_PERMANENT = "permanent"
+_CLASSIC_STAMP_OPEN, _CLASSIC_STAMP_CLOSE = " (<t:", ":R>)"
+_CLASSIC_STAMP_DIGITS_MAX = 11
+_CLASSIC_GOLDEN_PREFIX = "Golden Key: "
+_CLASSIC_LINK_SEP = " · "
+_CLASSIC_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def _classic_live_expiry(row: CodeDetailsRow | None) -> str | None:
+    """v3.1's persisted expiry: the date, then a live Discord timestamp ("permanent" if it is).
+
+    Frozen copy of v3.1.4's `_live_expiry`; see the section note above.
+    """
+    if row is None:
+        return None
+    if row.category == "permanent":
+        return _CLASSIC_PERMANENT
+    if row.expires_on is None:
+        return None
+    due = row.expires_on
+    phrase = f"{_CLASSIC_EXPIRES}{_CLASSIC_MONTHS[due.month - 1]} {due.day}, {due.year}"
+    stamp = int(end_of_day(due).timestamp())
+    if 0 < stamp < 10**_CLASSIC_STAMP_DIGITS_MAX:
+        phrase += f"{_CLASSIC_STAMP_OPEN}{stamp}{_CLASSIC_STAMP_CLOSE}"
+    return phrase
+
+
+def _classic_details_line(details: CodeDetailsRow | None) -> str | None:
+    """v3.1's details line, as `details_line(..., relative=False, show_expiry=True)` made it.
+
+    For example `3 Golden Keys · expires Oct 14, 2026 (<t:1792047600:R>) · details via mentalmars`.
+    None when there's neither a reward nor an expiry to show. Frozen copy of v3.1.4's.
+    """
+    if details is None:
+        return None
+    reward = _detail_text(details.reward)
+    expiry = _classic_live_expiry(details)
+    if not reward and expiry is None:
+        return None
+    parts: list[str] = []
+    sources: list[str] = []
+    if reward:
+        parts.append(esc(reward))
+        sources.append(details.reward_from)
+    if expiry is not None:
+        parts.append(expiry)
+        sources.append(
+            details.category_from if details.category == "permanent" else details.expires_from
+        )
+    line = _CLASSIC_DETAIL_SEP.join(parts)
+    names = list(dict.fromkeys(name for name in sources if name))
+    if names:
+        line += _CLASSIC_DETAIL_VIA + _CLASSIC_DETAIL_AND.join(
+            esc(_via_name(name)) for name in names
+        )
+    return line
+
+
+def _classic_alert_block(
+    candidate: CodeCandidate,
+    *,
+    golden_prefix: bool,
+    link: bool = True,
+    line: str | None = None,
+) -> str:
+    """v3.1's entry for one code: fence, details line if any, then its source and link.
+
+    Frozen copy of v3.1.4's `_alert_block`; `link=False` is still the one thing it sheds.
+    """
+    if not is_code(candidate.code):
+        raise ValueError(f"not a SHiFT code: {candidate.code!r}")
+    prefix = _CLASSIC_GOLDEN_PREFIX if golden_prefix and candidate.golden else ""
+    safe_url = _safe_link(candidate.item_url) if link else None
+    shown_link = f"{_CLASSIC_LINK_SEP}<{safe_url}>" if safe_url else ""
+    lines = [f"```\n{candidate.code}\n```"]
+    if line:
+        lines.append(line)
+    lines.append(f"{prefix}{esc(candidate.source_name)}{shown_link}")
+    return "\n".join(lines)
+
+
 # --- /shift codes (design.md §13) ---
 
 _CODE_PAGE_MAX_SOURCE = 100
@@ -1033,14 +1147,31 @@ def render_alert_edit(
     back out as it went in: the edit pass sends the message's stored ping choice with it
     (`mentions_for`), but only while the header still starts with that ping's own text, so an
     edit repeats a mention the message already had and never adds one.
+
+    The stored header is also the layout marker (design.md §17). A header in the terminal look
+    (`terminal.is_terminal_header`) is edited in the current layout. Anything else is a v3.1
+    alert, edited in the frozen classic layout it was packed for, and "anything else" includes a
+    header I don't recognize at all. Unknown means classic because classic is the smaller of the
+    two: a classic render fits a message packed for either layout, and the reverse isn't true.
     """
+    if terminal.is_terminal_header(header):
+        block = _alert_block
+
+        def line_for(code: str) -> str | None:
+            return _line_for(code, details, now)
+    else:
+        block = _classic_alert_block
+
+        def line_for(code: str) -> str | None:
+            return _classic_details_line(details.get(code)) if details else None
+
     for with_link in (True, False):
         blocks = [
-            _alert_block(
+            block(
                 c,
                 golden_prefix=golden_prefix,
                 link=with_link,
-                line=_line_for(c.code, details, now),
+                line=line_for(c.code),
             )
             for c in candidates
         ]
