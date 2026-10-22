@@ -368,13 +368,13 @@ def test_a_followup_for_one_astral_heavy_code_fits():
     assert discord_len(alert.content) <= 2000
 
 
-def test_a_followup_with_no_details_for_any_code_is_still_the_old_line_at_the_cap():
+def test_a_followup_with_no_details_for_any_code_fits_at_the_cap():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     fit = fit_followup_codes(codes, ping_mention="@everyone", details={}, now=NOW)
     assert fit == codes
     alert = render_followup_alert(fit, ping_mention="@everyone", details={}, now=NOW)
-    assert alert.content.startswith("@everyone Confirmed by a second source: `")
-    assert "\n" not in alert.content
+    assert alert.content.startswith("@everyone `> confirmed by a second source ▌`\n\n```\n")
+    assert alert.codes == codes
 
 
 # --- roundups ---
@@ -409,8 +409,8 @@ def test_a_roundup_header_is_the_first_paragraph_of_every_message():
     details = {c.code: _worst(c.code, "mentalmars", "mentalmars", "x" * 300) for c in cands}
     alerts = render_roundup_alerts(cands, details=details, now=NOW)
     assert len(alerts) > 1
-    assert alerts[0].header.startswith("**SHiFT codes from a roundup**")
-    assert [a.header for a in alerts[1:]] == ["**(continued)**"] * (len(alerts) - 1)
+    assert alerts[0].header.startswith("`> SHiFT roundup ▌` 20 codes from Roundup")
+    assert [a.header for a in alerts[1:]] == ["`> SHiFT roundup (continued) ▌`"] * (len(alerts) - 1)
     for alert in alerts:
         assert alert.content.startswith(alert.header + "\n\n")
 

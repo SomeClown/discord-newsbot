@@ -1291,7 +1291,7 @@ async def test_a_backlog_of_followups_drains_over_passes_with_one_ping_each_and_
         h.clock += timedelta(hours=1)
         await h.run([])
 
-    sent = [a for a in h.sent(1) if "Confirmed by a second source" in a.content]
+    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
     assert [len(a.codes) for a in sent] == [5, 5, 4]
     assert [c for a in sent for c in a.codes] == codes  # in queue order, none twice, none lost
     assert all(a.ping and a.content.startswith("@everyone ") for a in sent)
@@ -1312,7 +1312,7 @@ async def test_a_fourth_pass_is_stopped_by_the_daily_cap_and_nothing_goes_out_tw
         h.clock += timedelta(hours=1)
         await h.run([])
 
-    sent = [a for a in h.sent(1) if "Confirmed by a second source" in a.content]
+    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
     assert [len(a.codes) for a in sent] == [5, 5, 5]
     assert shift_row(h.db_path, 1).ping_count == 3  # the cap, never 4
     statuses = followup_statuses(h)
@@ -1349,7 +1349,7 @@ async def test_a_code_that_expired_inside_a_queued_batch_is_skipped_and_costs_no
     h.clock += timedelta(hours=1)
     await h.run([])
 
-    last = [a for a in h.sent(1) if "Confirmed by a second source" in a.content][-1]
+    last = [a for a in h.sent(1) if "confirmed by a second source" in a.content][-1]
     assert last.codes == [codes[5], codes[7]]
     assert codes[6] not in last.content
     assert followup_statuses(h)[codes[6]] == "skipped"
@@ -1373,7 +1373,7 @@ async def test_a_batch_of_nothing_but_expired_codes_posts_nothing_and_spends_not
 
     await h.deliver()
 
-    assert not any("Confirmed" in a.content for a in h.sent(1))
+    assert not any("confirmed by a second source" in a.content for a in h.sent(1))
     assert h.created == []  # no poster was even asked for
     assert shift_row(h.db_path, 1).ping_count == 0
     assert set(followup_statuses(h).values()) == {"skipped"}
@@ -1389,7 +1389,7 @@ async def test_a_code_known_to_be_expired_at_confirmation_is_never_queued(h):
 
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
-    assert not any("Confirmed" in a.content for a in h.sent(1))
+    assert not any("confirmed by a second source" in a.content for a in h.sent(1))
     assert shift_row(h.db_path, 1).ping_count == 0
 
 
@@ -1397,7 +1397,7 @@ async def test_details_that_change_between_passes_show_as_they_stand_in_each_fol
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(7)
     await first_pass_and_confirm(h, codes)  # 5 sent, with LONG_REWARD
-    first = [a for a in h.sent(1) if "Confirmed" in a.content][0]
+    first = [a for a in h.sent(1) if "confirmed by a second source" in a.content][0]
     assert LONG_REWARD in first.content
 
     store_details(
@@ -1406,9 +1406,11 @@ async def test_details_that_change_between_passes_show_as_they_stand_in_each_fol
     h.clock += timedelta(hours=1)
     await h.run([])
 
-    second = [a for a in h.sent(1) if "Confirmed" in a.content][1]
-    assert f"`{codes[5]}` · `reward` Now: 9 Golden Keys · `via` {MENTALMARS}" in second.content
-    assert f"`{codes[6]}` · `reward` {LONG_REWARD}" in second.content
+    second = [a for a in h.sent(1) if "confirmed by a second source" in a.content][1]
+    assert f"```\n{codes[5]}\n```\n`reward` Now: 9 Golden Keys · `via` {MENTALMARS}" in (
+        second.content
+    )
+    assert f"```\n{codes[6]}\n```\n`reward` {LONG_REWARD}" in second.content
 
 
 async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(h):
@@ -1420,13 +1422,13 @@ async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(
     h.clock += timedelta(days=1, hours=18)  # Oct 3 19:00 Pacific
     await h.run([])
 
-    last = [a for a in h.sent(1) if "Confirmed" in a.content][-1]
+    last = [a for a in h.sent(1) if "confirmed by a second source" in a.content][-1]
     # Oct 3 ends at Pacific midnight, Oct 4 00:00 PDT = 07:00 UTC; Discord does the counting.
     assert "`expires` Oct 3, 2026 (<t:1791097200:R>)" in last.content
     assert "`expires` in" not in last.content and "tomorrow" not in last.content
 
 
-async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows(h):
+async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_fences(h):
     add_guild(h.db_path, 1, ping=ROLE)
     codes = n_codes(3)
     await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
@@ -1435,12 +1437,12 @@ async def test_a_followup_mixing_codes_with_and_without_details_keeps_plain_rows
 
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
-    (followup,) = [a for a in h.sent(1) if "Confirmed" in a.content]
+    (followup,) = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
     assert followup.content == (
-        f"<@&{ROLE}> Confirmed by a second source:\n"
-        f"`{codes[0]}`\n"
-        f"`{codes[1]}` · `reward` A skin · `via` {MENTALMARS}\n"
-        f"`{codes[2]}`"
+        f"<@&{ROLE}> `> confirmed by a second source ▌`\n\n"
+        f"```\n{codes[0]}\n```\n\n"
+        f"```\n{codes[1]}\n```\n`reward` A skin · `via` {MENTALMARS}\n\n"
+        f"```\n{codes[2]}\n```"
     )
 
 
@@ -1452,10 +1454,10 @@ async def test_twenty_five_plain_followups_send_twenty_then_five(h):
     h.clock += timedelta(hours=1)
     await h.run([])
 
-    sent = [a for a in h.sent(1) if "Confirmed" in a.content]
+    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
     assert [len(a.codes) for a in sent] == [20, 5]
     assert [c for a in sent for c in a.codes] == codes
-    assert sent[0].content.startswith("@everyone Confirmed by a second source: `")  # one-liner
+    assert sent[0].content.startswith("@everyone `> confirmed by a second source ▌`\n\n```\n")
 
 
 async def test_a_followup_with_a_worst_case_line_per_code_still_fits_and_waits_for_the_rest(h):
@@ -1486,7 +1488,7 @@ async def test_a_followup_with_a_worst_case_line_per_code_still_fits_and_waits_f
 
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
-    (first,) = [a for a in h.sent(1) if "Confirmed" in a.content]
+    (first,) = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
     assert discord_len(first.content) <= 2000
     assert 0 < len(first.codes) < 6
     waiting = [c for c, s in followup_statuses(h).items() if s == "queued"]

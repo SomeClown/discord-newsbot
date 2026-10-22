@@ -97,8 +97,17 @@ def followup_rows(db_path):
     )
 
 
+FOLLOWUP_PROMPT = "`> confirmed by a second source ▌`"
+
+
+def followup_text(*codes, ping="@everyone "):
+    """A follow-up's whole text: the ping, the prompt, then each code alone in its fence."""
+    fences = "\n\n".join(f"```\n{code}\n```" for code in codes)
+    return f"{ping}{FOLLOWUP_PROMPT}\n\n{fences}"
+
+
 def followup_alerts(h, guild_id):
-    return [a for a in h.sent(guild_id) if a.content.split(" ", 1)[-1].startswith("Confirmed")]
+    return [a for a in h.sent(guild_id) if FOLLOWUP_PROMPT in a.content.split("\n", 1)[0]]
 
 
 # --- the real timeline ---
@@ -115,7 +124,7 @@ async def test_the_39fj3_timeline_posts_unpinged_then_one_pinged_followup(h):
     await later(h, timedelta(hours=20))
     sent = h.sent(1)
     assert len(sent) == 1 and sent[0].ping is True
-    assert sent[0].content == f"@everyone Confirmed by a second source: `{CODE}`"
+    assert sent[0].content == followup_text(CODE)
     assert sent[0].ping_prefix == "@everyone "
     assert shift_row(h.db_path, 1).ping_count == 1
     assert followup_rows(h.db_path) == [(1, CODE, "posted", 1)]
@@ -141,7 +150,7 @@ async def test_the_followup_goes_through_the_real_poster_with_the_servers_ping(h
     assert len(channel.sent) == 2
     (orig_content, orig_wire), (content, wire) = channel.sent
     assert wire["parse"] == ["everyone"] and orig_wire.get("parse", []) == []
-    assert content == f"@everyone Confirmed by a second source: `{CODE}`"
+    assert content == followup_text(CODE)
 
 
 async def test_a_role_server_gets_its_role_pinged_and_nothing_else(h):
@@ -154,7 +163,7 @@ async def test_a_role_server_gets_its_role_pinged_and_nothing_else(h):
     await later(h, timedelta(hours=20))
 
     content, wire = channel.sent[1]
-    assert content == f"<@&{role}> Confirmed by a second source: `{CODE}`"
+    assert content == followup_text(CODE, ping=f"<@&{role}> ")
     assert "everyone" not in wire.get("parse", []) and wire["roles"] == [int(role)]
 
 
@@ -431,7 +440,7 @@ async def test_several_codes_confirmed_at_once_share_one_message_and_one_ping_un
     await h.run([sighting_item(BLUESKY, "community", CODE, CODE_A, at=h.clock)])
     sent = h.sent(1)
     assert len(sent) == 1
-    assert sent[0].content == f"@everyone Confirmed by a second source: `{CODE}`, `{CODE_A}`"
+    assert sent[0].content == followup_text(CODE, CODE_A)
     assert shift_row(h.db_path, 1).ping_count == 1
 
 
@@ -455,7 +464,7 @@ async def test_an_ambiguous_failure_strips_the_ping_from_the_retry(h):
     await later(h, timedelta(hours=20))
     sent = h.sent(1)
     assert len(sent) == 1 and sent[0].ping is False
-    assert sent[0].content == f"Confirmed by a second source: `{CODE}`"
+    assert sent[0].content == followup_text(CODE, ping="")
     assert shift_row(h.db_path, 1).ping_count == 1  # claimed once, retries never re-spend
 
 
@@ -533,9 +542,9 @@ def test_aggregate_treats_two_source_names_as_trusted_and_one_as_not():
     assert aggregate([s("A"), s("B", trust="press")], **kwargs)[0].trusted is True
 
 
-def test_the_followup_text_is_short_and_uses_backticks():
+def test_the_followup_text_is_a_prompt_and_a_fence_per_code():
     alert = render_followup_alert([CODE], ping_mention="@everyone", nonce_scope="1|100")
-    assert alert.content == f"@everyone Confirmed by a second source: `{CODE}`"
+    assert alert.content == followup_text(CODE)
     assert alert.ping is True and alert.codes == [CODE]
     other = render_code_alerts(
         [CodeCandidate(CODE, golden=False, source_name="s", item_url="https://e.com", fresh=True)],

@@ -1,11 +1,11 @@
 """Tests for `bot.format.render_roundup_alerts` (design.md §13, plan step 5).
 
-v1 never rendered a roundup message at all -- every roundup code was
-recorded silently, forever. v2.0 posts the fresh ones, unpinged, headed
-"SHiFT codes from a roundup"; this file pins what those messages look
-like and, same as `test_format_code_alerts.py`, that "@everyone" can
-never show up in one no matter what a source name or a batch size throws
-at it.
+v1 never rendered a roundup message at all: every roundup code was
+recorded silently, forever. v2.0 posts the fresh ones, unpinged, and since
+v3.2.0 they're headed by the `> SHiFT roundup ▌` prompt and a count; this file
+pins what those messages look like and, same as `test_format_code_alerts.py`,
+that "@everyone" can never show up in one no matter what a source name or a
+batch size throws at it.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def test_single_code_header_and_block():
     rendered = render_roundup_alerts([_candidate()])
     assert len(rendered) == 1
     content = rendered[0].content
-    assert content.startswith("**SHiFT codes from a roundup** · Reddit Megathread")
+    assert content.startswith("`> SHiFT roundup ▌` 1 code from Reddit Megathread")
     assert f"```\n{CODE_A}\n```" in content
 
 
@@ -61,7 +61,7 @@ def test_link_shown_for_a_safe_url():
 def test_unsafe_url_omits_the_link_but_keeps_the_header_and_code():
     rendered = render_roundup_alerts([_candidate(item_url="javascript:alert(1)")])
     content = rendered[0].content
-    assert "SHiFT codes from a roundup" in content
+    assert content.startswith("`> SHiFT roundup ▌` 1 code from Reddit Megathread\n")
     assert CODE_A in content
     assert "<javascript:" not in content
 
@@ -87,7 +87,7 @@ def test_multiple_codes_same_item_share_one_header():
     ]
     rendered = render_roundup_alerts(same_item)
     assert len(rendered) == 1
-    assert rendered[0].content.count("SHiFT codes from a roundup") == 1
+    assert rendered[0].content.count("SHiFT roundup") == 1
     assert rendered[0].codes == [CODE_A, CODE_B]
 
 
@@ -124,9 +124,9 @@ def test_many_codes_one_item_split_into_continuation_messages():
         assert message.ping is False
         assert "@everyone" not in message.content
         if i == 0:
-            assert message.content.startswith("**SHiFT codes from a roundup**")
+            assert message.content.startswith("`> SHiFT roundup ▌` 80 codes from ")
         else:
-            assert message.content.startswith("**(continued)**")
+            assert message.content.startswith("`> SHiFT roundup (continued) ▌`\n\n")
 
     all_codes = [code for message in rendered for code in message.codes]
     assert len(all_codes) == 80

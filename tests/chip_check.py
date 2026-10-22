@@ -56,9 +56,9 @@ def chips(text: str) -> list[str]:
 def _prompts() -> set[str]:
     """Every prompt chip's contents: the alert headers, roundup and follow-up headers."""
     texts = {
-        "SHiFT roundup",
-        "SHiFT roundup (continued)",
-        "confirmed by a second source",
+        terminal.ROUNDUP_HEADER,
+        terminal.ROUNDUP_CONTINUATION,
+        terminal.FOLLOWUP_HEADER,
     }
     for test in ("", "[test] "):
         texts.add(f"{test}new SHiFT codes (continued)")

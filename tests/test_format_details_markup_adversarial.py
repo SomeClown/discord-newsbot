@@ -199,9 +199,7 @@ def _surfaces(text: str) -> dict[str, str]:
     follow = render_followup_alert(
         [_code(0)], ping_mention="@everyone", details=details, now=NOW
     ).content
-    out["followup"] = _set_aside(
-        follow.removeprefix("@everyone "), codes=codes, extra=("Confirmed by a second source:",)
-    )
+    out["followup"] = _set_aside(follow.removeprefix("@everyone "), codes=codes)
     rcand = CodeCandidate(
         code=_code(0),
         golden=False,
@@ -615,8 +613,9 @@ def test_followup_lines_use_the_same_wording_as_alerts():
     fit = fit_followup_codes([code], ping_mention="@everyone", details=details, now=NOW)
     alert = render_followup_alert(fit, ping_mention="@everyone", details=details, now=NOW)
     assert alert.content == (
-        "@everyone Confirmed by a second source:\n"
-        f"`{code}` \u00b7 `reward` r \u00b7 `expires` Oct 10, 2026 (<t:1791702000:R>)"
+        "@everyone `> confirmed by a second source ▌`\n\n"
+        f"```\n{code}\n```\n"
+        "`reward` r \u00b7 `expires` Oct 10, 2026 (<t:1791702000:R>)"
     )
 
 

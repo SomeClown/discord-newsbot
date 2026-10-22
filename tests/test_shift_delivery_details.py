@@ -384,8 +384,9 @@ async def test_a_followup_shows_details_and_writes_no_row(h):
 
     (followup,) = h.sent(1)
     assert followup.content == (
-        "@everyone Confirmed by a second source:\n"
-        f"`{CODE_A}` · `reward` 3 Golden Keys · `via` {MENTALMARS}"
+        "@everyone `> confirmed by a second source ▌`\n\n"
+        f"```\n{CODE_A}\n```\n"
+        f"`reward` 3 Golden Keys · `via` {MENTALMARS}"
     )
     assert message_rows(h.db_path) == before
 
@@ -410,7 +411,7 @@ async def test_a_followup_fits_by_its_real_size_and_the_rest_wait(h):
     assert len(message_rows(h.db_path)) == 1  # still only the original alert
 
 
-async def test_followups_without_details_keep_the_one_liner(h):
+async def test_followups_without_details_are_just_the_prompt_and_the_fence(h):
     add_guild(h.db_path, 1, ping="everyone")
     await h.run([sighting(REDDIT, "community", CODE_A, NOW)])
 
@@ -418,7 +419,9 @@ async def test_followups_without_details_keep_the_one_liner(h):
     await h.run([sighting(BLUESKY, "community", CODE_A, h.clock)])
 
     (followup,) = h.sent(1)
-    assert followup.content == f"@everyone Confirmed by a second source: `{CODE_A}`"
+    assert followup.content == (
+        f"@everyone `> confirmed by a second source ▌`\n\n```\n{CODE_A}\n```"
+    )
 
 
 # --- the CLI preview ---

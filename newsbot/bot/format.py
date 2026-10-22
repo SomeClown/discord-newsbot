@@ -1217,31 +1217,32 @@ def render_alert_edit(
     )
 
 
-_ROUNDUP_HEADER_PREFIX = "**SHiFT codes from a roundup**"
-# Roundups still wear v3.1's continuation header; they get the terminal one in Task 3.
-_CLASSIC_CONTINUATION = "**(continued)**"
+def _roundup_header(
+    source_name: str, item_url: str, count: int, *, max_len: int | None = None
+) -> str:
+    """The first line of a roundup: `` `> SHiFT roundup ▌` 7 codes from Some Site · <link> ``.
 
-
-def _roundup_header(source_name: str, item_url: str, *, max_len: int | None = None) -> str:
+    `count` is how many codes this group is rendering (the claimed ones, after a partial
+    claim), not how many land in this one message; the header is fixed before packing.
+    """
+    codes_text = f"{count} code{'' if count == 1 else 's'}"
+    lead = f"{terminal.prompt(terminal.ROUNDUP_HEADER)} {codes_text} from "
     safe_url = _safe_link(item_url)
     link = f" · <{safe_url}>" if safe_url else ""
-    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}{link}"
+    header = f"{lead}{esc(source_name)}{link}"
     if max_len is None or discord_len(header) <= max_len:
         return header
 
-    # Same shedding order as `_alert_block`: the link is the first thing
-    # to go (it's redundant with "click the code" anyway), and if a
-    # hostile or just very long source name still doesn't fit, hard-
-    # truncate it. The `_ROUNDUP_HEADER_PREFIX` itself never shrinks;
-    # it's what tells a reader this code didn't come with a ping.
-    header = f"{_ROUNDUP_HEADER_PREFIX} · {esc(source_name)}"
+    # Same shedding order as `_alert_block`: the link is the first thing to go (it's
+    # redundant with "click the code" anyway), and if a hostile or just very long source
+    # name still doesn't fit, hard-truncate it. The chip and the count never shrink; the
+    # chip is what tells a reader this code didn't come with a ping.
+    header = f"{lead}{esc(source_name)}"
     if discord_len(header) <= max_len:
         return header
 
-    fixed_len = discord_len(_ROUNDUP_HEADER_PREFIX) + 3  # " · " joining prefix to the name
-    name_budget = max(max_len - fixed_len, 0)
-    truncated_name = _truncate_utf16(esc(source_name), name_budget, suffix="…")
-    return f"{_ROUNDUP_HEADER_PREFIX} · {truncated_name}"
+    name_budget = max(max_len - discord_len(lead), 0)
+    return f"{lead}{_truncate_utf16(esc(source_name), name_budget, suffix='…')}"
 
 
 def _roundup_code_block(candidate: CodeCandidate, line: str | None = None) -> str:
@@ -1263,7 +1264,7 @@ def render_roundup_alerts(
     details: Mapping[str, CodeDetailsRow] | None = None,
     now: datetime | None = None,
 ) -> list[RenderedAlert]:
-    """Render fresh roundup-only codes into unpinged "from a roundup" messages (design.md §13).
+    """Render fresh roundup-only codes into unpinged `> SHiFT roundup ▌` messages (design.md §13).
 
     v1 recorded every roundup-only code silently, forever; v2.0 posts the
     fresh ones instead (`shift/decide.py`'s `AlertPlan.roundup_to_post`),
@@ -1279,7 +1280,7 @@ def render_roundup_alerts(
     codes into one or more messages under Discord's 2000-unit cap exactly
     like `render_code_alerts` does for a normal batch: the first message
     of a group carries that group's header, any continuation uses
-    `_CLASSIC_CONTINUATION`, and no group's codes ever share a message with
+    the "(continued)" roundup prompt, and no group's codes ever share a message with
     another group's (a header names one specific roundup post; mixing two
     posts' codes under one header would misattribute them).
 
@@ -1305,21 +1306,20 @@ def render_roundup_alerts(
         # first: a later code can carry a details line (hundreds of units) that the
         # first one doesn't, and any block may land under the header.
         largest_block_len = max(discord_len(block) for _, block in entries) + 2  # "\n\n" joiner
+        continuation = terminal.prompt(terminal.ROUNDUP_CONTINUATION)
         first_header = _roundup_header(
             group[0].source_name,
             group[0].item_url,
+            len(group),
             max_len=_ALERT_CONTENT_LIMIT - largest_block_len,
         )
         solo_budget = (
-            _ALERT_CONTENT_LIMIT
-            - max(discord_len(first_header), discord_len(_CLASSIC_CONTINUATION))
-            - 2
+            _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(continuation)) - 2
         )
-        # This is now a belt-and-suspenders check, not the mechanism that
-        # keeps things under budget: `_roundup_header`'s own shrinking
-        # already guarantees the largest block fits under `first_header`;
-        # this still catches a code block busting the *continuation*
-        # header's budget, which never shrinks.
+        # A second check, not the mechanism that keeps things under budget:
+        # `_roundup_header`'s own shrinking already guarantees the largest block fits
+        # under `first_header`; this still catches a code block busting the
+        # *continuation* header's budget, which never shrinks.
         for code, block in entries:
             if discord_len(block) > solo_budget:
                 raise ValueError(f"roundup code block for {code!r} exceeds the per-message budget")
@@ -1328,7 +1328,7 @@ def render_roundup_alerts(
         current: list[tuple[str, str]] = []
         current_len = 0
         for code, block in entries:
-            header_len = discord_len(first_header if not batches else _CLASSIC_CONTINUATION)
+            header_len = discord_len(first_header if not batches else continuation)
             block_len = discord_len(block) + 2  # "\n\n" joining it to the header/prior block
             if current and header_len + current_len + block_len > _ALERT_CONTENT_LIMIT:
                 batches.append(current)
@@ -1340,7 +1340,7 @@ def render_roundup_alerts(
             batches.append(current)
 
         for i, batch in enumerate(batches):
-            header = first_header if i == 0 else _CLASSIC_CONTINUATION
+            header = first_header if i == 0 else continuation
             content = "\n\n".join([header, *(block for _, block in batch)])
             if discord_len(content) > _ALERT_CONTENT_LIMIT:
                 raise ValueError(
@@ -1366,7 +1366,7 @@ def render_roundup_alerts(
 
 # One follow-up message names at most this many codes; the rest wait for the
 # next pass. A confirmation burst that big has never happened, and 20 keeps
-# the whole message a short line instead of a wall.
+# the whole message from turning into a wall (a fenced code is three lines tall now).
 FOLLOWUP_MAX_CODES = 20
 
 
@@ -1376,16 +1376,14 @@ def _followup_content(
     details: Mapping[str, CodeDetailsRow] | None,
     now: datetime | None,
 ) -> str:
-    """A follow-up's text: the short one-liner, or one line per code once any has details."""
-    lines = [_line_for(code, details, now) for code in codes]
-    if not any(lines):
-        named = ", ".join(f"`{code}`" for code in codes)
-        return f"{ping_prefix}Confirmed by a second source: {named}"
-    rows = [
-        f"`{code}` · {line}" if line else f"`{code}`"
-        for code, line in zip(codes, lines, strict=True)
-    ]
-    return "\n".join([f"{ping_prefix}Confirmed by a second source:", *rows])
+    """A follow-up's text: ping and prompt, then each code in its fence plus its details line."""
+    header = f"{ping_prefix}{terminal.prompt(terminal.FOLLOWUP_HEADER)}"
+    entries = []
+    for code in codes:
+        entry = f"```\n{code}\n```"
+        line = _line_for(code, details, now)
+        entries.append(f"{entry}\n{line}" if line else entry)
+    return "\n\n".join([header, *entries])
 
 
 def render_followup_alert(
@@ -1396,21 +1394,22 @@ def render_followup_alert(
     details: Mapping[str, CodeDetailsRow] | None = None,
     now: datetime | None = None,
 ) -> RenderedAlert:
-    """The "confirmed by a second source" follow-up (plan D14): one short, pinged message.
+    """The "confirmed by a second source" follow-up (plan D14): one pinged message.
 
     A community code that already posted unpinged just got a second,
-    independent source. This is the nudge: the ping first, then the codes in
-    backticks (the original alert already has the copy-able block; this one
-    only needs to say which). `ping_mention` is the text a server's ping choice
-    turns into (`@everyone` or a role mention), and the allowed-mentions that
-    make it actually notify come from `mentions_for` at send time, as for every
-    other alert. The nonce is salted with a `followup|` marker as well as the
-    server scope, so Discord can't mistake this for the original alert's send.
+    independent source. This is the nudge: the ping and a prompt line, then each
+    code alone in its fence so it copies cleanly (the original alert has the same
+    block; this one repeats it so nobody has to scroll). `ping_mention` is the text a
+    server's ping choice turns into (`@everyone` or a role mention), and the
+    allowed-mentions that make it actually notify come from `mentions_for` at send
+    time, as for every other alert. The nonce is salted with a `followup|` marker as
+    well as the server scope, so Discord can't mistake this for the original alert's send.
 
-    When any code has a details line (`details`, read against `now`), the message
-    becomes one line per code, `` `CODE` · `reward` 3 Golden Keys · `expires` Oct 14, 2026 ``
-    and so on, as the details stand right now. Nothing edits a follow-up, so it isn't given
-    a reserve; `fit_followup_codes` picks how many codes fit by their real size.
+    A code with a details line (`details`, read against `now`) gets it right under
+    its fence, as the details stand right now. There's no `src` line: the follow-up
+    exists because of a second source, and the `via` part of the details line names who
+    supplied the facts. Nothing edits a follow-up, so it isn't given a reserve;
+    `fit_followup_codes` picks how many codes fit by their real size.
     """
     if not codes or len(codes) > FOLLOWUP_MAX_CODES:
         raise ValueError(f"a follow-up names 1 to {FOLLOWUP_MAX_CODES} codes, got {len(codes)}")
@@ -1446,9 +1445,10 @@ def fit_followup_codes(
     """The longest prefix of `codes` (at most `FOLLOWUP_MAX_CODES`) whose follow-up fits 2000 units.
 
     The rest stay queued for the next pass. Measured by rendering, not by adding up
-    estimates, because the message changes shape when the first code with details shows
-    up. The result is empty only if not even one code fits, which needs a ping mention
-    that is itself nearly 2000 units long; the caller should treat that as the bug it is.
+    estimates, because a details line can be anywhere from nothing to several hundred
+    units and only the real text knows which. The result is empty only if not even one
+    code fits, which needs a ping mention that is itself nearly 2000 units long; the
+    caller should treat that as the bug it is.
     """
     ping_prefix = f"{ping_mention} "
     for n in range(min(len(codes), FOLLOWUP_MAX_CODES), 0, -1):

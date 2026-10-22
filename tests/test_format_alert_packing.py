@@ -432,7 +432,7 @@ def test_roundups_show_details_at_their_real_size_without_a_reserve():
     assert f"```\n{batch[0].code}\n```\n`reward` 3 Golden Keys · `via` mentalmars" in alert.content
     assert alert.content.count("`via`") == 1
     assert alert.ping is False
-    assert alert.header.startswith("**SHiFT codes from a roundup**")
+    assert alert.header.startswith("`> SHiFT roundup ▌` 3 codes from ")
 
 
 def test_a_big_roundup_is_packed_without_a_reserve():
@@ -453,24 +453,28 @@ def test_roundup_details_that_are_long_still_fit():
 # --- follow-ups ---
 
 
-def test_followup_without_details_is_the_old_one_liner():
+def test_followup_without_details_is_the_prompt_and_a_fence_per_code():
     codes = [_code(1), _code(2)]
     alert = render_followup_alert(codes, ping_mention="@everyone")
-    assert alert.content == f"@everyone Confirmed by a second source: `{codes[0]}`, `{codes[1]}`"
+    assert alert.content == (
+        "@everyone `> confirmed by a second source ▌`\n\n"
+        f"```\n{codes[0]}\n```\n\n"
+        f"```\n{codes[1]}\n```"
+    )
     with_empty = render_followup_alert(
         codes, ping_mention="@everyone", details={codes[0]: _row(codes[0])}, now=NOW
     )
     assert with_empty.content == alert.content
 
 
-def test_followup_with_details_is_one_line_per_code():
+def test_followup_with_details_puts_the_line_under_its_fence():
     codes = [_code(1), _code(2)]
     details = {codes[0]: _row(codes[0], reward="3 Golden Keys", reward_from="mentalmars")}
     alert = render_followup_alert(codes, ping_mention=ROLE, details=details, now=NOW)
     assert alert.content == (
-        f"{ROLE} Confirmed by a second source:\n"
-        f"`{codes[0]}` · `reward` 3 Golden Keys · `via` mentalmars\n"
-        f"`{codes[1]}`"
+        f"{ROLE} `> confirmed by a second source ▌`\n\n"
+        f"```\n{codes[0]}\n```\n`reward` 3 Golden Keys · `via` mentalmars\n\n"
+        f"```\n{codes[1]}\n```"
     )
     assert alert.ping is True
     assert alert.ping_prefix == f"{ROLE} "

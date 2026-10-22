@@ -43,6 +43,7 @@ from test_shift_followups import (
     at,
     first_sighting,
     followup_rows,
+    followup_text,
     later,
     sighting_item,
 )
@@ -257,8 +258,8 @@ async def test_an_original_and_a_followup_in_one_turn_are_two_messages_two_units
     )
     sent = h.every(1)
     assert [a.ping for a in sent] == [True, True]
-    assert CODE_X in sent[0].content and "Confirmed" not in sent[0].content
-    assert sent[1].content == f"@everyone Confirmed by a second source: `{CODE_Y}`"
+    assert CODE_X in sent[0].content and "confirmed by" not in sent[0].content
+    assert sent[1].content == followup_text(CODE_Y)
     assert sent[0].nonce != sent[1].nonce
     assert shift_row(h.db_path, 1).ping_count == 2
 

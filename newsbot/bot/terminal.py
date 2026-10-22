@@ -44,6 +44,12 @@ GROUP_COSMETICS = "cosmetics"
 GROUP_PERMANENT = "permanent"
 GROUP_OTHER = "other"
 
+# The bodies of the roundup and follow-up prompt chips. Fixed strings, like everything else
+# in here: the roundup's source name and count ride outside the chip, after it.
+ROUNDUP_HEADER = "SHiFT roundup"
+ROUNDUP_CONTINUATION = "SHiFT roundup (continued)"
+FOLLOWUP_HEADER = "confirmed by a second source"
+
 # Embed titles are plain text, not chips: a title can't hold inline code. They're fixed
 # strings, and deliberately don't go through `esc()`, which would turn the "> " into "\> ".
 PAGE_TITLE_CURRENT = f"> current SHiFT codes {CURSOR}"
