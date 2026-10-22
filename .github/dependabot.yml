@@ -12,6 +12,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # anthropic 2.x moves to API version 2026-10-21, which refuses any
+      # request that sets temperature, and summarize.py sends 0.2 on every
+      # call. CI can't see that (the tests use a fake Claude), so a 2.x PR
+      # would go green and then turn every comped digest into headlines.
+      # Moving to 2.x is a deliberate change with an owner-reviewed
+      # /newsbot preview, not a Dependabot bump (decided 2026-10-22).
+      - dependency-name: "anthropic"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
