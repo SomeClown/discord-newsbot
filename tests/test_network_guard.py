@@ -14,8 +14,8 @@ import httpx
 import pytest
 from network_guard import PUBLIC_TEST_ADDRESS, NetworkBlockedError
 
-from newsbot.collectors import rss as rss_module
-from newsbot.collectors.rss import _reject_private_redirect
+from newsbot import netguard
+from newsbot.netguard import reject_private_host
 
 
 async def test_the_loop_resolves_every_name_to_the_public_test_address():
@@ -53,10 +53,10 @@ async def test_a_stalled_resolver_refuses_the_source(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", never)
-    monkeypatch.setattr(rss_module, "_DNS_TIMEOUT_S", 0.05)
-    response = httpx.Response(200, request=httpx.Request("GET", "https://slow.example/feed"))
+    monkeypatch.setattr(netguard, "DNS_TIMEOUT_S", 0.05)
+    url = httpx.URL("https://slow.example/feed")
     with pytest.raises(ValueError, match="DNS lookup timed out"):
-        await _reject_private_redirect(response)
+        await reject_private_host(url)
 
 
 async def test_a_failed_lookup_is_still_not_a_refusal(monkeypatch):
@@ -64,5 +64,5 @@ async def test_a_failed_lookup_is_still_not_a_refusal(monkeypatch):
         raise OSError("no such host")
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", broken)
-    response = httpx.Response(200, request=httpx.Request("GET", "https://gone.example/feed"))
-    await _reject_private_redirect(response)
+    url = httpx.URL("https://gone.example/feed")
+    await reject_private_host(url)
