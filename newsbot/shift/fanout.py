@@ -775,16 +775,25 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
         return GuildOutcome(guild_id)
     if claimed != codes:
         # A concurrent pass took some; the rest re-pack, so no message has a hole in it.
-        rendered = render_followup_alerts(
-            claimed,
-            ping_mention=_mention_for(ping),
-            nonce_scope=f"{guild_id}|{channel_id}",
-            details=details,
-            now=read_at,
-        )
+        try:
+            rendered = render_followup_alerts(
+                claimed,
+                ping_mention=_mention_for(ping),
+                nonce_scope=f"{guild_id}|{channel_id}",
+                details=details,
+                now=read_at,
+            )
+        except ValueError:
+            # The first render passed with these same codes in it, so this needs an entry
+            # that fit beside different neighbors and now fits nowhere. I can't build one
+            # from real data, but if it happens the codes are already claimed, and letting
+            # it escape would strand them `pending` and notify the server, which a
+            # follow-up never does.
+            rendered = []
         if not rendered:
             # The race left a first code that can't lead a pinged message (the same
-            # absurd ping mention as above). It's claimed, so fail it rather than strand it.
+            # absurd ping mention as above), or one entry that can't fit any message.
+            # It's claimed, so fail it rather than strand it.
             logger.error("a SHiFT follow-up can't fit one code", extra={"guild_id": guild_id})
             await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
             return GuildOutcome(guild_id)

@@ -2375,7 +2375,9 @@ def claim_guild_followups(
     two passes racing for the same follow-up produce one claim. One claim is one
     ping, so one unit is spent however many codes there are, and however many
     messages the delivery spills them into (the first one pings, the rest
-    continue it).
+    continue it). So `pinged = 1` on a row means "claimed under a pinged
+    follow-up", not "its own message pinged": a code in a "(continued)"
+    message gets it too. Nothing reads the column yet; mind that if something does.
     If the day's budget is already gone, the follow-ups become `skipped` (never
     an unpinged repost: the whole point of one is the ping) and nothing is
     returned; the cap is left exactly as it was.

@@ -852,3 +852,71 @@ def test_the_preview_script_still_builds_every_case_and_shows_a_continued_follow
     assert script.main(["--out", str(tmp_path)]) == 0
     page = (tmp_path / "index.html").read_text(encoding="utf-8")
     assert "(continued)" in page and "follow-up that continues" in page
+
+
+# --- qa round (2026-10-23) ---
+
+
+async def test_a_race_rerender_that_raises_fails_the_claimed_codes_quietly(h, monkeypatch):
+    # Unreachable with real data, which is why it's faked: the second render (after a
+    # race shrank the claim) raises. The codes are claimed by then, so they must end up
+    # `failed`, not stuck `pending`, and the server hears nothing, as for any follow-up.
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 45)
+    real_claim = fanout.claim_guild_followups
+    real_render = fanout.render_followup_alerts
+    renders = 0
+
+    def racing(conn, guild_id, wanted, **kwargs):
+        with conn:
+            for code in wanted[:20]:
+                conn.execute(
+                    "UPDATE guild_code_followups SET status = 'posted' WHERE code = ?", (code,)
+                )
+        return real_claim(conn, guild_id, wanted, **kwargs)
+
+    def flaky_render(*args, **kwargs):
+        nonlocal renders
+        renders += 1
+        if renders > 1:
+            raise ValueError("an entry that fits nowhere")
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr(fanout, "claim_guild_followups", racing)
+    monkeypatch.setattr(fanout, "render_followup_alerts", flaky_render)
+    await confirm(h, codes)
+
+    assert followup_alerts(h, 1) == []
+    statuses = status_of(h.db_path)
+    assert [statuses[c] for c in codes[20:]] == ["failed"] * 25
+    assert h.notices == []
+
+
+async def test_a_burst_cancelled_mid_way_keeps_what_landed_and_recovery_fails_the_rest(
+    db_path, cfg, monkeypatch
+):
+    # The collection hook's hard stop cancels a slow turn. Message 1 landed; message 2 was
+    # in flight. Nothing may be re-sent, and startup recovery fails the rest without a word.
+    h = Harness(db_path, cfg, T0)
+    seed(db_path)
+    add_guild(db_path, 1, ping="everyone")
+    codes = await burst(h, 45)  # 20, 20, 5
+    release = queue_only(monkeypatch)
+    await confirm(h, codes)
+    release()
+    made = script_posts(h, None, asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await deliver_queued_codes(h.deps())
+
+    [poster] = made
+    assert flatten(poster.sent) == codes[:20]
+    statuses = status_of(db_path)
+    assert [statuses[c] for c in codes] == ["posted"] * 20 + ["pending"] * 25
+
+    h.posters.clear()
+    await deliver_queued_codes(h.deps(), startup=True)
+    statuses = status_of(db_path)
+    assert [statuses[c] for c in codes] == ["posted"] * 20 + ["failed"] * 25
+    assert followup_alerts(h, 1) == []
+    assert h.notices == []
