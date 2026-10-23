@@ -2,10 +2,10 @@
 # docker-compose.staging.yml pull && docker compose -f docker-compose.yml
 # -f docker-compose.staging.yml up -d`. Same dev token, config, and
 # database as docker-compose.dev.yml (test guild, never prod), but pulls
-# the published GHCR image instead of building from the local checkout --
-# this is the "try the actual published image against the test guild
-# before tagging a release" step in the standard workflow (see README's
-# Releasing section and docs/deploy.md).
+# the published GHCR image instead of building from the local checkout.
+# It's the optional "try the actual published image against the test
+# guild" check in README's Releasing section, for a change that can't be
+# judged any other way; the standard pre-tag check is a local image build.
 #
 # TAG defaults to latest (the newest build off main); set TAG in the
 # shell or in .env.dev if you want to try a specific sha- or release tag
