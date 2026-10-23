@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from newsbot.bot import terminal
 from newsbot.bot.format import discord_len, render_history_pages
 from newsbot.store.models import CodeView
 
@@ -34,7 +35,7 @@ def _view(**kwargs) -> CodeView:
 
 
 def _pages(views, timezone=LA):
-    return render_history_pages(views, timezone=timezone, now=NOW, title="/shift history")
+    return render_history_pages(views, timezone=timezone, now=NOW)
 
 
 def _text(views, timezone=LA) -> str:
@@ -46,9 +47,10 @@ def _text(views, timezone=LA) -> str:
 
 def test_one_plain_code_is_exactly_this_page():
     (embed,) = _pages([_view()])
-    assert embed.title == "/shift history"
+    assert embed.title == terminal.PAGE_TITLE_HISTORY == "> SHiFT code history ▌"
+    assert embed.color.value == terminal.SHIFT_GREEN
     assert embed.description == (
-        f"```\n{CODE_A}\n```\nFirst seen 2026-09-25 · Gearbox Blog · <https://e.com/a>"
+        f"```\n{CODE_A}\n```\n`src` Gearbox Blog · <https://e.com/a>\n`first seen` 2026-09-25"
     )
     assert embed.footer.text == (
         "Where the expiry is unknown, older codes may have stopped working. · Page 1 of 1"
@@ -64,9 +66,9 @@ def test_first_seen_date_shown_in_the_given_timezone():
     # midnight where the two calendars actually disagree on the date.
     late_utc = datetime(2026, 9, 26, 3, 30, tzinfo=UTC)
     text = _text([_view(first_seen_at=late_utc)])
-    assert "First seen 2026-09-25" in text
+    assert "`first seen` 2026-09-25" in text
     assert "2026-09-26" not in text
-    assert "First seen 2026-09-26" in _text([_view(first_seen_at=late_utc)], timezone="UTC")
+    assert "`first seen` 2026-09-26" in _text([_view(first_seen_at=late_utc)], timezone="UTC")
 
 
 def test_empty_window_message():
@@ -79,27 +81,28 @@ def test_empty_window_message():
 
 
 def test_roundup_marker_shown():
-    assert "· (from a roundup)" in _text([_view(from_roundup=True)])
+    assert "· from a roundup" in _text([_view(from_roundup=True)])
 
 
 def test_too_old_marker_shown():
-    assert "· (old post)" in _text([_view(status="too_old")])
+    assert "· old post" in _text([_view(status="too_old")])
 
 
 def test_seeded_marker_shown():
-    assert "· (already around when alerts started)" in _text([_view(status="seeded")])
+    assert "· already around when alerts started" in _text([_view(status="seeded")])
 
 
 def test_from_roundup_wins_over_too_old_status():
     # A roundup code that also went stale (both true at once) shows the roundup marker, not the
     # too-old one: the one D5 asks for.
     text = _text([_view(status="too_old", from_roundup=True)])
-    assert "(from a roundup)" in text
-    assert "(old post)" not in text
+    assert "· from a roundup" in text
+    assert "old post" not in text
 
 
 def test_plain_posted_code_has_no_marker():
-    assert "(" not in _text([_view(status="posted")])
+    # The first-seen line is the last one, and it ends at the date.
+    assert _text([_view(status="posted")]).endswith("`first seen` 2026-09-25")
 
 
 # --- escaping / safety ---
@@ -114,7 +117,7 @@ def test_unsafe_url_omits_the_link_but_keeps_the_code():
     text = _text([_view(item_url="javascript:alert(1)")])
     assert CODE_A in text
     assert "<javascript:" not in text
-    assert text.endswith("First seen 2026-09-25 · Gearbox Blog")
+    assert text.endswith("`src` Gearbox Blog\n`first seen` 2026-09-25")
 
 
 def test_long_source_name_is_truncated():

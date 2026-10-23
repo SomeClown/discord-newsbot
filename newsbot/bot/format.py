@@ -400,6 +400,7 @@ _REWARD_LEAD = terminal.label(terminal.REWARD) + " "
 _EXPIRES_LEAD = terminal.label(terminal.EXPIRES) + " "
 _VIA_LEAD = terminal.label(terminal.VIA) + " "
 _SRC_LEAD = terminal.label(terminal.SRC) + " "
+_FIRST_SEEN_LEAD = terminal.label(terminal.FIRST_SEEN) + " "
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 # Bidirectional overrides and isolates (U+202A to U+202E, U+2066 to U+2069). A reward
 # that opens one without closing it can make the rest of the line read backwards, the `via`
@@ -740,42 +741,46 @@ def _code_marker(view: CodeView, now: datetime | None = None) -> str | None:
 def _code_page_block(
     view: CodeView, timezone: str, *, max_len: int | None = None, now: datetime | None = None
 ) -> str:
+    """One `/shift history` entry: the fence, the details line, `src`, then `first seen`.
+
+    The marker (`expired`, `from a roundup`, ...) is plain text after the date, not a chip:
+    chips are for the fixed labels and the marker is a value. `max_len` is the room the
+    whole entry may take; past it the link goes first, then the source name is cut.
+    """
     code_block = f"```\n{view.code}\n```"
     first_seen = view.first_seen_at.astimezone(ZoneInfo(timezone)).date().isoformat()
-    seen_prefix = f"First seen {first_seen} · "
     marker = _code_marker(view, now)
-    marker_suffix = f" · ({marker})" if marker else ""
-    # `/shift history` (it passes `now`) also shows the details line under the source line.
+    marker_suffix = f"{_DETAIL_SEP}{marker}" if marker else ""
+    seen_line = f"\n{_FIRST_SEEN_LEAD}{first_seen}{marker_suffix}"
+    # `/shift history` (it passes `now`) also shows the details line right under the fence.
     # It never sheds: it's capped, and it's the point.
     line = (
         details_line(view.details, now=now, show_expiry=marker != "expired", relative=True)
         if now is not None
         else None
     )
-    tail = f"\n{line}" if line else ""
-    if max_len is not None:
-        max_len -= discord_len(tail)
+    head = f"{code_block}\n{line}" if line else code_block
     source = _truncate_utf16(esc(view.source_name), _CODE_PAGE_MAX_SOURCE, suffix="…")
     safe_url = _safe_link(view.item_url)
-    link = f" · <{safe_url}>" if safe_url else ""
-    block = f"{code_block}\n{seen_prefix}{source}{link}{marker_suffix}"
+    link = f"{_DETAIL_SEP}<{safe_url}>" if safe_url else ""
+    block = f"{head}\n{_SRC_LEAD}{source}{link}{seen_line}"
     if max_len is None or discord_len(block) <= max_len:
-        return block + tail
+        return block
 
     # Same shedding order as `_alert_block`: the link goes first (a
     # collected URL is the part most likely to be long and least likely
     # to be missed; the code and its source are the point).
-    block = f"{code_block}\n{seen_prefix}{source}{marker_suffix}"
+    block = f"{head}\n{_SRC_LEAD}{source}{seen_line}"
     if discord_len(block) <= max_len:
-        return block + tail
+        return block
 
     # Still too long: hard-truncate the source name. The fenced code
     # block never shrinks; a partial code would be actively wrong, and
     # cutting mid-fence would unbalance every block after it.
-    fixed_len = discord_len(code_block) + 1 + discord_len(seen_prefix) + discord_len(marker_suffix)
+    fixed_len = discord_len(head) + 1 + discord_len(_SRC_LEAD) + discord_len(seen_line)
     name_budget = max(max_len - fixed_len, 0)
     truncated_name = _truncate_utf16(esc(view.source_name), name_budget, suffix="…")
-    return f"{code_block}\n{seen_prefix}{truncated_name}{marker_suffix}{tail}"
+    return f"{head}\n{_SRC_LEAD}{truncated_name}{seen_line}"
 
 
 # --- /shift codes and /shift history pages (design.md §16) ---
@@ -787,12 +792,11 @@ def _code_page_block(
 # the next page gets its heading again with "(continued)", so nobody has to scroll
 # back up to find out whether they're reading Cosmetics or Permanent.
 
-_CURRENT_TITLE = "Current SHiFT codes"
 _CURRENT_GROUPS = (
-    ("golden", "Golden Keys"),
-    ("cosmetic", "Cosmetics"),
-    ("permanent", "Permanent"),
-    ("other", "Other"),
+    ("golden", terminal.GROUP_GOLDEN_KEYS),
+    ("cosmetic", terminal.GROUP_COSMETICS),
+    ("permanent", terminal.GROUP_PERMANENT),
+    ("other", terminal.GROUP_OTHER),
 )
 _CURRENT_KINDS = ("all", *(key for key, _ in _CURRENT_GROUPS if key != "other"))
 _HISTORY_FOOTER_NOTE = "Where the expiry is unknown, older codes may have stopped working."
@@ -802,7 +806,7 @@ def _pack_sections(sections: list[tuple[str | None, list[str]]]) -> list[str]:
     """Greedily fill descriptions from `(heading, entries)` sections; entries never split.
 
     Entries are joined by a blank line; a section's heading rides on its first entry on
-    each page (with "(continued)" on every page but the first). A section with no heading
+    each page (as `[heading (continued)]` on every page but the first). A section with no heading
     is just entries. An entry that can't fit a page by itself raises ValueError; the
     caps make that impossible, and a loud failure beats a silently shortened reward.
     """
@@ -816,7 +820,7 @@ def _pack_sections(sections: list[tuple[str | None, list[str]]]) -> list[str]:
             while True:
                 label = None
                 if heading is not None and not on_page:
-                    label = f"**{heading} (continued)**" if started else f"**{heading}**"
+                    label = terminal.heading(heading, continued=started)
                 block = f"{label}\n{entry}" if label else entry
                 cost = discord_len(block) + (2 if parts else 0)
                 if used + cost <= _DESCRIPTION_LIMIT:
@@ -836,12 +840,19 @@ def _pack_sections(sections: list[tuple[str | None, list[str]]]) -> list[str]:
 def _page_embeds(
     title: str, descriptions: list[str], footer: str, empty: str
 ) -> list[discord.Embed]:
-    """One embed per description, titled and footed "Page i of n"; or one with `empty`."""
-    safe_title = _truncate_utf16(esc(title), _TITLE_LIMIT)
+    """One embed per description, titled and footed "Page i of n"; or one with `empty`.
+
+    Titles are fixed constants from `terminal`, never user text, and so they go in as they
+    are. That is on purpose: `esc()` would turn the title's "> " into "\\> " and the
+    prompt would print its own backslash. (The truncation stays; it costs nothing and
+    a title that ever grew past Discord's cap should still be a title.) Every page is
+    green, the empty one included.
+    """
+    safe_title = _truncate_utf16(title, _TITLE_LIMIT)
     descriptions = descriptions or [empty]
     embeds = []
     for i, description in enumerate(descriptions, start=1):
-        embed = discord.Embed(title=safe_title, color=_PALETTE[0], description=description)
+        embed = discord.Embed(title=safe_title, color=terminal.SHIFT_GREEN, description=description)
         embed.set_footer(text=f"{footer} · Page {i} of {len(descriptions)}")
         embeds.append(embed)
     return embeds
@@ -861,23 +872,23 @@ def _current_newest(code: CurrentCode) -> datetime:
 
 
 def _current_entry(code: CurrentCode, now: datetime) -> str:
-    """` `CODE` ` on one line; reward and expiry (or a permanent code's origin) on the next."""
+    """The code in its fence, then `reward` and `expires` (and a permanent code's origin) under it.
+
+    A permanent code reads `expires` never, with its origin, when it has one, as plain
+    escaped text after it. A code with no known expiry or no reward says "unknown" in its
+    place. Only the labels are chips; the reward and the origin are scraped text.
+    """
     d = code.details
     reward = _detail_text(d.reward) if d else ""
+    expiry = _expiry_value(d, now, with_days=True)
+    word, value = expiry if expiry is not None else (terminal.EXPIRES, "unknown")
+    line = f"{_REWARD_LEAD}{esc(reward) if reward else 'unknown'}"
+    line += f"{_DETAIL_SEP}{terminal.label(word)} {value}"
     if d is not None and d.category == "permanent":
         origin = _detail_text(d.origin)
-        tail = esc(origin) if origin else "permanent"
-    else:
-        # Task 4 restyles this entry; until then it says what it always said, built from
-        # the same value producer the new details line uses.
-        expiry = _expiry_value(d, now, with_days=True)
-        if expiry is None:
-            tail = "expiry unknown"
-        elif expiry[0] == terminal.EXPIRED:
-            tail = "expired"
-        else:
-            tail = f"expires {expiry[1]}"
-    return f"`{code.code}`\n{esc(reward) if reward else 'reward unknown'}{_DETAIL_SEP}{tail}"
+        if origin:
+            line += f"{_DETAIL_SEP}{esc(origin)}"
+    return f"```\n{code.code}\n```\n{line}"
 
 
 def render_current_pages(
@@ -885,7 +896,7 @@ def render_current_pages(
 ) -> list[discord.Embed]:
     """`/shift codes`: the codes that should still work, grouped, newest first, paged by size.
 
-    Groups run Golden Keys, Cosmetics, Permanent, Other (a code with no details, or
+    Groups run golden keys, cosmetics, permanent, other (a code with no details, or
     whose reward is none of the first three, is Other), and `kind` ("all", "golden",
     "cosmetic" or "permanent") keeps one of them. Inside a group the newest comes first:
     by the table's "Added" day when it has one, else the bot's first sighting. `footer`
@@ -904,22 +915,25 @@ def render_current_pages(
         )
         if members:
             sections.append((heading, [_current_entry(c, now) for c in members]))
-    title = _CURRENT_TITLE if kind == "all" else f"{_CURRENT_TITLE}: {dict(_CURRENT_GROUPS)[kind]}"
-    return _page_embeds(title, _pack_sections(sections), footer, empty)
+    return _page_embeds(terminal.PAGE_TITLES_CURRENT[kind], _pack_sections(sections), footer, empty)
 
 
 def render_history_pages(
-    views: Sequence[CodeView], *, timezone: str, now: datetime, title: str
+    views: Sequence[CodeView], *, timezone: str, now: datetime
 ) -> list[discord.Embed]:
     """`/shift history`: every code seen in the window, as given (newest first), paged by size.
 
-    The old `/shift codes` with a details line under each source line and an "expired"
-    marker for a code whose known expiry has passed. An entry too big for a page on its
+    The old dated list, now with the fence, a details line, `src` and `first seen` under each
+    code, and an "expired" marker for a code whose known expiry has passed. The title is
+    always the history one; there's no way to hand it another. An entry too big for a page on its
     own (a very long collected URL, most likely) sheds its link like an alert does.
     """
     blocks = [_code_page_block(v, timezone, max_len=_DESCRIPTION_LIMIT, now=now) for v in views]
     return _page_embeds(
-        title, _pack_sections([(None, blocks)]), _HISTORY_FOOTER_NOTE, _CODE_PAGE_EMPTY
+        terminal.PAGE_TITLE_HISTORY,
+        _pack_sections([(None, blocks)]),
+        _HISTORY_FOOTER_NOTE,
+        _CODE_PAGE_EMPTY,
     )
 
 

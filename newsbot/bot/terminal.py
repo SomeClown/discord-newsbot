@@ -54,6 +54,17 @@ FOLLOWUP_HEADER = "confirmed by a second source"
 # strings, and deliberately don't go through `esc()`, which would turn the "> " into "\> ".
 PAGE_TITLE_CURRENT = f"> current SHiFT codes {CURSOR}"
 PAGE_TITLE_HISTORY = f"> SHiFT code history {CURSOR}"
+# One per `/shift codes` `type:`, spelled out in full on purpose: a title built from a group
+# word at runtime is a title one typo away from disagreeing with its own headings.
+PAGE_TITLE_CURRENT_GOLDEN = f"> current SHiFT codes: golden keys {CURSOR}"
+PAGE_TITLE_CURRENT_COSMETIC = f"> current SHiFT codes: cosmetics {CURSOR}"
+PAGE_TITLE_CURRENT_PERMANENT = f"> current SHiFT codes: permanent {CURSOR}"
+PAGE_TITLES_CURRENT = {
+    "all": PAGE_TITLE_CURRENT,
+    "golden": PAGE_TITLE_CURRENT_GOLDEN,
+    "cosmetic": PAGE_TITLE_CURRENT_COSMETIC,
+    "permanent": PAGE_TITLE_CURRENT_PERMANENT,
+}
 
 
 def prompt(text: str) -> str:
@@ -70,6 +81,14 @@ def prompt(text: str) -> str:
 def label(word: str) -> str:
     """A label chip: `` `word` ``. Same rules as `prompt`, minus the guard; pass the words above."""
     return f"`{word}`"
+
+
+def heading(word: str, *, continued: bool = False) -> str:
+    """A group heading chip: `` `[golden keys]` ``, or `` `[golden keys (continued)]` `` later on.
+
+    Same rules as `label`: pass the group words above, never anything a stranger typed.
+    """
+    return f"`[{word} (continued)]`" if continued else f"`[{word}]`"
 
 
 def is_terminal_header(header: str) -> bool:

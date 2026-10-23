@@ -409,7 +409,7 @@ async def test_a_type_value_outside_the_choices_gets_the_whole_list_and_no_echo(
 
     text = _embed(interaction).description
     assert _code(1) in text and _code(2) in text
-    assert _embed(interaction).title == "Current SHiFT codes"
+    assert _embed(interaction).title == "> current SHiFT codes ▌"
     if value.strip():
         assert value not in json.dumps(_embed(interaction).to_dict())
 
@@ -870,14 +870,14 @@ async def test_five_thousand_current_codes_page_cleanly_and_quickly(v3_cfg, v3_d
     joined = "\n\n".join(e.description for e in embeds)
     for index, embed in enumerate(embeds, start=1):
         _within_discord_limits(embed)
-        assert embed.description.count("`") % 2 == 0  # no entry split mid code span
+        assert embed.description.count("```") % 2 == 0  # no entry split mid fence
         assert embed.footer.text.endswith(f"Page {index} of {len(embeds)}")
     assert view.total_pages == len(embeds)
     assert all(joined.count(_code(n)) == 1 for n in range(total))
     # Greedy packing wastes little: no more than a tenth over the least possible.
     least = -(-sum(discord_len(e.description) for e in embeds) // 4096)
     assert len(embeds) <= least * 1.1 + 2
-    assert joined.count("**Golden Keys**") == 1  # the heading once, then "(continued)" per page
+    assert joined.count("`[golden keys]`") == 1  # the heading once, then "(continued)" per page
     assert joined.count("(continued)") == len(embeds) - 1
 
 

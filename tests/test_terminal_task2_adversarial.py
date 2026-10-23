@@ -19,7 +19,7 @@ look can actually break:
 4. Batches of 1, 2, 5, 6 and 50 codes: header kind and plural, continuations, ping on the first
    message only, nonces that match v3.1.4's (read out of git, like the Task 1 round does).
 5. What must not move: `displayed()` (a v3.1-era record must not become due), `/shift codes`
-   entries (still today's text until Task 4), and the nonce formula.
+   entries (the same facts as v3.1.4, laid out by Task 4), and the nonce formula.
 
 If git or the base commit isn't around (a shallow clone, a tarball), the differential tests skip
 with a reason; the literal pins and the formula checks still run everywhere.
@@ -999,7 +999,32 @@ def _entries_grid():
         yield dict(reward=reward, origin=origin, category=cat, expires_on=exp)
 
 
-def test_shift_codes_entries_read_exactly_as_v314_wrote_them(old_format):
+def _v314_entry_in_the_new_layout(old: str, fields: dict) -> str:
+    """What v3.1.4 wrote for a `/shift codes` entry, re-laid-out the way Task 4 draws it.
+
+    Task 4 changed the layout and none of the facts: the fence replaces the inline code, the
+    two labels become chips, "unknown" loses its word, and a permanent code reads `expires`
+    never with its origin after it. The reward text, the expiry phrase and the origin are
+    taken from the old entry as they were.
+    """
+    code_line, rest = old.split("\n", 1)
+    reward, tail = rest.rsplit(" \u00b7 ", 1)
+    reward = "unknown" if reward == "reward unknown" else reward
+    if tail == "permanent":
+        expires = "`expires` never"
+    elif fields.get("category") == "permanent":
+        expires = f"`expires` never \u00b7 {tail}"
+    elif tail == "expiry unknown":
+        expires = "`expires` unknown"
+    elif tail == "expired":
+        d = fields["expires_on"]
+        expires = f"`expired` {d.strftime('%b')} {d.day}, {d.year}"
+    else:
+        expires = "`expires` " + tail.removeprefix("expires ")
+    return f"```\n{code_line.strip('`')}\n```\n`reward` {reward} \u00b7 {expires}"
+
+
+def test_shift_codes_entries_say_what_v314_said_in_the_new_layout(old_format):
     checked = 0
     for fields in _entries_grid():
         row = _row("A" * 29, **fields)
@@ -1007,25 +1032,33 @@ def test_shift_codes_entries_read_exactly_as_v314_wrote_them(old_format):
         old_cur = (
             old_format.CurrentCode(**cur.__dict__) if hasattr(old_format, "CurrentCode") else cur
         )
-        assert _current_entry(cur, NOW) == old_format._current_entry(old_cur, NOW), fields
+        want = _v314_entry_in_the_new_layout(old_format._current_entry(old_cur, NOW), fields)
+        assert _current_entry(cur, NOW) == want, fields
         checked += 1
     assert checked > 500
     bare = CurrentCode(code="A" * 29, first_seen_at=NOW, details=None)
-    assert _current_entry(bare, NOW) == old_format._current_entry(bare, NOW)
+    assert _current_entry(bare, NOW) == _v314_entry_in_the_new_layout(
+        old_format._current_entry(bare, NOW), {}
+    )
 
 
-def test_shift_codes_pages_are_byte_identical_to_v314s(old_format):
+def test_shift_codes_pages_list_v314s_codes_in_v314s_order_under_the_new_look(old_format):
     entries = [
         _current(code=f"{i:04d}A-BCDEF-GHJKL-MNPQR-STUVW", **f)
         for i, f in enumerate(list(_entries_grid())[::7])
     ]
+
+    def codes(pages):
+        text = "\n".join(e.description for e in pages)
+        return re.findall(r"\d{4}A-BCDEF-GHJKL-MNPQR-STUVW", text)
+
     for kind in ("all", "golden", "permanent", "cosmetic"):
         kw = dict(kind=kind, now=NOW, footer="sources", empty="nothing")
         got = render_current_pages(entries, **kw)
         want = old_format.render_current_pages(entries, **kw)
-        assert [(e.title, e.description, e.footer.text, e.color) for e in got] == [
-            (e.title, e.description, e.footer.text, e.color) for e in want
-        ]
+        assert codes(got) == codes(want)
+        assert all(e.footer.text.startswith("sources \u00b7 Page ") for e in got)
+        assert {e.color.value for e in got} == {terminal.SHIFT_GREEN}
 
 
 def test_the_only_alert_text_that_changed_is_what_the_plan_names(old_format):

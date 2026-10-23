@@ -17,7 +17,9 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from chip_check import ALLOWED_CHIPS, chips, fence_bodies
 
+from newsbot.bot import terminal
 from newsbot.bot.format import (
     discord_len,
     render_current_pages,
@@ -30,7 +32,6 @@ SEEN = datetime(2026, 9, 25, 20, 0, tzinfo=UTC)
 FOOTER = "Codes from Gearbox and mentalmars.com \u00b7 redeem at shift.gearboxsoftware.com"
 EMPTY = "No current codes. I'll post new ones in <#123> when they show up."
 KINDS = ("all", "golden", "cosmetic", "permanent")
-GROUPS = {"golden": "Golden Keys", "cosmetic": "Cosmetics", "permanent": "Permanent", None: "Other"}
 FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
 
 
@@ -109,9 +110,12 @@ def test_current_pages_stay_inside_every_discord_limit(n, kind):
         e.code for e in entries if kind == "all" or (e.details and e.details.category == kind)
     ]
     text = _text(embeds)
+    assert sorted(b for e in embeds for b in fence_bodies(e.description)) == sorted(wanted)
     for code in wanted:
-        assert text.count(f"`{code}`") == 1
-    assert text.count("`") == 2 * len(wanted)
+        assert text.count(f"```\n{code}\n```") == 1
+    for embed in embeds:
+        assert set(chips(embed.description)) <= ALLOWED_CHIPS
+        assert embed.color.value == terminal.SHIFT_GREEN
 
 
 def test_one_page_is_page_1_of_1_and_a_hundred_pages_count_up_to_a_hundred():
@@ -137,9 +141,9 @@ def _entry_with_reward(length: int, i: int = 0) -> CurrentCode:
 
 
 def test_a_description_of_exactly_4096_units_is_one_page_and_one_unit_more_is_two():
-    # Other-group entries: "**Other**\n" then entries joined by a blank line.
+    # Other-group entries: "`[other]`\n" then entries joined by a blank line.
     def build(last: int):
-        return [_entry_with_reward(50, i) for i in range(39)] + [_entry_with_reward(last, 39)]
+        return [_entry_with_reward(50, i) for i in range(33)] + [_entry_with_reward(last, 33)]
 
     exact = None
     for last in range(0, 301):
@@ -152,8 +156,8 @@ def test_a_description_of_exactly_4096_units_is_one_page_and_one_unit_more_is_tw
     assert discord_len(full.description) == 4096
     over = _pages(build(exact + 1))
     assert len(over) == 2
-    assert over[1].description.startswith("**Other (continued)**")
-    assert f"`{_code(39)}`" in over[1].description
+    assert over[1].description.startswith("`[other (continued)]`")
+    assert f"```\n{_code(33)}\n```" in over[1].description
     assert all(discord_len(e.description) <= 4096 for e in over)
 
 
@@ -164,12 +168,19 @@ def test_the_title_is_one_line_inside_256_whatever_the_filter():
             assert "\n" not in embed.title
 
 
-def test_history_title_is_cut_to_256_after_escaping():
-    views = [_view(0)]
-    for title in ("*" * 400, "\U0001f600" * 400, "@everyone" * 60, "t" * 1000):
-        [embed] = render_history_pages(views, timezone="America/Los_Angeles", now=NOW, title=title)
-        assert discord_len(embed.title) <= 256
-        embed.title.encode("utf-16-le")  # no lone surrogate from the cut
+def test_the_title_is_the_constant_whatever_the_input():
+    # No caller can hand either command a title: `/shift codes` picks one by `type:` and
+    # `/shift history` has no title parameter at all. The constants are plain text with a
+    # prompt and a cursor in them, and none of them goes through `esc()`.
+    for kind, want in terminal.PAGE_TITLES_CURRENT.items():
+        for embed in _pages(_mixed(30), kind):
+            assert embed.title == want
+            assert "\\" not in embed.title
+    [embed] = render_history_pages([_view(0)], timezone="America/Los_Angeles", now=NOW)
+    assert embed.title == terminal.PAGE_TITLE_HISTORY
+    assert "\\" not in embed.title
+    with pytest.raises(TypeError):
+        render_history_pages([], timezone="UTC", now=NOW, title="@everyone")  # type: ignore[call-arg]
 
 
 # --- headings and "(continued)" ---
@@ -189,19 +200,19 @@ def _big(n: int, category: str, start: int = 0) -> list[CurrentCode]:
 def test_a_group_over_three_pages_says_continued_on_the_second_and_third_only():
     embeds = _pages(_big(25, "permanent"))
     assert len(embeds) >= 3
-    assert embeds[0].description.startswith("**Permanent**\n")
+    assert embeds[0].description.startswith("`[permanent]`\n")
     for embed in embeds[1:]:
-        assert embed.description.startswith("**Permanent (continued)**\n")
+        assert embed.description.startswith("`[permanent (continued)]`\n")
     for embed in embeds:
-        assert embed.description.count("**Permanent") == 1
+        assert embed.description.count("`[permanent") == 1
 
 
 def test_every_page_starts_with_a_heading_and_none_ends_on_one():
     embeds = _pages(_big(9, "golden") + _big(9, "cosmetic", 100) + _big(9, "permanent", 200))
     for embed in embeds:
         first = embed.description.splitlines()[0]
-        assert re.fullmatch(r"\*\*[A-Za-z ]+( \(continued\))?\*\*", first), first
-        assert not embed.description.rstrip().endswith("**")
+        assert re.fullmatch(r"`\[[a-z ]+( \(continued\))?\]`", first), first
+        assert not embed.description.rstrip().endswith("]`")
 
 
 def test_a_heading_says_continued_exactly_when_the_group_was_already_shown():
@@ -214,7 +225,7 @@ def test_a_heading_says_continued_exactly_when_the_group_was_already_shown():
     seen = set()
     for embed in embeds:
         headings = re.findall(
-            r"(?m)^\*\*(Golden Keys|Cosmetics|Permanent|Other)( \(continued\))?\*\*$",
+            r"(?m)^`\[(golden keys|cosmetics|permanent|other)( \(continued\))?\]`$",
             embed.description,
         )
         assert len({name for name, _ in headings}) == len(headings), (
@@ -223,24 +234,25 @@ def test_a_heading_says_continued_exactly_when_the_group_was_already_shown():
         for name, continued in headings:
             assert bool(continued) == (name in seen), (name, continued)
             seen.add(name)
-    assert seen == {"Golden Keys", "Cosmetics", "Permanent", "Other"}
+    assert seen == {"golden keys", "cosmetics", "permanent", "other"}
 
 
 def test_each_groups_first_heading_appears_once_without_continued():
     embeds = _pages(_big(14, "golden") + _big(14, "cosmetic", 100) + _big(14, "permanent", 200))
     text = _text(embeds)
-    for name in ("Golden Keys", "Cosmetics", "Permanent"):
-        assert text.count(f"**{name}**") == 1
-        assert f"**{name} (continued)**" in text
-    assert text.index("**Golden Keys**") < text.index("**Cosmetics**") < text.index("**Permanent**")
+    for name in ("golden keys", "cosmetics", "permanent"):
+        assert text.count(f"`[{name}]`") == 1
+        assert f"`[{name} (continued)]`" in text
+    first = [text.index(f"`[{name}]`") for name in ("golden keys", "cosmetics", "permanent")]
+    assert first == sorted(first)
 
 
 def test_the_filter_title_and_only_that_groups_heading():
     embeds = _pages(_mixed(40), "cosmetic")
-    assert {e.title for e in embeds} == {"Current SHiFT codes: Cosmetics"}
+    assert {e.title for e in embeds} == {"> current SHiFT codes: cosmetics \u258c"}
     for embed in embeds:
-        assert "Golden Keys" not in embed.description
-        assert "**Permanent" not in embed.description
+        assert "golden keys" not in embed.description
+        assert "`[permanent" not in embed.description
 
 
 def test_an_entry_is_never_split_across_pages():
@@ -260,7 +272,8 @@ def test_no_entries_is_the_empty_text_for_every_filter(kind):
     [embed] = _pages([], kind)
     assert embed.description == EMPTY
     assert embed.footer.text == f"{FOOTER} \u00b7 Page 1 of 1"
-    assert embed.title.startswith("Current SHiFT codes")
+    assert embed.title == terminal.PAGE_TITLES_CURRENT[kind]
+    assert embed.color.value == terminal.SHIFT_GREEN
 
 
 @pytest.mark.parametrize("kind", ["golden", "cosmetic", "permanent"])
@@ -271,7 +284,8 @@ def test_entries_in_other_groups_only_is_the_empty_text_with_the_filters_title(k
     ] + [_current(9)]
     [embed] = _pages(others, kind)
     assert embed.description == EMPTY
-    assert embed.title.endswith(GROUPS[kind])
+    assert embed.title == terminal.PAGE_TITLES_CURRENT[kind]
+    assert embed.color.value == terminal.SHIFT_GREEN
 
 
 @pytest.mark.parametrize("kind", ["", "ALL", "Golden", "other", "everything", "all ", None, 0])
@@ -324,7 +338,7 @@ def test_the_order_holds_across_a_page_break():
     ]
     embeds = _pages(entries)
     assert len(embeds) > 2
-    codes_in_order = re.findall(r"`(\d{4})A-BCDEF", _text(embeds))
+    codes_in_order = re.findall(r"```\n(\d{4})A-BCDEF", _text(embeds))
     assert codes_in_order == [f"{i:04d}" for i in reversed(range(40))]
 
 
@@ -345,35 +359,42 @@ def test_group_order_does_not_depend_on_input_order():
 
 def test_a_permanent_code_with_no_reward_and_no_origin():
     [embed] = _pages([_current(1, {"category": "permanent"})])
-    assert embed.description.endswith(f"`{_code(1)}`\nreward unknown \u00b7 permanent")
+    assert embed.description.endswith(
+        f"```\n{_code(1)}\n```\n`reward` unknown \u00b7 `expires` never"
+    )
 
 
 def test_a_permanent_code_with_an_origin_and_no_reward():
     [embed] = _pages([_current(1, {"category": "permanent", "origin": "Twitch drop"})])
-    assert embed.description.endswith(f"`{_code(1)}`\nreward unknown \u00b7 Twitch drop")
+    assert embed.description.endswith(
+        f"```\n{_code(1)}\n```\n`reward` unknown \u00b7 `expires` never \u00b7 Twitch drop"
+    )
 
 
 def test_a_row_with_nothing_in_it_is_other_with_both_unknowns():
     [embed] = _pages([_current(1, {})])
-    assert embed.description == f"**Other**\n`{_code(1)}`\nreward unknown \u00b7 expiry unknown"
+    assert embed.description == (
+        f"`[other]`\n```\n{_code(1)}\n```\n`reward` unknown \u00b7 `expires` unknown"
+    )
 
 
 def test_an_expired_code_that_slipped_into_the_list_says_so():
     [embed] = _pages([_current(1, {"reward": "r", "expires_on": date(2026, 10, 8)})])
-    assert embed.description.endswith("r \u00b7 expired")
+    assert embed.description.endswith("`reward` r \u00b7 `expired` Oct 8, 2026")
 
 
 def test_a_multiline_reward_cannot_forge_a_heading_or_a_second_entry():
     reward = "line one\n\n**Golden Keys**\n`" + _code(99) + "`\n# big\n-# small\n> quote"
     [embed] = _pages([_current(1, {"category": "cosmetic", "reward": reward})])
     assert "**Golden Keys**" not in embed.description
-    assert f"`{_code(99)}`" not in embed.description
-    assert len(re.findall(r"(?<!\\)`", embed.description)) == 2  # the entry's own code only
+    assert "`[golden keys]`" not in embed.description
+    assert fence_bodies(embed.description) == [_code(1)]  # the entry's own code only
+    assert set(chips(embed.description)) <= ALLOWED_CHIPS
 
 
 def test_the_reward_is_cut_to_300_shown_units_on_the_page_too():
     [embed] = _pages([_current(1, {"reward": "*" * 400})])
-    reward_line = embed.description.splitlines()[-1].split(" \u00b7 ")[0]
+    reward_line = embed.description.splitlines()[-1].split(" \u00b7 ")[0].removeprefix("`reward` ")
     assert discord_len(reward_line) <= 300
     assert reward_line.endswith("\u2026")
 
@@ -396,8 +417,8 @@ def _view(i: int = 0, details: dict | None = None, **kwargs) -> CodeView:
     return CodeView(**defaults)
 
 
-def _history(views, *, now=NOW, title="Codes seen in the last 14 days"):
-    return render_history_pages(views, timezone="America/Los_Angeles", now=now, title=title)
+def _history(views, *, now=NOW):
+    return render_history_pages(views, timezone="America/Los_Angeles", now=now)
 
 
 def test_history_with_no_details_is_the_old_page_block_for_block():
@@ -410,15 +431,15 @@ def test_history_with_no_details_is_the_old_page_block_for_block():
     ]
     [new] = _history(views)
 
-    def block(i, rest):
-        return f"```\n{_code(i)}\n```\nFirst seen 2026-09-25 · {rest}"
+    def block(i, src, marker=""):
+        return f"```\n{_code(i)}\n```\n`src` {src}\n`first seen` 2026-09-25{marker}"
 
     link = "<https://e.com/a>"
     assert new.description == "\n\n".join(
         [
             block(0, f"Gearbox Blog · {link}"),
-            block(1, f"Gearbox Blog · {link} · (old post)"),
-            block(2, f"Gearbox Blog · {link} · (from a roundup)"),
+            block(1, f"Gearbox Blog · {link}", " · old post"),
+            block(2, f"Gearbox Blog · {link}", " · from a roundup"),
             block(4, "\\*" * 49 + "\\\N{HORIZONTAL ELLIPSIS}" + f" · {link}"),
         ]
     )
@@ -430,8 +451,8 @@ def test_history_marks_a_code_expired_only_from_the_instant_its_day_ends():
     view = _view(0, {"expires_on": d, "reward": "r"})
     [alive] = _history([view], now=end - timedelta(microseconds=1))
     [dead] = _history([view], now=end)
-    assert "(expired)" not in alive.description
-    assert "(expired)" in dead.description
+    assert "\u00b7 expired" not in alive.description
+    assert dead.description.endswith("\u00b7 expired")
 
 
 @pytest.mark.parametrize(
@@ -441,23 +462,23 @@ def test_history_marks_a_code_expired_only_from_the_instant_its_day_ends():
 def test_expired_beats_every_other_marker_and_replaces_it(kwargs):
     view = _view(0, {"expires_on": date(2026, 10, 1)}, **kwargs)
     [embed] = _history([view])
-    assert "\u00b7 (expired)" in embed.description
-    assert "(from a roundup)" not in embed.description
-    assert "(old post)" not in embed.description
+    assert embed.description.endswith("\u00b7 expired")
+    assert "from a roundup" not in embed.description
+    assert "old post" not in embed.description
 
 
 def test_a_permanent_code_with_a_past_expiry_is_never_marked_expired_in_history():
     view = _view(0, {"category": "permanent", "expires_on": date(2020, 1, 1)}, from_roundup=True)
     [embed] = _history([view])
-    assert "(expired)" not in embed.description
-    assert "(from a roundup)" in embed.description
+    assert "expired" not in embed.description
+    assert embed.description.endswith("\u00b7 from a roundup")
 
 
 def test_a_row_without_an_expiry_keeps_its_old_marker():
     view = _view(0, {"reward": "r"}, status="too_old")
     [embed] = _history([view])
-    assert "(expired)" not in embed.description
-    assert "(old post)" in embed.description
+    assert "expired" not in embed.description
+    assert embed.description.endswith("\u00b7 old post")
 
 
 def test_history_mixes_pre_and_post_3_1_0_codes_on_one_page():
@@ -469,7 +490,7 @@ def test_history_mixes_pre_and_post_3_1_0_codes_on_one_page():
     [embed] = _history(views)
     blocks = embed.description.split("\n\n")
     assert len(blocks) == 3
-    assert blocks[0].count("\n") == 3  # fence (3 lines) and the source line, nothing more
+    assert blocks[0].count("\n") == 4  # fence (3 lines), then `src` and `first seen`, no more
     assert "`reward` 3 Golden Keys \u00b7 `via` mentalmars" in blocks[1]
     assert "expired" in blocks[2]
 
@@ -481,9 +502,10 @@ def test_history_keeps_the_order_it_is_given():
 
 
 def test_history_with_nothing_is_one_page_with_the_old_empty_text():
-    [embed] = _history([], title="Codes seen in the last 90 days")
+    [embed] = _history([])
     assert embed.description == "No codes seen in that window."
-    assert embed.title == "Codes seen in the last 90 days"
+    assert embed.title == terminal.PAGE_TITLE_HISTORY
+    assert embed.color.value == terminal.SHIFT_GREEN
     assert embed.footer.text.endswith("Page 1 of 1")
 
 

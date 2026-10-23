@@ -825,7 +825,7 @@ def make_member_shift_group(
         moment = clock()
         since = moment - timedelta(days=_history_days(days))
         views = await asyncio.to_thread(_history_codes_sync, db_path, since)
-        embeds = render_history_pages(views, timezone=timezone, now=moment, title="/shift history")
+        embeds = render_history_pages(views, timezone=timezone, now=moment)
         embed, view = _pages_view(interaction.user.id, embeds)
         await interaction.followup.send(
             embed=embed, view=view, ephemeral=not public, allowed_mentions=_none_mentions()

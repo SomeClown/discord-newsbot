@@ -230,11 +230,11 @@ def _surfaces(text: str) -> dict[str, str]:
         from_roundup=False,
         details=plain,
     )
-    history = render_history_pages([view], timezone="America/Los_Angeles", now=NOW, title="t")
+    history = render_history_pages([view], timezone="America/Los_Angeles", now=NOW)
     out["history"] = _set_aside(
         "\n".join(p.description for p in history),
         codes=codes,
-        extra=("Gearbox Blog", "First seen 2026-10-09"),
+        extra=("Gearbox Blog", "2026-10-09"),
     )
     return out
 
@@ -359,7 +359,7 @@ def test_a_reward_of_nothing_but_controls_is_no_reward_on_the_page_either():
         code=_code(), first_seen_at=NOW, details=_row(reward=BIDI_CONTROLS, expires_on=None)
     )
     [embed] = render_current_pages([entry], kind="all", now=NOW, footer="f", empty="e")
-    assert "reward unknown" in embed.description
+    assert "`reward` unknown" in embed.description
 
 
 def test_an_origin_at_the_cap_with_controls_is_untouched_and_a_dangling_override_is_dropped():
@@ -379,7 +379,7 @@ def test_an_origin_at_the_cap_with_controls_is_untouched_and_a_dangling_override
     [embed] = render_current_pages(entries, kind="permanent", now=NOW, footer="f", empty="e")
     assert "o" * 300 in embed.description
     assert "\u2026" not in embed.description
-    assert "reward unknown \u00b7 abc" in embed.description
+    assert "`reward` unknown \u00b7 `expires` never \u00b7 abc" in embed.description
     assert not any(ch in embed.description for ch in BIDI_CONTROLS)
 
 
@@ -586,9 +586,11 @@ def test_the_current_page_counts_days_from_pacific_midnight():
         return embed.description.splitlines()[-1]
 
     before = datetime(2026, 10, 10, 6, 59, 59, tzinfo=UTC)  # Oct 9, 23:59:59 PDT
-    assert phrase(before) == "r \u00b7 expires Oct 14 (in 5 days)"
-    assert phrase(before + timedelta(seconds=1)) == "r \u00b7 expires Oct 14 (in 4 days)"
-    assert phrase(datetime(2026, 10, 13, 7, 0, tzinfo=UTC)) == "r \u00b7 expires tomorrow"
+    assert phrase(before) == "`reward` r \u00b7 `expires` Oct 14 (in 5 days)"
+    assert phrase(before + timedelta(seconds=1)) == "`reward` r \u00b7 `expires` Oct 14 (in 4 days)"
+    assert (
+        phrase(datetime(2026, 10, 13, 7, 0, tzinfo=UTC)) == "`reward` r \u00b7 `expires` tomorrow"
+    )
 
 
 def test_the_current_page_shows_the_year_only_when_it_is_another_year():
@@ -603,8 +605,8 @@ def test_the_current_page_shows_the_year_only_when_it_is_another_year():
         ),
     ]
     [embed] = render_current_pages(entries, kind="all", now=NOW, footer="f", empty="e")
-    assert "expires Dec 31 (in 83 days)" in embed.description
-    assert "expires Jan 2, 2027 (in 85 days)" in embed.description
+    assert "`expires` Dec 31 (in 83 days)" in embed.description
+    assert "`expires` Jan 2, 2027 (in 85 days)" in embed.description
 
 
 def test_followup_lines_use_the_same_wording_as_alerts():

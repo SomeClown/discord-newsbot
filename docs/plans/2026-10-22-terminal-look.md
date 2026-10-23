@@ -448,11 +448,13 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-22-termi
 Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees the preview screenshots after Task 5, before the qa review (Tasks 7 and 8 here are run-plan's qa pass and docs step).
 
 ### Progress
+- Task 4: complete (from 209abe8; gate exit 0, 13621 passed; spec check PASS; adversarial: 317 tests with mutation checks, 0 bugs)
 - Task 3: complete (from 7170941; gate exit 0, 13269 passed; spec check PASS with 2 notes; adversarial: 100 tests incl. nonce differential vs v3.1.4, 0 bugs)
 - Task 2: complete (from 8c03cac; gate exit 0, 13132 passed; spec check PASS with 3 notes; adversarial: 697 tests, 0 bugs)
 - Task 1: complete (from 1fcd04b; gate exit 0, 12340 passed; spec check: 2 minor gaps, accepted; adversarial: 418 tests incl. a byte-for-byte differential against v3.1.4's format.py, 0 bugs)
 
 ### Decisions made during the build
+- Ruling (Task 4): the builder replaced Task 2's two "unchanged until Task 4" `/shift codes` tests in `tests/test_terminal_task2_adversarial.py` rather than editing their assertions (page counts changed, so footers can't be compared byte for byte). Accepted: the replacements map v3.1.4's entries into the new layout over the same case grid and check codes, order, color and footer prefix. If wrong: slightly weaker pinning of page breaks, covered by Task 4's own page tests.
 - Ruling (Task 3): `FOLLOWUP_MAX_CODES` stays 20. With a fence per code, a follow-up now fits about 14 typical codes per message (3 at worst-case details); the rest stay queued and drain on later passes, and each extra follow-up message spends one of the server's daily pings. Why: follow-ups confirm community codes one or two at a time in practice, and the owner chose fenced follow-ups (§17, 1A). If wrong: a rare big confirmation burst costs a server an extra ping or two; for the owner's final report.
 - Ruling (Task 2): a lone entry now tops out at 1,997 UTF-16 units instead of 2,000, because the plain continuation header (33) is longer than the pinged single-code header (30) and `solo_budget` takes the larger, as §1 predicts. `test_batch_at_exactly_the_2000_unit_boundary_does_not_split` was retargeted to 1,997. If wrong: an entry between 1,998 and 2,000 units can't go out alone; the 300-unit caps make that unreachable in practice.
 - Ruling (Task 2 spec check): the comment-only rewording in `fanout.py` and `repo.py` (outside the brief's file list) is accepted; it keeps the comments true.
@@ -461,6 +463,7 @@ Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees 
 - Ruling (Task 1 spec check): `PAGE_TITLE_CURRENT` / `PAGE_TITLE_HISTORY` in `terminal.py` ratified (§1 puts page titles there); Task 4 adds the per-`type:` titles beside them.
 
 ### Parked
+- Task 4 (adversarial, pre-existing): bidi controls stripped from rewards and origins but not from source/via names; a raw newline in a reward or origin makes a multi-line entry. Same family as Task 2's notes; for the qa pass.
 - Task 3 (spec check): stale comment at `newsbot/shift/fanout.py:237` ("Confirmed by a second source"); for the docs task. `tests/chip_check.py` now builds `ALLOWED_CHIPS` from the `terminal` constants, so a typo in a constant would pass the chip check; the Task 3 tests pin the literal chip strings, which covers it.
 - Task 2 (adversarial, pre-existing, for the qa pass): `esc()` leaves a "1. " numbered-list start after a newline unescaped and `_detail_text` keeps newlines, so a reward holding "\n1. x" draws a list item; bidi controls are stripped from rewards but not source names (config-controlled); `escape_mentions` only defuses 17–20 digit ids (`allowed_mentions` is the backstop); a reward line starting with spaces then `> ` isn't escaped. All live in shared helpers the classic layout depends on, so changing them is a v3.1 behavior change too.
 - Task 2 (spec check): comments and docstrings that still say "details via" (`newsbot/config.py:63,291`, `newsbot/shift/details.py:18,57`, the `CodeDetailsRow` docstring in `newsbot/store/models.py`). Comment-only; for the docs task.

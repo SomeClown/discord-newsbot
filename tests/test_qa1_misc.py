@@ -534,7 +534,7 @@ def _view(n: int, **details) -> CodeView:
 
 
 def _history_text(view: CodeView) -> str:
-    (embed,) = render_history_pages([view], timezone="UTC", now=T0, title="/shift history")
+    (embed,) = render_history_pages([view], timezone="UTC", now=T0)
     return embed.description
 
 
@@ -549,10 +549,9 @@ def test_an_expired_code_with_a_reward_says_expired_once_in_its_marker():
         )
     )
     assert text.count("expired") == 1
-    assert "(expired)" in text
-    assert text.endswith(
-        "\n`reward` 3 Golden Keys · `via` mentalmars"
-    )  # the expiry's credit went with it
+    assert text.endswith("`first seen` 2026-10-07 · expired")
+    # the expiry's credit went with the expiry, and the line sits right under the fence
+    assert "```\n`reward` 3 Golden Keys · `via` mentalmars\n`src`" in text
 
 
 def test_an_expired_code_with_no_reward_has_no_details_line_at_all():
@@ -571,7 +570,7 @@ def test_a_live_code_still_shows_its_expiry_in_the_line():
             expires_from="mentalmars",
         )
     )
-    assert "(expired)" not in text
+    assert "· expired" not in text
     assert "`reward` 3 Golden Keys · `expires` Oct 14, 2026 · `via` mentalmars" in text
 
 
