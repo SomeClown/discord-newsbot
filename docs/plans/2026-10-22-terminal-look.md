@@ -448,6 +448,7 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-22-termi
 Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees the preview screenshots after Task 5, before the qa review (Tasks 7 and 8 here are run-plan's qa pass and docs step).
 
 ### Progress
+- Task 6: complete (from 709e77b; gate exit 0, 13695 passed; installed package reports 3.2.0; no adversarial round: a two-line version bump covered by the existing useragent tests)
 - Task 5: complete (from 2332bc6; gate exit 0, 13695 passed; adversarial: 68 tests, 1 bug (a far-future `<t:N:R>` crashed the preview's converter) fixed in round 1; owner reviewed the screenshots and approved the look)
 - Task 4: complete (from 209abe8; gate exit 0, 13621 passed; spec check PASS; adversarial: 317 tests with mutation checks, 0 bugs)
 - Task 3: complete (from 7170941; gate exit 0, 13269 passed; spec check PASS with 2 notes; adversarial: 100 tests incl. nonce differential vs v3.1.4, 0 bugs)
