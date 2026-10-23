@@ -281,13 +281,13 @@ async def test_fetch_body_caps_response_at_5mb():
 async def test_rss_collector_rejects_redirect_to_link_local_metadata_host():
     # 169.254.169.254 is the cloud-provider instance-metadata address --
     # the canonical SSRF target. A feed URL that redirects there should
-    # never get followed to completion.
+    # never get requested at all (the check runs before the hop, not after).
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":
             return httpx.Response(
-                302, headers={"Location": "http://169.254.169.254/latest/meta-data/"}
+                302, headers={"Location": "https://169.254.169.254/latest/meta-data/"}
             )
-        return httpx.Response(200, content=b"secret metadata, never seen")
+        raise AssertionError(f"the private host was requested: {request.url}")
 
     source = RssSource(
         type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
@@ -331,8 +331,8 @@ async def test_rss_collector_allows_a_redirect_to_a_normal_public_host():
 async def test_rss_collector_rejects_redirect_to_every_private_ip_shape(location_host):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":
-            return httpx.Response(302, headers={"Location": f"http://{location_host}/x"})
-        return httpx.Response(200, content=b"never seen")
+            return httpx.Response(302, headers={"Location": f"https://{location_host}/x"})
+        raise AssertionError(f"the private host was requested: {request.url}")
 
     source = RssSource(
         type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
@@ -347,7 +347,7 @@ async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_p
     monkeypatch,
 ):
     # The literal-IP cases above never exercise the DNS-resolution branch
-    # of _reject_private_redirect: a redirect to a *hostname* (not an IP
+    # of reject_private_host: a redirect to a *hostname* (not an IP
     # literal) that happens to resolve to a private address needs the
     # same rejection, and only mocking the resolver can prove that branch
     # actually runs and actually rejects.
@@ -362,8 +362,8 @@ async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_p
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":
-            return httpx.Response(302, headers={"Location": "http://internal.attacker.example/x"})
-        return httpx.Response(200, content=b"never seen")
+            return httpx.Response(302, headers={"Location": "https://internal.attacker.example/x"})
+        raise AssertionError(f"the private host was requested: {request.url}")
 
     source = RssSource(
         type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"
@@ -377,8 +377,8 @@ async def test_rss_collector_rejects_redirect_to_a_hostname_that_resolves_to_a_p
 async def test_rss_collector_rejects_redirect_to_cgnat_shared_address_space():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":
-            return httpx.Response(302, headers={"Location": "http://100.64.0.1/x"})
-        return httpx.Response(200, content=b"never seen")
+            return httpx.Response(302, headers={"Location": "https://100.64.0.1/x"})
+        raise AssertionError(f"the private host was requested: {request.url}")
 
     source = RssSource(
         type="rss", name="Redirecting Feed", url="https://example.com/feed.xml", trust="press"

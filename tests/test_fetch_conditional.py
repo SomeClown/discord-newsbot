@@ -229,8 +229,8 @@ async def test_a_429_that_never_clears_raises():
 async def test_a_redirect_to_a_private_address_is_refused():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "codes.example":
-            return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/"})
-        return httpx.Response(200, content=PAGE)
+            return httpx.Response(302, headers={"Location": "https://169.254.169.254/latest/"})
+        raise AssertionError(f"the private host was requested: {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(ValueError, match="non-public"):
@@ -249,8 +249,8 @@ async def test_a_redirect_to_a_hostname_that_resolves_privately_is_refused(monke
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "codes.example":
-            return httpx.Response(302, headers={"Location": "http://internal.attacker.example/x"})
-        return httpx.Response(200, content=PAGE)
+            return httpx.Response(302, headers={"Location": "https://internal.attacker.example/x"})
+        raise AssertionError(f"the private host was asked: {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(ValueError, match="non-public"):

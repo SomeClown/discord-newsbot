@@ -49,6 +49,7 @@ import httpx
 from newsbot.config import QuoteSourceCfg
 from newsbot.lounge.quotes import Quote, split_fortune
 from newsbot.lounge.wikiquote import fetch_page, parse_page
+from newsbot.netguard import AddressRefused, reject_private_host, reject_private_peer
 from newsbot.text import plain_line, shown_url
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,10 @@ async def _fetch_url(http: httpx.AsyncClient, url: str) -> str:
             return await _get_text(http, url, shown)
     except TimeoutError:
         raise SourceError(f"{shown} didn't answer within {URL_TIMEOUT_S:g} seconds") from None
+    except httpx.InvalidURL, UnicodeError:
+        # httpx builds the next request from a redirect's Location even when told not to follow it,
+        # and a bad one (or a malformed IDNA label like `xn--`) escapes from the stream call.
+        raise SourceError(f"{shown} redirected to an address that isn't a valid URL") from None
     except httpx.HTTPError as exc:
         raise SourceError(f"couldn't reach {shown} ({type(exc).__name__})") from exc
 
@@ -236,9 +241,13 @@ async def _get_text(http: httpx.AsyncClient, url: str, shown: str) -> str:
     """Fetch `url`, following redirects by hand so no hop is ever requested over plain http.
 
     I let httpx follow redirects at first and checked the hops afterwards,
-    which is the bouncer inspecting your ID after you've already walked the
+    which is the bouncer inspecting your ID after you've walked through the
     dodgy alley. Now the `Location` is checked before the request, so a
-    downgrade is refused instead of merely noticed.
+    downgrade is refused instead of merely noticed. The same goes for where a
+    hop points: every URL's host is checked for a public address before it's
+    requested (the configured one too), and the connection's own address is
+    checked before the body is read (see `newsbot/netguard.py` for what that
+    does and doesn't catch).
     """
     current = httpx.URL(url)
     # Config load already refuses http://, but this is the function that
@@ -246,11 +255,19 @@ async def _get_text(http: httpx.AsyncClient, url: str, shown: str) -> str:
     if current.scheme != "https":
         raise SourceError(f"{shown} is a non-https address")
     for hop in range(MAX_REDIRECTS + 1):
+        try:
+            await reject_private_host(current)
+        except AddressRefused as exc:
+            raise SourceError(_refused(shown, hop, exc)) from None
         # httpx's own timeout is per operation, so the caller's asyncio.timeout
         # is what makes ten seconds mean ten seconds.
         async with http.stream(
             "GET", current, timeout=URL_TIMEOUT_S, follow_redirects=False
         ) as response:
+            try:
+                reject_private_peer(current, response)
+            except AddressRefused as exc:
+                raise SourceError(_refused(shown, hop, exc)) from None
             if response.status_code not in _REDIRECT_STATUSES:
                 return await _read_final(response, shown)
             target = response.headers.get("location")
@@ -261,13 +278,21 @@ async def _get_text(http: httpx.AsyncClient, url: str, shown: str) -> str:
             raise SourceError(f"{shown} redirected more than {MAX_REDIRECTS} times")
         try:
             current = current.join(target)
-        except httpx.InvalidURL:
+            # A malformed IDNA label (`xn--`) only complains when somebody asks for the host.
+            current.host  # noqa: B018
+        except httpx.InvalidURL, UnicodeError:
             raise SourceError(f"{shown} redirected to an address that isn't a valid URL") from None
         if current.scheme != "https":
             raise SourceError(
                 f"{shown} redirects to a non-https address ({shown_url(str(current))})"
             )
     raise AssertionError("unreachable: the loop returns or raises")
+
+
+def _refused(shown: str, hop: int, exc: AddressRefused) -> str:
+    """The admin line for a refused address: which source, which hop, why (host only)."""
+    where = " on a redirect" if hop else ""
+    return f"{shown} was refused{where}: {exc}"
 
 
 async def _read_final(response: httpx.Response, shown: str) -> str:

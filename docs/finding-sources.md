@@ -242,3 +242,10 @@ It's the fastest way to find out a feed URL is wrong, a subreddit is
 blocking the connection you're running from, or a brand-new alias is
 matching nothing at all, before any of that shows up as a confusing gap in
 tomorrow's digest.
+
+A few refusals it can show you, all on purpose. The bot only fetches public
+addresses: a feed on your own network (an RSS-Bridge on `192.168.x.x`, a
+compose service name, `localhost`) is refused before it's asked, and so is a
+feed that redirects somewhere private. It follows at most 5 redirects, and
+won't follow one from `https` down to plain `http`. The error line names
+the host, so `curl -sSIL <url>` against it shows you where the chain went.

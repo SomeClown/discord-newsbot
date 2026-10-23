@@ -23,9 +23,10 @@ import httpx
 import pytest
 from network_guard import PUBLIC_TEST_ADDRESS, NetworkBlockedError
 
-from newsbot.collectors import rss as rss_module
-from newsbot.collectors.rss import RssCollector, _reject_private_redirect
+from newsbot import netguard
+from newsbot.collectors.rss import RssCollector
 from newsbot.config import RssSource
+from newsbot.netguard import reject_private_host
 
 
 async def test_an_httpx_client_with_no_transport_cannot_reach_out(blocked_attempts):
@@ -227,7 +228,7 @@ async def test_a_stalled_resolver_refuses_the_source_through_the_real_collector(
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", never)
-    monkeypatch.setattr(rss_module, "_DNS_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(netguard, "DNS_TIMEOUT_S", 0.05)
     async with httpx.AsyncClient(transport=a_feed_transport()) as http:
         started = time.monotonic()
         with pytest.raises(ValueError, match="DNS lookup timed out"):
@@ -241,7 +242,7 @@ async def test_a_resolver_that_answers_inside_the_limit_is_not_refused(monkeypat
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_TEST_ADDRESS, 0))]
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", quick)
-    monkeypatch.setattr(rss_module, "_DNS_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(netguard, "DNS_TIMEOUT_S", 1.0)
     async with httpx.AsyncClient(transport=a_feed_transport()) as http:
         items = await feed_collector("https://fine.example/feed").collect(http)
     assert [i.title for i in items] == ["x"]
@@ -252,8 +253,8 @@ async def test_an_ip_literal_host_never_asks_the_resolver_at_all(monkeypatch):
         raise AssertionError("an IP literal doesn't need DNS")
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", explode)
-    response = httpx.Response(200, request=httpx.Request("GET", f"https://{PUBLIC_TEST_ADDRESS}/f"))
-    await _reject_private_redirect(response)
+    url = httpx.URL(f"https://{PUBLIC_TEST_ADDRESS}/f")
+    await reject_private_host(url)
 
 
 @pytest.mark.parametrize(
@@ -265,9 +266,9 @@ async def test_private_literals_are_still_refused_whatever_the_resolver_is_doing
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", never)
-    response = httpx.Response(200, request=httpx.Request("GET", f"https://{host}/f"))
+    url = httpx.URL(f"https://{host}/f")
     with pytest.raises(ValueError, match="non-public host"):
-        await _reject_private_redirect(response)
+        await reject_private_host(url)
 
 
 async def test_a_name_that_resolves_to_a_private_address_is_refused(monkeypatch):
@@ -275,9 +276,9 @@ async def test_a_name_that_resolves_to_a_private_address_is_refused(monkeypatch)
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 0))]
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", inside)
-    response = httpx.Response(200, request=httpx.Request("GET", "https://sneaky.example/f"))
+    url = httpx.URL("https://sneaky.example/f")
     with pytest.raises(ValueError, match="non-public host"):
-        await _reject_private_redirect(response)
+        await reject_private_host(url)
 
 
 async def test_an_outer_timeout_is_not_mistaken_for_a_dns_stall(monkeypatch):
@@ -288,8 +289,8 @@ async def test_an_outer_timeout_is_not_mistaken_for_a_dns_stall(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", never)
-    monkeypatch.setattr(rss_module, "_DNS_TIMEOUT_S", 30.0)
-    response = httpx.Response(200, request=httpx.Request("GET", "https://slow.example/f"))
+    monkeypatch.setattr(netguard, "DNS_TIMEOUT_S", 30.0)
+    url = httpx.URL("https://slow.example/f")
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.05):
-            await _reject_private_redirect(response)
+            await reject_private_host(url)

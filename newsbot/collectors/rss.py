@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import calendar
-import ipaddress
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -29,6 +29,7 @@ import httpx
 from newsbot import text
 from newsbot.collectors.base import RateLimited, RawItem
 from newsbot.config import RssSource
+from newsbot.netguard import host_name, reject_private_host, reject_private_peer
 from newsbot.reddit import is_reddit_host
 from newsbot.useragent import user_agent_headers
 
@@ -54,51 +55,59 @@ _RETRY_BACKOFFS_S = (3.0, 6.0)
 # gives.
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
-# The redirect check's own DNS lookup gets this long. `getaddrinfo` has no timeout of its own,
-# and a resolver that never answers would park the whole collection pass behind one feed.
-_DNS_TIMEOUT_S = 10.0
+# Redirect hops `_fetch` follows by hand before giving up, matching the lounge's
+# `MAX_REDIRECTS`. Five is plenty for a feed that moved.
+_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# How httpx words a `Location` it can't parse (`RemoteProtocolError`); `_stream_hop` matches it.
+_HTTPX_BAD_LOCATION = "Invalid URL in location header"
 
 
-async def _reject_private_redirect(response: httpx.Response) -> None:
-    """Raise if `response.url`'s host resolves to a private/loopback/link-local address.
+def _redirect_target(current: httpx.URL, response: httpx.Response) -> httpx.URL:
+    """Where a redirect response sends us next, or a ValueError saying why it can't."""
+    sender = host_name(current)
+    location = response.headers.get("location")
+    if not location:
+        raise ValueError(f"{sender} answered HTTP {response.status_code} with no Location")
+    target = current.join(location)
+    if target.scheme not in ("http", "https"):
+        raise ValueError(f"{sender} redirected to a non-http address")
+    if current.scheme == "https" and target.scheme == "http":
+        raise ValueError(f"{sender} redirected from https to http ({host_name(target)})")
+    return target
 
-    `follow_redirects=True` means whatever server first answered a feed
-    URL gets to redirect this client anywhere it wants: including, if
-    nothing stopped it, the cloud metadata endpoint at
-    `169.254.169.254` or a service only reachable from inside this
-    container's own network. This runs after redirects are followed
-    (`response.url` is the final URL), so it catches a redirect chain
-    that *ends* somewhere it shouldn't, not just an initially-configured
-    bad URL (config-time URLs are an owner's own problem to get right).
+
+@asynccontextmanager
+async def _stream_hop(
+    http: httpx.AsyncClient, url: httpx.URL, headers: Mapping[str, str]
+) -> AsyncIterator[httpx.Response]:
+    """One GET, streamed, with no redirect followed: that's `_fetch`'s job, hop by hop.
+
+    httpx parses a redirect's `Location` even when told not to follow it, and a junk one
+    comes out as a `RemoteProtocolError`, an `InvalidURL` or (a malformed IDNA label like
+    `xn--`) a bare `UnicodeError`, none of which says whose redirect it was. Here each
+    becomes a `ValueError` naming the host, like every other way a redirect can be wrong.
+    Only opening the stream is translated: whatever `_fetch` raises while it holds the
+    response is its own business and keeps its own name. (The `RemoteProtocolError` case
+    matches httpx's wording; a test pins that wording, so an upgrade that changes it fails
+    loudly instead of quietly un-translating it.)
     """
-    host = response.url.host
-    if not host:
-        return
-    try:
-        addresses = [ipaddress.ip_address(host)]
-    except ValueError:
-        # Not a literal IP: resolve it. A DNS failure here isn't this
-        # function's problem to report; raise_for_status()/feedparser
-        # will have their own opinion about a response that never came.
+    async with AsyncExitStack() as stack:
         try:
-            loop = asyncio.get_running_loop()
-            async with asyncio.timeout(_DNS_TIMEOUT_S):
-                infos = await loop.getaddrinfo(host, None)
-        except TimeoutError:
-            # Unlike a plain DNS failure, a resolver that stalls is a host nobody vetted, and a
-            # stalled lookup is how a collection pass could hang. Refuse the source. (This
-            # clause goes first because TimeoutError is an OSError, and the next one waves
-            # those through.)
-            raise ValueError(f"could not check where {host} points: DNS lookup timed out") from None
-        except OSError:
-            return
-        addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
-    for addr in addresses:
-        # `is_global` rather than a list of is_private/is_loopback/...: the
-        # list missed CGNAT space (100.64.0.0/10), and I'd rather let the
-        # stdlib keep the catalogue of non-public ranges than keep it myself.
-        if not addr.is_global:
-            raise ValueError(f"redirected to a non-public host: {host} ({addr})")
+            response = await stack.enter_async_context(
+                http.stream("GET", url, headers=headers, follow_redirects=False)
+            )
+        except httpx.InvalidURL, UnicodeError:
+            raise ValueError(
+                f"{host_name(url)} redirected to an address that isn't a valid URL"
+            ) from None
+        except httpx.RemoteProtocolError as exc:
+            if str(exc).startswith(_HTTPX_BAD_LOCATION):
+                raise ValueError(
+                    f"{host_name(url)} redirected to an address that isn't a valid URL"
+                ) from None
+            raise
+        yield response
 
 
 def _retry_after_s(response: httpx.Response) -> float | None:
@@ -165,50 +174,72 @@ async def _fetch(
     carried one of those is returned, not raised, with an empty body; to any other
     request it's an error (`raise_for_status`), because "nothing changed" is an
     answer to a question nobody asked.
+
+    Redirects are followed by hand, up to `_MAX_REDIRECTS`, and every URL gets its host checked
+    before it's requested (`reject_private_host`), the configured one included, so a feed can't
+    send the bot to a private address and have the request land first. Where the connection
+    actually went is checked too, before any body is read (`reject_private_peer`). Both refuse
+    with a `ValueError` that names the host, as does a redirect that loops on, drops from
+    https to http, or has no usable `Location`.
     """
     attempts = 1 + len(_RETRY_BACKOFFS_S) if retry_429 else 1
     request_headers = {**_HEADERS, **(headers or {})}
     for attempt in range(attempts):
         if attempt:
             await sleep(_RETRY_BACKOFFS_S[attempt - 1])
-        async with http.stream(
-            "GET", url, headers=request_headers, follow_redirects=True
-        ) as response:
-            await _reject_private_redirect(response)
-            if response.status_code == 429 and attempt < attempts - 1:
-                continue
-            if response.status_code == 429 and not retry_429:
-                retry_after = _retry_after_s(response)
-                logger.info(
-                    "Reddit 429 for %s (%s), Retry-After: %s",
-                    source_name or url,
-                    url,
-                    _describe_retry_after(response, retry_after),
-                    extra={"source_name": source_name, "retry_after_s": retry_after},
-                )
-                raise RateLimited(retry_after)
-            etag = response.headers.get("etag")
-            last_modified = response.headers.get("last-modified")
-            if response.status_code == 304 and _asked_for_304(request_headers):
-                return Fetched(304, b"", etag, last_modified)
-            response.raise_for_status()
-            chunks = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                remaining = _MAX_RESPONSE_BYTES - total
-                if remaining <= 0:
-                    break
-                if len(chunk) > remaining:
-                    # Slice rather than just stop after this chunk: a
-                    # transport is free to hand back the whole body as
-                    # one chunk (a test double does exactly that), and
-                    # appending it whole would blow the cap it was just
-                    # about to enforce.
-                    chunks.append(chunk[:remaining])
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            return Fetched(response.status_code, b"".join(chunks), etag, last_modified)
+        # Every attempt walks the redirects again from the configured URL.
+        current = httpx.URL(url)
+        redirects = 0
+        while True:
+            await reject_private_host(current)
+            async with _stream_hop(http, current, request_headers) as response:
+                reject_private_peer(current, response)
+                if response.status_code in _REDIRECT_STATUSES:
+                    if redirects == _MAX_REDIRECTS:
+                        raise ValueError(
+                            f"{host_name(current)} redirected more than {_MAX_REDIRECTS} times"
+                        )
+                    next_url = _redirect_target(current, response)
+                else:
+                    if response.status_code == 429 and attempt < attempts - 1:
+                        break
+                    if response.status_code == 429 and not retry_429:
+                        retry_after = _retry_after_s(response)
+                        logger.info(
+                            "Reddit 429 for %s (%s), Retry-After: %s",
+                            source_name or url,
+                            url,
+                            _describe_retry_after(response, retry_after),
+                            extra={"source_name": source_name, "retry_after_s": retry_after},
+                        )
+                        raise RateLimited(retry_after)
+                    etag = response.headers.get("etag")
+                    last_modified = response.headers.get("last-modified")
+                    if response.status_code == 304 and _asked_for_304(request_headers):
+                        return Fetched(304, b"", etag, last_modified)
+                    response.raise_for_status()
+                    chunks = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        remaining = _MAX_RESPONSE_BYTES - total
+                        if remaining <= 0:
+                            break
+                        if len(chunk) > remaining:
+                            # Slice rather than just stop after this chunk: a
+                            # transport is free to hand back the whole body as
+                            # one chunk (a test double does exactly that), and
+                            # appending it whole would blow the cap it was just
+                            # about to enforce.
+                            chunks.append(chunk[:remaining])
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                    return Fetched(response.status_code, b"".join(chunks), etag, last_modified)
+            # Only a redirect falls out of the block above (everything else
+            # returned, raised or broke out to the next attempt), and leaving
+            # the block is what closed its response.
+            current = next_url
+            redirects += 1
     raise AssertionError("unreachable: the loop above always returns or raises")
 
 

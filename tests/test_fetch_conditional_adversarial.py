@@ -104,16 +104,16 @@ async def test_a_304_after_a_redirect_to_a_public_host_is_healthy():
 @pytest.mark.parametrize(
     "location",
     [
-        "http://127.0.0.1/",
-        "http://10.0.0.5/codes",
-        "http://192.168.1.1/",
-        "http://172.16.0.9/",
-        "http://100.64.0.1/",  # CGNAT
-        "http://169.254.169.254/latest/meta-data/",
-        "http://0.0.0.0/",
-        "http://[::1]/",
-        "http://[fd00::1]/",
-        "http://[fe80::1]/",
+        "https://127.0.0.1/",
+        "https://10.0.0.5/codes",
+        "https://192.168.1.1/",
+        "https://172.16.0.9/",
+        "https://100.64.0.1/",  # CGNAT
+        "https://169.254.169.254/latest/meta-data/",
+        "https://0.0.0.0/",
+        "https://[::1]/",
+        "https://[fd00::1]/",
+        "https://[fe80::1]/",
     ],
 )
 async def test_a_redirect_to_a_non_public_literal_is_refused_even_when_it_would_say_304(location):
@@ -130,12 +130,13 @@ async def test_a_redirect_to_a_non_public_literal_is_refused_even_when_it_would_
         with pytest.raises(ValueError, match="non-public"):
             await _collect(validators, http)
     assert validators == {URL: Validators('"v1"', None)}
+    assert hits == ["codes.example"]  # refused before the private address was asked
 
 
 async def test_a_redirect_to_a_public_ip_literal_is_not_over_blocked():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "codes.example":
-            return httpx.Response(302, headers={"Location": "http://93.184.215.14/codes"})
+            return httpx.Response(302, headers={"Location": "https://93.184.215.14/codes"})
         return httpx.Response(200, content=PAGE)
 
     async with _client(handler) as http:
