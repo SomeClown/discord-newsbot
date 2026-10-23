@@ -17,7 +17,7 @@ import asyncio
 import calendar
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -59,6 +59,8 @@ _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 # `MAX_REDIRECTS`. Five is plenty for a feed that moved.
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# How httpx words a `Location` it can't parse (`RemoteProtocolError`); `_stream_hop` matches it.
+_HTTPX_BAD_LOCATION = "Invalid URL in location header"
 
 
 def _redirect_target(current: httpx.URL, response: httpx.Response) -> httpx.URL:
@@ -85,20 +87,27 @@ async def _stream_hop(
     comes out as a `RemoteProtocolError`, an `InvalidURL` or (a malformed IDNA label like
     `xn--`) a bare `UnicodeError`, none of which says whose redirect it was. Here each
     becomes a `ValueError` naming the host, like every other way a redirect can be wrong.
+    Only opening the stream is translated: whatever `_fetch` raises while it holds the
+    response is its own business and keeps its own name. (The `RemoteProtocolError` case
+    matches httpx's wording; a test pins that wording, so an upgrade that changes it fails
+    loudly instead of quietly un-translating it.)
     """
-    try:
-        async with http.stream("GET", url, headers=headers, follow_redirects=False) as response:
-            yield response
-    except httpx.InvalidURL, UnicodeError:
-        raise ValueError(
-            f"{host_name(url)} redirected to an address that isn't a valid URL"
-        ) from None
-    except httpx.RemoteProtocolError as exc:
-        if str(exc).startswith("Invalid URL in location header"):
+    async with AsyncExitStack() as stack:
+        try:
+            response = await stack.enter_async_context(
+                http.stream("GET", url, headers=headers, follow_redirects=False)
+            )
+        except httpx.InvalidURL, UnicodeError:
             raise ValueError(
                 f"{host_name(url)} redirected to an address that isn't a valid URL"
             ) from None
-        raise
+        except httpx.RemoteProtocolError as exc:
+            if str(exc).startswith(_HTTPX_BAD_LOCATION):
+                raise ValueError(
+                    f"{host_name(url)} redirected to an address that isn't a valid URL"
+                ) from None
+            raise
+        yield response
 
 
 def _retry_after_s(response: httpx.Response) -> float | None:

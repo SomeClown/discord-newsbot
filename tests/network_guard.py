@@ -1,9 +1,10 @@
 """The suite's network guard: no real DNS and no real outbound connections from a test.
 
-The suite used to make about 41 real DNS lookups (the RSS redirect check resolves hosts even
-under `MockTransport`) and at least one real connection to Steam, and an occasional stalled
-resolver looked like a hung test run. Now every lookup answers with a public test address,
-and connecting to anything but loopback or a unix socket raises on the spot.
+The suite used to make about 41 real DNS lookups (the address check, `newsbot/netguard.py`,
+resolves every host before it's fetched, even under `MockTransport`) and at least one real
+connection to Steam, and an occasional stalled resolver looked like a hung test run. Now every
+lookup answers with a public test address, and connecting to anything but loopback or a unix
+socket raises on the spot.
 
 Raising isn't enough on its own, and I learned why the dull way: the error is a
 `RuntimeError`, the collectors (rightly) catch `Exception` so one dead source can't sink a
@@ -25,7 +26,7 @@ import socket
 
 import pytest
 
-# What every hostname resolves to during a test (a public address, so the redirect guard sees a
+# What every hostname resolves to during a test (a public address, so the address check sees a
 # perfectly ordinary host). Tests that care about a particular answer patch their own.
 PUBLIC_TEST_ADDRESS = "93.184.215.14"
 

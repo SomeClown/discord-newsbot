@@ -544,3 +544,54 @@ async def test_a_nat64_address_embedding_a_public_ipv4_is_allowed():
         }
     )
     assert (await _get(site)).body == b"ok"
+
+
+# --- qa round (2026-10-23) ---
+
+
+async def test_httpx_still_words_an_unparseable_location_the_way_stream_hop_expects():
+    # `_stream_hop` translates this one RemoteProtocolError by its message. If an httpx
+    # upgrade rewords it, this fails, instead of the translation quietly stopping.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://feeds.example:abc/x"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(httpx.RemoteProtocolError) as caught:
+            async with http.stream("GET", START, follow_redirects=False):
+                pass
+    assert str(caught.value).startswith(rss_module._HTTPX_BAD_LOCATION)
+
+
+async def test_an_unparseable_location_is_a_value_error_naming_the_host():
+    site = Site({START: _redirect("https://feeds.example:abc/x")})
+    with pytest.raises(ValueError, match="feeds.example redirected to an address that isn't a"):
+        await _get(site)
+
+
+@pytest.mark.parametrize("host", ["a" * 64 + ".example", "a..example"])
+async def test_a_name_no_resolver_could_look_up_is_refused_in_plain_words(host, monkeypatch):
+    # The suite's DNS stub answers anything; the real `getaddrinfo` encodes the name with
+    # Python's IDNA codec first, which refuses these two (checked by hand on 3.14).
+    loop = asyncio.get_running_loop()
+
+    async def encoding_getaddrinfo(name, port, *args, **kwargs):
+        name.encode("idna")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", 0))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", encoding_getaddrinfo)
+    site = Site({START: _redirect(f"https://{host}/x")})
+    with pytest.raises(netguard.AddressRefused, match="isn't a name that can be looked up"):
+        await _get(site)
+    assert site.seen == [START]
+
+
+async def test_an_error_while_reading_a_body_keeps_its_own_name():
+    # Only opening the stream is translated; a failure after that is not a "redirect".
+    class Boom(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "made up")
+            yield b""  # pragma: no cover
+
+    site = Site({START: httpx.Response(200, stream=Boom())})
+    with pytest.raises(UnicodeDecodeError):
+        await _get(site)

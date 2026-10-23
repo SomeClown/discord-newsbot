@@ -868,7 +868,7 @@ Owner decisions (2026-10-09):
 ```
 
 - **Fetching:**
-  - It's fetched with the hourly collection, through the same guarded fetch the RSS collector uses (the User-Agent, the 5 MB cap, the 429 retries, the private-address redirect check).
+  - It's fetched with the hourly collection, through the same guarded fetch the RSS collector uses (the User-Agent, the 5 MB cap, the 429 retries, the private-address redirect check; since v3.2.2 that check looks at every hop, the configured URL included, before it's requested).
   - When the site sends `ETag` or `Last-Modified`, the next request asks "has it changed?". A `304 Not Modified` is a healthy pass with nothing new.
   - The validators live in memory; the first pass after a restart fetches in full.
 - **`codes_only` is always on** for this type: leaving it out means true, and `false` is a config error.
@@ -1054,7 +1054,7 @@ Where the code settled on something this section leaves open or says differently
 **Startup refuses a database from an earlier draft of 009.** 009 was amended in place during the build (the edit-tracking, ping and silencing columns and one index were added), which is fine because no released database has it. A development database that ran an earlier draft can't be upgraded: `migrate` checks for the later columns and index (`_BUILD_COLUMNS`, `_BUILD_INDEXES` in `store/db.py`) and raises a `StoreError` that says to start the database fresh. That applies to the dev bot's `data/dev.db`.
 
 **Known limits.**
-- The SSRF redirect check in the shared fetch (`_reject_private_redirect`) runs after redirects are followed, as it always has, so it catches a bad destination but doesn't stop the request from being made. That predates 3.1.0; the new collector shares it.
+- The SSRF redirect check in the shared fetch (`_reject_private_redirect`) runs after redirects are followed, as it always has, so it catches a bad destination but doesn't stop the request from being made. That predates 3.1.0; the new collector shares it. **Fixed in v3.2.2 (2026-10-23):** `newsbot/netguard.py` checks every URL before it's requested and the address each connection reached before its body is read, for the shared fetch and the lounge's text-file fetcher alike (see the CLAUDE.md v3.2.2 entry).
 - Delivery and edits still run inside the collection hook's 120-second budget (deliveries first). The edit reserve makes alerts bigger and so spreads a big drop over more messages, which means the old estimate of "about 170 SHiFT servers" for a drop to drain over several passes now comes sooner. Moving SHiFT delivery into a job of its own is the fix and is still on the to-do list.
 - Details are read only from mentalmars' tables and Gearbox's own posts. Reddit, Bluesky search and press free text are on the to-do list.
 

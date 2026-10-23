@@ -118,7 +118,9 @@ async def test_a_plain_dns_failure_passes_through_to_the_request(tmp_path, monke
     assert seen == [START]
 
 
-async def test_the_refusal_does_not_echo_the_url_path_or_query(tmp_path):
+async def test_the_refusal_does_not_echo_the_url_query(tmp_path):
+    # `shown_url` keeps the path on purpose (it's how an admin finds the file) and drops the
+    # query, where a token would ride.
     url = "https://example.test/gist/s3cr3t-token/quotes.txt?key=hunter2"
     result, _ = await _load(tmp_path, {url: _redirect("https://10.0.0.5/x")}, url)
     assert "hunter2" not in result.problem

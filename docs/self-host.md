@@ -697,7 +697,8 @@ entry is exactly one of:
   `./data`, §5).
 - `url: https://...`: a raw text file at an https address, in the same `%`
   format. Plain `http://` is refused, and so is an address that redirects to
-  one (redirects are followed by hand, at most 5). It must be served as
+  one (redirects are followed by hand, at most 5), and so is an address on a
+  private network or one that redirects there. It must be served as
   `text/plain`; the link to a gist's or GitHub's web page is HTML, and the
   bot says so rather than posting a page of markup. It's fetched every time
   it's picked, with a 1 MB cap and a 10-second limit.

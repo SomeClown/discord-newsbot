@@ -92,6 +92,11 @@ async def reject_private_host(url: httpx.URL) -> None:
             raise AddressRefused(
                 f"could not check where {host} points: DNS lookup timed out"
             ) from None
+        except UnicodeError:
+            # Python's own IDNA codec, inside `getaddrinfo`, refuses a label over 63
+            # characters or an empty one (`a..b`). No request can go there either, so
+            # it's refused here, in words a run report can use.
+            raise AddressRefused(f"{host} isn't a name that can be looked up") from None
         except OSError:
             return
         addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
