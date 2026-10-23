@@ -677,30 +677,46 @@ The standard path from a change to a running production bot:
 2. **Merge to `main`.** CI publishes `ghcr.io/someclown/discord-newsbot:latest`
    and a `sha-<short>` tag for that specific build. GitHub Pages publishes
    `site/` (the privacy policy and terms) from `main` too.
-3. **Try the published image against the test guild**, with the dev bot,
-   before trusting it anywhere near prod:
+3. **Build and check the image locally** from the merged `main`, before
+   tagging. Docker Desktop doesn't run all the time (it wants 2 to 4 GB of
+   memory, and once a forgotten dev container ran for 33 hours), so start
+   it, build, check, and quit it again:
+   ```bash
+   open -a Docker            # then wait until `docker info` answers
+   docker build -t newsbot-local .
+   docker run --rm --entrypoint python newsbot-local -c "import newsbot"
+   docker run --rm --entrypoint sh newsbot-local -c "ls /app/LICENSE /app/NOTICE"
+   docker ps                 # should be empty
+   osascript -e 'quit app "Docker Desktop"'
+   ```
+   A prompt change gets an owner-run `/newsbot preview` (or the CLI's
+   `--dry-run`) on top of that. For anything else that needs a live
+   Discord check, the staging overlay can still run the published image
+   against the test guild with the dev bot:
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
    docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
    ```
    `docker-compose.staging.yml` is the same dev token/config/database as
    `docker-compose.dev.yml` (`.env.dev`, `config.dev.yaml`, `data/dev.db`)
-   but pulls the GHCR image instead of building locally; the point is to
-   exercise the exact artifact that would get deployed, not a fresh local
-   build of the same source. Stop `docker-compose.dev.yml` (or a local
-   `python -m newsbot` against `.env.dev`) first; it's still the dev
-   token, so it's still one-instance-per-token (see `CLAUDE.md`), just
-   like running the dev bot any other way. It's unrelated to prod's
-   token, so prod can keep running the whole time regardless.
-4. **Tag a release** once the staging check looks good:
+   but pulls the GHCR image instead of building locally, so it exercises
+   the exact artifact that would get deployed. Stop `docker-compose.dev.yml`
+   (or a local `python -m newsbot` against `.env.dev`) first; it's still
+   the dev token, so it's still one-instance-per-token (see `CLAUDE.md`).
+   It's unrelated to prod's token, so prod keeps running regardless. Every
+   release since the bot went public has done the local check and skipped
+   this one; it's here for the day a change can't be judged any other way.
+4. **Tag a release** on the merge commit, as an annotated tag:
    ```bash
-   git tag v1.1.0
-   git push origin v1.1.0
+   git tag -a v3.2.1 -m "v3.2.1: what ships"
+   git push origin v3.2.1
    ```
-   CI additionally publishes semver tags (`1.1.0`, `1.1`) for a tagged
-   push.
+   CI additionally publishes semver tags (`3.2.1`, `3.2`) for a tagged
+   push. That build makes the image for amd64 and arm64 and takes about
+   15 minutes; wait for it to go green before deploying (see
+   [`docs/deploy.md`](docs/deploy.md) §7).
 5. **Deploy** with `./scripts/deploy.sh` on the Droplet: see
-   [`docs/deploy.md`](docs/deploy.md). Pin `TAG=1.1.0` in the Droplet's
+   [`docs/deploy.md`](docs/deploy.md). Pin `TAG=3.2.1` in the Droplet's
    `.env` for a deliberate upgrade; rolling back is changing `TAG` back
    to the previous value.
 
