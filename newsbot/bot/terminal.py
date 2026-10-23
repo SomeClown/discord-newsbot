@@ -49,6 +49,7 @@ GROUP_OTHER = "other"
 ROUNDUP_HEADER = "SHiFT roundup"
 ROUNDUP_CONTINUATION = "SHiFT roundup (continued)"
 FOLLOWUP_HEADER = "confirmed by a second source"
+FOLLOWUP_CONTINUATION = "confirmed by a second source (continued)"
 
 # Embed titles are plain text, not chips: a title can't hold inline code. They're fixed
 # strings, and deliberately don't go through `esc()`, which would turn the "> " into "\> ".

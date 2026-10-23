@@ -244,7 +244,7 @@ def built():
 
 def test_every_case_title_is_on_the_page(built):
     script, cases, page = built
-    assert len(cases) == 14
+    assert len(cases) == 15
     for title, items in cases:
         assert html.escape(title) in page
         assert items

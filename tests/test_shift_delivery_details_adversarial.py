@@ -12,7 +12,7 @@ The groups, in the order a stranger would notice them breaking:
 3. Ping integrity: what the stored header says against what the message carried.
 4. The reserve: `reserve_for_config` on every config shape, renamed "via" names, and
    packing with it against the walk's time budget and pacing.
-5. Follow-ups that fit by size and drain over several passes.
+5. Follow-ups that fit by size and spill into continuations, all under one ping.
 6. Roundups, the CLI preview, retention.
 
 Real temp SQLite with the real migrations, scripted fake posters, an injected clock. No
@@ -1260,7 +1260,7 @@ async def deliver_after_release(h: Rig):
     return await h.deliver()
 
 
-# --- 5. follow-ups that fit by size and drain over several passes ---
+# --- 5. follow-ups that fit by size and spill into continuations under one ping ---
 
 LONG_REWARD = "x" * 300  # five of these (plus their codes) fill a follow-up; six don't
 
@@ -1274,6 +1274,19 @@ async def first_pass_and_confirm(h: Rig, codes: list[str], *, details=True) -> N
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
 
+async def confirm_without_delivering(h: Rig, codes: list[str]) -> None:
+    """Queue every code's follow-up and stop there, as a walk that ran out of time would."""
+    await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
+    for code in codes:
+        store_details(h.db_path, code, reward=LONG_REWARD)
+    h.clock = NOW + timedelta(hours=20)
+    await fanout._release(
+        h.deps(), [sighting(BLUESKY, "community", c, h.clock) for c in codes], seeding_ok=True
+    )
+    assert set(followup_statuses(h).values()) == {"queued"}
+    h.created.clear()
+
+
 def followups(h: Rig) -> list[RenderedAlert]:
     return [a for a in h.sent(1) if a.content.startswith(("@everyone", "<@&"))]
 
@@ -1282,78 +1295,91 @@ def followup_statuses(h: Rig) -> dict[str, str]:
     return dict(rows(h.db_path, "SELECT code, status FROM guild_code_followups"))
 
 
-async def test_a_backlog_of_followups_drains_over_passes_with_one_ping_each_and_no_repeats(h):
+def followup_messages(h: Rig) -> list[RenderedAlert]:
+    """Every follow-up message sent to server 1, continuations included, in order."""
+    return [a for a in h.sent(1) if "confirmed by a second source" in a.content]
+
+
+async def test_a_backlog_of_followups_goes_out_in_one_turn_under_one_ping(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(14)
 
     await first_pass_and_confirm(h, codes)
-    for _ in range(3):
-        h.clock += timedelta(hours=1)
-        await h.run([])
 
-    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
+    sent = followup_messages(h)
     assert [len(a.codes) for a in sent] == [5, 5, 4]
     assert [c for a in sent for c in a.codes] == codes  # in queue order, none twice, none lost
-    assert all(a.ping and a.content.startswith("@everyone ") for a in sent)
+    assert [a.ping for a in sent] == [True, False, False]  # the first message carries the ping
+    assert sent[0].content.startswith("@everyone ")
+    assert all(
+        a.content.startswith("`> confirmed by a second source (continued)") for a in sent[1:]
+    )
     assert all(discord_len(a.content) <= 2000 for a in sent)
-    assert shift_row(h.db_path, 1).ping_count == 3
+    assert shift_row(h.db_path, 1).ping_count == 1  # one claim, one unit, three messages
     assert set(followup_statuses(h).values()) == {"posted"}
     assert (
         len(message_rows(h.db_path)) == 1
     )  # the 14 originals went out as one alert; follow-ups add none
 
+    # Later passes find nothing waiting.
+    before = len(h.sent(1))
+    for _ in range(3):
+        h.clock += timedelta(hours=1)
+        await h.run([])
+        assert len(h.sent(1)) == before
 
-async def test_a_fourth_pass_is_stopped_by_the_daily_cap_and_nothing_goes_out_twice(h):
+
+async def test_a_backlog_never_loses_codes_to_the_daily_cap_because_it_costs_one_ping(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(16)
 
     await first_pass_and_confirm(h, codes)
-    for _ in range(4):  # one more than the cap allows
+    for _ in range(4):
         h.clock += timedelta(hours=1)
         await h.run([])
 
-    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
-    assert [len(a.codes) for a in sent] == [5, 5, 5]
-    assert shift_row(h.db_path, 1).ping_count == 3  # the cap, never 4
-    statuses = followup_statuses(h)
-    assert statuses[codes[-1]] == "skipped"  # not "queued forever", and not posted unpinged
-    assert [s for c, s in statuses.items() if c != codes[-1]] == ["posted"] * 15
+    sent = followup_messages(h)
+    assert shift_row(h.db_path, 1).ping_count == 1  # three a day were allowed; one was used
+    assert set(followup_statuses(h).values()) == {"posted"}  # nothing skipped, nothing unpinged
     posted_codes = [c for a in sent for c in a.codes]
-    assert len(posted_codes) == len(set(posted_codes))
+    assert posted_codes == codes
 
 
-async def test_one_ping_per_pass_even_when_a_pass_has_both_new_codes_and_followups(h):
+async def test_one_ping_per_claim_when_a_pass_has_both_new_codes_and_a_burst_of_followups(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(8)
-    await first_pass_and_confirm(h, codes)  # the confirming pass already sent follow-up number 1
-    before = shift_row(h.db_path, 1).ping_count
+    await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
+    for code in codes:
+        store_details(h.db_path, code, reward=LONG_REWARD)
+    h.clock = NOW + timedelta(hours=20)
 
-    h.clock += timedelta(hours=1)
     await h.run(
-        [item(CODE_A, url="https://example.com/fresh")]
-    )  # an official code, and a follow-up due
+        [item(CODE_A, url="https://example.com/fresh")]  # an official code: its own ping
+        + [sighting(BLUESKY, "community", c, h.clock) for c in codes]  # and a follow-up burst
+    )
 
     pings = [a for a in h.sent(1) if carries_a_ping(a.content)]
-    assert shift_row(h.db_path, 1).ping_count == before + 2  # one alert ping, one follow-up ping
-    assert len(pings) == 3  # the confirming pass's follow-up, then this pass's alert and follow-up
+    sent = followup_messages(h)
+    assert len(sent) == 2 and sum(len(a.codes) for a in sent) == 8  # one burst, two messages
+    assert shift_row(h.db_path, 1).ping_count == 2  # one alert ping, one follow-up ping
+    assert len(pings) == 2  # the alert, and the burst's first message
+    assert [a.ping for a in sent] == [True, False]
     assert_records_match_what_posted(h)
 
 
 async def test_a_code_that_expired_inside_a_queued_batch_is_skipped_and_costs_no_ping(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(8)
-    await first_pass_and_confirm(h, codes)  # 5 went out; codes[5:] are queued
-    assert followup_statuses(h)[codes[5]] == "queued"
+    await confirm_without_delivering(h, codes)
     store_expiry(h.db_path, codes[6], date(2026, 9, 30), now=h.clock)
 
-    h.clock += timedelta(hours=1)
-    await h.run([])
+    await h.deliver()
 
-    last = [a for a in h.sent(1) if "confirmed by a second source" in a.content][-1]
-    assert last.codes == [codes[5], codes[7]]
-    assert codes[6] not in last.content
+    sent = followup_messages(h)
+    assert [c for a in sent for c in a.codes] == [c for c in codes if c != codes[6]]
+    assert all(codes[6] not in a.content for a in sent)
     assert followup_statuses(h)[codes[6]] == "skipped"
-    assert shift_row(h.db_path, 1).ping_count == 2
+    assert shift_row(h.db_path, 1).ping_count == 1  # one claim for the live seven
 
 
 async def test_a_batch_of_nothing_but_expired_codes_posts_nothing_and_spends_nothing(h):
@@ -1393,36 +1419,37 @@ async def test_a_code_known_to_be_expired_at_confirmation_is_never_queued(h):
     assert shift_row(h.db_path, 1).ping_count == 0
 
 
-async def test_details_that_change_between_passes_show_as_they_stand_in_each_followup(h):
+async def test_details_that_changed_since_the_alert_show_as_they_stand_in_every_message(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(7)
-    await first_pass_and_confirm(h, codes)  # 5 sent, with LONG_REWARD
-    first = [a for a in h.sent(1) if "confirmed by a second source" in a.content][0]
+    await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
+    for code in codes:
+        store_details(h.db_path, code, reward=LONG_REWARD)
+    # The sixth code's reward changes after its alert and before the confirmation.
+    store_details(h.db_path, codes[5], reward="Now: 9 Golden Keys", now=NOW + timedelta(hours=1))
+    h.clock = NOW + timedelta(hours=20)
+    await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
+
+    first, second = followup_messages(h)  # a short line fits where a long one didn't: 6 and 1
     assert LONG_REWARD in first.content
-
-    store_details(
-        h.db_path, codes[5], reward="Now: 9 Golden Keys", now=h.clock + timedelta(minutes=1)
-    )
-    h.clock += timedelta(hours=1)
-    await h.run([])
-
-    second = [a for a in h.sent(1) if "confirmed by a second source" in a.content][1]
     assert f"```\n{codes[5]}\n```\n`reward` Now: 9 Golden Keys · `via` {MENTALMARS}" in (
-        second.content
+        first.content
     )
+    assert second.codes == [codes[6]]
     assert f"```\n{codes[6]}\n```\n`reward` {LONG_REWARD}" in second.content
 
 
 async def test_a_followup_that_waited_a_day_says_the_date_and_no_relative_words(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = n_codes(6)
-    await first_pass_and_confirm(h, codes)  # 5 sent at Oct 2 01:00 Pacific; codes[5] waits
+    await confirm_without_delivering(h, codes)  # queued at Oct 2 01:00 Pacific
     store_expiry(h.db_path, codes[5], date(2026, 10, 3), now=h.clock)
 
     h.clock += timedelta(days=1, hours=18)  # Oct 3 19:00 Pacific
-    await h.run([])
+    await h.deliver()
 
-    last = [a for a in h.sent(1) if "confirmed by a second source" in a.content][-1]
+    last = followup_messages(h)[-1]
+    assert codes[5] in last.codes
     # Oct 3 ends at Pacific midnight, Oct 4 00:00 PDT = 07:00 UTC; Discord does the counting.
     assert "`expires` Oct 3, 2026 (<t:1791097200:R>)" in last.content
     assert "`expires` in" not in last.content and "tomorrow" not in last.content
@@ -1451,16 +1478,16 @@ async def test_twenty_five_plain_followups_send_twenty_then_five(h):
     codes = n_codes(25)
 
     await first_pass_and_confirm(h, codes, details=False)
-    h.clock += timedelta(hours=1)
-    await h.run([])
 
-    sent = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
+    sent = followup_messages(h)
     assert [len(a.codes) for a in sent] == [20, 5]
     assert [c for a in sent for c in a.codes] == codes
     assert sent[0].content.startswith("@everyone `> confirmed by a second source ▌`\n\n```\n")
+    assert sent[1].content.startswith("`> confirmed by a second source (continued) ▌`\n\n```\n")
+    assert [a.ping for a in sent] == [True, False]
 
 
-async def test_a_followup_with_a_worst_case_line_per_code_still_fits_and_waits_for_the_rest(h):
+async def test_a_followup_with_a_worst_case_line_per_code_spills_and_loses_nothing(h):
     add_guild(h.db_path, 1, ping=ROLE)
     codes = n_codes(6)
     await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
@@ -1488,11 +1515,13 @@ async def test_a_followup_with_a_worst_case_line_per_code_still_fits_and_waits_f
 
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
-    (first,) = [a for a in h.sent(1) if "confirmed by a second source" in a.content]
-    assert discord_len(first.content) <= 2000
-    assert 0 < len(first.codes) < 6
-    waiting = [c for c, s in followup_statuses(h).items() if s == "queued"]
-    assert waiting == codes[len(first.codes) :]
+    sent = followup_messages(h)
+    assert len(sent) > 1
+    assert all(discord_len(a.content) <= 2000 for a in sent)
+    assert [c for a in sent for c in a.codes] == codes
+    assert [a.ping for a in sent] == [True] + [False] * (len(sent) - 1)
+    assert set(followup_statuses(h).values()) == {"posted"}
+    assert shift_row(h.db_path, 1).ping_count == 1
 
 
 def store_expiry(db_path, code, day, *, now):

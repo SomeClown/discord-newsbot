@@ -30,8 +30,7 @@ from newsbot.bot.format import (
     _roundup_header,
     discord_len,
     esc,
-    fit_followup_codes,
-    render_followup_alert,
+    render_followup_alerts,
     render_roundup_alerts,
 )
 from newsbot.config import load_config
@@ -46,6 +45,7 @@ POST = "https://e.com/roundup"
 ROUNDUP_CHIP = "`> SHiFT roundup ▌`"
 CONTINUATION = "`> SHiFT roundup (continued) ▌`"
 FOLLOWUP_CHIP = "`> confirmed by a second source ▌`"
+FOLLOWUP_CONTINUATION = "`> confirmed by a second source (continued) ▌`"
 CODE_SHAPE = re.compile(r"[0-9A-Z]{5}(-[0-9A-Z]{5}){4}")
 
 # Text that tries to be a chip, a fence, a ping or a link. Every one of these goes in as a
@@ -242,15 +242,16 @@ def test_a_roundup_never_pings_and_its_continuations_say_so():
         assert alert.header == CONTINUATION
 
 
-def test_the_roundup_and_followup_nonces_are_the_ones_they_always_were():
+def test_the_roundup_and_followup_nonces_follow_their_formulas():
     cands = [_candidate(1), _candidate(2)]
     [roundup] = render_roundup_alerts(cands, nonce_scope="1|100")
     codes = [c.code for c in cands]
     want = hashlib.sha256(f"1|100|roundup|{'|'.join(codes)}|0".encode()).hexdigest()[:25]
     assert roundup.nonce == want
 
-    follow = render_followup_alert(codes, ping_mention="@everyone", nonce_scope="1|100")
-    want = hashlib.sha256(f"1|100|followup|{'|'.join(codes)}".encode()).hexdigest()[:25]
+    [follow] = render_followup_alerts(codes, ping_mention="@everyone", nonce_scope="1|100")
+    # Same formula as v3.1.4, plus the message's index on the end (as the roundup has).
+    want = hashlib.sha256(f"1|100|followup|{'|'.join(codes)}|0".encode()).hexdigest()[:25]
     assert follow.nonce == want
     assert follow.ping is True and follow.ping_prefix == "@everyone "
 
@@ -260,7 +261,7 @@ def test_the_roundup_and_followup_nonces_are_the_ones_they_always_were():
 
 def test_a_followup_is_the_ping_the_prompt_and_a_fence_per_code():
     codes = [_code(1), _code(2)]
-    alert = render_followup_alert(codes, ping_mention=ROLE20)
+    [alert] = render_followup_alerts(codes, ping_mention=ROLE20)
     assert alert.content == (
         f"{ROLE20} {FOLLOWUP_CHIP}\n\n```\n{codes[0]}\n```\n\n```\n{codes[1]}\n```"
     )
@@ -271,31 +272,36 @@ def test_a_followup_is_the_ping_the_prompt_and_a_fence_per_code():
 def test_twenty_followup_codes_without_details_fit_in_one_message(mention):
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     assert FOLLOWUP_MAX_CODES == 20
-    assert fit_followup_codes(codes, ping_mention=mention, details={}, now=NOW) == codes
-    alert = render_followup_alert(codes, ping_mention=mention)
+    [alert] = render_followup_alerts(codes, ping_mention=mention, details={}, now=NOW)
     assert discord_len(alert.content) <= 2000
     assert alert.codes == codes
 
 
-def test_worst_case_details_make_the_fit_shorter_and_the_message_still_fits():
+def test_worst_case_details_make_a_followup_spill_and_every_message_still_fits():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     details = {c: _worst(c, "m" * 100, "n" * 100, "x" * 300) for c in codes}
-    fit = fit_followup_codes(codes, ping_mention=ROLE20, details=details, now=NOW)
-    assert 0 < len(fit) < len(codes)
-    assert fit == codes[: len(fit)]
-    alert = render_followup_alert(fit, ping_mention=ROLE20, details=details, now=NOW)
-    assert discord_len(alert.content) <= 2000
-    # One more code would have been over; that's what "fits" means.
-    with pytest.raises(ValueError, match="exceeds 2000"):
-        render_followup_alert(codes[: len(fit) + 1], ping_mention=ROLE20, details=details, now=NOW)
+    alerts = render_followup_alerts(codes, ping_mention=ROLE20, details=details, now=NOW)
+    assert len(alerts) > 1
+    assert [c for a in alerts for c in a.codes] == codes
+    assert all(discord_len(a.content) <= 2000 for a in alerts)
+    # The ping is in the first message only; the rest are the continuation chip's.
+    assert alerts[0].content.startswith(f"{ROLE20} {FOLLOWUP_CHIP}\n\n")
+    for a in alerts[1:]:
+        assert a.content.startswith(f"{FOLLOWUP_CONTINUATION}\n\n")
+        assert ROLE20 not in a.content
 
 
 def followups_sent(h):
     """What the rig sent to server 1 that was a follow-up, not the originals before it."""
-    return [a for a in h.sent(1) if FOLLOWUP_CHIP in a.content.split("\n", 1)[0]]
+    return [
+        a
+        for a in h.sent(1)
+        if (first := a.content.split("\n", 1)[0])
+        and (FOLLOWUP_CHIP in first or FOLLOWUP_CONTINUATION in first)
+    ]
 
 
-async def test_the_codes_that_do_not_fit_stay_queued_and_go_out_next_pass(h):
+async def test_the_codes_that_do_not_fit_one_message_go_out_in_the_same_turn(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = [numbered(n) for n in range(1, 9)]
     await h.run([sighting(REDDIT, "community", c, FANOUT_NOW) for c in codes])
@@ -306,22 +312,21 @@ async def test_the_codes_that_do_not_fit_stay_queued_and_go_out_next_pass(h):
 
     with closing(connect(h.db_path)) as conn:
         details = repo.code_details_for(conn, codes)
-    expected = fit_followup_codes(codes, ping_mention="@everyone", details=details, now=h.clock)
-    (first,) = followups_sent(h)
-    assert first.codes == expected
-    assert 0 < len(expected) < len(codes)
-    assert discord_len(first.content) <= 2000
-    statuses = dict(rows(h.db_path, "SELECT code, status FROM guild_code_followups"))
-    assert [c for c in codes if statuses[c] == "queued"] == codes[len(expected) :]
-    assert [c for c in codes if statuses[c] == "posted"] == expected
-
-    h.clock += timedelta(hours=1)
-    await h.run([])
-
+    expected = render_followup_alerts(codes, ping_mention="@everyone", details=details, now=h.clock)
     sent = followups_sent(h)
+    assert len(sent) == len(expected) > 1
+    assert [a.codes for a in sent] == [e.codes for e in expected]
     assert [c for a in sent for c in a.codes] == codes  # in order, none twice, none lost
     assert all(discord_len(a.content) <= 2000 for a in sent)
-    assert all(a.content.startswith(f"@everyone {FOLLOWUP_CHIP}\n\n") for a in sent)
+    assert sent[0].content.startswith(f"@everyone {FOLLOWUP_CHIP}\n\n")
+    assert all(a.content.startswith(f"{FOLLOWUP_CONTINUATION}\n\n") for a in sent[1:])
+    statuses = dict(rows(h.db_path, "SELECT code, status FROM guild_code_followups"))
+    assert set(statuses.values()) == {"posted"}
+
+    # Nothing is left for a later pass to send.
+    h.clock += timedelta(hours=1)
+    await h.run([])
+    assert len(followups_sent(h)) == len(sent)
 
 
 # --- the two rules, checked from the outside ---
@@ -344,10 +349,9 @@ def test_hostile_text_never_lands_in_a_chip_or_a_fence_in_a_roundup(text):
 def test_hostile_text_never_lands_in_a_chip_or_a_fence_in_a_followup(text):
     codes = [_code(i) for i in range(3)]
     details = {c: _worst(c, text[:100], text[:100], text) for c in codes}
-    fit = fit_followup_codes(codes, ping_mention="@everyone", details=details, now=NOW)
-    alert = render_followup_alert(fit, ping_mention="@everyone", details=details, now=NOW)
+    [alert] = render_followup_alerts(codes, ping_mention="@everyone", details=details, now=NOW)
     assert set(chips(alert.content)) <= ALLOWED_CHIPS, alert.content
-    assert fence_bodies(alert.content) == fit
+    assert fence_bodies(alert.content) == codes
     # The one ping is the one the server asked for.
     assert alert.content.count("@everyone") == 1 and "@here" not in alert.content
     assert alert.content.startswith(f"@everyone {FOLLOWUP_CHIP}")
@@ -357,5 +361,6 @@ def test_the_new_chips_are_in_the_allowed_set():
     assert ROUNDUP_CHIP.strip("`") in ALLOWED_CHIPS
     assert CONTINUATION.strip("`") in ALLOWED_CHIPS
     assert FOLLOWUP_CHIP.strip("`") in ALLOWED_CHIPS
+    assert FOLLOWUP_CONTINUATION.strip("`") in ALLOWED_CHIPS
     assert terminal.is_terminal_header(CONTINUATION)
     assert terminal.is_terminal_header(f"{ROUNDUP_CHIP} 1 code from Some Site")

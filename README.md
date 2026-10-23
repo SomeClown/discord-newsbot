@@ -274,9 +274,10 @@ take back:
   its own block, with its `reward` and `expires` line when it has details and
   no source line (the original post already named one). It spends one of that
   day's pings. A spent cap skips it silently; a server gets at most one per
-  code, ever. A follow-up holds about 15 codes (about 4 with the longest
-  possible details), and the rest wait for a later pass, though once the day's
-  cap is spent they're skipped for good. Two sources
+  code, ever. A burst of confirmations shares that one ping: the first
+  message pings, and whatever doesn't fit in it (a message holds about 15
+  codes, about 4 with the longest possible details) follows in
+  `> confirmed by a second source (continued) ▌` messages that don't. Two sources
   seeing a code in the same pass just ping on the first post. A confirmation
   that arrives while the original is still queued waits for the next sighting,
   and a stale second sighting still counts (the bot only asks that it *sees*

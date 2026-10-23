@@ -48,11 +48,10 @@ from newsbot.bot.format import (
     details_reserve,
     discord_len,
     esc,
-    fit_followup_codes,
     render_alert_edit,
     render_code_alerts,
     render_current_pages,
-    render_followup_alert,
+    render_followup_alerts,
     render_guild_digest,
     render_history_pages,
     render_roundup_alerts,
@@ -262,10 +261,12 @@ def _surfaces(f: dict) -> list[Surface]:
         out.append(Surface(f"roundup {n}", a.content, len(a.codes), "look", (3, 4)))
 
     for mention in ("@everyone", ROLE):
-        fu = render_followup_alert(
-            [c.code for c in batch], ping_mention=mention, details=details, now=NOW
-        )
-        out.append(Surface("followup", fu.content, 3, "look", (3, 4)))
+        for n, fu in enumerate(
+            render_followup_alerts(
+                [c.code for c in batch], ping_mention=mention, details=details, now=NOW
+            )
+        ):
+            out.append(Surface(f"followup {n}", fu.content, len(fu.codes), "look", (3, 4)))
 
     entries = [CurrentCode(code=c.code, first_seen_at=NOW, details=details[c.code]) for c in batch]
     for kind in ("all", "golden", "permanent", "cosmetic"):
@@ -847,7 +848,7 @@ def test_the_reserve_still_leaves_room_for_the_worst_edit_of_a_classic_header_to
             assert edited.count(" · <https://") == len(members)
 
 
-def test_followup_selection_is_consistent_with_the_rendered_size():
+def test_followup_packing_is_consistent_with_the_rendered_size():
     codes = [_code(i) for i in range(20)]
     details = {
         c: _row(
@@ -859,18 +860,16 @@ def test_followup_selection_is_consistent_with_the_rendered_size():
         )
         for c in codes
     }
-    chosen = fit_followup_codes(codes, ping_mention=ROLE_20, details=details, now=NOW)
-    assert 0 < len(chosen) <= 20
-    fu = render_followup_alert(chosen, ping_mention=ROLE_20, details=details, now=NOW)
-    assert discord_len(fu.content) <= 2000
-    assert not _markup_problems(fu.content, n_codes=len(chosen))
-    if len(chosen) < len(codes):
-        too_many = render_followup_alert_len(codes[: len(chosen) + 1], details)
-        assert too_many > 2000
-
-
-def render_followup_alert_len(codes, details) -> int:
-    return discord_len(fmt._followup_content(codes, f"{ROLE_20} ", details, NOW))
+    alerts = render_followup_alerts(codes, ping_mention=ROLE_20, details=details, now=NOW)
+    assert [c for a in alerts for c in a.codes] == codes
+    assert all(0 < len(a.codes) <= 20 for a in alerts)
+    for a in alerts:
+        assert discord_len(a.content) <= 2000
+        assert not _markup_problems(a.content, n_codes=len(a.codes))
+    # Each message closed because the next code really would not have fit under it.
+    for here, after in zip(alerts, alerts[1:], strict=False):
+        entry = after.content.split("\n\n")[1]
+        assert discord_len(here.content) + 2 + discord_len(entry) > 2000
 
 
 def test_pages_stay_within_the_embed_limit_with_worst_case_details():
