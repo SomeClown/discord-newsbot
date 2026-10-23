@@ -14,6 +14,8 @@ bold, mentions, timestamps and `<link>`s, which is everything the bot writes and
 else; the fonts, the spacing and the exact grays are my eyeballing of a dark-theme client.
 The first live alert is the real test, and the page says so at the top, in case anyone
 forgets and starts arguing with a screenshot.
+One more caveat: its chip and fence pairing is tidier than Discord's, so a message with stray
+backticks can look fine here and still break in a real client.
 
 The clock is fixed (`NOW`), so two runs write the same page byte for byte, and the page
 loads nothing from anywhere: no scripts, no fonts, no images. Standard library plus the

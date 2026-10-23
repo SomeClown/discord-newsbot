@@ -158,7 +158,21 @@ def esc(s: str) -> str:
     a working @everyone in someone's client before the send-time guard
     would have caught it anyway.
     """
-    escaped = discord.utils.escape_mentions(discord.utils.escape_markdown(s))
+    # `ignore_links=False` on purpose: the default leaves anything URL-shaped alone, markdown
+    # included, so a reward of "see https://x.y/`" kept a raw backtick that could close a chip
+    # early, and three of them could open a fence. A scheme gets defused a few lines down, so
+    # no live link is lost by escaping what's inside one.
+    #
+    # That still isn't the whole story: `escape_markdown` treats a markdown link, "[a](b)", as
+    # one token and puts a backslash on its "[" only, leaving everything inside raw, so
+    # "[a](b`)" kept a live backtick. The "](" is what makes it a link, so I cut the text there,
+    # escape the pieces on their own (without it the link pattern has nothing to match), and
+    # stitch them back with the "]" escaped, plus the "[" in every piece that had a "](" after
+    # it (as before, so a masked link still reads as text). Same words on screen, and no link
+    # left to hide in.
+    pieces = [discord.utils.escape_markdown(p, ignore_links=False) for p in s.split("](")]
+    pieces[:-1] = [p.replace("[", "\\[") for p in pieces[:-1]]
+    escaped = discord.utils.escape_mentions("\\](".join(pieces))
     # escape_mentions() covers users, roles and @everyone but, per its own
     # docstring, not channels (<#id>) or slash-command links (</name:id>).
     # A zero-width space after the "<" defuses both without visibly changing
@@ -392,7 +406,7 @@ _VIA_NAME_MAX = 100
 # is counted separately, in `details_reserve`.
 _STAMP_OPEN, _STAMP_CLOSE = " (<t:", ":R>)"
 _STAMP_DIGITS_MAX = 11
-_EXPIRY_VALUE_MAX = 32
+_EXPIRY_VALUE_MAX = len("Sep 30, 2026") + len(_STAMP_OPEN) + _STAMP_DIGITS_MAX + len(_STAMP_CLOSE)
 _DETAIL_SEP = " · "
 _DETAIL_AND = " and "
 # The label chips that lead each part of the line, each with the space that follows it.
@@ -417,13 +431,17 @@ def _aware(moment: datetime) -> datetime:
 def _detail_text(text: str) -> str:
     """Scraped reward or origin text, ready to escape: bidi controls gone, still at most 300 shown.
 
+    Whitespace of every kind, newlines included, collapses to single spaces, so a reward can't
+    start its own list, quote or line ("\n1. x" is just "1. x" now). That only ever shrinks
+    the text, so the reserve and both layouts' budgets are safe.
+
     The strip comes before the escaping on purpose (a bidi character wedged inside
     "@everyone" would otherwise hide it from `esc`, and then vanish). The cap is applied
     again afterwards because `esc` isn't strictly additive, so removing a character can
     in principle make a neighbor escape. As far as I can tell that never grows the
     string; the property test throws bidi-laden rewards at it to keep me honest.
     """
-    return cap_shown(_BIDI_RE.sub("", text).strip(), _DETAIL_SHOWN_MAX)
+    return cap_shown(" ".join(_BIDI_RE.sub("", text).split()), _DETAIL_SHOWN_MAX)
 
 
 def _short_date(d: date, *, with_year: bool = True) -> str:
@@ -969,7 +987,7 @@ class RenderedAlert:
     ping_prefix: str = ""
     # The exact first paragraph of `content` (ping prefix included), or the continuation
     # header. An edit re-renders the blocks under it and keeps this as it went out. Empty
-    # for a follow-up, which has no header to speak of.
+    # for a follow-up: its prompt line is part of the content, and nothing ever edits it.
     header: str = ""
     # Whether this message's batch was mixed golden and plain, so its golden entries wear
     # "Golden Key: ". An edit needs it to rebuild the same blocks; it can't be derived
@@ -1092,10 +1110,9 @@ def render_code_alerts(
     continuation = _continuation_header(test=test)
 
     # The most room any one entry can ever count on: alone in its own
-    # message, under whichever header is longer (always the first
-    # message's, thanks to "@everyone " and the title, but the max is
-    # cheap insurance against that assumption changing later) plus the
-    # "\n\n" joining the header to the block.
+    # message, under whichever header is longer, plus the "\n\n" joining the header to the
+    # block. Which one that is depends on the batch: a ping makes the first header longer,
+    # and with no ping the continuation's "(continued)" usually wins. So take the max.
     solo_budget = (
         _ALERT_CONTENT_LIMIT - max(discord_len(first_header), discord_len(continuation)) - 2
     )
@@ -1122,8 +1139,8 @@ def render_code_alerts(
         )
 
     # Greedily pack entries into batches under Discord's 2000-char message
-    # cap, counting each batch's own header (the first batch's is longer,
-    # thanks to "@everyone " and the title) plus a "\n\n" joiner per entry.
+    # cap, counting each batch's own header (the first and the continuation differ in
+    # length, and which is longer depends on the ping) plus a "\n\n" joiner per entry.
     # Every entry is already guaranteed to fit `solo_budget` on its own
     # (see above), so this loop only ever has to decide when to start a
     # *new* batch, never split one entry across two.

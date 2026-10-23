@@ -23,6 +23,7 @@ moves, the differential tests are the ones that will say so.
 from __future__ import annotations
 
 import random
+import re
 import subprocess
 import sys
 import types
@@ -481,20 +482,76 @@ def _random_case(rng: random.Random):
     return header, cands, details or rng.choice([None, {}, details]), rng.random() < 0.5
 
 
+# Fix batch 1 changed two helpers the classic path shares with the new look, on purpose:
+# `esc()` now escapes markdown inside URL-shaped text too (a backtick in "https://x.y/`" used to
+# slip through and could close a chip or open a fence), and `_detail_text` collapses runs of
+# whitespace, newlines included, to single spaces. So byte-identity with v3.1.4 still holds for
+# every input where the two can't differ, and for the rest only the properties a reader would
+# care about hold. (Round 1 of the fix also made esc() split on "](", so any text holding one
+# is in the weak half too.) The differential below is strict for the first kind and weaker
+# for the second.
+_URL_SHAPED_RE = re.compile(r"<[^: >]+:/[^ >]+>|(?:https?|steam)://[^\s<]+[^<.,:;\"'\]\s]")
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+
+def _changes_on_purpose(text: str) -> bool:
+    """Whether fix batch 1 can make `text` render differently from v3.1.4."""
+    text = _BIDI.sub("", text)
+    if "](" in text:  # esc() cuts there now and escapes the "]" too, so the backslashes differ
+        return True
+    if " ".join(text.split()) != text.strip():
+        return True
+    return any(set("*_~|`\\") & set(m.group(0)) for m in _URL_SHAPED_RE.finditer(text))
+
+
+def _case_strings(cands, details):
+    for c in cands:
+        yield c.source_name
+    for row in (details or {}).values():
+        yield from (row.reward, row.reward_from, row.category_from, row.expires_from)
+
+
+def _link_count(text: str) -> int:
+    return text.count(" · <https://") + text.count(" · <http://")
+
+
 def test_classic_edits_match_the_v314_render_on_a_few_hundred_hostile_inputs(old):
+    from chip_check import chips, fence_bodies
+
     rng = random.Random(20261022)  # noqa: S311
-    ok = err = 0
+    strict_ok = strict_err = weak = 0
     for i in range(600):
         header, cands, details, golden_prefix = _random_case(rng)
         want, got = _both(old, header, cands, details, golden_prefix)
-        assert got == want, f"case {i}: header={header!r}"
+        if not any(_changes_on_purpose(t) for t in _case_strings(cands, details)):
+            assert got == want, f"case {i}: header={header!r}"
+            if want[0] == "ok":
+                strict_ok += 1
+            else:
+                strict_err += 1
+            continue
+        weak += 1
+        # The new render only ever shrinks text, so it can't fail where v3.1.4 fit ...
         if want[0] == "ok":
-            ok += 1
-        else:
-            err += 1
-    # Both paths get exercised, or the comparison is hollow.
-    assert ok > 100
-    assert err > 5
+            assert got[0] == "ok", f"case {i}: a v3.1.4 edit that fit now fails: {got}"
+        if got[0] != "ok":
+            continue
+        text = got[1]
+        # ... what it makes still fits, starts with the stored header as it was, and keeps
+        # every code alone in its own plain fence (nothing else in there) ...
+        assert discord_len(text) <= 2000, f"case {i}"
+        assert text.startswith(header), f"case {i}"
+        body = text[len(header) :]  # the header is whatever was stored, garbage included
+        assert fence_bodies(body) == [c.code for c in cands], f"case {i}"
+        # ... a classic edit has no chips, and the hostile text can't conjure one ...
+        assert chips(body) == [], f"case {i}: {chips(body)}"
+        # ... and a link kept by v3.1.4 is kept now (shorter text can only keep more).
+        if want[0] == "ok":
+            assert _link_count(text) >= _link_count(want[1]), f"case {i}"
+    # Both kinds get exercised, or the comparison is hollow.
+    assert strict_ok > 100
+    assert strict_err > 5
+    assert weak > 50
 
 
 def test_a_bad_code_raises_the_same_error_on_the_classic_path(old):

@@ -1010,6 +1010,10 @@ def _v314_entry_in_the_new_layout(old: str, fields: dict) -> str:
     code_line, rest = old.split("\n", 1)
     reward, tail = rest.rsplit(" \u00b7 ", 1)
     reward = "unknown" if reward == "reward unknown" else reward
+    # Fix batch 1: detail text collapses whitespace, newlines included, to single spaces, so a
+    # reward of "a\n> b" is one line now ("a > b": the ">" is no longer at a line start, so
+    # it isn't escaped either). Everything else about the reward is what v3.1.4 said.
+    reward = " ".join(reward.replace("\n\\>", " >").split())
     if tail == "permanent":
         expires = "`expires` never"
     elif fields.get("category") == "permanent":
@@ -1022,6 +1026,14 @@ def _v314_entry_in_the_new_layout(old: str, fields: dict) -> str:
     else:
         expires = "`expires` " + tail.removeprefix("expires ")
     return f"```\n{code_line.strip('`')}\n```\n`reward` {reward} \u00b7 {expires}"
+
+
+def test_a_reward_with_a_newline_and_a_quote_marker_is_one_plain_line_now():
+    cur = _current(reward="a\n> b", origin="Shift Code Hunters")
+    entry = _current_entry(cur, NOW)
+    assert "`reward` a > b \u00b7 " in entry
+    assert "\n> " not in entry
+    assert "\\>" not in entry
 
 
 def test_shift_codes_entries_say_what_v314_said_in_the_new_layout(old_format):
