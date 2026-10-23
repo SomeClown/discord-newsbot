@@ -448,12 +448,16 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-22-termi
 Owner decisions before Task 1: leave `site/privacy.html` alone (1A). Owner sees the preview screenshots after Task 5, before the qa review (Tasks 7 and 8 here are run-plan's qa pass and docs step).
 
 ### Progress
+- Task 5: complete (from 2332bc6; gate exit 0, 13695 passed; adversarial: 68 tests, 1 bug (a far-future `<t:N:R>` crashed the preview's converter) fixed in round 1; owner reviewed the screenshots and approved the look)
 - Task 4: complete (from 209abe8; gate exit 0, 13621 passed; spec check PASS; adversarial: 317 tests with mutation checks, 0 bugs)
 - Task 3: complete (from 7170941; gate exit 0, 13269 passed; spec check PASS with 2 notes; adversarial: 100 tests incl. nonce differential vs v3.1.4, 0 bugs)
 - Task 2: complete (from 8c03cac; gate exit 0, 13132 passed; spec check PASS with 3 notes; adversarial: 697 tests, 0 bugs)
 - Task 1: complete (from 1fcd04b; gate exit 0, 12340 passed; spec check: 2 minor gaps, accepted; adversarial: 418 tests incl. a byte-for-byte differential against v3.1.4's format.py, 0 bugs)
 
 ### Decisions made during the build
+- Ruling (Task 5): test_a_huge_timestamp_does_not_crash_the_converter is a real bug, not a misread: the converter must never crash on message text. Fixed in round 1 (falls back to the escaped token).
+- Owner (after Task 5, 2026-10-22): reviewed the preview screenshots (desktop and phone) and approved the look; go ahead with the version bump and qa.
+- Ruling (Task 5): the screenshot argv adds a temporary `--user-data-dir`, a window height cap (Chrome hangs above 8,192 css px at 2x) and a fixed-width iframe wrapper for the 390 px phone shot (headless Chrome won't lay out under 500 px). Dev tool only. If wrong: a longer case list could clip the bottom of `desktop.png`; the comment above `SCREENSHOTS` says so.
 - Ruling (Task 4): the builder replaced Task 2's two "unchanged until Task 4" `/shift codes` tests in `tests/test_terminal_task2_adversarial.py` rather than editing their assertions (page counts changed, so footers can't be compared byte for byte). Accepted: the replacements map v3.1.4's entries into the new layout over the same case grid and check codes, order, color and footer prefix. If wrong: slightly weaker pinning of page breaks, covered by Task 4's own page tests.
 - Ruling (Task 3): `FOLLOWUP_MAX_CODES` stays 20. With a fence per code, a follow-up now fits about 14 typical codes per message (3 at worst-case details); the rest stay queued and drain on later passes, and each extra follow-up message spends one of the server's daily pings. Why: follow-ups confirm community codes one or two at a time in practice, and the owner chose fenced follow-ups (§17, 1A). If wrong: a rare big confirmation burst costs a server an extra ping or two; for the owner's final report.
 - Ruling (Task 2): a lone entry now tops out at 1,997 UTF-16 units instead of 2,000, because the plain continuation header (33) is longer than the pinged single-code header (30) and `solo_budget` takes the larger, as §1 predicts. `test_batch_at_exactly_the_2000_unit_boundary_does_not_split` was retargeted to 1,997. If wrong: an entry between 1,998 and 2,000 units can't go out alone; the 300-unit caps make that unreachable in practice.
