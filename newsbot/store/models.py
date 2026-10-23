@@ -155,13 +155,13 @@ class CodeDetailsRow:
 
     Reward, category and expiry each carry the rank that set them (`*_source`) and the
     source name that did (`*_from`), because precedence is decided field by field and the
-    alert's "details via ..." wants names. `expires_on` and `added_on` are Pacific calendar dates;
+    alert's `via` part wants names. `expires_on` and `added_on` are Pacific calendar dates;
     every timestamp is an aware UTC datetime. The merge rules that produce one of these live
     in `shift/details.py`, and this class just holds the result (design.md §16).
 
     `clock_start` is set once, when the row is created, and never moves.
     `details_changed_at` moves only when something an alert shows changes (the reward, the
-    expiry, "permanent" for a permanent code, or whose name goes in "details via"), which is what
+    expiry, `expires` never for a permanent code, or whose name goes after `via`), which is what
     flags an alert for an edit. Every new stamp is later than every other row's, so one
     message's version stamp (the largest among its codes) is safe to compare with any code's.
     """

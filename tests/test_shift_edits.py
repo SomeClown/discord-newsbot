@@ -163,8 +163,8 @@ async def test_a_details_change_edits_every_servers_message_with_its_own_header(
     await h.run([])
 
     body = (
-        f"**New SHiFT code**\n\n```\n{CODE_A}\n```\n"
-        f"3 Golden Keys · details via {MENTALMARS}\n{GEARBOX} · <https://example.com/AAAA>"
+        f"`> new SHiFT code ▌`\n\n```\n{CODE_A}\n```\n"
+        f"`reward` 3 Golden Keys · `via` {MENTALMARS}\n`src` {GEARBOX} · <https://example.com/AAAA>"
     )
     assert [(c.guild_id, c.channel_id, c.message_id, c.content) for c in h.editors.calls] == [
         (1, 100, 9001, f"@everyone {body}"),
@@ -218,7 +218,7 @@ async def test_the_clock_alone_never_makes_an_alert_due_for_an_edit(h):
     stamp = int(
         datetime(2026, 10, 4, 7, 0, tzinfo=UTC).timestamp()
     )  # Oct 3 ends at Pacific midnight
-    assert f"expires Oct 3, 2026 (<t:{stamp}:R>)" in call.content
+    assert f"`expires` Oct 3, 2026 (<t:{stamp}:R>)" in call.content
 
     # Two days later, then the final hour, then after the deadline: nothing is due.
     for moment in (
@@ -244,13 +244,17 @@ async def test_a_message_of_several_codes_is_rerendered_whole_in_its_original_or
 
     (call,) = h.editors.calls
     assert call.message_id == 9001  # C's message (9002) holds nothing that changed
-    assert call.content.startswith("@everyone **New SHiFT codes**\n\n")
+    assert call.content.startswith("@everyone `> new SHiFT codes ▌`\n\n")
     assert call.content.index(CODE_A) < call.content.index(CODE_B)
     assert CODE_C not in call.content
-    assert f"Golden Key: {GEARBOX}" in call.content  # the batch was mixed, and still is
-    assert f"```\n{CODE_B}\n```\nA skin · details via {MENTALMARS}\n{GEARBOX}" in call.content
+    assert f"`src` Golden Key: {GEARBOX}" in call.content  # the batch was mixed, and still is
+    assert (
+        f"```\n{CODE_B}\n```\n`reward` A skin · `via` {MENTALMARS}\n`src` {GEARBOX}" in call.content
+    )
     # The same blocks it went out with, plus the one new line.
-    assert call.content.replace(f"A skin · details via {MENTALMARS}\n", "") == first_alert.content
+    assert (
+        call.content.replace(f"`reward` A skin · `via` {MENTALMARS}\n", "") == first_alert.content
+    )
 
 
 async def test_only_the_servers_holding_the_changed_code_are_touched(h):

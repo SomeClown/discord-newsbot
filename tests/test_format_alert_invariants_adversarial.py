@@ -109,7 +109,7 @@ def _worst(code: str, name_a: str, name_b: str, reward: str) -> CodeDetailsRow:
 
 
 def _twin(name: str) -> str:
-    """A different name exactly as long once escaped (so "details via A and B" is the worst)."""
+    """A different name exactly as long once escaped (so `via` A and B is the worst)."""
     return name.replace("*", "_").replace("x", "y").replace("e", "i") or name
 
 
@@ -124,7 +124,8 @@ def _golden_pattern(n: int, i: int) -> bool:
 def test_every_hostile_reward_is_exactly_the_cap_and_not_cut(reward):
     line = details_line(_row(_code(0), reward=REWARDS[reward]), now=NOW)
     assert line is not None
-    assert discord_len(line) == 300
+    shown = line.removeprefix("`reward` ")
+    assert discord_len(shown) == 300
     assert "\u2026" not in line
 
 
@@ -132,17 +133,18 @@ def test_every_hostile_reward_is_exactly_the_cap_and_not_cut(reward):
 def test_one_unit_past_the_cap_is_cut_to_fit_with_an_ellipsis(reward):
     line = details_line(_row(_code(0), reward=REWARDS[reward] + "q"), now=NOW)
     assert line.endswith("\u2026")
-    assert 290 <= discord_len(line) <= 300
+    assert 290 <= discord_len(line.removeprefix("`reward` ")) <= 300
 
 
-def test_the_longest_expiry_phrase_is_what_the_reserve_assumed():
+def test_the_longest_expiry_value_is_what_the_reserve_assumed():
     # A date plus an 11-digit live timestamp: " (<t:", the digits, ":R>)" after the date.
     line = details_line(_row(_code(0), expires_on=date(5000, 12, 31)), now=NOW)
-    assert line == "expires Dec 31, 5000 (<t:95649148800:R>)"
-    assert discord_len(line) == 40
+    assert line == "`expires` Dec 31, 5000 (<t:95649148800:R>)"
+    assert discord_len(line.removeprefix("`expires` ")) == 32
     now_ish = details_line(_row(_code(0), expires_on=date(2026, 10, 14)), now=NOW)
-    assert now_ish == "expires Oct 14, 2026 (<t:1792047600:R>)"
-    assert discord_len(now_ish) == 39  # today's timestamps are one digit short of the reserve
+    assert now_ish == "`expires` Oct 14, 2026 (<t:1792047600:R>)"
+    # Today's timestamps are one digit short of the reserve.
+    assert discord_len(now_ish.removeprefix("`expires` ")) == 31
 
 
 # --- first render, with the worst details already present ---
@@ -262,7 +264,7 @@ def test_continuation_messages_edit_under_their_own_header():
     alerts = render_code_alerts(batch, ping=True, ping_mention=ROLE20, reserve=reserve)
     assert len(alerts) > 2
     for alert in alerts[1:]:
-        assert alert.header == "**(continued)**"
+        assert alert.header == "`> new SHiFT codes (continued) ▌`"
         assert alert.golden_prefix is True  # the batch was mixed; a continuation keeps the flag
         details = {c: _worst(c, "mentalmars", "mentalmars", "x" * 300) for c in alert.codes}
         edited = render_alert_edit(
@@ -272,7 +274,7 @@ def test_continuation_messages_edit_under_their_own_header():
             details=details,
             now=NOW,
         )
-        assert edited.startswith("**(continued)**\n\n")
+        assert edited.startswith("`> new SHiFT codes (continued) ▌`\n\n")
         assert discord_len(edited) <= 2000
 
 
@@ -366,13 +368,13 @@ def test_a_followup_for_one_astral_heavy_code_fits():
     assert discord_len(alert.content) <= 2000
 
 
-def test_a_followup_with_no_details_for_any_code_is_still_the_old_line_at_the_cap():
+def test_a_followup_with_no_details_for_any_code_fits_at_the_cap():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     fit = fit_followup_codes(codes, ping_mention="@everyone", details={}, now=NOW)
     assert fit == codes
     alert = render_followup_alert(fit, ping_mention="@everyone", details={}, now=NOW)
-    assert alert.content.startswith("@everyone Confirmed by a second source: `")
-    assert "\n" not in alert.content
+    assert alert.content.startswith("@everyone `> confirmed by a second source ▌`\n\n```\n")
+    assert alert.codes == codes
 
 
 # --- roundups ---
@@ -407,8 +409,8 @@ def test_a_roundup_header_is_the_first_paragraph_of_every_message():
     details = {c.code: _worst(c.code, "mentalmars", "mentalmars", "x" * 300) for c in cands}
     alerts = render_roundup_alerts(cands, details=details, now=NOW)
     assert len(alerts) > 1
-    assert alerts[0].header.startswith("**SHiFT codes from a roundup**")
-    assert [a.header for a in alerts[1:]] == ["**(continued)**"] * (len(alerts) - 1)
+    assert alerts[0].header.startswith("`> SHiFT roundup ▌` 20 codes from Roundup")
+    assert [a.header for a in alerts[1:]] == ["`> SHiFT roundup (continued) ▌`"] * (len(alerts) - 1)
     for alert in alerts:
         assert alert.content.startswith(alert.header + "\n\n")
 
@@ -440,4 +442,4 @@ def test_the_same_roundup_with_the_detailed_code_first_already_sheds_the_link():
 def test_reserve_counts_names_as_shown(name):
     shown = discord_len(esc(NAMES[name]))
     assert shown <= 200
-    assert details_reserve([NAMES[name]]) == 1 + 300 + 3 + 40 + 15 + shown + 5 + shown
+    assert details_reserve([NAMES[name]]) == 369 + shown + shown

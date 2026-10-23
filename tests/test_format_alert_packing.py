@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from newsbot.bot import terminal
 from newsbot.bot.format import (
     FOLLOWUP_MAX_CODES,
     _followup_content,
@@ -80,7 +81,8 @@ def test_details_line_sits_between_the_fence_and_the_source_line():
     row = _row(c.code, reward="3 Golden Keys", reward_from="mentalmars")
     [alert] = render_code_alerts([c], ping=False, details={c.code: row}, now=NOW)
     assert (
-        f"```\n{c.code}\n```\n3 Golden Keys · details via mentalmars\nGearbox Blog" in alert.content
+        f"```\n{c.code}\n```\n`reward` 3 Golden Keys · `via` mentalmars\n`src` Gearbox Blog"
+        in alert.content
     )
 
 
@@ -106,20 +108,20 @@ def test_details_without_a_clock_is_an_error():
 def test_rendered_alert_remembers_its_header_and_golden_prefix():
     batch = [_candidate(1, golden=True), _candidate(2)]
     [alert] = render_code_alerts(batch, ping=True, ping_mention=ROLE)
-    assert alert.header == f"{ROLE} **New SHiFT codes**"
+    assert alert.header == f"{ROLE} `> new SHiFT codes ▌`"
     assert alert.content.startswith(alert.header + "\n\n")
     assert alert.golden_prefix is True
     [plain] = render_code_alerts([_candidate(1, golden=True)], ping=False)
     assert plain.golden_prefix is False
-    assert plain.header == "**New Golden Key code**"
+    assert plain.header == "`> new Golden Key code ▌`"
 
 
 def test_continuation_messages_keep_their_own_header():
     batch = [_candidate(i, golden=i % 2 == 0) for i in range(8)]
     alerts = render_code_alerts(batch, ping=True, reserve=details_reserve(["Gearbox Blog"]))
     assert len(alerts) > 1
-    assert alerts[0].header.endswith("**New SHiFT codes**")
-    assert all(a.header == "**(continued)**" for a in alerts[1:])
+    assert alerts[0].header.endswith("`> new SHiFT codes ▌`")
+    assert all(a.header == "`> new SHiFT codes (continued) ▌`" for a in alerts[1:])
     assert all(a.golden_prefix for a in alerts)
     assert all(a.content.startswith(a.header) for a in alerts)
 
@@ -262,7 +264,7 @@ def test_property_any_edit_with_worst_case_details_fits_the_message_it_was_packe
 # --- no relative words in anything that stays in a channel ---
 
 TOKEN_RE = re.compile(r"<t:(\d+):R>")
-RELATIVE_WORDS_RE = re.compile(r"expires in|tomorrow|expired|\bhours?\b|\bago\b", re.IGNORECASE)
+RELATIVE_WORDS_RE = re.compile(r"expires` in|tomorrow|`expired`|\bhours?\b|\bago\b", re.IGNORECASE)
 
 
 def _dated_rows(codes, due):
@@ -272,12 +274,12 @@ def _dated_rows(codes, due):
 
 
 def test_alerts_edits_followups_and_roundups_carry_a_date_and_a_live_timestamp_only():
-    # Oct 9 is the last day at NOW: the old wording was "expires in under an hour".
+    # Oct 9 is the last day at NOW: the relative wording would be "in under an hour".
     batch = [_candidate(i) for i in range(2)]
     codes = [c.code for c in batch]
     details = _dated_rows(codes, date(2026, 10, 9))
     stamp = int(datetime(2026, 10, 10, 7, 0, tzinfo=UTC).timestamp())  # Pacific midnight
-    expected = f"3 Golden Keys · expires Oct 9, 2026 (<t:{stamp}:R>) · details via mentalmars"
+    expected = f"`reward` 3 Golden Keys · `expires` Oct 9, 2026 (<t:{stamp}:R>) · `via` mentalmars"
 
     [alert] = render_code_alerts(batch, ping=False, details=details, now=NOW)
     edited = render_alert_edit(alert.header, batch, golden_prefix=False, details=details, now=NOW)
@@ -390,7 +392,7 @@ def test_an_edit_adds_the_details_that_arrived_after_the_post():
     edited = render_alert_edit(
         original.header, [c], golden_prefix=False, details={c.code: row}, now=NOW
     )
-    assert "3 Golden Keys · details via mentalmars" in edited
+    assert "`reward` 3 Golden Keys · `via` mentalmars" in edited
     assert "3 Golden Keys" not in original.content
 
 
@@ -398,10 +400,11 @@ def test_an_edit_that_has_outgrown_its_message_drops_the_links():
     # The config gained a very long name after this was posted.
     batch = [_candidate(i, item_url="https://example.com/" + "a" * 120) for i in range(4)]
     row = {c.code: _worst_row(c.code, "n" * 100, "m" * 100, reward="x" * 100) for c in batch}
-    header = "**New SHiFT codes**"
+    header = terminal.prompt("new SHiFT codes")
     # ... with links it would be over the cap (the setup really does overflow):
     kept = [
-        f"```\n{c.code}\n```\n{details_line(row[c.code], now=NOW)}\nGearbox Blog · <{c.item_url}>"
+        f"```\n{c.code}\n```\n{details_line(row[c.code], now=NOW)}\n"
+        f"`src` Gearbox Blog · <{c.item_url}>"
         for c in batch
     ]
     assert discord_len("\n\n".join([header, *kept])) > 2000
@@ -414,7 +417,9 @@ def test_an_edit_that_cannot_fit_even_without_links_raises():
     batch = [_candidate(i) for i in range(5)]
     row = {c.code: _worst_row(c.code, "n" * 100, "m" * 100) for c in batch}
     with pytest.raises(ValueError, match="exceeds"):
-        render_alert_edit("**New SHiFT codes**", batch, golden_prefix=False, details=row, now=NOW)
+        render_alert_edit(
+            terminal.prompt("new SHiFT codes"), batch, golden_prefix=False, details=row, now=NOW
+        )
 
 
 # --- roundups: real size, no reservation ---
@@ -424,10 +429,10 @@ def test_roundups_show_details_at_their_real_size_without_a_reserve():
     batch = [_candidate(i, roundup=True, item_url=POST) for i in range(3)]
     details = {batch[0].code: _row(batch[0].code, reward="3 Golden Keys", reward_from="mentalmars")}
     [alert] = render_roundup_alerts(batch, details=details, now=NOW)
-    assert f"```\n{batch[0].code}\n```\n3 Golden Keys · details via mentalmars" in alert.content
-    assert alert.content.count("details via") == 1
+    assert f"```\n{batch[0].code}\n```\n`reward` 3 Golden Keys · `via` mentalmars" in alert.content
+    assert alert.content.count("`via`") == 1
     assert alert.ping is False
-    assert alert.header.startswith("**SHiFT codes from a roundup**")
+    assert alert.header.startswith("`> SHiFT roundup ▌` 3 codes from ")
 
 
 def test_a_big_roundup_is_packed_without_a_reserve():
@@ -448,24 +453,28 @@ def test_roundup_details_that_are_long_still_fit():
 # --- follow-ups ---
 
 
-def test_followup_without_details_is_the_old_one_liner():
+def test_followup_without_details_is_the_prompt_and_a_fence_per_code():
     codes = [_code(1), _code(2)]
     alert = render_followup_alert(codes, ping_mention="@everyone")
-    assert alert.content == f"@everyone Confirmed by a second source: `{codes[0]}`, `{codes[1]}`"
+    assert alert.content == (
+        "@everyone `> confirmed by a second source ▌`\n\n"
+        f"```\n{codes[0]}\n```\n\n"
+        f"```\n{codes[1]}\n```"
+    )
     with_empty = render_followup_alert(
         codes, ping_mention="@everyone", details={codes[0]: _row(codes[0])}, now=NOW
     )
     assert with_empty.content == alert.content
 
 
-def test_followup_with_details_is_one_line_per_code():
+def test_followup_with_details_puts_the_line_under_its_fence():
     codes = [_code(1), _code(2)]
     details = {codes[0]: _row(codes[0], reward="3 Golden Keys", reward_from="mentalmars")}
     alert = render_followup_alert(codes, ping_mention=ROLE, details=details, now=NOW)
     assert alert.content == (
-        f"{ROLE} Confirmed by a second source:\n"
-        f"`{codes[0]}` · 3 Golden Keys · details via mentalmars\n"
-        f"`{codes[1]}`"
+        f"{ROLE} `> confirmed by a second source ▌`\n\n"
+        f"```\n{codes[0]}\n```\n`reward` 3 Golden Keys · `via` mentalmars\n\n"
+        f"```\n{codes[1]}\n```"
     )
     assert alert.ping is True
     assert alert.ping_prefix == f"{ROLE} "

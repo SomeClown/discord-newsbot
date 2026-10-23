@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 _SQLITE_VARIABLE_CHUNK = 900
 
 # `guild_alert_messages.header`'s CHECK (migration 009). The longest real header is a role
-# ping plus "**New Golden Key codes**", around 50; this is the table's own limit.
+# ping plus `> [test] new Golden Key codes ▌`, around 60; this is the table's own limit.
 _ALERT_HEADER_MAX = 200
 
 

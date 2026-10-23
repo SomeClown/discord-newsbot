@@ -345,7 +345,7 @@ async def test_cap_is_per_guild_a_capped_guild_posts_unpinged_while_another_stil
 
     (a1,) = h.sent(1)
     (a2,) = h.sent(2)
-    assert not a1.ping and a1.content.startswith("**")
+    assert not a1.ping and a1.content.startswith("`> ")
     assert a2.ping and a2.content.startswith("@everyone ")
     assert shift_row(h.db_path, 1).ping_count == 3
     assert shift_row(h.db_path, 2).ping_count == 1
@@ -418,7 +418,7 @@ async def test_roundups_are_never_pinged_and_never_spend_the_cap(h):
     alerts = h.sent(1)
     assert alerts and all(not a.ping and a.ping_prefix == "" for a in alerts)
     assert all("@everyone" not in a.content for a in alerts)
-    assert all("from a roundup" in a.content for a in alerts[:1])
+    assert all("`> SHiFT roundup ▌` 6 codes from " in a.content for a in alerts[:1])
     assert shift_row(h.db_path, 1).ping_count == 0
     assert set(post_status(h.db_path, 1).values()) == {"posted"}
     assert rows(h.db_path, "SELECT DISTINCT from_roundup FROM guild_code_posts") == [(1,)]

@@ -1310,7 +1310,7 @@ def test_render_defaults_are_v2s_everyone_header_byte_for_byte():
     default = render_code_alerts(_candidates(), ping=True)
     explicit = render_code_alerts(_candidates(), ping_mention="@everyone", ping=True)
     assert default == explicit
-    assert default[0].content.startswith("@everyone **New SHiFT codes**")
+    assert default[0].content.startswith("@everyone `> new SHiFT codes ▌`")
     assert default[0].ping_prefix == "@everyone "
 
 

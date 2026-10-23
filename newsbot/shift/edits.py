@@ -48,6 +48,11 @@ How a message's edit can end:
 - a 5xx or a timeout: left as it is for the next pass.
 
 Roundups and alerts from before 3.1.0 have no record, so they are never found here.
+
+Records from v3.1.x are edited in their own layout. The stored header decides: a header in the
+v3.2.0 terminal look is re-rendered in that look, and anything else (every v3.1 header, and
+any header I don't recognize) gets the frozen v3.1 layout it was packed for. That lives in
+`format.render_alert_edit`; this module only hands it the header it stored.
 """
 
 from __future__ import annotations

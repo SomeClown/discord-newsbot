@@ -146,12 +146,12 @@ shift:
   # code (a Reddit thread, a Bluesky search) posts unpinged. If a second,
   # independent source (a different source name; case doesn't matter) or an
   # official or press one sees it within 24 hours, each server that has
-  # pinging on gets one short "Confirmed by a second source" follow-up with
+  # pinging on gets one follow-up ("> confirmed by a second source") with
   # its chosen ping. That follow-up costs one of the server's daily pings.
   ping_trust: [official, press]
   # An item naming more than this many distinct codes is a roundup or
   # megathread, not a genuine single-code announcement; its codes post under
-  # a "from a roundup" header, never pinged, and a roundup never counts as a
+  # a "> SHiFT roundup" header, never pinged, and a roundup never counts as a
   # second source.
   max_codes_per_item: 5
 

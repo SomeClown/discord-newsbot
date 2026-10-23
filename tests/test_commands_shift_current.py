@@ -144,13 +144,13 @@ async def test_groups_run_golden_cosmetic_permanent_other_with_newest_first(v3_c
     await _codes(v3_cfg, v3_db)(interaction)
 
     text = _embed(interaction).description
-    headings = [text.index(h) for h in ("**Golden Keys**", "**Cosmetics**", "**Permanent**")]
+    headings = [text.index(h) for h in ("`[golden keys]`", "`[cosmetics]`", "`[permanent]`")]
     assert headings == sorted(headings)
-    assert text.index("**Other**") > headings[-1]
+    assert text.index("`[other]`") > headings[-1]
     assert text.index(_code(2)) < text.index(_code(1))  # added Oct 5 beats added Oct 1
-    assert text.index(_code(1)) < text.index("**Cosmetics**")
-    assert text.index(_code(3)) < text.index("**Permanent**")
-    assert text.index(_code(4)) < text.index("**Other**") < text.index(_code(5))
+    assert text.index(_code(1)) < text.index("`[cosmetics]`")
+    assert text.index(_code(3)) < text.index("`[permanent]`")
+    assert text.index(_code(4)) < text.index("`[other]`") < text.index(_code(5))
 
 
 async def test_the_type_option_keeps_one_group(v3_cfg, v3_db):
@@ -189,7 +189,7 @@ async def test_an_entry_has_the_reward_and_the_expiry_phrase(v3_cfg, v3_db):
     await _codes(v3_cfg, v3_db)(interaction)
 
     assert (
-        f"`{_code(1)}`\n3 Golden Keys · expires Oct 14 (in 5 days)"
+        f"```\n{_code(1)}\n```\n`reward` 3 Golden Keys · `expires` Oct 14 (in 5 days)"
         in _embed(interaction).description
     )
 
@@ -315,7 +315,10 @@ async def test_a_permanent_code_never_goes_away(v3_cfg, v3_db):
 
     await _codes(v3_cfg, v3_db)(interaction)
 
-    assert f"`{_code(1)}`\nreward unknown · Launch day" in _embed(interaction).description
+    assert (
+        f"```\n{_code(1)}\n```\n`reward` unknown · `expires` never · Launch day"
+        in _embed(interaction).description
+    )
 
 
 async def test_a_known_expiry_outlives_the_180_day_clock(v3_cfg, v3_db):
@@ -475,7 +478,7 @@ async def test_long_entries_page_by_size_and_never_split(v3_cfg, v3_db):
         assert embed.description.count("`") % 2 == 0
         seen += [n for n in range(count) if _code(n) in embed.description]
     assert sorted(seen) == list(range(count))  # every code, once
-    assert "(continued)" in embeds[1].description  # the heading comes back on the next page
+    assert "(continued)]`" in embeds[1].description  # the heading comes back on the next page
     assert embeds[-1].footer.text.endswith(f"Page {len(embeds)} of {len(embeds)}")
 
 
@@ -513,15 +516,15 @@ async def test_history_marks_expired_codes_and_wins_over_the_other_markers(v3_cf
 
     text = _embed(interaction).description
     blocks = {n: b for n in (1, 2, 3) for b in text.split("\n\n") if _code(n) in b}
-    assert "(expired)" in blocks[1] and "(old post)" not in blocks[1]
-    assert "(old post)" in blocks[2]
-    assert "(expired)" in blocks[3] and "(from a roundup)" not in blocks[3]
-    # The details line sits under the source line, and the marker has already said "expired",
+    assert blocks[1].endswith("· expired") and "old post" not in blocks[1]
+    assert blocks[2].endswith("· old post")
+    assert blocks[3].endswith("· expired") and "from a roundup" not in blocks[3]
+    # The details line sits right under the fence, and the marker has already said "expired",
     # so the line doesn't say it again (QA batch 1, fix 16).
-    assert blocks[1].endswith("\n1 Golden Key")
+    assert blocks[1].split("\n")[3] == "`reward` 1 Golden Key"
     assert "1 Golden Key ·" not in blocks[1]
     assert blocks[1].count("expired") == 1
-    assert blocks[3].endswith("\nCosmetic") and blocks[3].count("expired") == 1
+    assert blocks[3].split("\n")[3] == "`reward` Cosmetic" and blocks[3].count("expired") == 1
 
 
 async def test_history_is_the_old_list_with_its_own_title_and_gating(v3_cfg, v3_db):
@@ -533,7 +536,8 @@ async def test_history_is_the_old_list_with_its_own_title_and_gating(v3_cfg, v3_
     await _history(v3_cfg, v3_db)(interaction, days=14)
 
     embed = _embed(interaction)
-    assert embed.title == "/shift history"
+    assert embed.title == "> SHiFT code history ▌"
+    assert embed.color.value == 0x3FE37F
     assert _code(2) in embed.description and _code(1) not in embed.description
 
     wrong = FakeInteraction(guild_id=GUILD_A)

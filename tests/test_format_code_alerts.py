@@ -35,32 +35,32 @@ def _candidate(**kwargs) -> CodeCandidate:
 def test_single_plain_code_wording():
     rendered = render_code_alerts([_candidate()], ping=True)
     assert len(rendered) == 1
-    assert "**New SHiFT code**" in rendered[0].content
-    assert "New SHiFT codes" not in rendered[0].content
+    assert "`> new SHiFT code ▌`" in rendered[0].content
+    assert "new SHiFT codes" not in rendered[0].content
 
 
 def test_multiple_plain_codes_wording_is_plural():
     candidates = [_candidate(code=CODE_A), _candidate(code=CODE_B)]
     rendered = render_code_alerts(candidates, ping=True)
-    assert "**New SHiFT codes**" in rendered[0].content
+    assert "`> new SHiFT codes ▌`" in rendered[0].content
 
 
 def test_all_golden_wording():
     rendered = render_code_alerts([_candidate(golden=True)], ping=True)
-    assert "**New Golden Key code**" in rendered[0].content
+    assert "`> new Golden Key code ▌`" in rendered[0].content
 
 
 def test_all_golden_multiple_wording_is_plural():
     candidates = [_candidate(code=CODE_A, golden=True), _candidate(code=CODE_B, golden=True)]
     rendered = render_code_alerts(candidates, ping=True)
-    assert "**New Golden Key codes**" in rendered[0].content
+    assert "`> new Golden Key codes ▌`" in rendered[0].content
 
 
 def test_mixed_batch_uses_plain_title_with_golden_key_prefix():
     candidates = [_candidate(code=CODE_A, golden=False), _candidate(code=CODE_B, golden=True)]
     rendered = render_code_alerts(candidates, ping=True)
     content = rendered[0].content
-    assert "**New SHiFT codes**" in content
+    assert "`> new SHiFT codes ▌`" in content
     assert "Golden Key: " in content
     # The non-golden entry shouldn't get the prefix.
     assert f"Golden Key: {'Gearbox Blog'}" not in content.split(CODE_A)[1].split(CODE_B)[0]
@@ -88,7 +88,7 @@ def test_ping_false_never_mentions_everyone():
 
 def test_test_prefix_shown():
     rendered = render_code_alerts([_candidate()], ping=False, test=True)
-    assert "[TEST] " in rendered[0].content
+    assert "`> [test] new SHiFT code ▌`" in rendered[0].content
 
 
 # --- escaping and safety ---
@@ -150,7 +150,7 @@ def test_many_codes_with_long_urls_split_and_only_first_pings():
             assert message.content.startswith("@everyone ")
             assert message.ping is True
         else:
-            assert message.content.startswith("**(continued)**")
+            assert message.content.startswith("`> new SHiFT codes (continued) ▌`")
             assert "@everyone" not in message.content
             assert message.ping is False
 
@@ -229,15 +229,22 @@ def test_batch_at_exactly_the_2000_unit_boundary_does_not_split():
     # in the source name so the boundary math has to get UTF-16 counting
     # right, not codepoint counting.
     base_candidate = _candidate(source_name="X")
-    base_len = discord_len(render_code_alerts([base_candidate], ping=True)[0].content)
-    pad_units_needed = 2000 - base_len
+    [base] = render_code_alerts([base_candidate], ping=True)
+    base_len = discord_len(base.content)
+    # A lone entry is budgeted against the longer of the two headers, and the continuation
+    # header (`> new SHiFT codes (continued) ▌`) is longer than the pinged first one, so the
+    # largest message that still doesn't split stops a few units short of the 2000 cap.
+    continuation = "`> new SHiFT codes (continued) ▌`"
+    target = 2000 - max(0, discord_len(continuation) - discord_len(base.header))
+    pad_units_needed = target - base_len
     assert pad_units_needed > 0
     ascii_pad = "Y" if pad_units_needed % 2 else ""
     emoji_pad = "\U0001f600" * ((pad_units_needed - len(ascii_pad)) // 2)
     padded = _candidate(source_name="X" + ascii_pad + emoji_pad)
     rendered = render_code_alerts([padded], ping=True)
     assert len(rendered) == 1
-    assert discord_len(rendered[0].content) == 2000
+    assert discord_len(rendered[0].content) == target
+    assert "<https://" in rendered[0].content  # the link stays: nothing had to shed
 
 
 def test_single_entry_alone_exceeding_2000_units_is_not_split_further():

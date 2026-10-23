@@ -510,14 +510,15 @@ moment; there's no backlog. A few things to know before choosing a ping:
 - A code seen only by a community source (a Reddit thread, a Bluesky search)
   posts without a ping. If a second independent source, or an official or
   press one, sees it within 24 hours, each server with pinging on gets one
-  short follow-up, "Confirmed by a second source", with its chosen ping,
-  which spends one of that day's pings. Roundups of many codes post but never
-  ping.
+  follow-up headed `> confirmed by a second source ▌`, with its chosen ping,
+  which spends one of that day's pings. Each code sits in its own block with
+  its `reward` and `expires` line when it has details. Roundups of many codes
+  post but never ping.
 
 **Code details (v3.1.0).** The example config reads one extra source for
 Borderlands 4, a `shift_table` source that turns a community page's tables of
 SHiFT codes into rewards and expiry dates (mentalmars' list, in the example).
-It's optional: without it, alerts look as they did before and `/shift codes`
+It's optional: without it, alerts have no details line and `/shift codes`
 shows what Gearbox's own posts gave it. If you add one:
 
 - It goes under its game in `catalog:` (not in `shared_sources:`), and the game

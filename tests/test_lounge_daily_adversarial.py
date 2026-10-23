@@ -1077,7 +1077,8 @@ async def test_the_post_argument_is_exactly_the_rendered_quote_and_hostile_text_
     await run_daily_quote(_deps(db_path, [src], spy))
     assert spy.posts == [render_quote_message(Quote(text))]
     assert "@everyone" not in spy.posts[0].replace("@​everyone", "")
-    assert "\\[x](" in spy.posts[0]  # the bracket is escaped, so no masked link
+    # Both brackets are escaped, so no masked link (fix batch 1 round 1 escaped the "]" too).
+    assert "\\[x\\](" in spy.posts[0]
 
 
 async def test_every_post_fits_in_2000_utf16_units_even_at_the_astral_boundary(tmp_path, db_path):

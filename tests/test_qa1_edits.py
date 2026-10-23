@@ -141,9 +141,9 @@ async def test_the_ping_choice_is_stored_with_each_posted_message(h):
     await h.run([item(CODE_A)])
 
     assert stored_pings(h.db_path) == [
-        (1, 9001, "everyone", "@everyone **New SHiFT code**"),
-        (2, 9001, ROLE, f"<@&{ROLE}> **New SHiFT code**"),
-        (3, 9001, "none", "**New SHiFT code**"),
+        (1, 9001, "everyone", "@everyone `> new SHiFT code ▌`"),
+        (2, 9001, ROLE, f"<@&{ROLE}> `> new SHiFT code ▌`"),
+        (3, 9001, "none", "`> new SHiFT code ▌`"),
     ]
 
 
@@ -179,7 +179,7 @@ async def test_a_ping_the_retry_stripped_stores_none_and_a_header_without_it(h):
 
     await h.run([item(CODE_A)])
 
-    assert stored_pings(h.db_path) == [(1, 9001, "none", "**New SHiFT code**")]
+    assert stored_pings(h.db_path) == [(1, 9001, "none", "`> new SHiFT code ▌`")]
 
 
 def test_a_ping_the_table_would_refuse_is_stored_as_none(db_path):
@@ -250,7 +250,7 @@ async def test_an_edit_of_a_pinged_alert_sends_the_stored_choice_back(h):
         (3, "none"),
     ]
     # And the text, as before: the header is as it went out.
-    assert h.editors.calls[0].content.startswith("@everyone **New SHiFT code**")
+    assert h.editors.calls[0].content.startswith("@everyone `> new SHiFT code ▌`")
 
 
 async def test_an_edit_of_an_alert_whose_ping_was_stripped_sends_none(h):

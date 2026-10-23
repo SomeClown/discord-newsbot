@@ -15,7 +15,7 @@ The rules (design.md §16), field by field for reward, category and expiry:
   wins, so a fan site can correct itself;
 - a source that merely agrees with what's stored doesn't get its name on it, unless it
   outranks the one that's there (two fan sites repeating each other shouldn't take turns
-  being "details via" every hour);
+  being the `via` name every hour);
 - `details_changed_at` moves only when something an alert shows changes (a value, or
   who supplied it), and only on the net difference, because that timestamp is what sends
   an edit to a posted message and nobody wants an edit for a change that undid itself;
@@ -54,7 +54,7 @@ RANK: dict[str, int] = {"": 0, "table": 1, "official": 2}
 # reader promise to stay under them, and a promise is a fine thing to double-check.
 _CODE_LENGTH = 29
 _TEXT_MAX = 300
-# Config holds source names to 100 characters (they're printed in alerts as "details via ..."), so a
+# Config holds source names to 100 characters (they're printed in alerts after `via`), so a
 # longer one is damage, and the store won't take it.
 _NAME_MAX = 100
 _CATEGORIES = frozenset({"golden", "cosmetic", "permanent", "other"})
@@ -201,11 +201,12 @@ def displayed(row: CodeDetailsRow | None) -> tuple:
     """What an alert's details line shows for `row`, as a value that compares equal when it does.
 
     Mirrors `format.details_line`, and nothing more: the reward and, if there is one, who
-    supplied it; for a permanent code the word "permanent" and who set the category; for any
-    other code the expiry and who supplied it. A category that never reaches the line
-    (golden, cosmetic, other) isn't in here, so changing it doesn't send an edit to every
-    message that holds the code. None, like a row with nothing to show, is the all-empty
-    tuple, which is what makes "the first details" a change.
+    supplied it; for a permanent code `expires` never (v3.1 said "the word permanent"; the
+    tuple never held the wording, which is why the restyle sends no edits) and who set the
+    category; for any other code the expiry and who supplied it. A category that never
+    reaches the line (golden, cosmetic, other) isn't in here, so changing it doesn't send
+    an edit to every message that holds the code. None, like a row with nothing to show, is
+    the all-empty tuple, which is what makes "the first details" a change.
     """
     if row is None:
         return ("", "", False, "", None, "")

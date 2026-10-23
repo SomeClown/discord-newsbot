@@ -1059,3 +1059,111 @@ Where the code settled on something this section leaves open or says differently
 - Details are read only from mentalmars' tables and Gearbox's own posts. Reddit, Bluesky search and press free text are on the to-do list.
 
 **Tests.** About 11,500, in about five minutes. Two files were snapshots tied to this build: `tests/fixtures/format_pre_details_snapshot.txt` and `tests/fixtures/fanout_pre_delivery_snapshot.txt` (checked by `test_format_backcompat_snapshot.py` and `test_shift_delivery_backcompat_snapshot.py`). They pinned the pre-3.1.0 output so the build couldn't change it by accident, and were retired on 2026-10-21, after v3.1.0 had shipped, since from then on they could only stop later work. `tests/fixtures/v305_repo_snapshot.txt` stays, because the rollback test depends on it.
+
+## 17. A terminal look for SHiFT alerts and `/shift` replies (v3.2.0, approved 2026-10-22)
+
+The SHiFT messages work; they just look like every other bot's. This section gives them the green-screen, Matrix-inspired feel of the owner's PacketQueue site, without giving up the two things the owner likes about them now: they read as plain text, and each code sits alone in a code block whose copy icon copies exactly the code. Discord limits how far a bot can go. A plain message can't set a color or a font, and the one way to color text (ANSI codes in a code block) may not render on phones, so the look here comes entirely from monospace text, a prompt, a cursor, and short labels. It's a costume, not a rebuild: no field goes missing, no ping changes, and the delivery, edit and paging machinery from §15 and §16 stays exactly as it is.
+
+**Owner decisions (2026-10-22):**
+- Direction: **terminal text** (1A). Alerts stay plain messages, dressed in monospace touches; not an embed.
+- Scope: **SHiFT alerts and the `/shift codes` and `/shift history` replies** (2A), the v3.2.0 scope as first written in §16.
+- Images: **none** (3A).
+- Who gets it: **every server**, as the bot's one style (4A); no per-server switch.
+- Color: **none at all** (1A); no ANSI. The look has to read the same on a phone.
+- `/shift` replies: **stay page-through embeds** (2A), restyled, with a green stripe.
+- Flavor: **a light touch** (3A): the prompt, the cursor and the labels, in plain words anyone in the server can read.
+- Preview before release: **screenshots from a local preview** (1B), not a dev-bot run.
+- Follow-ups: **the new header, each code in its own block with the `reward`/`expires` line, and no `src` line** (1A, after the builder check). The original alert already showed the source, and nothing new has to be passed to the follow-up.
+
+**Goals.** Make SHiFT messages fun to look at for people who'd enjoy a terminal joke, while keeping them as quick to read and act on as they are today.
+
+**Non-goals.** Digests, run reports, `/newsbot status`, `/news`, the lounge and owner alerts don't change. No color, no images, no setting.
+
+**Anti-goals.** Any of these makes v3.2.0 a failure, however nice it looks:
+- the copy icon copying anything but the code;
+- a message that's hard to read on a phone;
+- a reward, expiry, source or link going missing from a message that shows one today;
+- an edit that pings anyone, or any change to who gets pinged and when.
+
+### The look
+
+The header line and the labels sit in inline code, the small gray monospace chips Discord draws on every client. Values stay plain text, for two reasons: a link inside code isn't clickable, and a Discord timestamp (`<t:…:R>`) inside code shows as raw text instead of a live countdown. The code itself stays alone in its own plain fenced block, as it is today, with nothing else inside it.
+
+~~~
+@everyone `> new SHiFT code ▌`
+```
+ABCDE-12345-FGHIJ-KLMNO-PQRST
+```
+`reward` 3 Golden Keys · `expires` Oct 29, 2026 (<t:1793318400:R>) · `via` mentalmars
+`src` mentalmars · <https://…>
+~~~
+
+(That's the raw message text; Discord shows the backticked words as gray chips, the middle block as a code block with a copy icon, and the timestamp as a live countdown.)
+
+The ▌ is a still character; Discord can't animate text. The prompt and labels are plain words: `>` as the prompt, then `reward`, `expires`, `via` and `src`. The details line keeps everything §16 put in it (the reward or kind, the expiry date with its countdown, and who supplied the details); only its labels change.
+
+### Alerts, case by case
+
+Only the header line changes between kinds of alert; everything under it is the layout above.
+
+- **New codes:** `> new SHiFT code ▌`, or `> new SHiFT codes ▌` when a message carries more than one. One ping, on the first message, as today. A batch that's all Golden Keys says so, as today's title does: `> new Golden Key code ▌` / `codes`. In a mixed batch, a golden entry's `src` value starts with "Golden Key: ", as today's source line does, and edits keep using the stored choice.
+- **A batch that runs past one message:** `> new SHiFT codes (continued) ▌`, never pinged, as today's continuation header.
+- **A roundup** (more than five new codes from one table, §16): the header reads `> SHiFT roundup ▌` with the count, the source and the post's link after it, outside the code chip (`7 codes from mentalmars · <link>`). The count is the whole group, not just that message. Its continuations read `> SHiFT roundup (continued) ▌`. Never pinged, as today.
+- **A follow-up** (a second source confirms a community code, §15's B+): `> confirmed by a second source ▌`, under the server's own ping rule, as today. Each code gets its own block (so the copy icon) and its `reward`/`expires` line when it has details, but no `src` line: today's follow-up is one compact line per code with no source, and the original alert already named one. Fewer codes fit per follow-up message than in today's one-liners; the existing fitting logic decides how many.
+- **Test alerts:** `> [test] new SHiFT code ▌`.
+- **Edits in place** (§16, up to 14 days) render the same layout and repeat the original ping choice; Discord doesn't notify on an edit.
+
+The header costs a few more characters than today's bold title, so a long batch may now and then fit one code fewer per message. The existing splitting and edit-reserve arithmetic absorbs that; nothing about it changes in kind.
+
+### `/shift codes` and `/shift history`
+
+They stay embeds with their page buttons and the `type:` filter. Changes:
+- The stripe is PacketQueue green, `#3FE37F`, for both commands.
+- Titles: `> current SHiFT codes ▌` and `> SHiFT code history ▌`.
+- `/shift codes` groups (Golden Keys, Cosmetics, Permanent, Other) get monospace headings such as `[golden keys]`.
+- Each entry uses the alert layout for what it shows today: the code block and the `reward`/`expires` line, plus the `src` line in `/shift history`, which has a source today. `/shift codes` doesn't carry a source now and doesn't gain one. History keeps `first seen` and its marker ("expired", "from a roundup", and the rest) as a label-style line.
+- The pages keep their own expiry wording ("Oct 14 (in 5 days)", computed when the page is drawn) rather than the alerts' live countdown; only the label changes.
+
+Page counts and the page footer work as now.
+
+### Constraints
+
+- Every client: desktop, web and phone. Nothing may depend on color or on how a client draws ANSI.
+- Message limits are Discord's: 2,000 characters for an alert, 4,096 for an embed page, as §16 already budgets for.
+- No user-controlled text goes inside a code chip. Source names, rewards and the rest stay outside, where the existing escaping (`esc()`) works; inside inline code, escaping would show its backslashes and a stray backtick would break the chip. The header and label words are fixed strings.
+- One look for every server, so there's no tier, setting or migration.
+
+### Calls I made
+
+- The label words (`reward`, `expires`, `via`, `src`), the header wording above, and the `[golden keys]` heading style.
+- Roundup count and source go after the header chip, not inside it (from the constraint above).
+- A permanent code reads `` `expires` never `` in an alert; where a page shows a code's origin text today, it follows as plain text.
+- **Edits to alerts posted before v3.2.0** (up to 14 days of them) keep the old layout for the life of that record. Re-rendering them in the new look would put new-style entries under an old stored header, and the labels add about 19 characters per code that those messages never reserved, so a worst-case edit could lose its link. The mixed look lasts two weeks and then ages out.
+- Builder check, 2026-10-22: a fresh architect read this section cold. Its questions about Golden Key wording, the roundup link and continuations, the `/shift codes` source line, old-record edits and permanent codes were settled above; the follow-up layout went to the owner (1A).
+- Readability on a phone is a requirement, not a nice-to-have: the guess that a good share of Rage Quit Tavern reads on phones went uncorrected.
+- The local preview is a small script under `scripts/` that renders the real format functions' output for each case above into an HTML page imitating Discord's dark theme, screenshotted at a desktop width and a phone width. It's an approximation of Discord's rendering, not a substitute for it; the owner sees the real thing on the first live alert.
+- It ships as v3.2.0, a minor release: nothing about storage, config or commands changes.
+
+### Left to the builder
+
+- Where the header and label strings live, and how the format functions share them.
+- The exact effect on the alert and edit budgets, and updating the tests that pin today's exact text.
+- The preview script's shape, within the call above.
+
+### As built (2026-10-22)
+
+Built on `feat/terminal-look` per `docs/plans/2026-10-22-terminal-look.md`, and qa'd the same day. It supersedes the text above where they differ. The fixed words live in `newsbot/bot/terminal.py`; `format.py` builds every message from them.
+
+- **The stored header is the layout marker.** There's no `layout` column and no migration. A v3.2.0 header always contains `▌` followed by a closing backtick; every v3.1 header is one of a closed set of fixed strings that can't contain a cursor. `render_alert_edit` draws the terminal layout only when it finds that pair in the stored header, and the frozen v3.1 ("classic") layout for anything else. Unknown means classic on purpose: a classic entry is strictly smaller than a terminal one (no `src` chip, shorter labels), so a classic render fits a message packed for either layout, and the reverse doesn't hold. The classic layout is a labeled, deprecated section of `format.py`, and `displayed()` in `shift/details.py` is unchanged, so deploying makes no stored message due for an edit.
+- **The real reserve is `369 + 2L`, not the guessed ~19 per code.** The details line grows by 5 units and the `src` chip adds 6, so a code costs about 11 more than in v3.1.4's `364 + 2L`. Prod's `L` is 19, so the reserve goes from 402 to 407. A test pins it against the real worst-case line plus one.
+- **The plural follows the batch.** The header is fixed before packing (it's part of the budget), so a batch of two or more says "codes" even if the first message ends up holding one. The 300-unit caps make that unreachable in practice, and a continuation follows anyway.
+- **`[test]` goes on test continuations too**, so a test batch can't look real halfway down.
+- **A passed expiry swaps its label to `expired`.** History hides the expiry behind its marker and `/shift codes` can't list an expired code, so this is a fallback and not a look.
+- **History markers are plain text** (`expired`, `from a roundup`, `old post`, `already around when alerts started`). They're values, and chips are for labels.
+- **Page titles are fixed constants and are not run through `esc()`**, which would turn `> ` into `\> `. `render_history_pages` lost its `title` parameter so no dynamic title path exists. Every page, the empty one included, is `#3FE37F`; digests keep their palette.
+- **A lone entry tops out at 1,997 UTF-16 units, not 2,000.** The plain continuation header (33) is longer than the pinged single-code header (30), and `solo_budget` takes the larger. The 300-unit caps make an entry between 1,998 and 2,000 unreachable in practice.
+- **Follow-up capacity.** With a fence per code, one follow-up message holds about 15 typical codes, and about 4 with worst-case details (v3.1.4: about 18 to 20, and 4 to 5). `FOLLOWUP_MAX_CODES` stays 20; what doesn't fit stays queued for a later pass, and each extra follow-up spends one of the server's daily pings. **Open hazard, not changed:** the queue only drains while the day's ping cap (shared with new alerts) has room. Once it's spent, `claim_guild_followups` marks the leftover codes skipped for good, so they're never confirmed. That's the same hazard as v3.1, reached sooner, and fixing it means changing the claim logic, which was out of scope. It's a question for the owner.
+- **The qa pass fixed an escaping hole that predates this release.** `escape_markdown` treated `[text](target)` as one token and left markdown inside it raw, and markdown inside a bare URL passed too, which broke the rule that scraped text never goes in a chip. Both are now escaped, and `_detail_text` collapses whitespace, which also closes a reward holding a newline and then `1. x` or `> ` and drawing a list item or a quote. The fix is in `esc()`, so it reaches every caller: alerts, edits, roundups, follow-ups, pages, the digests and the lounge's daily quote (which now shows a masked link as `\[x\](…)` instead of a live one). Bidi controls in config-supplied source names, and `escape_mentions` only defusing 17 to 20 digit ids (with `allowed_mentions` as the backstop), were left as they were.
+- **Rollback is `TAG=3.1.4` with no config change and no database restore.** If v3.1.4 then edits a v3.2.0 record, it draws classic blocks under the stored terminal header. That fits (classic is smaller), so the cost is cosmetic, for at most 14 days.
+- **The preview script** is `scripts/preview_shift_look.py [--out build/shift-look] [--screenshots]`. It runs 14 cases through the real renderers at a fixed clock (2026-10-22 18:00 UTC) and writes `index.html` (`build/` is gitignored); a smoke test covers it. Its Chrome quirks: `--screenshots` is Mac-only (Chrome's path is hard-coded), it needs a scratch `--user-data-dir` (otherwise Chrome hands the job to an already-open Chrome and waits forever), a window taller than 8,192 px at 2x hangs rather than fails (so the case list has a ceiling), and headless Chrome won't lay out under 500 px wide, so the 390 px phone shot photographs the page through a fixed-width iframe. The converter pairs backticks more tidily than Discord does, so a stray one can look fine in the preview and still break in a client. The owner reviewed the desktop and phone screenshots on 2026-10-22 and approved the look.
+- **To check after deploy:** that the `> ` in the embed titles shows right on every client. If one draws it oddly, the fix is one constant in `terminal.py`.

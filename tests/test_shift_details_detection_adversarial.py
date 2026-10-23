@@ -70,7 +70,7 @@ from newsbot.store.db import connect, migrate
 
 BLUESKY = "Borderlands 4 (Bluesky search)"
 OTHER_SITE = "another-codes-site"
-FOLLOWUP_TEXT = "Confirmed by a second source"
+FOLLOWUP_TEXT = "confirmed by a second source"
 
 
 async def _noop_sleep(_seconds: float) -> None:
@@ -887,8 +887,8 @@ async def test_a_code_found_by_mentalmars_and_confirmed_by_bluesky_gets_one_foll
     assert len(h.followups(1)) == 1
     # Task 7: mentalmars' row gave the code details, and the follow-up shows them.
     assert h.followups(1)[0].content == (
-        f"@everyone {FOLLOWUP_TEXT}:\n`{X}` · 3 Golden Keys"
-        " · expires Oct 30, 2026 (<t:1793430000:R>) · details via mentalmars"
+        f"@everyone `> {FOLLOWUP_TEXT} ▌`\n\n```\n{X}\n```\n`reward` 3 Golden Keys"
+        " · `expires` Oct 30, 2026 (<t:1793430000:R>) · `via` mentalmars"
     )
 
     # A third source, and a fourth, change nothing.

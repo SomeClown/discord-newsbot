@@ -269,9 +269,14 @@ take back:
   by a second, independent source (a different source name, compared without
   regard to case) or an official or press one within 24 hours of its first
   sighting, each server whose original post went out unpinged for that reason,
-  and has pinging on, gets one short follow-up: "Confirmed by a second
-  source", with its chosen ping, spending one of that day's pings. A spent cap
-  skips it silently; a server gets at most one per code, ever. Two sources
+  and has pinging on, gets one follow-up headed
+  `> confirmed by a second source ▌`, with its chosen ping. Each code sits in
+  its own block, with its `reward` and `expires` line when it has details and
+  no source line (the original post already named one). It spends one of that
+  day's pings. A spent cap skips it silently; a server gets at most one per
+  code, ever. A follow-up holds about 15 codes (about 4 with the longest
+  possible details), and the rest wait for a later pass, though once the day's
+  cap is spent they're skipped for good. Two sources
   seeing a code in the same pass just ping on the first post. A confirmation
   that arrives while the original is still queued waits for the next sighting,
   and a stale second sighting still counts (the bot only asks that it *sees*
@@ -279,9 +284,9 @@ take back:
 - **Roundups post, but without a ping.** An item naming more than
   `shift.max_codes_per_item` (default 5) distinct codes is a roundup or
   megathread, not a genuine single-code announcement. A fresh code whose
-  only sightings are roundup items still posts under a separate "SHiFT codes
-  from a roundup" header naming the source, never pinged, and never spending
-  the cap; capped at 50 fresh roundup codes per pass, with the rest recorded
+  only sightings are roundup items still posts under a separate
+  `> SHiFT roundup ▌` header ("7 codes from" the source, then a link to its
+  post), never pinged, and never spending the cap; capped at 50 fresh roundup codes per pass, with the rest recorded
   silently and the owner told.
 - **A failed send keeps its ping only if nobody could have been pinged.** If
   Discord answers 429 (it refused the message), the retry keeps the ping,
@@ -315,10 +320,19 @@ first posts without a ping like any other community find (it does count as the
 second source that can earn the follow-up above). For each of reward, kind and
 expiry, Gearbox's value beats mentalmars', and a missing value never erases a
 known one. A code with details gets a line under it:
-`3 Golden Keys · expires Oct 14, 2026 (in 3 days) · details via mentalmars`.
-The "in 3 days" is a Discord timestamp, so Discord keeps it counting down and
-shows each reader their own time zone. With nothing known, the line is left
-out and the alert looks like it always did.
+`` `reward` 3 Golden Keys · `expires` Oct 14, 2026 (in 3 days) · `via` mentalmars ``
+(Discord draws the backticked words as small gray labels). The "in 3 days" is
+a Discord timestamp, so Discord keeps it counting down and shows each reader
+their own time zone. With nothing known, the line is left out.
+
+Since v3.2.0 the whole alert has a terminal look: a `> new SHiFT code ▌` header
+(a still cursor; Discord can't animate text), the code alone in its block so
+the copy icon copies only the code, the details line, and a `src` line with the
+source and its link. It's all plain text and small gray labels, so it reads the
+same on a phone. `/shift codes` and `/shift history` keep their pages and
+buttons, with a green stripe, `> current SHiFT codes ▌` and
+`> SHiFT code history ▌` titles, and `[golden keys]`-style group headings.
+Alerts posted before v3.2.0 keep their old layout when they're edited.
 
 When details arrive after an alert has posted, the bot edits that message in
 place (for 14 days after it posts; no new message, and no new notification).
@@ -456,6 +470,13 @@ see `docs/sources-research.md` for how the seed sources were verified.
 `--collect`, `--fixtures` and `--post-to-stdout` do write, and none of them
 belongs near a live database. The full list of modes is in
 `docs/self-host.md` §14.
+
+To see what the SHiFT alerts and `/shift` pages look like without a Discord
+server, run `python scripts/preview_shift_look.py` (add `--screenshots` for
+desktop and phone images; that part needs Chrome at its Mac path). It renders
+every case through the real formatting code into
+`build/shift-look/index.html`, imitating Discord's dark theme. It's an
+approximation of Discord, not Discord.
 
 ### Running the dev bot
 

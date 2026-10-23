@@ -114,8 +114,8 @@ async def test_the_first_alert_carries_the_details_line(h):
     # Oct 2 ends at Pacific midnight, Oct 3 00:00 PDT = 07:00 UTC; no "tomorrow" in the post.
     stamp = int(datetime(2026, 10, 3, 7, 0, tzinfo=UTC).timestamp())
     assert (
-        f"```\n{CODE_A}\n```\n3 Golden Keys · expires Oct 2, 2026 (<t:{stamp}:R>)"
-        f" · details via {GEARBOX}\n"
+        f"```\n{CODE_A}\n```\n`reward` 3 Golden Keys · `expires` Oct 2, 2026 (<t:{stamp}:R>)"
+        f" · `via` {GEARBOX}\n"
     ) in alert.content
     assert "tomorrow" not in alert.content
 
@@ -127,7 +127,8 @@ async def test_a_code_without_details_posts_the_old_way(h):
 
     (alert,) = h.sent(1)
     assert alert.content == (
-        f"@everyone **New SHiFT code**\n\n```\n{CODE_A}\n```\n{GEARBOX} · <https://example.com/AAAA>"
+        f"@everyone `> new SHiFT code ▌`\n\n```\n{CODE_A}\n```\n"
+        f"`src` {GEARBOX} · <https://example.com/AAAA>"
     )
 
 
@@ -210,10 +211,10 @@ async def test_each_posted_alert_leaves_a_row_for_the_edit_pass(h):
     # Two servers, two messages each (a pair, then the leftover), mixed so golden entries
     # wear their prefix. Each poster numbers its own messages from 9001.
     assert [(r[0], r[1], r[2], r[3], r[4]) for r in got] == [
-        (1, 9001, 100, "@everyone **New SHiFT codes**", 1),
-        (1, 9002, 100, "**(continued)**", 1),
-        (2, 9001, 200, f"<@&{ROLE}> **New SHiFT codes**", 1),
-        (2, 9002, 200, "**(continued)**", 1),
+        (1, 9001, 100, "@everyone `> new SHiFT codes ▌`", 1),
+        (1, 9002, 100, "`> new SHiFT codes (continued) ▌`", 1),
+        (2, 9001, 200, f"<@&{ROLE}> `> new SHiFT codes ▌`", 1),
+        (2, 9002, 200, "`> new SHiFT codes (continued) ▌`", 1),
     ]
     for _guild, _message, _channel, _header, _golden, posted_at, rendered_at in got:
         assert datetime.fromisoformat(posted_at) == NOW
@@ -290,7 +291,7 @@ async def test_a_stripped_ping_stores_the_header_that_actually_posted(h):
     await h.run([item(CODE_A)])
 
     ((_g, _m, _c, header, *_),) = message_rows(h.db_path)
-    assert header == "**New SHiFT code**"
+    assert header == "`> new SHiFT code ▌`"
 
 
 async def test_a_ping_kept_on_a_rejection_is_stored_with_the_ping(h):
@@ -300,7 +301,7 @@ async def test_a_ping_kept_on_a_rejection_is_stored_with_the_ping(h):
     await h.run([item(CODE_A)])
 
     ((_g, _m, _c, header, *_),) = message_rows(h.db_path)
-    assert header == "@everyone **New SHiFT code**"
+    assert header == "@everyone `> new SHiFT code ▌`"
 
 
 async def test_a_failed_message_leaves_no_row(h):
@@ -383,8 +384,9 @@ async def test_a_followup_shows_details_and_writes_no_row(h):
 
     (followup,) = h.sent(1)
     assert followup.content == (
-        "@everyone Confirmed by a second source:\n"
-        f"`{CODE_A}` · 3 Golden Keys · details via {MENTALMARS}"
+        "@everyone `> confirmed by a second source ▌`\n\n"
+        f"```\n{CODE_A}\n```\n"
+        f"`reward` 3 Golden Keys · `via` {MENTALMARS}"
     )
     assert message_rows(h.db_path) == before
 
@@ -409,7 +411,7 @@ async def test_a_followup_fits_by_its_real_size_and_the_rest_wait(h):
     assert len(message_rows(h.db_path)) == 1  # still only the original alert
 
 
-async def test_followups_without_details_keep_the_one_liner(h):
+async def test_followups_without_details_are_just_the_prompt_and_the_fence(h):
     add_guild(h.db_path, 1, ping="everyone")
     await h.run([sighting(REDDIT, "community", CODE_A, NOW)])
 
@@ -417,7 +419,9 @@ async def test_followups_without_details_keep_the_one_liner(h):
     await h.run([sighting(BLUESKY, "community", CODE_A, h.clock)])
 
     (followup,) = h.sent(1)
-    assert followup.content == f"@everyone Confirmed by a second source: `{CODE_A}`"
+    assert followup.content == (
+        f"@everyone `> confirmed by a second source ▌`\n\n```\n{CODE_A}\n```"
+    )
 
 
 # --- the CLI preview ---
