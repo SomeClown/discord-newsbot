@@ -234,7 +234,7 @@ class GuildOutcome:
     skipped: int = 0
     pinged: bool = False
     cap_reached: bool = False
-    # "Confirmed by a second source" follow-ups (D14): codes named in the one
+    # "> confirmed by a second source" follow-ups (D14): codes named in the one
     # pinged message this turn sent, if any.
     followups_posted: int = 0
     error: str | None = None
