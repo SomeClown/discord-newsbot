@@ -391,7 +391,7 @@ async def test_a_followup_shows_details_and_writes_no_row(h):
     assert message_rows(h.db_path) == before
 
 
-async def test_a_followup_fits_by_its_real_size_and_the_rest_wait(h):
+async def test_a_followup_fits_by_its_real_size_and_the_rest_continue_in_the_same_turn(h):
     add_guild(h.db_path, 1, ping="everyone")
     codes = [numbered(n) for n in range(1, 9)]
     await h.run([sighting(REDDIT, "community", c, NOW) for c in codes])
@@ -402,12 +402,14 @@ async def test_a_followup_fits_by_its_real_size_and_the_rest_wait(h):
     h.clock = NOW + timedelta(hours=20)
     await h.run([sighting(BLUESKY, "community", c, h.clock) for c in codes])
 
-    (followup,) = h.sent(1)
-    assert discord_len(followup.content) <= 2000
-    assert followup.codes == codes[:5]
+    first, second = h.sent(1)
+    assert all(discord_len(a.content) <= 2000 for a in (first, second))
+    assert first.codes == codes[:5] and second.codes == codes[5:]
+    assert first.ping is True and second.ping is False
+    assert second.content.startswith("`> confirmed by a second source (continued) ▌`\n\n")
     assert rows(h.db_path, "SELECT code, status FROM guild_code_followups ORDER BY code") == [
-        (c, "posted") for c in codes[:5]
-    ] + [(c, "queued") for c in codes[5:]]
+        (c, "posted") for c in codes
+    ]
     assert len(message_rows(h.db_path)) == 1  # still only the original alert
 
 

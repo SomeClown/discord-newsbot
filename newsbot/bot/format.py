@@ -1395,37 +1395,30 @@ def render_roundup_alerts(
     return rendered
 
 
-# One follow-up message names at most this many codes; the rest wait for the
-# next pass. A confirmation burst that big has never happened, and 20 keeps
-# the whole message from turning into a wall (a fenced code is three lines tall now).
+# One follow-up message names at most this many codes; a bigger burst spills into
+# "(continued)" messages under the same ping. 20 keeps any one message from turning
+# into a wall (a fenced code is three lines tall now).
 FOLLOWUP_MAX_CODES = 20
 
 
-def _followup_content(
-    codes: list[str],
-    ping_prefix: str,
-    details: Mapping[str, CodeDetailsRow] | None,
-    now: datetime | None,
+def _followup_entry(
+    code: str, details: Mapping[str, CodeDetailsRow] | None, now: datetime | None
 ) -> str:
-    """A follow-up's text: ping and prompt, then each code in its fence plus its details line."""
-    header = f"{ping_prefix}{terminal.prompt(terminal.FOLLOWUP_HEADER)}"
-    entries = []
-    for code in codes:
-        entry = f"```\n{code}\n```"
-        line = _line_for(code, details, now)
-        entries.append(f"{entry}\n{line}" if line else entry)
-    return "\n\n".join([header, *entries])
+    """One follow-up entry: the code in its fence, plus its details line if it has one."""
+    entry = f"```\n{code}\n```"
+    line = _line_for(code, details, now)
+    return f"{entry}\n{line}" if line else entry
 
 
-def render_followup_alert(
+def render_followup_alerts(
     codes: list[str],
     *,
     ping_mention: str,
     nonce_scope: str = "",
     details: Mapping[str, CodeDetailsRow] | None = None,
     now: datetime | None = None,
-) -> RenderedAlert:
-    """The "confirmed by a second source" follow-up (plan D14): one pinged message.
+) -> list[RenderedAlert]:
+    """The "confirmed by a second source" follow-up (plan D14): one ping, then a message per batch.
 
     A community code that already posted unpinged just got a second,
     independent source. This is the nudge: the ping and a prompt line, then each
@@ -1433,60 +1426,90 @@ def render_followup_alert(
     block; this one repeats it so nobody has to scroll). `ping_mention` is the text a
     server's ping choice turns into (`@everyone` or a role mention), and the
     allowed-mentions that make it actually notify come from `mentions_for` at send
-    time, as for every other alert. The nonce is salted with a `followup|` marker as
-    well as the server scope, so Discord can't mistake this for the original alert's send.
+    time, as for every other alert.
+
+    Codes are packed in order, greedily, by their real rendered size: a message takes
+    codes until the next one would pass `FOLLOWUP_MAX_CODES` or 2,000 UTF-16 units. Only
+    the first message pings. Every later one wears the fixed continuation chip instead
+    and never pings, the way an alert batch spills over (`render_code_alerts`). A
+    burst that doesn't fit one message is therefore still one claim and one unit of
+    the day's ping budget, which is the whole reason this isn't capped at one message.
 
     A code with a details line (`details`, read against `now`) gets it right under
     its fence, as the details stand right now. There's no `src` line: the follow-up
     exists because of a second source, and the `via` part of the details line names who
-    supplied the facts. Nothing edits a follow-up, so it isn't given a reserve;
-    `fit_followup_codes` picks how many codes fit by their real size.
+    supplied the facts. Nothing edits a follow-up, so it isn't given a reserve, and its
+    `header` stays empty (the prompt line is part of the content).
+
+    Each message's nonce is salted with a `followup|` marker as well as the server
+    scope, so Discord can't mistake it for the original alert's send, and with the
+    message's position, so message 2 can't be mistaken for message 1. A retry of the
+    same message reuses its own.
+
+    Returns `[]` for no codes, or when not even the first code fits a pinged message
+    (that takes a ping mention close to 2,000 units; the caller treats it as the bug it
+    is). A later code that can't fit a message of its own is the same bug one message
+    on, and raises.
     """
-    if not codes or len(codes) > FOLLOWUP_MAX_CODES:
-        raise ValueError(f"a follow-up names 1 to {FOLLOWUP_MAX_CODES} codes, got {len(codes)}")
     for code in codes:
         if not is_code(code):
             raise ValueError(f"not a SHiFT code: {code!r}")
+    if not codes:
+        return []
     ping_prefix = f"{ping_mention} "
-    content = _followup_content(codes, ping_prefix, details, now)
-    if discord_len(content) > _ALERT_CONTENT_LIMIT:
-        raise ValueError(
-            f"rendered follow-up exceeds {_ALERT_CONTENT_LIMIT} UTF-16 units "
-            f"({discord_len(content)}); use fit_followup_codes to choose the codes"
+    first_header = f"{ping_prefix}{terminal.prompt(terminal.FOLLOWUP_HEADER)}"
+    continuation = terminal.prompt(terminal.FOLLOWUP_CONTINUATION)
+
+    # Each batch is a list of (code, entry). A message is its header plus "\n\n" and an
+    # entry per code, and UTF-16 lengths add, so the running total is exact.
+    batches: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_len = 0
+    for code in codes:
+        entry = _followup_entry(code, details, now)
+        cost = discord_len(entry) + 2
+        if current and (
+            len(current) >= FOLLOWUP_MAX_CODES or current_len + cost > _ALERT_CONTENT_LIMIT
+        ):
+            batches.append(current)
+            current = []
+        if not current:
+            current_len = discord_len(first_header if not batches else continuation)
+            if current_len + cost > _ALERT_CONTENT_LIMIT:
+                if not batches:
+                    return []
+                raise ValueError(f"follow-up entry for {code!r} can't fit in a message of its own")
+        current.append((code, entry))
+        current_len += cost
+    batches.append(current)
+
+    rendered = []
+    for i, batch in enumerate(batches):
+        header = first_header if i == 0 else continuation
+        content = "\n\n".join([header, *(entry for _, entry in batch)])
+        # A second check behind the packing loop above, as in `render_code_alerts`: a
+        # message that snuck past the cap would be rejected by Discord, and a code lost
+        # that way is a code nobody notices is gone. Louder than an `assert`, which
+        # `-O` strips.
+        if discord_len(content) > _ALERT_CONTENT_LIMIT:
+            raise ValueError(
+                f"rendered follow-up exceeds {_ALERT_CONTENT_LIMIT} UTF-16 units "
+                f"({discord_len(content)}); codes: {[code for code, _ in batch]}"
+            )
+        batch_codes = [code for code, _ in batch]
+        nonce = hashlib.sha256(
+            f"{_nonce_salt(nonce_scope)}followup|{'|'.join(batch_codes)}|{i}".encode()
+        ).hexdigest()[:25]
+        rendered.append(
+            RenderedAlert(
+                content=content,
+                codes=batch_codes,
+                ping=i == 0,
+                nonce=nonce,
+                ping_prefix=ping_prefix if i == 0 else "",
+            )
         )
-    nonce = hashlib.sha256(
-        f"{_nonce_salt(nonce_scope)}followup|{'|'.join(codes)}".encode()
-    ).hexdigest()[:25]
-    return RenderedAlert(
-        content=content,
-        codes=list(codes),
-        ping=True,
-        nonce=nonce,
-        ping_prefix=ping_prefix,
-    )
-
-
-def fit_followup_codes(
-    codes: list[str],
-    *,
-    ping_mention: str,
-    details: Mapping[str, CodeDetailsRow] | None,
-    now: datetime | None,
-) -> list[str]:
-    """The longest prefix of `codes` (at most `FOLLOWUP_MAX_CODES`) whose follow-up fits 2000 units.
-
-    The rest stay queued for the next pass. Measured by rendering, not by adding up
-    estimates, because a details line can be anywhere from nothing to several hundred
-    units and only the real text knows which. The result is empty only if not even one
-    code fits, which needs a ping mention that is itself nearly 2000 units long; the
-    caller should treat that as the bug it is.
-    """
-    ping_prefix = f"{ping_mention} "
-    for n in range(min(len(codes), FOLLOWUP_MAX_CODES), 0, -1):
-        content = _followup_content(codes[:n], ping_prefix, details, now)
-        if discord_len(content) <= _ALERT_CONTENT_LIMIT:
-            return codes[:n]
-    return []
+    return rendered
 
 
 # --- Admin-channel run reports (design.md §6, §8) ---
@@ -2143,13 +2166,12 @@ __all__ = [
     "details_line",
     "details_reserve",
     "esc",
-    "fit_followup_codes",
     "outcome_from_digest",
     "render_alert_edit",
     "render_code_alerts",
     "render_current_pages",
     "render_digest_summary_line",
-    "render_followup_alert",
+    "render_followup_alerts",
     "render_guild_digest",
     "friendly_skip_reason",
     "render_guild_run_report",

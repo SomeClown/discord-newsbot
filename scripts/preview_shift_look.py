@@ -42,7 +42,7 @@ from newsbot.bot.format import (
     render_alert_edit,
     render_code_alerts,
     render_current_pages,
-    render_followup_alert,
+    render_followup_alerts,
     render_history_pages,
     render_roundup_alerts,
 )
@@ -60,10 +60,11 @@ CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 # window, not the page, and I'd rather have one long image per width than a pile of slices.
 # Too tall leaves a dark band at the bottom; too short cuts the end off. Chrome also hangs
 # (it doesn't fail, it hangs) on a window taller than 8,192 px at 2x scale, so that is the
-# ceiling. The desktop page is the one that gets near it (7,800 of 8,192, and the page itself
-# is about 7,500); a new case that pushes either past it means trimming cases, because the
+# ceiling. Both pages are near it now (the desktop one is about 7,750 and the phone one about
+# 7,700, in windows of 7,900 and 8,000); a new case that pushes either past it means trimming
+# cases (the roundup in case 10 was cut to 17 codes to make room for case 12), because the
 # height can't simply go up.
-SCREENSHOTS = (("desktop.png", 1280, 7800), ("phone.png", 390, 7200))
+SCREENSHOTS = (("desktop.png", 1280, 7900), ("phone.png", 390, 8000))
 
 # Headless Chrome won't lay a page out narrower than this, whatever `--window-size` says: it
 # lays out at 500 and then crops the screenshot to the width you asked for, which clips
@@ -314,7 +315,7 @@ def build_cases(now: datetime) -> list[Case]:
             url="https://example.com/wiki/shift",
             roundup=True,
         )
-        for i in range(22)
+        for i in range(17)
     ]
     d10 = {
         c.code: _golden_row(50 + i, 1 + i % 5, today + timedelta(days=2 + i))
@@ -336,30 +337,56 @@ def build_cases(now: datetime) -> list[Case]:
             [
                 (
                     "with details",
-                    render_followup_alert(
+                    render_followup_alerts(
                         [code_a], ping_mention="@everyone", details=d11, now=now
-                    ).content,
+                    )[0].content,
                 ),
                 (
                     "without",
-                    render_followup_alert([code_b], ping_mention="@everyone").content,
+                    render_followup_alerts([code_b], ping_mention="@everyone")[0].content,
                 ),
             ],
         )
     )
 
-    # 12. The test alert, which can't pass for a real one.
+    # 12. A follow-up that continues: one ping, then a "(continued)" message. Worst-case details
+    # keep it to a handful of codes; a real burst of 25 plain ones does the same, just taller.
+    c12f = [_cand(80 + i, source="Community Source #1") for i in range(5)]
+    d12f = {
+        c.code: _row(
+            80 + i,
+            reward=cap_shown("3 Golden Keys and a generous pile of cosmetics, " * 8, 300),
+            reward_from="Community Source #1",
+            category="golden",
+            category_from="Community Source #1",
+            expires_on=date(2026, 10, 30),
+            expires_from="Community Source #2",
+        )
+        for i, c in enumerate(c12f)
+    }
+    cases.append(
+        (
+            "12. A follow-up that continues (five codes at worst-case details)",
+            _alert_texts(
+                render_followup_alerts(
+                    [c.code for c in c12f], ping_mention="@everyone", details=d12f, now=now
+                )
+            ),
+        )
+    )
+
+    # 13. The test alert, which can't pass for a real one.
     c12 = _cand(70, golden=True, source="test")
     cases.append(
         (
-            "12. A test alert",
+            "13. A test alert",
             _alert_texts(
                 render_code_alerts([c12], ping=False, test=True, now=now, reserve=PROD_RESERVE)
             ),
         )
     )
 
-    # 13. /shift codes: everything, golden only, and nothing at all.
+    # 14. /shift codes: everything, golden only, and nothing at all.
     current = [
         CurrentCode(
             _code(80), now - timedelta(days=1), _golden_row(80, 3, today + timedelta(days=6))
@@ -397,7 +424,7 @@ def build_cases(now: datetime) -> list[Case]:
     empty = "No current codes. I'll post new ones in <#1411111111111111112> when they show up."
     cases.append(
         (
-            "13. /shift codes (all, type: golden, empty)",
+            "14. /shift codes (all, type: golden, empty)",
             [
                 (
                     "all",
@@ -421,7 +448,7 @@ def build_cases(now: datetime) -> list[Case]:
         )
     )
 
-    # 14. /shift history, with each marker it has: expired, from a roundup, old post.
+    # 15. /shift history, with each marker it has: expired, from a roundup, old post.
     views = [
         CodeView(
             _code(90),
@@ -460,7 +487,7 @@ def build_cases(now: datetime) -> list[Case]:
     ]
     cases.append(
         (
-            "14. /shift history (expired, from a roundup, old post)",
+            "15. /shift history (expired, from a roundup, old post)",
             list(render_history_pages(views, timezone="America/Los_Angeles", now=now)),
         )
     )

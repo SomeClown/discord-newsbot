@@ -19,15 +19,13 @@ import pytest
 from newsbot.bot import terminal
 from newsbot.bot.format import (
     FOLLOWUP_MAX_CODES,
-    _followup_content,
     details_line,
     details_reserve,
     discord_len,
     esc,
-    fit_followup_codes,
     render_alert_edit,
     render_code_alerts,
-    render_followup_alert,
+    render_followup_alerts,
     render_roundup_alerts,
 )
 from newsbot.shift.decide import CodeCandidate
@@ -283,7 +281,7 @@ def test_alerts_edits_followups_and_roundups_carry_a_date_and_a_live_timestamp_o
 
     [alert] = render_code_alerts(batch, ping=False, details=details, now=NOW)
     edited = render_alert_edit(alert.header, batch, golden_prefix=False, details=details, now=NOW)
-    followup = render_followup_alert(codes, ping_mention="@everyone", details=details, now=NOW)
+    [followup] = render_followup_alerts(codes, ping_mention="@everyone", details=details, now=NOW)
     [roundup] = render_roundup_alerts(
         [_candidate(i, roundup=True, item_url=POST) for i in range(2)], details=details, now=NOW
     )
@@ -455,13 +453,13 @@ def test_roundup_details_that_are_long_still_fit():
 
 def test_followup_without_details_is_the_prompt_and_a_fence_per_code():
     codes = [_code(1), _code(2)]
-    alert = render_followup_alert(codes, ping_mention="@everyone")
+    [alert] = render_followup_alerts(codes, ping_mention="@everyone")
     assert alert.content == (
         "@everyone `> confirmed by a second source ▌`\n\n"
         f"```\n{codes[0]}\n```\n\n"
         f"```\n{codes[1]}\n```"
     )
-    with_empty = render_followup_alert(
+    [with_empty] = render_followup_alerts(
         codes, ping_mention="@everyone", details={codes[0]: _row(codes[0])}, now=NOW
     )
     assert with_empty.content == alert.content
@@ -470,7 +468,7 @@ def test_followup_without_details_is_the_prompt_and_a_fence_per_code():
 def test_followup_with_details_puts_the_line_under_its_fence():
     codes = [_code(1), _code(2)]
     details = {codes[0]: _row(codes[0], reward="3 Golden Keys", reward_from="mentalmars")}
-    alert = render_followup_alert(codes, ping_mention=ROLE, details=details, now=NOW)
+    [alert] = render_followup_alerts(codes, ping_mention=ROLE, details=details, now=NOW)
     assert alert.content == (
         f"{ROLE} `> confirmed by a second source ▌`\n\n"
         f"```\n{codes[0]}\n```\n`reward` 3 Golden Keys · `via` mentalmars\n\n"
@@ -480,40 +478,44 @@ def test_followup_with_details_puts_the_line_under_its_fence():
     assert alert.ping_prefix == f"{ROLE} "
 
 
-def test_followup_too_big_for_a_message_is_an_error():
+def test_followups_too_big_for_a_message_spill_into_continuations():
     codes = [_code(i) for i in range(10)]
     details = {c: _worst_row(c, "a" * 100, "b" * 100) for c in codes}
-    with pytest.raises(ValueError, match="fit_followup_codes"):
-        render_followup_alert(codes, ping_mention="@everyone", details=details, now=NOW)
+    alerts = render_followup_alerts(codes, ping_mention=ROLE, details=details, now=NOW)
+    assert len(alerts) > 1
+    assert [c for a in alerts for c in a.codes] == codes  # in order, none lost
+    assert all(discord_len(a.content) <= 2000 for a in alerts)
+    assert [a.ping for a in alerts] == [True] + [False] * (len(alerts) - 1)
+    assert alerts[0].content.startswith(f"{ROLE} `> confirmed by a second source ▌`\n\n")
+    for a in alerts[1:]:
+        assert a.content.startswith("`> confirmed by a second source (continued) ▌`\n\n")
+        assert ROLE not in a.content and a.ping_prefix == ""
 
 
-def test_fit_followup_codes_takes_every_code_when_there_are_no_details():
-    codes = [_code(i) for i in range(30)]
-    fit = fit_followup_codes(codes, ping_mention="@everyone", details=None, now=None)
-    assert fit == codes[:FOLLOWUP_MAX_CODES]
-
-
-def test_fit_followup_codes_stops_when_the_details_fill_the_message():
+def test_followups_pack_by_real_size_so_each_message_is_as_full_as_it_can_be():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     details = {c: _worst_row(c, "a" * 100, "b" * 100) for c in codes}
-    fit = fit_followup_codes(codes, ping_mention=ROLE, details=details, now=NOW)
-    assert 0 < len(fit) < len(codes)
-    assert fit == codes[: len(fit)]  # a prefix, in queue order
-    assert (
-        discord_len(render_followup_alert(fit, ping_mention=ROLE, details=details, now=NOW).content)
-        <= 2000
-    )
-    # ... and it was the longest one: one more code would not have fit.
-    more = codes[: len(fit) + 1]
-    assert discord_len(_followup_content(more, f"{ROLE} ", details, NOW)) > 2000
+    alerts = render_followup_alerts(codes, ping_mention=ROLE, details=details, now=NOW)
+    for here, after in zip(alerts, alerts[1:], strict=False):
+        # The next message started because this one was full: one more entry (and its "\n\n")
+        # would have passed 2,000 units.
+        next_entry = after.content.split("\n\n")[1]
+        assert discord_len(here.content) + 2 + discord_len(next_entry) > 2000
 
 
-def test_fit_followup_codes_counts_real_sizes_not_worst_cases():
+def test_followups_are_packed_twenty_to_a_message_without_details():
+    codes = [_code(i) for i in range(30)]
+    alerts = render_followup_alerts(codes, ping_mention="@everyone")
+    assert [len(a.codes) for a in alerts] == [FOLLOWUP_MAX_CODES, 10]
+    assert [c for a in alerts for c in a.codes] == codes
+
+
+def test_short_details_lines_still_fit_twenty_codes_in_one_message():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
     details = {c: _row(c, reward="3 Golden Keys", reward_from="mentalmars") for c in codes}
-    fit = fit_followup_codes(codes, ping_mention="@everyone", details=details, now=NOW)
-    assert fit == codes  # twenty short lines fit easily
+    [alert] = render_followup_alerts(codes, ping_mention="@everyone", details=details, now=NOW)
+    assert alert.codes == codes
 
 
-def test_fit_followup_codes_with_nothing_to_fit_is_empty():
-    assert fit_followup_codes([], ping_mention="@everyone", details=None, now=None) == []
+def test_followups_with_nothing_to_render_are_empty():
+    assert render_followup_alerts([], ping_mention="@everyone") == []

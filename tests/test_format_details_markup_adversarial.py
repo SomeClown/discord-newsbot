@@ -32,11 +32,10 @@ from newsbot.bot.format import (
     details_line,
     details_reserve,
     discord_len,
-    fit_followup_codes,
     render_alert_edit,
     render_code_alerts,
     render_current_pages,
-    render_followup_alert,
+    render_followup_alerts,
     render_history_pages,
     render_roundup_alerts,
 )
@@ -196,9 +195,10 @@ def _surfaces(text: str) -> dict[str, str]:
     out["alert"] = _set_aside(alert.content, codes=codes, extra=("Gearbox Blog",))
     edit = render_alert_edit(alert.header, [cand], golden_prefix=False, details=details, now=NOW)
     out["edit"] = _set_aside(edit, codes=codes, extra=("Gearbox Blog",))
-    follow = render_followup_alert(
+    [followup] = render_followup_alerts(
         [_code(0)], ping_mention="@everyone", details=details, now=NOW
-    ).content
+    )
+    follow = followup.content
     out["followup"] = _set_aside(follow.removeprefix("@everyone "), codes=codes)
     rcand = CodeCandidate(
         code=_code(0),
@@ -612,8 +612,7 @@ def test_the_current_page_shows_the_year_only_when_it_is_another_year():
 def test_followup_lines_use_the_same_wording_as_alerts():
     code = _code()
     details = {code: _row(code, reward="r", expires_on=date(2026, 10, 10))}
-    fit = fit_followup_codes([code], ping_mention="@everyone", details=details, now=NOW)
-    alert = render_followup_alert(fit, ping_mention="@everyone", details=details, now=NOW)
+    [alert] = render_followup_alerts([code], ping_mention="@everyone", details=details, now=NOW)
     assert alert.content == (
         "@everyone `> confirmed by a second source ▌`\n\n"
         f"```\n{code}\n```\n"

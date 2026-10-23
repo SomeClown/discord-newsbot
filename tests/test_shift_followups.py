@@ -11,16 +11,19 @@ no network.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from test_shift_delivery_details import store_details
 from test_shift_fanout_adversarial import (
     CODE_A,
     CODE_B,
     EARLIER,
     V3,
     FakeChannel,
+    FakePoster,
     Harness,
     _code,
     add_guild,
@@ -29,10 +32,11 @@ from test_shift_fanout_adversarial import (
     shift_row,
 )
 
-from newsbot.bot.format import FOLLOWUP_MAX_CODES, render_code_alerts, render_followup_alert
+from newsbot.bot.format import FOLLOWUP_MAX_CODES, render_code_alerts, render_followup_alerts
 from newsbot.collectors.base import RawItem
 from newsbot.config import load_config
 from newsbot.pipeline.publisher import PublishError
+from newsbot.shift import fanout
 from newsbot.shift.decide import CodeCandidate, CodeSighting, aggregate
 from newsbot.shift.fanout import deliver_queued_codes, detect_and_fan_out
 from newsbot.store import repo
@@ -98,6 +102,7 @@ def followup_rows(db_path):
 
 
 FOLLOWUP_PROMPT = "`> confirmed by a second source ▌`"
+FOLLOWUP_CONTINUED = "`> confirmed by a second source (continued) ▌`"
 
 
 def followup_text(*codes, ping="@everyone "):
@@ -107,7 +112,12 @@ def followup_text(*codes, ping="@everyone "):
 
 
 def followup_alerts(h, guild_id):
-    return [a for a in h.sent(guild_id) if FOLLOWUP_PROMPT in a.content.split("\n", 1)[0]]
+    return [
+        a
+        for a in h.sent(guild_id)
+        if FOLLOWUP_PROMPT in a.content.split("\n", 1)[0]
+        or FOLLOWUP_CONTINUED in a.content.split("\n", 1)[0]
+    ]
 
 
 # --- the real timeline ---
@@ -543,7 +553,7 @@ def test_aggregate_treats_two_source_names_as_trusted_and_one_as_not():
 
 
 def test_the_followup_text_is_a_prompt_and_a_fence_per_code():
-    alert = render_followup_alert([CODE], ping_mention="@everyone", nonce_scope="1|100")
+    [alert] = render_followup_alerts([CODE], ping_mention="@everyone", nonce_scope="1|100")
     assert alert.content == followup_text(CODE)
     assert alert.ping is True and alert.codes == [CODE]
     other = render_code_alerts(
@@ -555,12 +565,14 @@ def test_the_followup_text_is_a_prompt_and_a_fence_per_code():
     assert alert.nonce != other.nonce and len(alert.nonce) <= 25
 
 
-@pytest.mark.parametrize(
-    "bad", [[], ["not a code"], [_code(i) for i in range(FOLLOWUP_MAX_CODES + 1)]]
-)
-def test_the_followup_renderer_refuses_bad_input(bad):
-    with pytest.raises(ValueError):
-        render_followup_alert(bad, ping_mention="@everyone")
+def test_the_followup_renderer_refuses_a_non_code_and_spills_past_twenty():
+    with pytest.raises(ValueError, match="not a SHiFT code"):
+        render_followup_alerts(["not a code"], ping_mention="@everyone")
+    assert render_followup_alerts([], ping_mention="@everyone") == []
+    many = [_code(i) for i in range(FOLLOWUP_MAX_CODES + 1)]
+    sent = render_followup_alerts(many, ping_mention="@everyone")
+    assert [len(a.codes) for a in sent] == [FOLLOWUP_MAX_CODES, 1]
+    assert [a.ping for a in sent] == [True, False]
 
 
 async def test_a_code_confirmed_with_nothing_to_follow_up_is_a_quiet_noop(h):
@@ -570,3 +582,223 @@ async def test_a_code_confirmed_with_nothing_to_follow_up_is_a_quiet_noop(h):
     assert followup_rows(h.db_path) == []
     assert rows(h.db_path, "SELECT COUNT(*) FROM code_sightings") == [(2,)]
     assert EARLIER < T0 and CODE_B  # (the shared fixtures' constants stay importable)
+
+
+# --- one claim, one ping, as many messages as it takes ---
+
+
+class ScriptedPoster(FakePoster):
+    """A poster whose Nth post call (counting from 0) raises `script[N]` when that is an error."""
+
+    def __init__(self, guild_id, channel_id, ping, script):
+        super().__init__(guild_id, channel_id, ping)
+        self.script = list(script)
+        self.calls: list = []
+
+    async def post(self, alert):
+        self.calls.append(alert)
+        step = self.script[len(self.calls) - 1] if len(self.calls) <= len(self.script) else None
+        if step is not None:
+            raise step
+        self.sent.append(alert)
+        return 9000 + len(self.sent)
+
+
+def script_posts(h, *script):
+    """Replace the harness's poster with a `ScriptedPoster`; the returned list gets it."""
+    made: list[ScriptedPoster] = []
+
+    def factory(guild_id, channel_id, ping, notify):
+        poster = ScriptedPoster(guild_id, channel_id, ping, script)
+        made.append(poster)
+        return poster
+
+    h.factory = factory
+    return made
+
+
+async def burst(h, count, *, reward=""):
+    """`count` community codes post unpinged at T0, then a second source confirms them all."""
+    codes = [_code(i) for i in range(1, count + 1)]
+    await at(h, timedelta(0)).run([sighting_item(REDDIT, "community", c, at=T0) for c in codes])
+    if reward:
+        for code in codes:
+            store_details(h.db_path, code, reward=reward, now=T0)
+    h.sleeps.clear()
+    h.clock = T0 + timedelta(hours=20)
+    return codes
+
+
+async def confirm(h, codes):
+    await h.run([sighting_item(BLUESKY, "community", c, at=h.clock) for c in codes])
+
+
+def status_of(db_path):
+    return dict(rows(db_path, "SELECT code, status FROM guild_code_followups"))
+
+
+async def test_a_forty_code_burst_posts_every_code_in_one_turn_under_one_ping(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 40)
+    await confirm(h, codes)
+
+    sent = followup_alerts(h, 1)
+    assert [len(a.codes) for a in sent] == [FOLLOWUP_MAX_CODES, FOLLOWUP_MAX_CODES]
+    assert [c for a in sent for c in a.codes] == codes  # in order, none twice, none lost
+    # Only the first message pings; the rest continue it without a mention in sight.
+    assert [a.ping for a in sent] == [True] + [False] * (len(sent) - 1)
+    assert sent[0].content.startswith(f"@everyone {FOLLOWUP_PROMPT}\n\n")
+    assert sent[0].ping_prefix == "@everyone "
+    for a in sent[1:]:
+        assert a.content.startswith(f"{FOLLOWUP_CONTINUED}\n\n")
+        assert "@everyone" not in a.content and a.ping_prefix == ""
+    assert len({a.nonce for a in sent}) == len(sent)
+    assert shift_row(h.db_path, 1).ping_count == 1  # one claim, one unit
+    assert set(status_of(h.db_path).values()) == {"posted"}
+    # Each message's codes carry that message's own id.
+    ids = rows(h.db_path, "SELECT DISTINCT message_id FROM guild_code_followups ORDER BY 1")
+    assert ids == [(9001 + i,) for i in range(len(sent))]
+
+    # A later pass has nothing left to say, and nothing was skipped.
+    h.clock += timedelta(hours=1)
+    await confirm(h, codes)
+    assert h.sent(1) == []
+
+
+async def test_the_role_ping_rides_the_first_message_only(h):
+    role = "1234567890123456789"
+    add_guild(h.db_path, 1, ping=role)
+    codes = await burst(h, 25)
+    channel = FakeChannel(roles={int(role): type("R", (), {"mentionable": True})()})
+    h.channels = {1: channel}
+    await confirm(h, codes)
+
+    followups = channel.sent[0:]
+    assert len(followups) >= 2
+    first, *rest = followups
+    assert first[0].startswith(f"<@&{role}> {FOLLOWUP_PROMPT}") and first[1]["roles"] == [int(role)]
+    for content, wire in rest:
+        assert content.startswith(FOLLOWUP_CONTINUED)
+        # The real poster honors `ping=False`: no mention of any kind is allowed through.
+        assert wire.get("parse", []) == [] and wire.get("roles", []) == []
+
+
+async def test_worst_case_details_split_the_burst_into_several_messages_of_a_few(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 12, reward="x" * 300)
+    await confirm(h, codes)
+
+    sent = followup_alerts(h, 1)
+    assert len(sent) >= 3
+    assert all(len(a.codes) <= 5 for a in sent)
+    assert [c for a in sent for c in a.codes] == codes
+    assert [a.ping for a in sent] == [True] + [False] * (len(sent) - 1)
+    assert shift_row(h.db_path, 1).ping_count == 1
+    assert set(status_of(h.db_path).values()) == {"posted"}
+
+
+async def test_a_spent_ping_budget_skips_the_whole_burst_and_sends_nothing(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 40)
+    with closing(connect(h.db_path)) as conn, conn:
+        conn.execute("UPDATE guild_shift SET ping_day = '2026-10-01', ping_count = 3")
+    await confirm(h, codes)  # 2026-10-01 15:44 UTC
+    assert h.sent(1) == []
+    assert shift_row(h.db_path, 1).ping_count == 3
+    assert set(status_of(h.db_path).values()) == {"skipped"}
+
+
+async def test_a_message_that_fails_for_good_fails_itself_and_everything_after_it(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 50)  # three messages: 20, 20 and 10
+    made = script_posts(h, None, RuntimeError("the channel is gone"))
+    await confirm(h, codes)
+
+    [poster] = made
+    # Message 1 landed, message 2 failed, and nothing after message 2 was even tried.
+    assert len(poster.calls) == 2 and len(poster.sent) == 1
+    first, second = poster.calls
+    statuses = status_of(h.db_path)
+    assert all(statuses[c] == "posted" for c in first.codes)
+    assert all(statuses[c] == "failed" for c in codes if c not in first.codes)
+    assert second.codes[0] in codes and len(first.codes) < len(codes)
+    posted_ids = rows(
+        h.db_path, "SELECT DISTINCT message_id FROM guild_code_followups WHERE status = 'posted'"
+    )
+    assert posted_ids == [(9001,)]
+    assert h.notices == []  # a follow-up's failure is never announced
+    assert shift_row(h.db_path, 1).ping_count == 1
+
+    # Failed is final: the next pass does not try again.
+    await h.deliver()
+    assert len(made) == 1 and len(made[0].calls) == 2
+
+
+async def test_a_retried_message_reuses_its_own_nonce_and_is_not_confused_with_another(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 40)
+    # Message 2's first attempt is refused (a 429), so it goes out again.
+    made = script_posts(h, None, PublishError("429", rejected=True))
+    await confirm(h, codes)
+
+    [poster] = made
+    assert [a.nonce for a in poster.calls][1] == [a.nonce for a in poster.calls][2]
+    assert poster.calls[1].codes == poster.calls[2].codes
+    assert len({a.nonce for a in poster.sent}) == len(poster.sent)
+    assert set(status_of(h.db_path).values()) == {"posted"}
+
+
+async def test_an_ambiguous_failure_strips_the_ping_from_message_one_only(h):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 40)
+    made = script_posts(h, PublishError("timeout"))
+    await confirm(h, codes)
+
+    [poster] = made
+    sent = poster.sent
+    assert [c for a in sent for c in a.codes] == codes
+    assert all(a.ping is False for a in sent)
+    assert sent[0].content.startswith(FOLLOWUP_PROMPT) and "@everyone" not in sent[0].content
+    assert all(a.content.startswith(FOLLOWUP_CONTINUED) for a in sent[1:])
+    assert shift_row(h.db_path, 1).ping_count == 1  # claimed once, retries never re-spend
+
+
+async def test_a_mark_that_cannot_be_written_stops_the_burst_and_never_resends(h, monkeypatch):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 40)
+
+    def busy(*_args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fanout, "_followup_mark_sync", busy)
+    await confirm(h, codes)
+
+    # Message 1 went out and could not be recorded: nothing else was sent, and every claimed
+    # code stays `pending`, which no pass ever sends again.
+    assert len(h.sent(1)) == 1
+    assert set(status_of(h.db_path).values()) == {"pending"}
+    monkeypatch.undo()
+    await h.deliver()
+    assert h.sent(1) == []
+
+
+async def test_codes_another_pass_took_are_dropped_and_the_rest_are_repacked(h, monkeypatch):
+    add_guild(h.db_path, 1, ping="everyone")
+    codes = await burst(h, 30)
+    real = fanout.claim_guild_followups
+
+    def racing(conn, guild_id, wanted, **kwargs):
+        with conn:  # another pass got to the first five while this one was rendering
+            for code in wanted[:5]:
+                conn.execute(
+                    "UPDATE guild_code_followups SET status = 'posted' WHERE code = ?", (code,)
+                )
+        return real(conn, guild_id, wanted, **kwargs)
+
+    monkeypatch.setattr(fanout, "claim_guild_followups", racing)
+    await confirm(h, codes)
+
+    sent = followup_alerts(h, 1)
+    assert [c for a in sent for c in a.codes] == codes[5:]
+    assert sent[0].ping is True and sent[0].content.startswith(f"@everyone {FOLLOWUP_PROMPT}")
+    assert shift_row(h.db_path, 1).ping_count == 1

@@ -48,7 +48,7 @@ from test_shift_followups import (
     sighting_item,
 )
 
-from newsbot.bot.format import render_code_alerts, render_followup_alert
+from newsbot.bot.format import render_code_alerts, render_followup_alerts
 from newsbot.config import load_config
 from newsbot.shift.decide import CodeCandidate
 from newsbot.shift.fanout import _release, deliver_queued_codes
@@ -456,9 +456,9 @@ def test_nonces_are_unique_across_servers_and_channels_and_never_shared_with_a_f
         for channel in (guild * 100, guild * 100 + 1, 7):
             scope = f"{guild}|{channel}"
             original = render_code_alerts([candidate], ping=False, nonce_scope=scope)[0].nonce
-            follow = render_followup_alert(
-                [CODE], ping_mention="@everyone", nonce_scope=scope
-            ).nonce
+            follow = render_followup_alerts([CODE], ping_mention="@everyone", nonce_scope=scope)[
+                0
+            ].nonce
             for label, nonce in ((f"{scope} original", original), (f"{scope} followup", follow)):
                 assert len(nonce) == 25 and nonce not in seen, (label, seen.get(nonce))
                 seen[nonce] = label

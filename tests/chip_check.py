@@ -59,6 +59,7 @@ def _prompts() -> set[str]:
         terminal.ROUNDUP_HEADER,
         terminal.ROUNDUP_CONTINUATION,
         terminal.FOLLOWUP_HEADER,
+        terminal.FOLLOWUP_CONTINUATION,
     }
     for test in ("", "[test] "):
         texts.add(f"{test}new SHiFT codes (continued)")

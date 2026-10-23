@@ -24,10 +24,9 @@ from newsbot.bot.format import (
     details_reserve,
     discord_len,
     esc,
-    fit_followup_codes,
     render_alert_edit,
     render_code_alerts,
-    render_followup_alert,
+    render_followup_alerts,
     render_roundup_alerts,
 )
 from newsbot.shift.decide import CodeCandidate
@@ -338,7 +337,7 @@ def test_a_reserve_for_a_longer_name_than_the_edit_uses_has_room_to_spare():
 
 @pytest.mark.parametrize("mention", ["@everyone", "@here", ROLE20])
 @pytest.mark.parametrize("who_has_details", ["all", "every_third", "none"])
-def test_a_followup_chosen_by_fit_always_renders_and_is_the_longest_that_does(
+def test_followups_always_render_in_order_and_each_message_is_as_full_as_it_can_be(
     mention, who_has_details
 ):
     for n in range(1, 26):
@@ -347,32 +346,30 @@ def test_a_followup_chosen_by_fit_always_renders_and_is_the_longest_that_does(
         for i, code in enumerate(codes):
             if who_has_details == "all" or (who_has_details == "every_third" and i % 3 == 0):
                 details[code] = _worst(code, "m" * 100, "n" * 100, "x" * 300)
-        fit = fit_followup_codes(codes, ping_mention=mention, details=details, now=NOW)
-        assert fit == codes[: len(fit)]
-        assert fit, "even the worst single code fits behind a ping"
-        alert = render_followup_alert(fit, ping_mention=mention, details=details, now=NOW)
-        assert discord_len(alert.content) <= 2000
-        assert alert.codes == fit
-        if len(fit) < min(n, FOLLOWUP_MAX_CODES):
-            with pytest.raises(ValueError):
-                render_followup_alert(
-                    codes[: len(fit) + 1], ping_mention=mention, details=details, now=NOW
-                )
+        alerts = render_followup_alerts(codes, ping_mention=mention, details=details, now=NOW)
+        assert alerts, "even the worst single code fits behind a ping"
+        assert [c for a in alerts for c in a.codes] == codes  # in order, none lost
+        assert all(discord_len(a.content) <= 2000 for a in alerts)
+        assert all(len(a.codes) <= FOLLOWUP_MAX_CODES for a in alerts)
+        assert [a.ping for a in alerts] == [True] + [False] * (len(alerts) - 1)
+        # A message closed early only because the next code did not fit (or it held twenty).
+        for here, after in zip(alerts, alerts[1:], strict=False):
+            entry = after.content.split("\n\n")[1]
+            assert len(here.codes) == FOLLOWUP_MAX_CODES or (
+                discord_len(here.content) + 2 + discord_len(entry) > 2000
+            )
 
 
 def test_a_followup_for_one_astral_heavy_code_fits():
     code = _code(0)
     details = {code: _worst(code, "\U0001f600" * 100, "\U0001f601" * 100, "\U0001f600" * 150)}
-    [c] = fit_followup_codes([code], ping_mention=ROLE20, details=details, now=NOW)
-    alert = render_followup_alert([c], ping_mention=ROLE20, details=details, now=NOW)
+    [alert] = render_followup_alerts([code], ping_mention=ROLE20, details=details, now=NOW)
     assert discord_len(alert.content) <= 2000
 
 
 def test_a_followup_with_no_details_for_any_code_fits_at_the_cap():
     codes = [_code(i) for i in range(FOLLOWUP_MAX_CODES)]
-    fit = fit_followup_codes(codes, ping_mention="@everyone", details={}, now=NOW)
-    assert fit == codes
-    alert = render_followup_alert(fit, ping_mention="@everyone", details={}, now=NOW)
+    [alert] = render_followup_alerts(codes, ping_mention="@everyone", details={}, now=NOW)
     assert alert.content.startswith("@everyone `> confirmed by a second source ▌`\n\n```\n")
     assert alert.codes == codes
 

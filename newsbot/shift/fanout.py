@@ -51,12 +51,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from newsbot.bot.format import (
-    FOLLOWUP_MAX_CODES,
     RenderedAlert,
     details_reserve,
-    fit_followup_codes,
     render_code_alerts,
-    render_followup_alert,
+    render_followup_alerts,
     render_roundup_alerts,
 )
 from newsbot.collectors.base import CollectorResult, RawItem
@@ -234,8 +232,8 @@ class GuildOutcome:
     skipped: int = 0
     pinged: bool = False
     cap_reached: bool = False
-    # "> confirmed by a second source" follow-ups (D14): codes named in the one
-    # pinged message this turn sent, if any.
+    # "> confirmed by a second source" follow-ups (D14): codes named in the messages
+    # this turn actually sent (one ping, however many messages), if any.
     followups_posted: int = 0
     error: str | None = None
     # Why a server's alert went out without a ping (or lost it on the way); for logs.
@@ -680,9 +678,11 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
 async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     """One server's "confirmed by a second source" follow-up (D14), through the usual machinery.
 
-    Everything queued for this server goes out as one pinged message (one unit
-    of its daily ping budget, claimed before the send, with the cap re-checked
-    under the write lock); `post_alert_with_retry` gives it the same nonce
+    Everything queued for this server goes out under one ping: one claim, one
+    unit of its daily ping budget (claimed before the send, with the cap
+    re-checked under the write lock), and as many messages as the codes take.
+    Only the first message pings; the rest are "(continued)", the way an alert
+    batch spills over. `post_alert_with_retry` gives each the same nonce
     reuse, the same ping kept on a 429 and the same ping stripped after an
     ambiguous failure as any other alert. The server's *current* settings
     decide: alerts off or ping off means `skipped`, and a spent budget means
@@ -693,7 +693,16 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     """
 
     def _load_sync() -> (
-        tuple[GuildSettings, int, str, list[str], dict[str, CodeDetailsRow], datetime] | None
+        tuple[
+            GuildSettings,
+            int,
+            str,
+            list[str],
+            dict[str, CodeDetailsRow],
+            datetime,
+            list[RenderedAlert],
+        ]
+        | None
     ):
         with closing(connect(deps.db_path)) as conn:
             queued = queued_guild_followups(conn, guild_id)
@@ -714,38 +723,33 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                 skip_queued_guild_followups(conn, guild_id, queued)
                 return None
             guild, shift = state
-            # A follow-up is never edited, so it fits by its real size: as many of the
-            # queued codes as the message holds go now, and the rest wait their turn.
-            codes = fit_followup_codes(
-                queued[:FOLLOWUP_MAX_CODES],
+            # Render before claiming, for the same reason as the alerts: a claim that
+            # a render error strands is a row stuck `pending`. A follow-up is never
+            # edited, so it's packed by its real size and every queued code goes now.
+            # Its own nonce scope marker (`render_followup_alerts` adds "followup|"), so
+            # it can't be mistaken for the original alert's send.
+            rendered = render_followup_alerts(
+                queued,
                 ping_mention=_mention_for(shift.ping),
+                nonce_scope=f"{guild_id}|{shift.channel_id}",
                 details=details,
                 now=now,
             )
-            if not codes:
+            if not rendered:
                 # Not even one code fits, which takes a ping mention close to 2,000 units.
                 # Retrying it every hour wouldn't change that, so it's skipped, loudly.
                 logger.error("a SHiFT follow-up can't fit one code", extra={"guild_id": guild_id})
                 skip_queued_guild_followups(conn, guild_id, queued)
                 return None
-            return guild, shift.channel_id, shift.ping, codes, details, now
+            return guild, shift.channel_id, shift.ping, queued, details, now, rendered
 
     loaded = await asyncio.to_thread(_load_sync)
     if loaded is None:
         return GuildOutcome(guild_id)
-    guild, channel_id, ping, codes, details, read_at = loaded
+    guild, channel_id, ping, codes, details, read_at, rendered = loaded
 
     async def notify(text: str) -> None:
         await deps.notify_guild(guild_id, text)
-
-    # Its own nonce scope marker (`render_followup_alert` adds "followup|"), so
-    # it can't be mistaken for the original alert's send.
-    scope = f"{guild_id}|{channel_id}"
-    # Render before claiming, for the same reason as the alerts: a claim that
-    # a render error strands is a row stuck `pending`.
-    rendered = render_followup_alert(
-        codes, ping_mention=_mention_for(ping), nonce_scope=scope, details=details, now=read_at
-    )
 
     def _claim_sync() -> list[str]:
         now = deps.now()
@@ -770,28 +774,63 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     if not claimed:
         return GuildOutcome(guild_id)
     if claimed != codes:
-        rendered = render_followup_alert(
+        # A concurrent pass took some; the rest re-pack, so no message has a hole in it.
+        rendered = render_followup_alerts(
             claimed,
             ping_mention=_mention_for(ping),
-            nonce_scope=scope,
+            nonce_scope=f"{guild_id}|{channel_id}",
             details=details,
             now=read_at,
         )
+        if not rendered:
+            # The race left a first code that can't lead a pinged message (the same
+            # absurd ping mention as above). It's claimed, so fail it rather than strand it.
+            logger.error("a SHiFT follow-up can't fit one code", extra={"guild_id": guild_id})
+            await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
+            return GuildOutcome(guild_id)
 
     poster = deps.poster_for(guild_id, channel_id, ping, notify)
     begin_batch = getattr(poster, "begin_batch", None)
     if begin_batch is not None:
         begin_batch()
-    message_id, error = await post_alert_with_retry(poster, deps.sleep, rendered)
-    if error is not None:
-        logger.error(
-            "guild SHiFT follow-up post failed",
-            extra={"guild_id": guild_id, "codes": claimed, "error": str(error)},
+    posted = await _post_followups(deps, guild_id, poster, rendered)
+    return GuildOutcome(guild_id, followups_posted=posted)
+
+
+async def _post_followups(
+    deps: FanoutDeps, guild_id: int, poster: CodeAlertPoster, rendered: list[RenderedAlert]
+) -> int:
+    """Post a claimed follow-up's messages in order; return how many codes landed.
+
+    The same rules as `_post_batch`, minus the notices. Each message's codes are marked
+    `posted` with its own id the moment it lands. Once one fails for good, its codes and
+    every later message's are marked `failed` without being sent: "(continued)" is
+    literal. A mark that can't be written raises `MarkLostError`, which ends the batch on
+    the spot; the rows left unmarked stay `pending`, which is never sent again (nothing
+    double-sends) and which recovery fails once it's stale.
+    """
+    posted = 0
+    failed_from_here = False
+    for alert in rendered:
+        message_id: int | None = None
+        if not failed_from_here:
+            message_id, error = await post_alert_with_retry(poster, deps.sleep, alert)
+            if error is not None:
+                failed_from_here = True
+                logger.error(
+                    "guild SHiFT follow-up post failed",
+                    extra={"guild_id": guild_id, "codes": alert.codes, "error": str(error)},
+                )
+        if failed_from_here:
+            await _record(
+                deps, _followup_mark_sync, deps.db_path, guild_id, list(alert.codes), None, False
+            )
+            continue
+        await _record(
+            deps, _followup_mark_sync, deps.db_path, guild_id, list(alert.codes), message_id, True
         )
-        await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, None, False)
-        return GuildOutcome(guild_id)
-    await _record(deps, _followup_mark_sync, deps.db_path, guild_id, claimed, message_id, True)
-    return GuildOutcome(guild_id, followups_posted=len(claimed))
+        posted += len(alert.codes)
+    return posted
 
 
 def _followup_mark_sync(
