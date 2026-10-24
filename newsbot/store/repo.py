@@ -926,7 +926,11 @@ _FTS_TOKEN_RE = re.compile(r"\S+")
 
 
 def _story_urls(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[str]]:
-    """Map story id to its item URLs, in the order they were linked."""
+    """Map story id to its item URLs, lowest item id first (not the order they were linked).
+
+    Comped game embeds depend on this order, so it stays. A story whose first link matters
+    (the industry pick's) reads `_story_urls_linked` instead.
+    """
     urls_by_story: dict[int, list[str]] = {story_id: [] for story_id in story_ids}
     for i in range(0, len(story_ids), _SQLITE_VARIABLE_CHUNK):
         chunk = story_ids[i : i + _SQLITE_VARIABLE_CHUNK]
@@ -944,8 +948,35 @@ def _story_urls(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, lis
     return urls_by_story
 
 
-def _rows_to_story_views(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[StoryView]:
-    urls_by_story = _story_urls(conn, [row["id"] for row in rows])
+def _story_urls_linked(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[str]]:
+    """Map story id to its item URLs in the order they were linked (`story_items` insertion order).
+
+    `save_game_summary` links a story's items in the order the model listed them, and the
+    prompt asks for the item that reports the story best first, so the first URL here is the
+    model's choice. `_story_urls` sorts by item id instead, which would hand a merged story's
+    link to whichever item was stored first.
+    """
+    urls_by_story: dict[int, list[str]] = {story_id: [] for story_id in story_ids}
+    for i in range(0, len(story_ids), _SQLITE_VARIABLE_CHUNK):
+        chunk = story_ids[i : i + _SQLITE_VARIABLE_CHUNK]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a run of literal "?"s sized to the chunk; the values are bound below.
+        select = "SELECT story_items.story_id, items.url FROM story_items "
+        join = "JOIN items ON items.id = story_items.item_id "
+        where = f"WHERE story_items.story_id IN ({placeholders}) "  # noqa: S608
+        order = "ORDER BY story_items.story_id, story_items.rowid"
+        for row in conn.execute(select + join + where + order, chunk):
+            urls_by_story[row["story_id"]].append(row["url"])
+    return urls_by_story
+
+
+def _rows_to_story_views(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], *, link_order: bool = False
+) -> list[StoryView]:
+    ids = [row["id"] for row in rows]
+    urls_by_story = _story_urls_linked(conn, ids) if link_order else _story_urls(conn, ids)
     return [
         StoryView(
             id=row["id"],
@@ -3966,14 +3997,20 @@ def get_game_summary(
     return game_summary_by_id(conn, row["id"]) if row else None
 
 
-def summary_stories(conn: sqlite3.Connection, summary_id: int) -> list[StoryView]:
-    """The stories saved against `summary_id`, in the order they were written."""
+def summary_stories(
+    conn: sqlite3.Connection, summary_id: int, *, link_order: bool = False
+) -> list[StoryView]:
+    """The stories saved against `summary_id`, in the order they were written.
+
+    Each story's URLs are lowest item id first, unless `link_order` asks for the order they
+    were linked (the industry pick's, where the first URL is the model's choice).
+    """
     rows = conn.execute(
         "SELECT id, topic_key, headline, summary, label, created_at, is_update_of "
         "FROM stories WHERE summary_id = ? ORDER BY id",
         (summary_id,),
     ).fetchall()
-    return _rows_to_story_views(conn, rows)
+    return _rows_to_story_views(conn, rows, link_order=link_order)
 
 
 # --- Comped summaries (plan task 7) ---

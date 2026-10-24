@@ -148,6 +148,10 @@ class SummaryDeps:
     heartbeat_s: float = _HEARTBEAT_S
     # game key -> (consecutive failed saves, not before). See `SAVE_BACKOFF`.
     save_failures: dict[str, tuple[int, datetime]] = field(default_factory=dict)
+    # game key -> the UTC day its fallback alert last went out; the industry pick alerts once
+    # a day, since an outage makes one fallback row per diverged chain. In memory like
+    # `save_failures`: a restart can repeat an alert, which beats losing one.
+    alerted_on: dict[str, date] = field(default_factory=dict)
 
 
 # --- Who needs a summary, and when ---
@@ -401,6 +405,17 @@ def _backed_off(deps: SummaryDeps, game_key: str) -> bool:
     return failed is not None and deps.now() < failed[1]
 
 
+def _should_alert(deps: SummaryDeps, game_key: str) -> bool:
+    """Whether a fallback for `game_key` should tell the owner: always, but the pick once a day."""
+    if game_key != INDUSTRY_KEY:
+        return True
+    today = deps.now().astimezone(UTC).date()
+    if deps.alerted_on.get(game_key) == today:
+        return False
+    deps.alerted_on[game_key] = today
+    return True
+
+
 def _note_save_failure(deps: SummaryDeps, game_key: str) -> None:
     count = deps.save_failures.get(game_key, (0, deps.now()))[0] + 1
     wait = min(SAVE_BACKOFF * 2 ** (count - 1), SAVE_BACKOFF_MAX)
@@ -551,7 +566,7 @@ async def ensure_summary(
                 logger.warning("lost the summary claim for %s %d times; giving up", game_key, lost)
                 return None
             continue
-        if saved.status == "fallback":
+        if saved.status == "fallback" and _should_alert(deps, game_key):
             try:
                 await deps.alert(f"newsbot: summary for {game.name} fell back to headlines")
             except Exception:
@@ -683,8 +698,17 @@ def dry_run_lookup(
 def _needs_summary_sync(
     db_path: str, guild_id: int, game_key: str, due_at: datetime, day: date
 ) -> tuple[bool, Coverage | None]:
-    """Whether this server's digest has no summary it may reuse, and where its coverage left off."""
+    """Whether this server's digest has no summary it may reuse, and where its coverage left off.
+
+    A server whose digest for `day` is already done (`ok`, `partial` or `failed`) needs none:
+    `upcoming_dues` keeps a due time for a grace period after it passes, and a summary made
+    in that window would be for a digest that has already read what it was going to read.
+    A `pending` row isn't done; it may still be about to build.
+    """
     with closing(connect(db_path)) as conn:
+        digest = repo.get_guild_digest(conn, guild_id, day)
+        if digest is not None and digest.status in ("ok", "partial", "failed"):
+            return False, None
         coverage = repo.last_coverage(conn, guild_id, exclude_run_date=day, games=[game_key])
         after = coverage.for_game(game_key) if coverage else None
         return repo.get_game_summary(conn, game_key, due_at, after) is None, after
@@ -728,7 +752,8 @@ async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> l
     is what keeps this to about one call per distinct comped cycle per game. A
     server whose window starts elsewhere gets its own summary on a later pass
     (one per game per run, so one pass never makes two).
-    The industry pick is never searched; only games are.
+    The industry pick is never searched; only games are. It is made first, and it is made
+    only here: a free server's digest reads the stored pick and never makes one.
     """
     now = now or deps.now()
     follows = await asyncio.to_thread(_follows_sync, deps.db_path)
@@ -745,6 +770,10 @@ async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> l
             if needs:
                 todo.append((game, due, run_date, after))
                 break
+    # The industry pick goes first (a stable sort, so games keep catalog order): it is the
+    # only thing a free server's digest waits on, and slow game calls ahead of it in the
+    # same pass shouldn't be able to starve it.
+    todo.sort(key=lambda t: t[0].key != INDUSTRY_KEY)
     done: list[str] = []
     for game, due, run_date, after in todo:
         try:

@@ -52,7 +52,7 @@ class IndustryWorld(World):
             self.channels.setdefault(channel_id, type(self.channels[11])())
         self.calls: list[tuple[str, str]] = []
         # What the lookups answer for the industry entry; every game answers `None`.
-        self.pick: GameSummary | None = None
+        self._pick: GameSummary | None = None
         self.retry_result: GameSummary | None = None
 
     def deps(self, **overrides):
@@ -70,6 +70,48 @@ class IndustryWorld(World):
         )
         args.update(overrides)
         return super().deps(**args)
+
+    @property
+    def pick(self) -> GameSummary | None:
+        return self._pick
+
+    @pick.setter
+    def pick(self, value: GameSummary | None) -> None:
+        """What a comped server's lookups answer, and the same pick stored for a free one.
+
+        A free server's build only reads the stored pick (it never calls a lookup), so a
+        pick a test sets has to be a real row for the free half to see it. A story whose
+        items aren't stored loses its links on the way in, as `save_game_summary` does it.
+        """
+        self._pick = value
+        if value is not None:
+            self.seed(value)
+
+    def answer_only(self, pick: GameSummary) -> None:
+        """The lookups answer `pick` but nothing is stored: what a free build must not rely on."""
+        self._pick = pick
+
+    def seed(self, pick: GameSummary) -> None:
+        with self.conn() as conn:
+            repo.save_game_summary(
+                conn,
+                game_key=INDUSTRY_KEY,
+                run_date=DUE.date(),
+                status=pick.status,
+                window_start=DUE - timedelta(hours=24),
+                window_end=DUE - timedelta(minutes=30),
+                coverage_notes=list(pick.coverage_notes),
+                note=pick.note,
+                usage=Usage(10, 5),
+                stories=[
+                    Save(INDUSTRY_KEY, d.headline, d.summary, d.label, d.item_urls, None)
+                    for d in pick.stories
+                ],
+                token="t",  # noqa: S106
+                now=lambda: DUE,
+                items_after=None,
+                items_upto=pick.items_upto,
+            )
 
     def follow(self, guild_id, tier="free", games=(BL4, PAL, INDUSTRY_KEY)):
         with self.conn() as conn:
@@ -117,6 +159,11 @@ class IndustryWorld(World):
                 items_after=None,
                 items_upto=newest if upto is None else upto,
             )
+
+    def forget(self, url):
+        """Prune an item, as retention does; the stories linking it lose that link."""
+        with self.conn() as conn, conn:
+            conn.execute("DELETE FROM items WHERE url = ?", (url,))
 
     def lines(self, channel_id=13):
         """The industry post's lines, or [] if nothing was posted."""
@@ -167,22 +214,26 @@ async def test_a_free_scheduled_digest_records_the_picks_items_upto_as_coverage(
     assert json.loads(raw)[INDUSTRY_KEY] == 1
 
 
-async def test_a_free_scheduled_digest_with_nothing_stored_asks_summary_for_once(world):
-    url = world.news("Studio closes")
-    world.news("Other")
+async def test_a_free_scheduled_digest_with_nothing_stored_never_calls_summary_for(world):
+    # Only the prepare job makes a pick. A scheduled build with none stored shows the newest
+    # five headlines instead of making the digest tick wait on a model call.
+    for n in range(7):
+        world.news(f"Story {n}", hours_before_due=1 + n / 10)
     world.follow(G1)
-    world.pick = GameSummary("ok", [draft("Model words", url)], [], items_upto=2)
-    await run_guild_digest(world.deps(), G1, kind=SCHED)
-    assert world.calls == [("summary_for", INDUSTRY_KEY)]
-    assert titles(world.lines()) == ["Studio closes"]
+    world.answer_only(GameSummary("ok", [draft("Model words", "https://example.com/x")], []))
+    outcome = await run_guild_digest(world.deps(), G1, kind=SCHED)
+    assert world.calls == []
+    assert titles(world.lines()) == [f"Story {n}" for n in range(5)]
+    assert outcome.status == "ok"
 
 
 async def test_a_free_scheduled_fallback_is_five_headlines_with_no_note_and_not_partial(world):
     for n in range(7):
         world.news(f"Story {n}", hours_before_due=1 + n / 10)
     world.follow(G1)
-    world.pick = GameSummary("fallback", [], [], "Custom note.")
+    world.store_pick([], status="fallback")
     outcome = await run_guild_digest(world.deps(), G1, kind=SCHED)
+    assert world.calls == []
     lines = world.lines()
     assert len(lines) == 5 and FALLBACK not in "\n".join(lines) and "Custom" not in "\n".join(lines)
     assert outcome.status == "ok"
@@ -294,10 +345,18 @@ async def test_a_comped_ok_pick_shows_ranked_stories_in_the_models_order(world):
 # --- an ok pick with nothing in it ---
 
 
-@pytest.mark.parametrize("tier", ["free", "comped"])
-async def test_an_ok_pick_with_zero_stories_posts_nothing(world, tier):
+async def test_a_stored_ok_pick_with_zero_stories_posts_nothing_for_a_free_server(world):
     world.news("Studio closes")
-    world.follow(G1, tier)
+    world.follow(G1)
+    world.store_pick([])
+    outcome = await run_guild_digest(world.deps(), G1, kind=SCHED)
+    assert world.channels[13].embeds == [] and world.calls == []
+    assert INDUSTRY_KEY not in outcome.posted_by_game
+
+
+async def test_an_ok_pick_with_zero_stories_posts_nothing_for_a_comped_server(world):
+    world.news("Studio closes")
+    world.follow(G1, "comped")
     world.pick = GameSummary("ok", [], [])
     outcome = await run_guild_digest(world.deps(), G1, kind=SCHED)
     assert world.channels[13].embeds == []
@@ -305,20 +364,21 @@ async def test_an_ok_pick_with_zero_stories_posts_nothing(world, tier):
 
 
 async def test_a_free_pick_whose_items_are_all_gone_posts_nothing_and_not_the_fallback(world):
-    world.news("Studio closes")
+    gone = world.news("Studio closes")
+    world.news("Other")
     world.follow(G1)
-    world.pick = GameSummary("ok", [draft("Gone", "https://example.com/pruned")], [])
+    world.store_pick([gone])
+    world.forget(gone)
     await run_guild_digest(world.deps(), G1, kind=SCHED)
     assert world.channels[13].embeds == []
 
 
 async def test_a_free_pick_skips_a_story_whose_first_item_is_gone_and_caps_at_five(world):
+    gone = world.news("Gone")
     urls = [world.news(f"Story {n}") for n in range(7)]
     world.follow(G1)
-    stories = [draft("Gone", "https://example.com/pruned")] + [
-        draft(f"S{n}", u) for n, u in enumerate(urls)
-    ]
-    world.pick = GameSummary("ok", stories, [])
+    world.store_pick([gone, *urls])
+    world.forget(gone)
     await run_guild_digest(world.deps(), G1, kind=SCHED)
     assert titles(world.lines()) == [f"Story {n}" for n in range(5)]
 
@@ -335,6 +395,7 @@ async def test_the_industry_message_comes_last_and_game_messages_match_a_digest_
     url = world.news("Studio closes")
     world.follow(G1, tier)
     world.pick = GameSummary("ok", [draft("Studio closes", url)], [])
+    world.store_pick([url])
     with_industry = await preview_guild_digest(world.deps(), G1)
     world.set_games(G1, [BL4, PAL])
     without = await preview_guild_digest(world.deps(), G1)
@@ -380,27 +441,23 @@ async def test_a_run_report_counts_at_most_five_fallback_headlines(world, tier):
     assert "Gaming industry 5 " in report
 
 
-# --- a lookup that breaks or hangs ---
+# --- the injected lookups are not this server's business ---
 
 
-async def test_a_free_scheduled_lookup_that_raises_or_hangs_falls_back_to_headlines(world):
+async def test_a_free_scheduled_digest_never_touches_a_lookup_that_would_raise_or_hang(world):
     world.news("Studio closes")
     world.follow(G1)
+    called = []
 
-    async def boom(game_key, due_at, after=None):
+    async def boom(game_key, due_at, after=None, **kwargs):
+        called.append(game_key)
         raise RuntimeError("lookup broke")
 
-    outcome = await run_guild_digest(world.deps(summary_for=boom), G1, kind=SCHED)
-    assert outcome.status == "ok" and titles(world.lines()) == ["Studio closes"]
-
-
-async def test_a_free_scheduled_lookup_that_hangs_is_cut_off_at_the_deadline(world):
-    world.news("Studio closes")
-    world.follow(G1)
-
-    async def hang(game_key, due_at, after=None):
+    async def hang(game_key, due_at, after=None, **kwargs):
+        called.append(game_key)
         await asyncio.sleep(60)
 
-    deps = world.deps(summary_for=hang, summary_timeout_s=0.05, summary_min_s=0.01)
-    outcome = await run_guild_digest(deps, G1, kind=SCHED)
-    assert outcome.status == "ok" and titles(world.lines()) == ["Studio closes"]
+    for lookup in (boom, hang):
+        await run_guild_digest(world.deps(summary_for=lookup), G1, kind=SCHED, force=True)
+        assert titles(world.lines()) == ["Studio closes"]
+    assert called == []

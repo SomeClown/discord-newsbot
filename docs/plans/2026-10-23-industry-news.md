@@ -344,6 +344,7 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 - Ruling (fix batch 1): test_a_server_that_fell_back_and_rejoined_is_still_told_what_it_was_shown_before and test_a_free_server_that_ran_run_now_keeps_its_chain are real bugs (a mark no pick ended at breaks the chain; a re-announced story). Merged chains sharing one pick's union of priors is accepted (unavoidable with one shared pick). No index on (game_key, items_upto) for now: fast at today's scale.
 - Owner decision (2026-10-24, qa pass): drop PC Gamer's industry tag again (A). Why: across passes a story the tag feed stored first is tagged industry only, so a game's digest can lose it (breaks §18's anti-goal). Done in fix batch 3; back to four feeds.
 - Ruling (fix batch 1, round 1): chain_headlines steps to the pick with the largest items_upto <= mark (exact when there is one), the window applied to rows found. Accepted trade-off: a mark with no pick of its own behind it (a new server's first digest) can borrow the newest earlier pick from another cycle, widening priors by a story or two, instead of an empty prior that re-announces old news. Not fixed by moving marks, which would re-offer fallback headlines.
+- Ruling (fix batch 2): the alert-once rule is industry-only (game fallbacks still alert every time, pinned); skipping ok/partial/failed digests in _needs_summary_sync accepted as briefed (a failed digest retried in the grace window reads what's stored); Task 7 tests that expected free scheduled builds to call summary_for were changed to the stored-only rule, scenarios kept.
 
 ### Parked
 - Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
@@ -355,6 +356,7 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 - Task 6: in an extreme case (a head note leaving no room for even one line) the "Summary unavailable" note is dropped in favor of the line; the fixed note text can't reach that size.
 - Task 7 (qa LOW): a free server's run-now that falls back moves its industry mark to the run's range end, so the next day its coverage no longer matches the shared cycle's and its scheduled build may make its own pick (one extra Haiku call for that server that day). Allowed by the brief; the same family as Task 5's cost note.
 - Task 7: the parked Task 5 case is checked: when a free server's mark diverges (it fell back) from a comped server's, neither posts a story twice; they just stop sharing a pick (an extra call, not a correctness bug). Not covered: resume after a crash mid-publish when the pick changed between builds; DST and two-cycle sharing for free servers (Task 5's tests cover DST for the pick itself).
+- Fix batch 2 (trade-offs accepted): with industry first in prepare, a hung industry call can take up to 300 s before that pass's game summaries (comped digests still have their inline fallback); one industry pick per pass, so a free server on an unprepared chain shows the newest 5 headlines that day; a clean `failed` digest retried before prepare's lead shows headlines instead of the pick; the alert day is marked before the send, so a failed send loses that day's industry alert.
 
 ### From the qa pass
 
@@ -370,3 +372,4 @@ Declined or deferred:
 - An owner-report spend line: not this release; the runbook points at the Anthropic console.
 - PC Gamer's tag can strip a game tag across passes (MEDIUM): owner decision pending.
 - Fix batch 1: complete (from 4f2a9de; gate exit 0, 15481 passed; tests first, 10 of 12 failed before; adversarial: 22 tests incl. a 7-day 5-server scenario against a reference model, 2 bugs fixed in round 1 (a mark no pick ended at broke the chain))
+- Fix batch 2: complete (from f694f37; gate exit 0, 15556 passed; tests first, 11 of 18 failed before; adversarial: 57 tests, 25 fail on the base code, no bugs)

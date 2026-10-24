@@ -19,9 +19,9 @@ and day (`game_summaries`, written by `summaries.py`, task 7), or headlines
 with a "Summary unavailable" note if there isn't one. The "Gaming industry" entry
 is the odd one out (design §18): every server that follows it gets the model's pick,
 but a free server posts the picked *source headlines*, never the model's text, and it
-never pays for the pick: a preview or a run-now reads what's stored and falls back to
-the newest five headlines, because a free server has no business starting a model
-call. Publishing is injected
+never pays for the pick: its build (scheduled or not) reads what's stored and falls back
+to the newest five headlines, because only the prepare job makes the pick and a digest
+tick shouldn't wait on a model call for a free server. Publishing is injected
 (`GuildDigestDeps.publisher_for`), as is every way of telling a human
 something, so all of it runs in tests without a Discord in sight. Problems
 that belong to a server go to that server's own notifier, never the owner.
@@ -377,7 +377,7 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
             item_urls=list(v.urls),
             update_of_story_id=v.is_update_of,
         )
-        for v in repo.summary_stories(conn, row.id)
+        for v in repo.summary_stories(conn, row.id, link_order=row.game_key == INDUSTRY_KEY)
     ]
     return GameSummary(
         row.status,
@@ -434,10 +434,10 @@ async def _build(
     The industry entry goes through the comped loop like a game (ranked stories, or the
     newest five headlines under the usual note). A free server that follows it gets its own
     block afterwards: the stored pick's source headlines in the model's order, never its
-    text. On a `fresh` build that block makes no model call (`summary_for`, the preview's
-    in-memory lookup and `retry_fallback` are all ignored for it): the stored pick if one
-    qualifies, else the newest five headlines with no note. A scheduled or catch-up build
-    may use `deps.summary_for`. Neither case marks the digest degraded.
+    text. That block never makes or waits on a model call, on any path (scheduled, catch-up,
+    preview or run-now: `summary_for`, the preview's in-memory lookup and `retry_fallback`
+    are all ignored for it): the stored pick if one qualifies, else the newest five headlines
+    with no note. Neither case marks the digest degraded.
     """
     channels = {g.game_key: g.channel_id for g in followed}
     games = [g for g in deps.cfg.catalog if g.key in channels]
@@ -532,13 +532,14 @@ async def _build(
     picks_by_game: dict[str, list[HeadlineItem]] = {}
     if guild.tier != "comped" and any(g.key == INDUSTRY_KEY for g in games):
         # A free server shows the pick's source headlines, so all it needs from the pick
-        # is its URLs. A preview or a run-now reads what's stored and never starts a model
-        # call for it (owner decision 2A); only a scheduled or catch-up build may use the
-        # injected lookup, which can make the pick inline if the prepare job missed it.
-        async def _stored(key, at, after, fresh_upto=None):
-            return await _stored_summary(deps.db_path, key, at, after, fresh_upto)
+        # is its URLs, and it only ever reads the stored one. Making the pick is the prepare
+        # job's work (`summaries.prepare_summaries`): the tick builds servers one after
+        # another, and an inline model call (or a wait on someone else's claim) here would
+        # hold up every server behind this one. With nothing stored, the renderer's newest
+        # five headlines stand in.
+        async def free_lookup(key, at, after):
+            return await _stored_summary(deps.db_path, key, at, after)
 
-        free_lookup = _stored if fresh else (deps.summary_for or _stored)
         before = coverage_before.for_game(INDUSTRY_KEY) if coverage_before else None
         allowed = max(min(deps.summary_timeout_s, deps.summary_budget_s), deps.summary_min_s)
         try:

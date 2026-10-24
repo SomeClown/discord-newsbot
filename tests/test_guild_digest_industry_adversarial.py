@@ -224,10 +224,11 @@ async def test_a_free_preview_or_run_now_with_the_real_lookups_never_reaches_the
         assert conn.execute("SELECT COUNT(*) FROM game_summaries").fetchone()[0] == 0
 
 
-async def test_the_same_wiring_does_reach_the_model_for_a_comped_preview_and_a_free_schedule(
+async def test_the_same_wiring_does_reach_the_model_for_a_comped_preview_but_not_a_free_schedule(
     world,
 ):
     # The control for the test above: the spy would have seen a call if there had been one.
+    # A free scheduled or catch-up build is stored-only too: only the prepare job makes a pick.
     story_urls(world, 3)
     world.follow(G1, "comped")
     await preview_guild_digest(world.real_deps(), G1)
@@ -236,15 +237,18 @@ async def test_the_same_wiring_does_reach_the_model_for_a_comped_preview_and_a_f
     world.llm.calls.clear()
     world.follow(G2, "free")
     await run_guild_digest(world.real_deps(), G2, kind=SCHED)
-    assert len(world.llm.calls) == 1
+    assert world.llm.calls == []
+    with world.conn() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM game_summaries").fetchone()[0] == 0
 
 
-async def test_a_free_catch_up_digest_may_use_the_injected_lookup(world):
+async def test_a_free_catch_up_digest_never_calls_the_injected_lookup(world):
     world.news("Studio closes")
     world.follow(G1)
-    world.pick = GameSummary("ok", [draft("w", world.news("Other"))], [], items_upto=2)
+    world.answer_only(GameSummary("ok", [draft("w", world.news("Other"))], [], items_upto=2))
     await run_guild_digest(world.deps(), G1, kind=RunKind.CATCH_UP)
-    assert world.calls == [("summary_for", INDUSTRY_KEY)]
+    assert world.calls == []
+    assert sorted(world.industry_titles()) == ["Other", "Studio closes"]
 
 
 @pytest.mark.parametrize("how", ["raises", "hangs"])
@@ -272,9 +276,7 @@ async def test_a_free_fresh_build_whose_stored_lookup_breaks_still_never_calls_a
     assert world.calls == []
 
 
-async def test_a_free_scheduled_lookup_that_raises_is_not_followed_by_a_retry_or_preview_lookup(
-    world,
-):
+async def test_a_free_scheduled_build_never_calls_an_injected_lookup_that_would_raise(world):
     world.news("Studio closes")
     world.follow(G1)
 
@@ -283,23 +285,26 @@ async def test_a_free_scheduled_lookup_that_raises_is_not_followed_by_a_retry_or
         raise RuntimeError("lookup broke")
 
     await run_guild_digest(world.deps(summary_for=boom), G1, kind=SCHED)
-    assert world.calls == [("boom", INDUSTRY_KEY)]
+    assert world.calls == []
+    assert world.industry_titles() == ["Studio closes"]
 
 
-async def test_a_free_scheduled_lookup_gets_the_min_deadline_when_the_budget_is_spent(world):
-    # `max(min(timeout, budget), min_s)`: a spent budget still gives the floor, as for a game.
-    url = world.news("Studio closes")
+async def test_a_free_scheduled_build_does_not_wait_on_a_slow_injected_lookup(world):
+    # Was the min-deadline test (`max(min(timeout, budget), min_s)` for a spent budget). A free
+    # build no longer calls the injected lookup at all, so a slow one costs it nothing.
+    world.news("Studio closes")
     world.follow(G1)
+    asked = []
 
     async def slow(game_key, due_at, after=None):
-        await asyncio.sleep(0.15)
-        return GameSummary("ok", [draft("Model words", url)], [], items_upto=1)
+        asked.append(game_key)
+        await asyncio.sleep(5)
 
     deps = world.deps(
         summary_for=slow, summary_timeout_s=0.05, summary_budget_s=0.001, summary_min_s=1.0
     )
     await run_guild_digest(deps, G1, kind=SCHED)
-    assert world.industry_titles() == ["Studio closes"]
+    assert asked == [] and world.industry_titles() == ["Studio closes"]
 
 
 # --- the model's words never reach a free message ---
@@ -436,7 +441,7 @@ async def test_a_pick_that_isnt_ok_marks_industry_at_the_digests_range_end(world
     else:
         overrides.update(summary_for=hanging, summary_timeout_s=0.05, summary_min_s=0.01)
     outcome = await run_guild_digest(world.deps(**overrides), G1, kind=SCHED)
-    assert outcome.status == "ok"
+    assert outcome.status == "ok" and world.calls == []
     marks = world.marks()
     assert marks[INDUSTRY_KEY] == world.newest_id() == 5
     assert marks[INDUSTRY_KEY] == marks[BL4]
@@ -764,14 +769,15 @@ async def test_a_free_and_a_comped_server_on_one_schedule_share_one_industry_cal
     assert world.industry_titles(G1) == ["Day two news"]
 
 
-async def test_when_a_free_server_fell_back_and_a_comped_one_did_not_nothing_posts_twice_or_is_lost(
+async def test_a_free_and_a_comped_server_on_one_prepared_pick_neither_repeat_nor_lose_a_story(
     world,
 ):
-    # The parked Task 5 question. Day one: the comped server gets the prepared pick (mark 2),
-    # the free one is handed no pick, so it shows the newest headlines and marks its range
-    # end (3, which includes an item that arrived after the prepare job). Their marks differ
-    # on day two, so they no longer share a pick; the point is that neither repeats a story
-    # and the comped server doesn't lose the late item.
+    # Was "when a free server fell back and a comped one did not" (the parked Task 5 question):
+    # a free scheduled build used to ask the injected lookup, so it could be handed no pick
+    # while the comped server got the prepared one. A free build now reads only what is
+    # stored, so both servers show the prepared pick (mark 2) and the item that arrived after
+    # the prepare job (id 3) waits for day two for both. The point is unchanged: neither
+    # repeats a story, and neither loses the late item.
     world.news("Day one early")
     world.news("Day one also")
     world.follow(G1)
@@ -780,14 +786,11 @@ async def test_when_a_free_server_fell_back_and_a_comped_one_did_not_nothing_pos
     world.add_item(INDUSTRY_KEY, "Late arrival", DUE - timedelta(minutes=10))
     world.clock = NOW
 
-    async def no_pick(game_key, due_at, after=None, **kw):
-        return None
-
-    await run_guild_digest(world.deps(summary_for=no_pick), G1, kind=SCHED)
+    await run_guild_digest(world.real_deps(), G1, kind=SCHED)
     await run_guild_digest(world.real_deps(), G2, kind=SCHED)
-    assert world.marks(G1)[INDUSTRY_KEY] == 3 and world.marks(G2)[INDUSTRY_KEY] == 2
+    assert world.marks(G1)[INDUSTRY_KEY] == 2 and world.marks(G2)[INDUSTRY_KEY] == 2
     day_one_free = set(world.industry_titles(G1))
-    assert "Late arrival" in day_one_free
+    assert day_one_free == {"Day one early", "Day one also"}
 
     world.add_item(INDUSTRY_KEY, "Day two news", DUE + DAY - timedelta(hours=3))
     await world.prepare(DUE + DAY - timedelta(minutes=20))
@@ -796,10 +799,31 @@ async def test_when_a_free_server_fell_back_and_a_comped_one_did_not_nothing_pos
     await run_guild_digest(world.real_deps(), G2, kind=SCHED)
     free_two = str(world.channels[13].embeds[-1].description)
     comped_two = str(world.channels[13 + G2_OFFSET].embeds[-1].description)
-    assert "Day two news" in free_two and "Day two news" in comped_two
-    for title in day_one_free:
-        assert title not in free_two
-    assert "Day one" not in comped_two and "Late arrival" in comped_two
+    for text in (free_two, comped_two):
+        assert "Day two news" in text and "Late arrival" in text
+        assert "Day one" not in text
+
+
+async def test_a_free_server_that_found_no_pick_shows_the_newest_headlines_and_loses_nothing_later(
+    world,
+):
+    # The case the test above used to cover by luck: a free server with no stored pick (the
+    # prepare job never ran) shows the newest five and marks its range end, so the next
+    # day's pick starts after the headlines it already saw.
+    world.news("Day one early")
+    world.news("Day one also")
+    world.follow(G1)
+    world.clock = NOW
+    await run_guild_digest(world.real_deps(), G1, kind=SCHED)
+    assert world.llm.calls == []
+    assert set(world.industry_titles(G1)) == {"Day one early", "Day one also"}
+    assert world.marks(G1)[INDUSTRY_KEY] == 2
+
+    world.add_item(INDUSTRY_KEY, "Day two news", DUE + DAY - timedelta(hours=3))
+    await world.prepare(DUE + DAY - timedelta(minutes=20))
+    world.clock = NOW + DAY
+    await run_guild_digest(world.real_deps(), G1, kind=SCHED)
+    assert world.industry_titles(G1) == ["Day two news"]
 
 
 # --- a server that couldn't post ---
