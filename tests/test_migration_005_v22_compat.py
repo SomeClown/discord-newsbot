@@ -86,8 +86,8 @@ def test_v22_migrate_would_be_a_noop(v22_db):
     # v2.2's own runner is today's runner minus 005 (it globs the files it ships with,
     # and 005 isn't one of them): it sees user_version 7 >= its newest, and skips.
     with closing(connect(v22_db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
-        assert migrate(conn) == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert migrate(conn) == 10
 
 
 # --- the digest guard ---
@@ -435,7 +435,7 @@ def test_after_v22_writes_v3_adopts_its_orphan_digest_and_the_day_is_not_due_twi
 def test_after_migration_the_v22_pipeline_helpers_survive_a_second_open(v22_db, v22):
     # A brand new process (v2.2 opening the file at boot) sees a consistent database.
     with closing(connect(v22_db)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert v22.get_digest(conn, TODAY + timedelta(days=0)).id == 12
         _assert_healthy(conn)
 

@@ -149,7 +149,7 @@ def test_after_the_orphan_rows_are_cleaned_up_the_same_file_migrates(v4_db):
             migrate(conn)
         conn.execute("DELETE FROM story_items WHERE story_id = 9999")
         conn.commit()
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         _assert_healthy(conn)
 
 
@@ -231,7 +231,7 @@ def test_tens_of_thousands_of_rows_migrate_quickly_and_the_fts_rebuild_keeps_up(
 
     started = time.monotonic()
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
     elapsed = time.monotonic() - started
     assert elapsed < 60, f"migration took {elapsed:.1f}s for {n} items and {n} stories"
 
@@ -391,11 +391,18 @@ def test_a_process_killed_at_any_point_leaves_a_database_that_still_migrates(v4_
                 ).fetchone()
                 assert marker is None, point
                 rolled_back += 1
+            elif version == 9:
+                # And 010, the trigger swap: the old trigger or the new one, never none.
+                triggers = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'guild_games_limit'"
+                ).fetchall()
+                assert len(triggers) == 1 and "industry" not in triggers[0][0], point
+                rolled_back += 1
             else:
                 # The last traced statement is the pragma that runs after COMMIT, so a kill
                 # there finds a finished migration, never a half-done one.
-                assert version == 9 and point >= total - tail, point
-            assert migrate(conn) == 9
+                assert version == 10 and point >= total - tail, point
+            assert migrate(conn) == 10
             _assert_healthy(conn)
     # Every kill before a COMMIT lands is rolled back (the last traced statement
     # of 006 is its COMMIT, which a kill there pre-empts); only a kill after one
@@ -414,7 +421,7 @@ def test_a_reader_holding_a_wal_snapshot_neither_blocks_nor_is_corrupted_by_the_
         assert reader.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 4
         with closing(connect(v4_db)) as migrator:
             started = time.monotonic()
-            assert migrate(migrator) == 9
+            assert migrate(migrator) == 10
             assert time.monotonic() - started < 4  # did not sit out the 5s busy timeout
         # Documented: the open read transaction keeps its pre-migration snapshot.
         assert reader.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 4
@@ -449,7 +456,7 @@ def test_a_writer_holding_the_lock_makes_the_migration_wait_and_then_keeps_its_r
     threading.Timer(0.4, release.set).start()
     started = time.monotonic()
     with closing(connect(v4_db)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
     assert time.monotonic() - started >= 0.3  # it really did wait for the writer
     thread.join(timeout=10)
 
@@ -510,7 +517,7 @@ def test_six_openers_with_a_writer_active_all_reach_the_latest_version_and_the_w
     threads[0].join(timeout=60)
 
     assert errors == []
-    assert versions == [9] * 6
+    assert versions == [10] * 6
     with closing(connect(v4_db)) as conn:
         names = conn.execute(
             "SELECT COUNT(*) FROM source_health WHERE source_name LIKE 'w%'"
@@ -535,7 +542,7 @@ def test_a_migration_that_cannot_get_the_lock_restores_the_connection_and_stays_
         holder.close()
     with closing(connect(v4_db)) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
 
 
 def test_a_connection_that_had_foreign_keys_off_gets_them_left_off(v4_db):
@@ -543,7 +550,7 @@ def test_a_connection_that_had_foreign_keys_off_gets_them_left_off(v4_db):
     conn = sqlite3.connect(v4_db)
     try:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 0
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
@@ -605,7 +612,7 @@ def test_a_long_lived_v22_connection_keeps_working_after_another_process_migrate
             == 5
         )
         with closing(connect(v4_db)) as other:
-            assert migrate(other) == 9
+            assert migrate(other) == 10
         # sqlite re-prepares on a schema change; the old connection just carries on.
         assert v22.get_digest(old_process, date(2026, 9, 30)).id == 12
         digest_id = v22.claim_digest(old_process, date(2026, 10, 1), force=False)

@@ -49,6 +49,7 @@ from newsbot.bot.format import _truncate_utf16, esc
 from newsbot.bot.permissions import check_guild
 from newsbot.bot.views import is_command_owner
 from newsbot.config import AppConfig, GameInfo
+from newsbot.industry import INDUSTRY_KEY, counts_toward_limit
 from newsbot.store import repo
 from newsbot.store.db import StoreError, connect
 from newsbot.store.models import GuildGame, GuildSettings, Tier
@@ -195,6 +196,8 @@ class SetupView(discord.ui.View):
         self.catalog: list[GameInfo] = list(cfg.catalog)
         self.names = {game.key: game.name for game in self.catalog}
         self.max_games = min(repo.MAX_GAMES_PER_GUILD, len(self.catalog))
+        # The Gaming industry entry rides along: it takes a menu slot but not a game slot.
+        self.industry_name = self.names.get(INDUSTRY_KEY)
 
         # The draft. Seeded from what the server has now, or from the defaults.
         self.previous_zone = guild.timezone if guild else "UTC"
@@ -278,10 +281,17 @@ class SetupView(discord.ui.View):
         ]
 
     def _build_games_select(self) -> discord.ui.Select:
+        placeholder = f"Games to follow (up to {self.max_games})"
+        max_values = self.max_games
+        if self.industry_name is not None:
+            placeholder = _truncate_utf16(
+                f"Games to follow (up to {self.max_games}, plus {esc(self.industry_name)})", 150
+            )
+            max_values = min(self.max_games + 1, len(self.catalog))
         select = discord.ui.Select(
-            placeholder=f"Games to follow (up to {self.max_games})",
+            placeholder=placeholder,
             min_values=1,
-            max_values=self.max_games,
+            max_values=max_values,
             row=2,
             options=self._game_options(),
         )
@@ -326,6 +336,11 @@ class SetupView(discord.ui.View):
         self.games_select.options = self._game_options()
         self.channel_select.default_values = self._channel_defaults()
 
+    @staticmethod
+    def _counted(keys: Sequence[str]) -> int:
+        """How many of `keys` use up one of the server's game slots (not the industry entry)."""
+        return sum(1 for key in keys if counts_toward_limit(key))
+
     # --- drawing the message ---
 
     def render(self) -> str:
@@ -335,7 +350,7 @@ class SetupView(discord.ui.View):
             zone += " (kept; see below)"
         if self.game_keys:
             picked = ", ".join(esc(self.names[k]) for k in self.game_keys)
-            games = f"{picked} ({len(self.game_keys)} of {self.max_games})"
+            games = f"{picked} ({self._counted(self.game_keys)} of {self.max_games})"
         else:
             games = "none picked yet"
         channel = f"<#{self.channel_id}>" if self.channel_id is not None else "none picked yet"
@@ -445,10 +460,10 @@ class SetupView(discord.ui.View):
             self.note = "I don't know one of those games. Pick from the list."
         elif not chosen:
             self.note = "Pick at least one game."
-        elif len(chosen) > self.max_games:
+        elif self._counted(chosen) > self.max_games:
             self.note = (
                 f"A server can follow at most {self.max_games} games here; "
-                f"you picked {len(chosen)}. Your last valid pick is still in place."
+                f"you picked {self._counted(chosen)}. Your last valid pick is still in place."
             )
         else:
             # Catalog order, not click order, so the summary reads the same every time.

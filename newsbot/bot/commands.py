@@ -54,6 +54,7 @@ from newsbot.bot.permissions import check_guild
 from newsbot.bot.views import ConfirmView, PagerView
 from newsbot.config import AppConfig, GameInfo, Topic
 from newsbot.guilds.schedule import local_due_instant
+from newsbot.industry import counts_toward_limit
 from newsbot.pipeline.guild_digest import (
     GuildDigestDeps,
     GuildTimeZoneError,
@@ -1217,7 +1218,8 @@ def make_guild_admin_group(
             f"- {esc(names.get(g.game_key, g.game_key))} in <#{g.channel_id}>" for g in followed
         ] or ["(none yet)"]
         others = [esc(g.name) for g in cfg.catalog if g.key not in have]
-        text = f"Following ({len(followed)} of {repo.MAX_GAMES_PER_GUILD}):\n" + "\n".join(lines)
+        counted = sum(1 for g in followed if counts_toward_limit(g.game_key))
+        text = f"Following ({counted} of {repo.MAX_GAMES_PER_GUILD}):\n" + "\n".join(lines)
         if others:
             text += "\n\nAvailable: " + ", ".join(others)
         await _say(interaction, text)

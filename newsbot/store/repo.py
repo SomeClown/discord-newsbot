@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
+from newsbot.industry import counts_toward_limit
 from newsbot.shift.details import (
     CLOCK_DAYS,
     SHIFT_TZ,
@@ -1216,13 +1217,19 @@ def list_guild_games(conn: sqlite3.Connection, guild_id: int) -> list[GuildGame]
     return [GuildGame(r["guild_id"], r["game_key"], r["channel_id"]) for r in rows]
 
 
+def _counted(games: Sequence[tuple[str, int]]) -> int:
+    """How many of `games` use up a slot: all of them but the Gaming industry entry."""
+    return sum(1 for key, _ in games if counts_toward_limit(key))
+
+
 def set_guild_games(conn: sqlite3.Connection, guild_id: int, games: list[tuple[str, int]]) -> None:
     """Replace `guild_id`'s followed games with `games`, `(game_key, channel_id)` each.
 
-    All or nothing: more than 10 raises `GameLimitError` and a repeated key
-    raises `ValueError`, both before anything is written.
+    All or nothing: more than 10 games raises `GameLimitError` and a repeated key
+    raises `ValueError`, both before anything is written. The Gaming industry entry
+    doesn't count toward the 10 (`counts_toward_limit`), so ten games plus it is fine.
     """
-    if len(games) > MAX_GAMES_PER_GUILD:
+    if _counted(games) > MAX_GAMES_PER_GUILD:
         raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
     keys = [key for key, _ in games]
     if len(set(keys)) != len(keys):
@@ -1271,8 +1278,9 @@ def apply_guild_setup(
     drops every followed game not in `games`, and points the rest at their channels,
     following any that are new. Unlike `set_guild_games` this doesn't wipe and refill, so
     a game that stays keeps its place in the order it was added. Any failure rolls the
-    lot back: more than 10 games raises `GameLimitError` and a repeated key raises
-    `ValueError`, both before anything is written.
+    lot back: more than 10 games (not counting the Gaming industry entry) raises
+    `GameLimitError` and a repeated key raises `ValueError`, both before anything is
+    written.
 
     With `expected_fingerprint` (from `setup_fingerprint`) the write is compare-and-set:
     the transaction takes the write lock first (`BEGIN IMMEDIATE`), then re-reads the
@@ -1280,7 +1288,7 @@ def apply_guild_setup(
     match. Nobody can change anything between the check and the write, because nobody
     else can hold the lock in between.
     """
-    if len(games) > MAX_GAMES_PER_GUILD:
+    if _counted(games) > MAX_GAMES_PER_GUILD:
         raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
     keys = [key for key, _ in games]
     if len(set(keys)) != len(keys):
@@ -1336,7 +1344,8 @@ def follow_game(conn: sqlite3.Connection, guild_id: int, game_key: str, channel_
     Update-then-insert rather than an upsert on purpose: the 10-game trigger
     fires on every INSERT attempt, including one that would only have
     turned into an update, so an upsert would refuse to re-point the tenth
-    game's channel. Raises `GameLimitError` on an eleventh.
+    game's channel. Raises `GameLimitError` on an eleventh game; the Gaming
+    industry entry is never refused and doesn't count toward the ten.
     """
     try:
         with conn:

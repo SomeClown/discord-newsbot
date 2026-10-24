@@ -493,8 +493,8 @@ def test_every_missing_column_is_named_at_once(fresh_db):
 
 def test_a_healthy_database_migrates_and_remigrates_without_complaint(fresh_db):
     with closing(connect(fresh_db)) as conn:
-        assert migrate(conn) == 9
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
+        assert migrate(conn) == 10
 
 
 def test_the_check_only_looks_at_databases_that_claim_to_have_009(fresh_db):

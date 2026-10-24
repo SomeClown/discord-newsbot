@@ -307,11 +307,19 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 ### Progress
 - Task 1: complete (from c643215; gate exit 0, 14680 passed; tests first, 18 of 22 failed before; adversarial: 71 cases, no bugs)
 - Task 2: complete (from 4637b8b; gate exit 0, 14768 passed; tests first, 8 of 12 failed before; adversarial: 76 tests, no bugs)
+- Task 3: complete (from 23f12dd; gate exit 0, 14855 passed; tests first, 22 failed before; qa spec check: matches, migration verified on a real v9 database and against the v3.2.2 binary; adversarial: 56 tests, 1 bug fixed in round 1 (BEFORE UPDATE trigger, which also closes moving a row into a full server))
 
 ### Decisions made during the build
 - Ruling (Task 2): "no web-search collector when nothing is left" applies only when games were requested and industry was all of them; an originally empty `web_search_games` list still builds a collector that searches nothing. Why: `test_config_v3_adversarial.py::test_an_empty_web_search_games_list_still_builds_a_collector_that_searches_nothing` pins today's behavior, and the plan says existing behavior stays byte-identical. If wrong: none visible; an empty collector makes no request.
+- Ruling (Task 3): accepted the builder's change to `newsbot/store/db.py` (outside the brief): `migrate` checks for a draft-009 database before applying anything, so a refused database is left untouched instead of migrated to 10 and then refused; the post-check runs only when something was applied. Why: 010's arrival exposed the order. If wrong: a migration-path regression on prod's real database, so Task 3 also got a qa spec check.
+- Ruling (Task 3): three 009/005 adversarial tests changed beyond the version pin (009's "only adds things" and kill-at-every-statement tests pin the migration directory at 009, since 010 replaces the trigger; 005's kill test gained a version-10 branch). No assertion weakened. If wrong: those tests stop covering 009 as it ships alone.
+- Ruling (Task 3 spec check, LOW): kept `DROP TRIGGER` without `IF EXISTS` in 010. Why: production has the trigger (005 made it, nothing rebuilt guild_games since), and a database missing it is wrong in a way worth failing loudly on (the migration rolls back). If wrong: the bot refuses to start on such a database until the trigger is restored.
+- Ruling (Task 3 spec check, LOW): no "follows no games now" warning when a server unfollows its last game but still follows industry. Why: industry still posts, so the server isn't silent. If wrong: an admin isn't told their game list is empty.
+- Ruling (Task 3 spec check, LOW): the setup placeholder escapes the entry's name per the brief, so a name with markdown would show backslashes; "Gaming industry" has none. If wrong: cosmetic only.
+- Ruling (Task 3): test_updating_industry_into_a_game_cannot_make_an_eleventh_counted_game is a real bug, not a misread: 010's trigger only guarded INSERT, so an UPDATE turning a guild's industry row into a game could reach 11 counted games (new with 010). No app path does that UPDATE; fixed anyway in 010 with a BEFORE UPDATE OF game_key trigger.
 
 ### Parked
 - Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
 - Task 2: until Task 5, a comped industry follow still goes through prepare_summaries as a game (game prompt); Task 5 routes it to the industry prompt. `_all_topics` never lists industry, so it must not feed industry's own prompt.
+- Task 3: (the `UPDATE ... SET guild_id` hole, which predated 010, was closed by fix round 1 too.) Concurrent migration of one v9 file by several processes untested (one bot process, by rule).
 

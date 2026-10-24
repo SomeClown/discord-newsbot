@@ -122,7 +122,7 @@ def _marker(conn):
 
 def test_an_empty_database_migrates_clean_and_every_new_table_starts_empty(tmp_path):
     with closing(connect(tmp_path / "fresh.db")) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         for table in NEW_THINGS:
@@ -143,7 +143,7 @@ def test_migrating_a_current_database_again_is_a_no_op_for_schema_rows_and_marke
     with closing(connect(tmp_path / "x.db")) as conn:
         migrate(conn)
         before = _state(conn)
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert _state(conn) == before
 
 
@@ -153,7 +153,7 @@ def test_a_deleted_marker_is_not_put_back_by_migrating_again_documented(tmp_path
     with closing(connect(tmp_path / "x.db")) as conn:
         migrate(conn)
         repo.app_state_delete(conn, repo.DETAILS_SINCE_KEY)
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert _marker(conn) is None
 
 
@@ -251,7 +251,7 @@ def test_a_stray_table_with_a_009_name_makes_it_fail_loudly_and_leave_v8_alone_d
         # A human removes the stray table, and then it goes through.
         conn.execute("DROP TABLE code_details")
         conn.commit()
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
 
 
 def test_a_stray_marker_row_of_the_same_name_is_kept_not_overwritten(v8_path):
@@ -295,14 +295,17 @@ def test_an_exception_after_every_single_statement_of_009_leaves_v8_untouched(
         with closing(connect(work)) as conn:
             assert _state(conn) == before, f"statement {k} leaked: {statements[k - 1][:60]!r}"
             # And the real 009 still goes in afterwards.
-            assert migrate(conn) == 9
+            assert migrate(conn) == 10
             assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 _KILL_SCRIPT = textwrap.dedent(
     """
     import os, sys
+    from pathlib import Path
+    from newsbot.store import db
     from newsbot.store.db import connect, migrate
+    db._MIGRATIONS_DIR = Path(sys.argv[3])
     kill_at = int(sys.argv[2])
     seen = [0]
     conn = connect(sys.argv[1])
@@ -320,6 +323,10 @@ _KILL_SCRIPT = textwrap.dedent(
 def test_a_process_killed_at_any_step_of_009_leaves_v8_and_the_next_start_finishes_it(
     v8_path, tmp_path, monkeypatch, migrations_up_to
 ):
+    # This is about 009 alone, so everything here runs against the directory as of 009
+    # (010 has its own tests, and its statements would only move the kill points around).
+    dir_009 = migrations_up_to(tmp_path / "v9_dir", 9)
+    monkeypatch.setattr(db, "_MIGRATIONS_DIR", dir_009)
     probe = tmp_path / "probe.db"
     shutil.copy(v8_path, probe)
     seen = [0]
@@ -343,7 +350,7 @@ def test_a_process_killed_at_any_step_of_009_leaves_v8_and_the_next_start_finish
         work = tmp_path / f"kill{point}.db"
         shutil.copy(v8_path, work)
         result = subprocess.run(  # noqa: S603
-            [sys.executable, "-c", _KILL_SCRIPT, str(work), str(point)],
+            [sys.executable, "-c", _KILL_SCRIPT, str(work), str(point), str(dir_009)],
             capture_output=True,
             text=True,
             timeout=60,
@@ -392,7 +399,7 @@ def test_four_processes_migrating_one_file_at_once_all_see_9_and_write_one_marke
     for t in threads:
         t.join(60)
     assert errors == []
-    assert results == [9, 9, 9, 9]
+    assert results == [10, 10, 10, 10]
     with closing(connect(v8_path)) as conn:
         assert (
             conn.execute(
