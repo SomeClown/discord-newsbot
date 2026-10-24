@@ -338,29 +338,30 @@ For the "Gaming industry" catalog entry (`docs/design.md` §18, v3.3.0). Eight c
 |---|---|---|---|---|---|
 | `https://www.gamesindustry.biz/feed/news` (GamesIndustry.biz) | 4.0 | 20/20 (about 14 headline-grade, 6 trade minutiae) | none seen | 200 | In: the backbone |
 | `https://www.gamedeveloper.com/rss.xml` (Game Developer) | 1.6 | 14/20 (the rest is developer craft and opinion, no reviews or guides) | Cloudflare | 200 | In |
-| `https://www.videogameschronicle.com/category/news/feed/` (VGC news) | 8.8 | 3/10 | Cloudflare (challenged two of our paged requests from home) | 200 | In, in place of PC Gamer's tag |
+| `https://www.videogameschronicle.com/category/news/feed/` (VGC news) | 8.8 | 3/10 | Cloudflare (challenged two of our paged requests from home) | 200 | In |
 | `https://www.gematsu.com/c/industry/feed` (Gematsu industry) | 0.6 | about 13/20 | Cloudflare | 200 | In: announcements and Japanese studios |
-| `https://www.pcgamer.com/feeds/tag/gaming-industry/` (PC Gamer tag) | 1.8 | about 10/20 | none seen | 200 | Dropped (below) |
+| `https://www.pcgamer.com/feeds/tag/gaming-industry/` (PC Gamer tag) | 1.8 | about 10/20 | none seen | 200 | In, as the fifth (below) |
 | `https://insider-gaming.com/category/news/feed/` (Insider Gaming news) | 20 to 30 | about 8/30 | Cloudflare (feeds answer) | 200 | Not added: the next step if the set is thin |
 | `https://www.theverge.com/rss/games/index.xml` (The Verge, Games) | 4.2 | 4/10 | none seen | 200 | Not added: mostly deals and features |
 | `https://www.pocketgamer.biz/index.rss` (PocketGamer.biz) | 6.0 | about 9/20 | Cloudflare | 200 | Not added: mobile only, heavy on its own conference coverage |
 
 All eight returned 200 with a feed content type from the Droplet, so none of the Cloudflare sites turned the datacenter away.
 
-### Why the four
+### Why the five
 
 - **GamesIndustry.biz** (`/feed/news`) is about 4 stories a day, nearly all industry news, on the same CDN stack as Eurogamer. Use `/feed/news`, not `/feed`: the plain feed (5.7 a day) adds opinion columns, podcasts and "Critical Consensus" review roundups. The trade minutiae it does carry (event formats, awards, survey reports) are what the selection prompt already leaves out. It's slow on reported stories: on 2026-10-23 it hadn't run Arkane's buyer deadline, the Xbox COO's exit or the Xbox and Netflix talks, all of which the consumer outlets had.
 - **Game Developer** leans toward labor, tools and studio stories (layoffs, closures, unions, platform policy), where GamesIndustry.biz leans toward business, data, pricing and policy. About a third of their stories overlap over the same days (BioWare, RedLynx), so they aren't redundant but they aren't independent either.
-- **VGC** carries the reported stories the trade press is slower on (Arkane's deadline, the Xbox and Netflix talks). Only 3 in 10 of its news category is industry news, so the daily pick does the filtering; it's the noisiest of the four.
+- **VGC** carries the reported stories the trade press is slower on (Arkane's deadline, the Xbox and Netflix talks). Only 3 in 10 of its news category is industry news, so the daily pick does the filtering; it's the noisiest of the five.
 - **Gematsu Industry** is low volume but the one feed that regularly brings new-game announcements and Japanese studio news (Arc System Works, Grasshopper Manufacture), which the other three barely touch. Its titles carry "Rumor:" and "Report:" prefixes. Drop it first if anything has to go.
+- **PC Gamer Industry** (the `gaming-industry` tag) is about 1.8 a day of reported stories the trade press is slower on, about half of them industry news. It was left out at first and the owner added it back (2A, below).
 
 A coverage check of 15 of the week's stories across 11 feeds found no single feed with all of them: GamesIndustry.biz had 9, PC Gamer's tag 5, Game Developer 3, Gematsu 4 (a shorter window).
 
-### Why PC Gamer's tag was dropped
+### Why PC Gamer's tag was dropped, then added back
 
 It was in the first recommended set (about 1.8 a day, reported stories the trade press is slower on) and it did answer from the Droplet. The owner dropped it (1A) because every item in it also arrives through PC Gamer's main feed, which is already a shared source. All 7 tag items in the main feed's 1.5-day window were in the main feed too.
 
-The reading behind that choice was stricter than the code. Across passes the first copy of a URL wins: a stored URL is dropped before any merging (`_store_sync` in `newsbot/pipeline/collect.py`), so a story the main feed carried in an earlier pass than the tag feed loses its industry tag. Within one pass the game tags of every copy merge into the stored item (`_merge_loser_tags`), so a story both feeds carried in the same pass would have reached the entry, and most of the tag's stories would have. The swap to VGC (it isn't one of the shared sources, and it carries the reported stories the trade press is slower on) was made on the stricter reading, which turned out to be wrong. The owner is being asked whether to add PC Gamer's tag back.
+The reading behind that choice was stricter than the code. Across passes the first copy of a URL wins: a stored URL is dropped before any merging (`_store_sync` in `newsbot/pipeline/collect.py`), so a story the main feed carried in an earlier pass than the tag feed loses its industry tag. Within one pass the game tags of every copy merge into the stored item (`_merge_loser_tags`), so a story both feeds carried in the same pass would have reached the entry, and most of the tag's stories would have. The swap to VGC (it isn't one of the shared sources, and it carries the reported stories the trade press is slower on) was made on the stricter reading, which turned out to be wrong. Once the reading was corrected the owner added PC Gamer's tag back (2A, 2026-10-23) as the fifth feed, after Gematsu Industry, named "PC Gamer Industry". The only stories it can lose are the ones PC Gamer's main feed carried in an earlier pass than the tag feed did. It was fetched from the Droplet that day (200, `application/xml`).
 
 The same caution applies to the next step in `docs/design.md` §18, Part 2 (an outlet's own news or industry category feed, if announcements turn out thin): check first whether the outlet's main feed is already a shared source, because a story the main feed carries in an earlier pass loses the industry tag. Insider Gaming's news category is the fallback named there: none of its feeds is a shared source, but it is only about a quarter industry news.
 
@@ -386,9 +387,11 @@ The same caution applies to the next step in `docs/design.md` §18, Part 2 (an o
 ### Notes for the builder
 
 - A big day repeats one story many times (BioWare's closure was 7 items in PC Gamer's tag, 6 in Eurogamer, 1 to 2 elsewhere). The daily pick merges them; it means 20 or more items for 5 slots.
-- Expect about 8 items a day on a normal day from the four feeds together, and 20 or more on a big one.
-- If Game Developer or Gematsu ever fails from the Droplet, the other three are still a usable set.
+- Expect about 10 items a day on a normal day from the five feeds together, and 20 or more on a big one.
+- If Game Developer or Gematsu ever fails from the Droplet, the rest are still a usable set.
 
 ### Owner decisions (2026-10-23)
 
 1A: the set is GamesIndustry.biz (`/feed/news`), Game Developer, VGC's news category and Gematsu's industry feed, all `trust: press`; PC Gamer's tag is dropped.
+
+2A (follow-up, after the dedupe reading was corrected): PC Gamer's gaming-industry tag (`https://www.pcgamer.com/feeds/tag/gaming-industry/`, named "PC Gamer Industry", `trust: press`) is added back as the fifth feed, so the set is five.

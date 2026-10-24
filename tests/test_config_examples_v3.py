@@ -109,11 +109,11 @@ def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
     assert all(s.type != "bluesky_search" for s in games[3].sources)
 
 
-def test_the_industry_entry_is_last_with_no_keywords_and_four_press_feeds():
+def test_the_industry_entry_is_last_with_no_keywords_and_five_press_feeds():
     # Added 2026-10-23 (docs/design.md section 18). It is matched by nothing: no aliases,
-    # entities or search queries, and its name is never matched. The four feeds were each
-    # fetched from the Droplet that day. PC Gamer's tag is left out (its items also arrive
-    # through PC Gamer's main feed, already shared); see docs/sources-research.md.
+    # entities or search queries, and its name is never matched. The five feeds were each
+    # fetched from the Droplet that day. PC Gamer's tag joined as the fifth on the owner's
+    # word (2A) once the dedupe reading was corrected; see docs/sources-research.md.
     cfg = load_config(EXAMPLE)
     game = cfg.catalog[-1]
     assert (game.key, game.name) == ("industry", "Gaming industry")
@@ -129,6 +129,12 @@ def test_the_industry_entry_is_last_with_no_keywords_and_four_press_feeds():
             "press",
         ),
         ("rss", "Gematsu Industry", "https://www.gematsu.com/c/industry/feed", "press"),
+        (
+            "rss",
+            "PC Gamer Industry",
+            "https://www.pcgamer.com/feeds/tag/gaming-industry/",
+            "press",
+        ),
     ]
     assert not any("industry" in (s.games or []) for s in cfg.shared_sources)
 
