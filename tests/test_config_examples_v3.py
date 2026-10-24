@@ -51,7 +51,7 @@ def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order()
     # three would change the friend's prompt (and need an owner-reviewed /newsbot preview).
     cfg = load_config(EXAMPLE)
     assert [g.key for g in cfg.catalog][:3] == ["borderlands4", "palworld", "diablo4"]
-    assert len(cfg.catalog) == 21
+    assert len(cfg.catalog) == 22
 
 
 def test_arc_raiders_has_steam_first_and_one_press_tag_feed():
@@ -73,10 +73,11 @@ def test_arc_raiders_has_steam_first_and_one_press_tag_feed():
 
 def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
     # Added 2026-10-21 for a friend's new server, after ARC Raiders so the first three keep
-    # their order. Each has its official Steam news; Valheim alone also has a verified,
-    # official Bluesky account. None of the studios offers a usable feed (JavaScript sites,
-    # and DayZ's answers a datacenter with a Cloudflare 403), so Steam is the backbone.
-    games = load_config(EXAMPLE).catalog[-5:]
+    # their order (the industry entry now follows them, hence the slice that skips the last).
+    # Each has its official Steam news; Valheim alone also has a verified, official Bluesky
+    # account. None of the studios offers a usable feed (JavaScript sites, and DayZ's answers a
+    # datacenter with a Cloudflare 403), so Steam is the backbone.
+    games = load_config(EXAMPLE).catalog[-6:-1]
     assert [(g.key, g.name) for g in games] == [
         ("valheim", "Valheim"),
         ("scum", "SCUM"),
@@ -106,6 +107,30 @@ def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
     assert games[4].aliases == ["Tarkov", "EFT", "EscapeFromTarkov"]
     # "active matter" on Bluesky is physics, so that game must never get a Bluesky search.
     assert all(s.type != "bluesky_search" for s in games[3].sources)
+
+
+def test_the_industry_entry_is_last_with_no_keywords_and_four_press_feeds():
+    # Added 2026-10-23 (docs/design.md section 18). It is matched by nothing: no aliases,
+    # entities or search queries, and its name is never matched. The four feeds were each
+    # fetched from the Droplet that day. PC Gamer's tag is left out (its items also arrive
+    # through PC Gamer's main feed, already shared); see docs/sources-research.md.
+    cfg = load_config(EXAMPLE)
+    game = cfg.catalog[-1]
+    assert (game.key, game.name) == ("industry", "Gaming industry")
+    assert game.match_name is False
+    assert game.aliases == [] and game.entities == [] and game.search_queries == []
+    assert [(s.type, s.name, str(s.url), s.trust) for s in game.sources] == [
+        ("rss", "GamesIndustry.biz", "https://www.gamesindustry.biz/feed/news", "press"),
+        ("rss", "Game Developer", "https://www.gamedeveloper.com/rss.xml", "press"),
+        (
+            "rss",
+            "VGC",
+            "https://www.videogameschronicle.com/category/news/feed/",
+            "press",
+        ),
+        ("rss", "Gematsu Industry", "https://www.gematsu.com/c/industry/feed", "press"),
+    ]
+    assert not any("industry" in (s.games or []) for s in cfg.shared_sources)
 
 
 def test_the_catalog_fits_under_every_discord_cap():

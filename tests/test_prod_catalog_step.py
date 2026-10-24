@@ -14,6 +14,11 @@ brings the example's own sources for the friend's three games (official Bluesky
 accounts, two more press feeds, the mentalmars code tables), so health continuity is
 a superset check, and the one source that vanishes is named below so nobody finds out
 the hard way.
+
+The 22nd catalog entry, "Gaming industry", sits inside its own nested pair of markers
+(industry-step) so production, whose config is already on the 21 games, gets it with one
+more awk line. The catalog step as written today is therefore 22 games; production's copy
+of it, cut without the industry region, is 21.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ FIXTURE = ROOT / "tests" / "fixtures" / "config_v2_prodlike.yaml"
 # the one in the runbook.
 AWK_PROGRAM = "/^# >>> catalog-step: start/{f=1;next} /^# <<< catalog-step: end/{f=0} f"
 
+# The second awk line, for the industry entry alone: the same trick on the nested markers.
+INDUSTRY_AWK = "/^# >>> industry-step: start/{f=1;next} /^# <<< industry-step: end/{f=0} f"
+
 # The three keys the real prod file adds on top of the v2.2 shape. The values are the
 # real, non-secret ids from CLAUDE.md; the friend's guild id is the fixture's fake one.
 PROD_EXTRAS = """
@@ -56,20 +64,45 @@ FRIENDS_GAMES = ["borderlands4", "palworld", "diablo4"]
 THEN = datetime(2026, 10, 5, 16, 0, tzinfo=UTC)
 
 
-def _recipe_blocks() -> str:
+def _awk(program: str) -> str:
     # The same awk the runbook runs, run in the repo the way the runbook runs it on /opt/newsbot.
     if shutil.which("awk") is None:
         pytest.skip("no awk on this machine")
     # A fixed argv with no user input in it, hence the two noqa codes.
-    out = subprocess.run(  # noqa: S603
-        ["awk", AWK_PROGRAM, "config.example.yaml"],  # noqa: S607
+    return subprocess.run(  # noqa: S603
+        ["awk", program, "config.example.yaml"],  # noqa: S607
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
+
+
+def _recipe_blocks() -> str:
+    out = _awk(AWK_PROGRAM)
     assert out.strip(), "the catalog-step markers are missing from config.example.yaml"
     return out
+
+
+def _industry_step() -> str:
+    out = _awk(INDUSTRY_AWK)
+    assert out.strip(), "the industry-step markers are missing from config.example.yaml"
+    return out
+
+
+def _blocks_without_industry() -> str:
+    # What production's config would hold today: the catalog-step blocks with the nested
+    # industry-step region (marker lines included) cut out.
+    kept: list[str] = []
+    skipping = False
+    for line in _recipe_blocks().splitlines(keepends=True):
+        if line.startswith("# >>> industry-step: start"):
+            skipping = True
+        if not skipping:
+            kept.append(line)
+        if line.startswith("# <<< industry-step: end"):
+            skipping = False
+    return "".join(kept)
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +142,19 @@ def test_the_markers_appear_once_and_cut_out_no_top_level_key_prod_already_has()
     text = EXAMPLE.read_text()
     assert text.count("# >>> catalog-step: start") == 1
     assert text.count("# <<< catalog-step: end") == 1
+    # The industry-step markers nest inside the catalog-step ones, once each, in order.
+    assert text.count("# >>> industry-step: start") == 1
+    assert text.count("# <<< industry-step: end") == 1
+    positions = [
+        text.index(marker)
+        for marker in (
+            "# >>> catalog-step: start",
+            "# >>> industry-step: start",
+            "# <<< industry-step: end",
+            "# <<< catalog-step: end",
+        )
+    ]
+    assert positions == sorted(positions)
     top_level = {
         line.split(":", 1)[0]
         for line in _recipe_blocks().splitlines()
@@ -145,12 +191,13 @@ def test_the_markers_appear_once_and_cut_out_no_top_level_key_prod_already_has()
 # --- 1 and 2: it loads, friend's games first ---
 
 
-def test_it_loads_with_twenty_one_games_and_the_friends_three_first_in_v2_order(before, after):
+def test_it_loads_with_twenty_two_games_and_the_friends_three_first_in_v2_order(before, after):
     assert [g.key for g in before.catalog] == FRIENDS_GAMES
     keys = [g.key for g in after.catalog]
-    assert len(keys) == 21
+    assert len(keys) == 22
     assert keys[:3] == ["borderlands4", "palworld", "diablo4"]
-    assert keys[-1] == "tarkov"
+    assert keys[-2] == "tarkov"
+    assert keys[-1] == "industry"
     assert [g.name for g in after.catalog[:3]] == ["Borderlands 4", "Palworld", "Diablo IV"]
 
 
@@ -201,13 +248,20 @@ def _items() -> list[RawItem]:
     ]
 
 
+@pytest.mark.parametrize(
+    "extra_follows",
+    [(), ("industry",)],
+    ids=["three games", "three games and industry"],
+)
 @pytest.mark.parametrize("game_key", FRIENDS_GAMES)
 def test_the_friends_prompt_is_byte_identical_to_the_pre_catalog_prompt(
-    game_key, before_path, before, after
+    game_key, extra_follows, before_path, before, after
 ):
     items = _items()
     prior = [PriorStory(1, "Yesterday's headline", THEN - timedelta(days=1))]
-    followed = set(FRIENDS_GAMES)  # a comped follow: the friend's three, the only comped server
+    # A comped follow: the friend's three, the only comped server. The second case adds the
+    # industry entry to what that server follows; the game prompt must not notice.
+    followed = set(FRIENDS_GAMES) | set(extra_follows)
 
     def prompt(cfg):
         game = next(g for g in cfg.catalog if g.key == game_key)
@@ -235,6 +289,28 @@ def test_the_friends_prompt_is_byte_identical_to_the_pre_catalog_prompt(
     assert prompt(before) == yardstick
     assert prompt(after) == yardstick
     assert "video games Borderlands 4, Palworld and Diablo IV." in yardstick[0]
+
+
+def test_the_industry_step_appends_cleanly_after_the_catalog_step_production_has_today(
+    tmp_path, before_path
+):
+    # Production's config already took the 21 games, so the industry entry arrives alone,
+    # by the second awk line. That file has to load as the same bot as one that took the whole
+    # catalog step at once.
+    today = tmp_path / "config.today.yaml"
+    today.write_text(before_path.read_text() + "\n" + _blocks_without_industry())
+    with_industry = tmp_path / "config.with-industry.yaml"
+    with_industry.write_text(today.read_text() + "\n" + _industry_step())
+    all_at_once = tmp_path / "config.all-at-once.yaml"
+    all_at_once.write_text(before_path.read_text() + "\n" + _recipe_blocks())
+
+    before_industry = load_config(today)
+    after_industry = load_config(with_industry)
+    assert [g.key for g in before_industry.catalog][-1] == "tarkov"
+    assert len(before_industry.catalog) == 21
+    assert after_industry.catalog[-1].key == "industry"
+    assert len(after_industry.catalog) == 22
+    assert after_industry.model_dump() == load_config(all_at_once).model_dump()
 
 
 # --- 4: SHiFT ---
