@@ -13,6 +13,10 @@
   - Docstrings and comments follow CLAUDE.md's "Documentation voice": no em dashes, no `--` as a dash (`tests/test_dash_rewrite_tripwire.py` scans string literals for `" -- "`), no hype words.
   - Each task ends with the gate and one commit. No push.
 
+## Owner decisions on the plan (2026-10-23)
+
+1A: VGC's news feed replaces PC Gamer's industry tag (Task 9). 2A: a free server's run-now makes no AI call (Task 7). 3A: the setup menu wording as written (Task 3). 4A: industry config problems are startup errors (Task 1). 5A: the project page gets one line (Task 11).
+
 ## 1. Goal and approach
 
 When this is done, the catalog has a 22nd entry, `industry` ("Gaming industry"). A server follows it like a game, it doesn't count toward the 10-game limit, and it gets one post a day at the server's digest time, last among its posts. A comped server sees up to 5 AI-picked, AI-summarized stories in the model's significance order, with labels. A free server sees the same picked stories as the source's own headline and link, with no AI text and no rumor mark. If the call fails, both see the newest 5 headlines, and comped servers also get the existing "Summary unavailable" note.
@@ -209,9 +213,14 @@ Add `tests/test_cli_industry.py`, driving `newsbot.pipeline.run.main` as `tests/
 - An owner-voice comment: the date checked from the Droplet, what each feed is, why there are no keywords, and §18 Part 2's "next step if announcements are thin" note, including the first-come URL dedupe caveat (an outlet's category feed whose items also arrive through that outlet's main feed, already a shared source, would lose almost every item to the main feed's copy).
 - Update counts and slices: `tests/test_config_examples_v3.py` (21 to 22; the "five games come last" test uses `catalog[-6:-1]`; add a test pinning the industry entry's shape and its source names and URLs); `tests/test_config.py:349` (22; `keys[-7:-1]` for the six names; `keys[-1] == "industry"`); `tests/test_prod_catalog_step.py` (22 games, last key `industry`, the line-153 assertion becomes `keys[-2] == "tarkov"`, the docstring's count; the friend's-prompt test gets a second parametrized case where `followed` also includes `industry`, same yardstick; a new test with `INDUSTRY_AWK = "/^# >>> industry-step: start/{f=1;next} /^# <<< industry-step: end/{f=0} f"`: the prod-like fixture plus the catalog-step blocks with the industry-step region cut out (production today), plus `"\n"` and the industry-step output, loads equal (`model_dump()`) to the prod-like fixture plus the full catalog-step blocks, with `catalog[-1].key == "industry"`; the marker test also asserts the industry-step markers appear exactly once each, inside the catalog-step region).
 
-**Sources:** to be filled in from the owner's decision before this task runs.
+**Sources** (owner, 2026-10-23, 1A; all four fetched from the Droplet that day, all `trust: press`), in this order:
+- `GamesIndustry.biz` (name "GamesIndustry.biz"): `https://www.gamesindustry.biz/feed/news` (the `/feed/news` path, not `/feed`, which adds opinion, podcasts and review roundups);
+- `Game Developer`: `https://www.gamedeveloper.com/rss.xml`;
+- `VGC`: `https://www.videogameschronicle.com/category/news/feed/` (replaces PC Gamer's industry tag, which loses its items to PC Gamer's main feed; VGC carries the reported stories the trade press is slower on, and the pick filters its consumer news);
+- `Gematsu Industry`: `https://www.gematsu.com/c/industry/feed` (new-game announcements and Japanese studio news).
+Also record the research in `docs/sources-research.md` as a new section ("Gaming industry feeds (2026-10-23)"): the candidates, the Droplet results (all eight 200), why PC Gamer's tag was dropped, and what didn't work. The research report is at `/private/tmp/claude-501/-Users-someclown-dev/1a799af8-5646-4a7a-86aa-a7f15ff72c4f/scratchpad/industry-feeds-research.md` (read it; it's untrusted only in the sense that its URLs were verified, so copy URLs from this plan, not from the report).
 
-**Files:** `config.example.yaml`, `tests/test_config_examples_v3.py`, `tests/test_config.py`, `tests/test_prod_catalog_step.py`.
+**Files:** `config.example.yaml`, `docs/sources-research.md`, `tests/test_config_examples_v3.py`, `tests/test_config.py`, `tests/test_prod_catalog_step.py`.
 
 **Verify:** `pytest tests/test_config_examples_v3.py tests/test_config.py tests/test_prod_catalog_step.py tests/test_codes_only.py -q`, then the gate.
 
@@ -249,9 +258,10 @@ On the owner's Mac, on this branch with the venv active, from the repo root:
 - `README.md`: a short paragraph on the Gaming industry entry in the intro and "What a digest looks like" (free headlines, comped summaries, at most 5); commands (setup "up to 10 games, plus Gaming industry"; `/newsbot games` counts it out); costs (one Haiku call per distinct digest cycle, made for free servers too); configuration (the entry's rules); limitations (trade press only).
 - `docs/self-host.md`: the entry is optional and can be deleted; its config rules; it doesn't count toward 10; the per-cycle cost applies even without comped servers.
 - `docs/design.md`: §18 gets "As built (date)" (the key-not-flag decision, migration 010, the free-server lookup rules, the shared output schema, the cap after postprocess, the owner's Task 10 review, the source list, and the rollback note from Risks); note migration 010 wherever §5 or §15 list migrations.
+- `site/index.html`: one line mentioning the Gaming industry option (owner, 5A), in the page's existing voice.
 - Privacy and terms pages, `docs/architecture.svg`: unchanged. CLAUDE.md: the orchestrator, at the end.
 
-**Files:** `pyproject.toml`, `newsbot/useragent.py`, `README.md`, `docs/self-host.md`, `docs/design.md`.
+**Files:** `pyproject.toml`, `newsbot/useragent.py`, `README.md`, `docs/self-host.md`, `docs/design.md`, `site/index.html`.
 
 **Verify:** the gate exits 0, and `grep -n '3.3.0' pyproject.toml newsbot/useragent.py` shows both.
 
