@@ -1180,3 +1180,78 @@ The follow-up capacity hazard above, fixed the way the owner picked (1B on 2026-
 - **Known and left alone:** a server that turns its ping off in the moment between loading and claiming still gets a pinged burst (v3.1.4 did the same, and the window is one thread hop); the delivery log line says `pinged: false` for a follow-up-only turn.
 - **The preview script** gained case 12, "A follow-up that continues", so it runs 15 cases; case 10's roundup went from 22 codes to 17 and the screenshot windows grew to 7,900 (desktop) and 8,000 (phone) pixels to stay under the 8,192 ceiling.
 - **No migration, config key or command change.** Rollback is `TAG=3.2.0` with no config change.
+
+## 18. General gaming news, as an option (v3.3.0, approved 2026-10-23)
+
+Some of the week's biggest gaming news isn't about any one game. When BioWare's shutdown broke, the owner saw it on Facebook and everywhere else, and the bot said nothing, because every item it posts has to match a game a server follows. This section adds that news as something a server can choose: studios closing, layoffs, acquisitions, new games and new hardware announced, platform and policy changes. It shows up as one more entry in the catalog, "Gaming industry", which a server follows like a game, in a channel of its own, with a short daily post. The point is a few things worth knowing each day, not a firehose.
+
+**Owner decisions (2026-10-23):**
+- How a server turns it on: **a "Gaming industry" entry in the catalog**, followed like any game, with its own channel (1A). A separate setting with its own command may come later (1B), but this is the starting point.
+- Where the news comes from: **industry and trade press feeds only**, dedicated to the entry, each checked from the Droplet before it goes in (2A). No keyword pulls from the general press feeds.
+- How much: **at most 5 stories a day** (3A).
+- Choosing them: **one AI pick a day, shared by every server** (4A). Comped servers get those stories summarized; free servers get the same stories as the source's own headline and a link.
+- Rumors: **allowed from vetted press**, and comped summaries keep their existing "rumor" label (5A). The owner's words: stay away from rumors unless they come from very reputable sources.
+- Parts 1 to 4 below were approved as written.
+- After the builder check (2026-10-23): **one pick per distinct digest time**, through the existing per-cycle summary machinery, so every server's news is fresh at its own posting time (1A; a handful of calls a day instead of literally one). **"Gaming industry" doesn't count toward a server's 10 games** (2A). **No rumor mark on a free server's post** (3A), the same as free headline lists today.
+
+**Goals.** A server that turns this on sees, once a day, the handful of industry stories a reasonably plugged-in player would want to know about, without having to follow anything else.
+
+**Non-goals.** Nothing about the existing games changes: their sources, prompts, matching and digests stay as they are. No new commands, no per-server tuning of the topics, no breaking-news posts during the day.
+
+**Anti-goals.** Any of these makes v3.3.0 a failure, however well it works:
+- a channel full of trade-press minutiae (executive hires, earnings footnotes, job ads, sponsored posts) instead of the stories that matter;
+- more than 5 stories in a day;
+- a story about one game leaking in because a general press feed happened to say "industry";
+- AI-written text in a free server's post;
+- a change, however small, to an existing game's digest or prompt.
+
+### Part 1: what a server sees
+
+"Gaming industry" appears in `/newsbot setup`'s game menu alongside the games. An admin who picks it gives it a channel the same way as any game. Once a day, at the server's usual digest time and with its game digests, that channel gets one post of at most 5 stories:
+- a **comped** server gets the AI's summary of each story with its source links, in the same embed style as a game's digest, each story labeled official, reported or rumor;
+- a **free** server gets the same stories as the source's own headline and a link, with no AI-written text.
+
+A day with nothing worth posting posts nothing, as a quiet game does today. `/news` works for it like for any game. The entry takes the catalog to 22 of the 24 games setup's menu can hold.
+
+### Part 2: where the news comes from
+
+Only industry and trade press feeds, where every story is industry news, dedicated to the "Gaming industry" entry. GamesIndustry.biz and Game Developer are the starting candidates; the final list comes out of research, and every feed is fetched from the Droplet before it goes in, because a feed that works from home proves nothing about a datacenter address (§15's Lodestone lesson, and 2026-10-23's Square Enix one). The entry never matches by keyword: its name isn't matched, it has no aliases or entities, and the general press feeds don't feed it, so a story about one game can't leak in. It has no Brave search queries either.
+
+If announcements and console news turn out thin, the next step is a big outlet's own "news" or "industry" category feed, still as a dedicated source, not keyword pulls.
+
+### Part 3: picking the 5
+
+For each digest cycle (a digest time that servers share, as with game summaries), one Claude call reads the industry items since the last cycle and returns at most 5 stories, ranked by significance. First in line: studios closing, layoffs, acquisitions and mergers, new game and new hardware announcements, platform and policy changes. Left out: executive hires and departures, earnings minutiae, job ads, sponsored posts. The same call writes the summaries, so comped servers get those 5 summarized, and free servers get the same 5 rendered as the source's own headline and link (the first linked item's title and URL; a story's AI headline is never shown to a free server).
+
+Unlike a game's summary, which is made only when a comped server follows the game, this call runs for any cycle with at least one server following the industry entry, comped or not. The stories keep the model's significance order for comped and free servers alike; a game digest's usual official-first sort doesn't apply (none of these sources is official, so it would only push a top-ranked rumor below filler). A free server's post shows no rumor mark, as free headline lists never have. As with game digests, stories already told in the last 3 days are left out, and a genuine new development of one is marked as an update. Rumors are allowed, since every source is vetted press, and keep their label.
+
+If the call fails, every server gets the newest 5 headlines instead (ordered the way free headlines already are), and comped servers see the existing "Summary unavailable" note above them.
+
+### Part 4: cost, limits, how it ships
+
+- **Cost:** one Haiku call per distinct digest cycle (a handful a day), a fraction of a cent in all, whatever the number of servers.
+- **The ranking rules are new prompt text**, so under the project's standing rule the owner reviews a preview of real output (the CLI `--dry-run`, which was accepted for v3.1.3) before release.
+- **No change** to existing games, their prompts or their digests, and no new commands. Nothing new about users is stored, so the privacy policy is unaffected.
+- **Ships as v3.3.0**, a minor release.
+
+### Calls I made
+
+- The entry's key is `industry` and its display name "Gaming industry"; it goes last in the catalog, so existing games keep their order.
+- It never pings and has nothing to do with SHiFT alerts.
+- A free server's post is still capped at 5 headlines; "+N more, use /news" isn't shown, because the cap is the point. `/news` still lists everything stored for it.
+- The 5-story cap applies to comped and free alike; on a day with fewer worthwhile stories, the post is shorter, and on a day with none, there's no post.
+- The fallback when the AI call fails is plain recency within trust order (the existing headline sort), capped at 5.
+- A free server's `/newsbot preview` never makes an AI call: it shows the stored pick for its cycle if there is one, or the fallback headlines. A comped server's preview and run-now behave as they do for games today.
+- The entry stays out of every other game's prompt (the `{games}` list), out of Brave search, and out of the follows that drive game summaries; config refuses a shared source with `games: [industry]` (that would be a keyword path in), and the "a game with `match_name: false` needs an alias" check gets an exception for it.
+- Its post comes last among a server's posts, in catalog order.
+- It doesn't count toward a server's 10 games (owner, 2A): setup's menu, `follow` and the "Following N of 10" replies leave it out of the count.
+
+### Left to the builder
+
+- How the entry is marked as "rank and cap at 5" (a catalog flag, or the key), how the selection prompt sits next to the existing summary prompt without changing it (the existing prompt's hash is pinned by a test), and how a free server's post is built from the stories.
+- How the summary job decides to run for this entry when no comped server follows it.
+- The exact source list, from research, with the owner's Droplet check before it goes in.
+
+### Open items
+
+- The source list (research, then the owner's Droplet check).
