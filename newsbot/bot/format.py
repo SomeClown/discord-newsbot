@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1606,6 +1606,124 @@ def render_headlines_embed(
     )
 
 
+# --- The industry post (design.md §18) ---
+#
+# "Gaming industry" isn't a game, so its post follows its own rules: the stories (or
+# the source titles, on a free server) stay in the order they were handed in, at most
+# a handful, and there is no "+N more, use /news" line, because /news has nothing to
+# add for it. What doesn't fit is shed from the bottom and nobody is told. The
+# renderers above stay as they were; these sit beside them.
+
+
+def _cut(parts: Sequence[str], cap: int | None) -> list[str]:
+    """The first `cap` of `parts`; below 1 means none (`[:-1]` would keep all but one)."""
+    return list(parts) if cap is None else list(parts[: max(cap, 0)])
+
+
+def _shed_to_fit(parts: Sequence[str], sep: str, head: str | None = None) -> str | None:
+    """Join `parts` (under an optional `head`), dropping whole parts from the bottom until it fits.
+
+    Never says how many were dropped, and never cuts a part in the middle: half a
+    line is how a link ends up dead. A part that is over the limit by itself is
+    skipped; if the `head` is what keeps the first part from fitting, the head goes
+    instead. `None` when nothing is left to show.
+    """
+    fits = [part for part in parts if discord_len(part) <= _DESCRIPTION_LIMIT]
+    for top in ([head] if head else [], []):
+        for kept in range(len(fits), 0, -1):
+            description = sep.join([*top, *fits[:kept]])
+            if discord_len(description) <= _DESCRIPTION_LIMIT:
+                return description
+    return None
+
+
+def _lines_embed(
+    game: GameInfo, lines: Sequence[str], head: str | None = None
+) -> discord.Embed | None:
+    """One line per row under `game`'s title, shed from the bottom past 4096 units.
+
+    `head` (a note, such as "Summary unavailable") goes on top, escaped. Returns `None`
+    when there are no lines: a game with nothing posts nothing.
+    """
+    description = _shed_to_fit(lines, "\n", esc(head) if head else None)
+    if description is None:
+        return None
+    return discord.Embed(
+        title=_truncate_utf16(esc(game.name), _TITLE_LIMIT),
+        description=description,
+        color=_topic_color(game.key),
+    )
+
+
+def _fitting_story_block(story: StoryDraft) -> str | None:
+    """`_story_block`, or the same story with fewer links if the block alone is too long.
+
+    Story links have no length cap (headline URLs do), so a few long ones can push a
+    block past the limit. Whole links go from the end until it fits; a story that is
+    still too long with no links at all is skipped. Cutting the block mid-text would
+    leave an unclosed `<https://...`.
+    """
+    block = _story_block(story)
+    if discord_len(block) <= _DESCRIPTION_LIMIT:
+        return block
+    # Count only the links that will really show, or an unusable first URL costs a
+    # usable one its place.
+    usable = [url for url in story.item_urls if _safe_link(url) is not None]
+    for shown in range(min(len(usable), _MAX_LINKS_SHOWN), -1, -1):
+        block = _story_block(replace(story, item_urls=usable[:shown])).rstrip("\n")
+        if discord_len(block) <= _DESCRIPTION_LIMIT:
+            return block
+    return None
+
+
+def _ranked_embed(
+    game: GameInfo, stories: Sequence[StoryDraft], cap: int | None = None
+) -> discord.Embed | None:
+    """The stories as `_topic_embed` writes them, but in the order given and with no "+N more".
+
+    The model ranked these by significance, so `_sort_key` (official first) stays out
+    of it. UPDATE and label markers are kept. A story that can't fit even without its
+    links is skipped before the cut to `cap`. Returns `None` for no stories.
+    """
+    blocks = [block for story in stories if (block := _fitting_story_block(story))]
+    description = _shed_to_fit(_cut(blocks, cap), "\n\n")
+    if description is None:
+        return None
+    return discord.Embed(
+        title=_truncate_utf16(esc(game.name), _TITLE_LIMIT),
+        description=description,
+        color=_topic_color(game.key),
+    )
+
+
+def render_picked_headlines_embed(
+    game: GameInfo, items: Sequence[HeadlineItem], cap: int | None = None
+) -> discord.Embed | None:
+    """A free server's industry post: the model's picks as source headlines, in its order.
+
+    Each pick is a `_headline_line` (source title and URL, `🟢 OFFICIAL` on official
+    items only); nothing the model wrote reaches it. Picks without a usable URL are
+    dropped first, then the rest are cut to `cap` if there is one. Returns `None` when
+    nothing is left.
+    """
+    lines = [line for item in items if (line := _headline_line(item))]
+    return _lines_embed(game, _cut(lines, cap))
+
+
+def render_capped_headlines_embed(
+    game: GameInfo, items: Sequence[HeadlineItem], note: str | None, cap: int
+) -> discord.Embed | None:
+    """The headline list, sorted as `render_headlines_embed` sorts it, cut to `cap` lines.
+
+    This is the industry post's fallback when there's no pick to show. `note` goes on
+    top; there is no "+N more".
+    """
+    lines = [
+        line for item in sorted(items, key=_headline_sort_key) if (line := _headline_line(item))
+    ]
+    return _lines_embed(game, _cut(lines, cap), note)
+
+
 def render_guild_digest(
     run_date: date,
     games: Sequence[GameInfo],
@@ -1615,6 +1733,8 @@ def render_guild_digest(
     items_by_game: Mapping[str, Sequence[HeadlineItem]],
     notes_by_game: Mapping[str, str | None],
     coverage_notes: list[str],
+    picks_by_game: Mapping[str, Sequence[HeadlineItem]] | None = None,
+    capped: Mapping[str, int] | None = None,
 ) -> RenderedDigest:
     """One server's digest: a `TopicMessage` for each followed game that has something to say.
 
@@ -1624,13 +1744,38 @@ def render_guild_digest(
     the summary found nothing, so nothing posts. Every other game gets its headlines
     from `items_by_game`, with `notes_by_game[key]` on top if there is one. A game with
     nothing to show is left out.
+
+    The industry post uses the two optional mappings (design.md §18). A key in
+    `capped` is cut to that many entries and never gets a "+N more": with stories, they
+    render in the order given (`_ranked_embed`, no official-first sort). A key in
+    `picks_by_game` renders those headlines in the order given, cut to its cap if it
+    has one; an empty pick list posts nothing and never falls back to `items_by_game`.
+    A capped key with neither gets the usual headlines, sorted and cut
+    (`render_capped_headlines_embed`). Both mappings default to `None`, which is every
+    other game's behavior, unchanged.
     """
     footer = _coverage_footer(coverage_notes)
+    picks_by_game = picks_by_game or {}
+    capped = capped or {}
     messages = []
     for game in games:
         if game.key in stories_by_game:
             stories = stories_by_game[game.key]
-            embed = _topic_embed(game, stories) if stories else None
+            if game.key in capped:
+                embed = _ranked_embed(game, stories, capped[game.key])
+            else:
+                embed = _topic_embed(game, stories) if stories else None
+        elif game.key in picks_by_game:
+            embed = render_picked_headlines_embed(
+                game, picks_by_game[game.key], capped.get(game.key)
+            )
+        elif game.key in capped:
+            embed = render_capped_headlines_embed(
+                game,
+                items_by_game.get(game.key, []),
+                notes_by_game.get(game.key),
+                capped[game.key],
+            )
         else:
             embed = render_headlines_embed(
                 game, items_by_game.get(game.key, []), notes_by_game.get(game.key)

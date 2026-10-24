@@ -47,14 +47,21 @@ def migrate(conn: sqlite3.Connection) -> int:
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
 
+    # A draft-009 database is refused before anything newer touches it: since migration
+    # 010 there is something newer, and "refused" is supposed to mean "left exactly as found".
+    _check_build_columns(conn, current)
+
+    applied = False
     migrations = sorted(_MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
     for path in migrations:
         version = int(path.name.split("_", 1)[0])
         if version <= current:
             continue
         current = _apply(conn, path, version, current)
+        applied = True
 
-    _check_build_columns(conn, current)
+    if applied:
+        _check_build_columns(conn, current)
     return current
 
 

@@ -270,7 +270,7 @@ def test_a_database_without_the_follow_up_index_is_refused(db_path):
 
 def test_a_database_with_the_index_still_passes(db_path):
     with closing(connect(db_path)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
 
 
 def test_both_a_missing_column_and_a_missing_index_are_named(db_path):

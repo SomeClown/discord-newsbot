@@ -102,8 +102,8 @@ def test_a_v8_database_migrates_to_9_with_all_data_intact(v8_path):
         before = _dump(conn)
         guild_shift_before = [tuple(r) for r in conn.execute("SELECT * FROM guild_shift")]
     with closing(connect(v8_path)) as conn:
-        assert migrate(conn) == 9
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert migrate(conn) == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
         after = _dump(conn)
         # The one new app_state row is the marker; everything else is exactly as it was.
         marker = [row for row in after["app_state"] if row[0] == "shift_details_since"]
@@ -122,7 +122,9 @@ def test_a_v8_database_migrates_to_9_with_all_data_intact(v8_path):
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_the_migration_only_adds_things(v8_path):
+def test_the_migration_only_adds_things(v8_path, tmp_path, monkeypatch, migrations_up_to):
+    # As of 009: migration 010 replaces the 10-game trigger, which is its business.
+    monkeypatch.setattr(db, "_MIGRATIONS_DIR", migrations_up_to(tmp_path / "v9_dir", 9))
     with closing(connect(v8_path)) as conn:
         old = _schema(conn)
         migrate(conn)
@@ -208,9 +210,9 @@ def test_migrating_twice_is_idempotent_and_the_marker_never_moves(v8_path):
         first = conn.execute(
             "SELECT value FROM app_state WHERE key = 'shift_details_since'"
         ).fetchone()[0]
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
     with closing(connect(v8_path)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         assert (
             conn.execute(
                 "SELECT value FROM app_state WHERE key = 'shift_details_since'"

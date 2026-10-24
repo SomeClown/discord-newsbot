@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from newsbot.config import AppConfig, LegacySetup, LoungeCfg
+from newsbot.industry import counts_toward_limit
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.store import repo
 from newsbot.store.db import connect
@@ -210,9 +211,10 @@ def _write_lounge(conn: sqlite3.Connection, lounge: LoungeSettings) -> None:
 
 def _do_import(conn: sqlite3.Connection, legacy: LegacySetup, now_iso: str) -> ImportReport:
     """Every write, in order, inside the caller's open transaction."""
-    if len(legacy.games) > repo.MAX_GAMES_PER_GUILD:
+    counted = sum(1 for key, _ in legacy.games if counts_toward_limit(key))
+    if counted > repo.MAX_GAMES_PER_GUILD:
         raise ImportFailedError(
-            f"the v2 config follows {len(legacy.games)} games but a server can follow at most "
+            f"the v2 config follows {counted} games but a server can follow at most "
             f"{repo.MAX_GAMES_PER_GUILD}; trim topics: in config.yaml and start again "
             "(nothing was imported)"
         )

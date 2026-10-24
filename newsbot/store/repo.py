@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
+from newsbot.industry import INDUSTRY_KEY, counts_toward_limit
 from newsbot.shift.details import (
     CLOCK_DAYS,
     SHIFT_TZ,
@@ -206,6 +207,80 @@ def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) 
             created_at=datetime.fromisoformat(row["created_at"]),
         )
         for row in rows
+    ]
+
+
+def chain_headlines(
+    conn: sqlite3.Connection, topic_key: str, since: datetime, mark: int | None
+) -> list[PriorStory]:
+    """Headlines `since` that servers standing at item id `mark` were shown, newest first.
+
+    `recent_headlines` for a pick that is made once per distinct digest time. A game has
+    one history, so every story of the last days is "prior". The industry pick is made for
+    each cycle over nearly the same items, so that history would hand the 08:00 server's
+    stories to the 09:00 server's pick as "already covered", and that server would never
+    hear them. What a cycle's servers were shown is on their chain: the pick that ended at
+    their mark (`items_upto == mark`), the pick that ended where that one began, and so
+    on back through `items_after`, as far as `since`. A fallback pick has no stories but
+    keeps the chain linked.
+
+    A mark isn't always a number a pick ended at. A digest records its own range end when
+    it had no pick to go by (a fallback day, a free run-now with nothing stored), and an
+    item usually lands between a pick and its digest, so that mark is newer than the pick
+    behind it. Servers at such a mark were shown the newest pick before it, so with no
+    exact match the walk takes the pick with the largest `items_upto` below the mark (the
+    age window applies to what it finds, not to the search, so an old chain ends instead
+    of borrowing some other cycle's pick). The cost is a mark with no pick of its own
+    behind it, such as a server's first digest with nothing stored, which can borrow the
+    newest pick before it, even another cycle's. That widens the prior list by a story
+    or two; the alternative was an empty list, which announces old news again.
+
+    When two cycles' picks happen to end at the same item, a server on that mark saw one
+    of them and nothing here says which, so both count ("could have been shown" is the
+    narrowest rule the records support). No mark (a first digest) has no prior stories.
+    """
+    if mark is None:
+        return []
+    since_iso = _utc_iso(since)
+    summary_ids: list[int] = []
+    seen = {mark}
+    pending = [mark]
+    while pending:
+        at = pending.pop()
+        # The pick that ended exactly here or, with none, the newest one before this mark
+        # (see above). One query: "the largest `items_upto` not past the mark" is both.
+        rows = conn.execute(
+            "SELECT id, items_after, created_at FROM game_summaries WHERE game_key = ? "
+            "AND items_upto = (SELECT MAX(items_upto) FROM game_summaries "
+            "WHERE game_key = ? AND items_upto <= ?)",
+            (topic_key, topic_key, at),
+        ).fetchall()
+        for row in rows:
+            if row["created_at"] < since_iso:
+                continue
+            summary_ids.append(row["id"])
+            before = row["items_after"]
+            if before is not None and before not in seen:
+                seen.add(before)
+                pending.append(before)
+    found: list[sqlite3.Row] = []
+    for i in range(0, len(summary_ids), _SQLITE_VARIABLE_CHUNK):
+        chunk = summary_ids[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a string of literal "?"s sized to the chunk; the values are bound.
+        query = (
+            "SELECT id, headline, created_at FROM stories "  # noqa: S608
+            f"WHERE topic_key = ? AND created_at >= ? AND summary_id IN ({placeholders})"
+        )
+        found.extend(conn.execute(query, (topic_key, since_iso, *chunk)).fetchall())
+    found.sort(key=lambda row: row["created_at"], reverse=True)
+    return [
+        PriorStory(
+            id=row["id"],
+            headline=row["headline"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+        for row in found
     ]
 
 
@@ -851,7 +926,11 @@ _FTS_TOKEN_RE = re.compile(r"\S+")
 
 
 def _story_urls(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[str]]:
-    """Map story id to its item URLs, in the order they were linked."""
+    """Map story id to its item URLs, lowest item id first (not the order they were linked).
+
+    Comped game embeds depend on this order, so it stays. A story whose first link matters
+    (the industry pick's) reads `_story_urls_linked` instead.
+    """
     urls_by_story: dict[int, list[str]] = {story_id: [] for story_id in story_ids}
     for i in range(0, len(story_ids), _SQLITE_VARIABLE_CHUNK):
         chunk = story_ids[i : i + _SQLITE_VARIABLE_CHUNK]
@@ -869,8 +948,35 @@ def _story_urls(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, lis
     return urls_by_story
 
 
-def _rows_to_story_views(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[StoryView]:
-    urls_by_story = _story_urls(conn, [row["id"] for row in rows])
+def _story_urls_linked(conn: sqlite3.Connection, story_ids: list[int]) -> dict[int, list[str]]:
+    """Map story id to its item URLs in the order they were linked (`story_items` insertion order).
+
+    `save_game_summary` links a story's items in the order the model listed them, and the
+    prompt asks for the item that reports the story best first, so the first URL here is the
+    model's choice. `_story_urls` sorts by item id instead, which would hand a merged story's
+    link to whichever item was stored first.
+    """
+    urls_by_story: dict[int, list[str]] = {story_id: [] for story_id in story_ids}
+    for i in range(0, len(story_ids), _SQLITE_VARIABLE_CHUNK):
+        chunk = story_ids[i : i + _SQLITE_VARIABLE_CHUNK]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a run of literal "?"s sized to the chunk; the values are bound below.
+        select = "SELECT story_items.story_id, items.url FROM story_items "
+        join = "JOIN items ON items.id = story_items.item_id "
+        where = f"WHERE story_items.story_id IN ({placeholders}) "  # noqa: S608
+        order = "ORDER BY story_items.story_id, story_items.rowid"
+        for row in conn.execute(select + join + where + order, chunk):
+            urls_by_story[row["story_id"]].append(row["url"])
+    return urls_by_story
+
+
+def _rows_to_story_views(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row], *, link_order: bool = False
+) -> list[StoryView]:
+    ids = [row["id"] for row in rows]
+    urls_by_story = _story_urls_linked(conn, ids) if link_order else _story_urls(conn, ids)
     return [
         StoryView(
             id=row["id"],
@@ -1216,13 +1322,19 @@ def list_guild_games(conn: sqlite3.Connection, guild_id: int) -> list[GuildGame]
     return [GuildGame(r["guild_id"], r["game_key"], r["channel_id"]) for r in rows]
 
 
+def _counted(games: Sequence[tuple[str, int]]) -> int:
+    """How many of `games` use up a slot: all of them but the Gaming industry entry."""
+    return sum(1 for key, _ in games if counts_toward_limit(key))
+
+
 def set_guild_games(conn: sqlite3.Connection, guild_id: int, games: list[tuple[str, int]]) -> None:
     """Replace `guild_id`'s followed games with `games`, `(game_key, channel_id)` each.
 
-    All or nothing: more than 10 raises `GameLimitError` and a repeated key
-    raises `ValueError`, both before anything is written.
+    All or nothing: more than 10 games raises `GameLimitError` and a repeated key
+    raises `ValueError`, both before anything is written. The Gaming industry entry
+    doesn't count toward the 10 (`counts_toward_limit`), so ten games plus it is fine.
     """
-    if len(games) > MAX_GAMES_PER_GUILD:
+    if _counted(games) > MAX_GAMES_PER_GUILD:
         raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
     keys = [key for key, _ in games]
     if len(set(keys)) != len(keys):
@@ -1271,8 +1383,9 @@ def apply_guild_setup(
     drops every followed game not in `games`, and points the rest at their channels,
     following any that are new. Unlike `set_guild_games` this doesn't wipe and refill, so
     a game that stays keeps its place in the order it was added. Any failure rolls the
-    lot back: more than 10 games raises `GameLimitError` and a repeated key raises
-    `ValueError`, both before anything is written.
+    lot back: more than 10 games (not counting the Gaming industry entry) raises
+    `GameLimitError` and a repeated key raises `ValueError`, both before anything is
+    written.
 
     With `expected_fingerprint` (from `setup_fingerprint`) the write is compare-and-set:
     the transaction takes the write lock first (`BEGIN IMMEDIATE`), then re-reads the
@@ -1280,7 +1393,7 @@ def apply_guild_setup(
     match. Nobody can change anything between the check and the write, because nobody
     else can hold the lock in between.
     """
-    if len(games) > MAX_GAMES_PER_GUILD:
+    if _counted(games) > MAX_GAMES_PER_GUILD:
         raise GameLimitError(f"At most {MAX_GAMES_PER_GUILD} games per server.")
     keys = [key for key, _ in games]
     if len(set(keys)) != len(keys):
@@ -1336,7 +1449,8 @@ def follow_game(conn: sqlite3.Connection, guild_id: int, game_key: str, channel_
     Update-then-insert rather than an upsert on purpose: the 10-game trigger
     fires on every INSERT attempt, including one that would only have
     turned into an update, so an upsert would refuse to re-point the tenth
-    game's channel. Raises `GameLimitError` on an eleventh.
+    game's channel. Raises `GameLimitError` on an eleventh game; the Gaming
+    industry entry is never refused and doesn't count toward the ten.
     """
     try:
         with conn:
@@ -3793,6 +3907,36 @@ def items_for_window(
     return by_game
 
 
+def headline_items_by_url(conn: sqlite3.Connection, urls: Iterable[str]) -> dict[str, HeadlineItem]:
+    """The stored item behind each of `urls`, as a free server's digest lists it.
+
+    A URL nobody stored is skipped. Items here have no game (the pick can name a URL
+    from any item it was shown), so `uncertain` is always False; the rumor mark is a
+    per-game idea and the industry post doesn't use one.
+    """
+    url_list = list(urls)
+    found: dict[str, HeadlineItem] = {}
+    for i in range(0, len(url_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = url_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a string of literal "?"s sized to the chunk; the values are bound.
+        query = (
+            "SELECT url, title, source_name, trust, published_at, collected_at "  # noqa: S608
+            f"FROM items WHERE url IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            found[row["url"]] = HeadlineItem(
+                url=row["url"],
+                title=row["title"],
+                source_name=row["source_name"],
+                trust=row["trust"],
+                published_at=_parse_dt(row["published_at"]),
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                uncertain=False,
+            )
+    return found
+
+
 # The most a stored summary may trail a digest's due instant and still be reused
 # (plan §3.6). The other half of the reuse rule is "newer than the server's last
 # digest", which is per server and so arrives as `after`.
@@ -3853,14 +3997,20 @@ def get_game_summary(
     return game_summary_by_id(conn, row["id"]) if row else None
 
 
-def summary_stories(conn: sqlite3.Connection, summary_id: int) -> list[StoryView]:
-    """The stories saved against `summary_id`, in the order they were written."""
+def summary_stories(
+    conn: sqlite3.Connection, summary_id: int, *, link_order: bool = False
+) -> list[StoryView]:
+    """The stories saved against `summary_id`, in the order they were written.
+
+    Each story's URLs are lowest item id first, unless `link_order` asks for the order they
+    were linked (the industry pick's, where the first URL is the model's choice).
+    """
     rows = conn.execute(
         "SELECT id, topic_key, headline, summary, label, created_at, is_update_of "
         "FROM stories WHERE summary_id = ? ORDER BY id",
         (summary_id,),
     ).fetchall()
-    return _rows_to_story_views(conn, rows)
+    return _rows_to_story_views(conn, rows, link_order=link_order)
 
 
 # --- Comped summaries (plan task 7) ---
@@ -3885,6 +4035,25 @@ def comped_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
         "SELECT gg.game_key, g.guild_id, g.digest_time, g.timezone "
         "FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
         "WHERE g.tier = 'comped' AND g.set_up = 1 ORDER BY g.guild_id, gg.game_key"
+    ).fetchall()
+    return [
+        CompedFollow(r["game_key"], r["guild_id"], r["digest_time"], r["timezone"]) for r in rows
+    ]
+
+
+def industry_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
+    """Every (set-up server of any tier, industry) pair: who needs the industry pick made.
+
+    The same shape and order as `comped_follows`, minus the tier condition. Games
+    are summarized for comped servers only, but the pick is made for every server
+    that follows the industry entry, because a free server posts the picked
+    headlines.
+    """
+    rows = conn.execute(
+        "SELECT gg.game_key, g.guild_id, g.digest_time, g.timezone "
+        "FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
+        "WHERE g.set_up = 1 AND gg.game_key = ? ORDER BY g.guild_id, gg.game_key",
+        (INDUSTRY_KEY,),
     ).fetchall()
     return [
         CompedFollow(r["game_key"], r["guild_id"], r["digest_time"], r["timezone"]) for r in rows
@@ -3922,6 +4091,9 @@ def summary_is_shared(
 ) -> bool:
     """True if some other set-up comped server follows the summary's game and could reuse it.
 
+    For the industry entry "comped" drops out: a server of any tier follows it, and any of
+    them could reuse the row.
+
     Nothing records which digests a summary served, so this asks `get_game_summary`'s own
     question from the other side: would another server's coverage of the game (as it stood
     before `run_date`) line up with this row? That is, the row starts exactly where that
@@ -3931,9 +4103,10 @@ def summary_is_shared(
     doesn't check the six-hour age rule, since two servers that line up on item ids are on
     the same cycle anyway.)
     """
+    tier_sql = "" if summary.game_key == INDUSTRY_KEY else "g.tier = 'comped' AND "
     others = conn.execute(
-        "SELECT g.guild_id FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
-        "WHERE g.tier = 'comped' AND g.set_up = 1 AND gg.game_key = ? AND g.guild_id != ?",
+        "SELECT g.guild_id FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "  # noqa: S608
+        "WHERE " + tier_sql + "g.set_up = 1 AND gg.game_key = ? AND g.guild_id != ?",
         (summary.game_key, guild_id),
     ).fetchall()
     for other in others:

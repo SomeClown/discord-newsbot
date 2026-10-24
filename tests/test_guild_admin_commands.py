@@ -24,6 +24,7 @@ from v3_fakes import (
     channel,
     command,
     fake_bot,
+    load_v3_industry_config,
     make_guild,
     role,
     thin_channel,
@@ -365,6 +366,19 @@ async def test_games_lists_this_servers_then_the_rest(admin, v3_db):
     assert "Palworld in <#5>" in interaction.text
     assert "Available: Borderlands 4, Rust" in interaction.text
     assert "<#7>" not in interaction.text
+
+
+async def test_games_counts_only_the_games_and_still_lists_the_industry_line(
+    monkeypatch, v3_db, problems
+):
+    cfg = load_v3_industry_config(monkeypatch)
+    group = make_guild_admin_group(cfg, fake_bot(v3_db), digest_deps=lambda: deps_for(cfg, v3_db))
+    make_guild(v3_db, GUILD_A, games=[("palworld", 5), ("rust", 6), ("industry", 7)])
+    interaction = FakeInteraction()
+    await command(group, "games").callback(interaction)
+    assert "Following (2 of 10)" in interaction.text
+    assert "Gaming industry in <#7>" in interaction.text
+    assert "Available: Borderlands 4" in interaction.text
 
 
 async def test_follow_and_unfollow_autocomplete(admin, v3_db):

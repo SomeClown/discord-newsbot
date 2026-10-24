@@ -21,6 +21,7 @@ from newsbot.store import repo
 from newsbot.store.db import connect
 
 CONFIG_V3 = Path(__file__).parent / "fixtures" / "config_v3.yaml"
+CONFIG_V3_INDUSTRY = Path(__file__).parent / "fixtures" / "config_v3_industry.yaml"
 ADMIN = discord.Permissions(manage_guild=True)
 MEMBER = discord.Permissions(send_messages=True)
 HOME = 200000000000000001
@@ -32,6 +33,13 @@ OWNER_ID = 42
 def load_v3_config(monkeypatch, **overrides):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
     cfg = load_config(CONFIG_V3)
+    return cfg.model_copy(update=overrides) if overrides else cfg
+
+
+def load_v3_industry_config(monkeypatch, **overrides):
+    """`load_v3_config`, with the Gaming industry entry added last."""
+    monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+    cfg = load_config(CONFIG_V3_INDUSTRY)
     return cfg.model_copy(update=overrides) if overrides else cfg
 
 

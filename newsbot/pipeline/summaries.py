@@ -53,6 +53,12 @@ running and the caller gives up and falls back). A game whose saves keep failing
 is left alone for a while (30 minutes, doubling, kept in memory) instead of being
 paid for every five minutes.
 
+The industry entry is the one exception to "comped servers only". A server of
+any tier can follow it, and a free server posts the picked headlines, so the
+pick is made for whoever follows it. It has no Brave search (there's no game
+to search for) and its own prompt (`pipeline/industry.py`); the claim, the reuse
+rule and the one-call-per-cycle bound are the same as a game's.
+
 `NewsBot` runs `prepare_summaries` every five minutes and hands the lookups to the
 digest job.
 """
@@ -71,6 +77,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from newsbot.collectors.base import RawItem
 from newsbot.config import AppConfig, GameCfg
 from newsbot.guilds.schedule import digest_window, item_floor, local_due_instant
+from newsbot.industry import INDUSTRY_KEY
 from newsbot.pipeline.collect import CollectionDeps, collect_web_search
 from newsbot.pipeline.filter import TopicItem, _cap_key
 from newsbot.pipeline.guild_digest import (
@@ -79,6 +86,7 @@ from newsbot.pipeline.guild_digest import (
     _stored_summary,
     summary_from_row,
 )
+from newsbot.pipeline.industry import pick_industry_stories
 from newsbot.pipeline.run import _PRIOR_HEADLINE_WINDOW, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, LLMClient, TopicSummary, summarize_topic
 from newsbot.store import repo
@@ -140,6 +148,10 @@ class SummaryDeps:
     heartbeat_s: float = _HEARTBEAT_S
     # game key -> (consecutive failed saves, not before). See `SAVE_BACKOFF`.
     save_failures: dict[str, tuple[int, datetime]] = field(default_factory=dict)
+    # game key -> the UTC day its fallback alert last went out; the industry pick alerts once
+    # a day, since an outage makes one fallback row per diverged chain. In memory like
+    # `save_failures`: a restart can repeat an alert, which beats losing one.
+    alerted_on: dict[str, date] = field(default_factory=dict)
 
 
 # --- Who needs a summary, and when ---
@@ -170,8 +182,16 @@ def upcoming_dues(
 
 
 def _all_topics(cfg: AppConfig, followed: set[str], game: GameCfg) -> list[GameCfg]:
-    """Every game a comped server follows, in catalog order: what the prompt says we track."""
-    return [g for g in cfg.catalog if g.key in followed or g.key == game.key]
+    """Every game a comped server follows, in catalog order: what the prompt says we track.
+
+    The industry entry is never in the list. It isn't a game, and the prompt
+    says "the video games A, B and C"; a server following industry would
+    otherwise put "Gaming industry" in every other game's system prompt, and
+    change what each of those summaries is told it covers.
+    """
+    return [
+        g for g in cfg.catalog if (g.key in followed or g.key == game.key) and g.key != INDUSTRY_KEY
+    ]
 
 
 # --- Making one summary ---
@@ -256,7 +276,13 @@ def _inputs_sync(
             after_id=items_after,
             upto_id=upto,
         )
-        prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
+        if game.key == INDUSTRY_KEY:
+            # One pick per distinct digest time, over nearly the same items: the stories the
+            # 08:00 server was shown aren't "already covered" for the 09:00 server. Only the
+            # asking cycle's own chain is prior (see `repo.chain_headlines`).
+            prior = repo.chain_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW, items_after)
+        else:
+            prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
         followed = {f.game_key for f in repo.comped_follows(conn)}
     # The same cap `filter_items` applied in v2: confident before uncertain, then
     # trust, then recency, and only the top N make it to the model.
@@ -298,15 +324,20 @@ async def _summarize(
         )
     try:
         async with asyncio.timeout(deps.summarize_timeout_s):
-            summary = await summarize_topic(
-                deps.llm,
-                game,
-                items,
-                prior,
-                all_topics=_all_topics(deps.cfg, followed, game),
-                subject=deps.cfg.ai.subject,
-                sleep=deps.sleep,
-            )
+            if game.key == INDUSTRY_KEY:
+                summary = await pick_industry_stories(
+                    deps.llm, game, items, prior, sleep=deps.sleep
+                )
+            else:
+                summary = await summarize_topic(
+                    deps.llm,
+                    game,
+                    items,
+                    prior,
+                    all_topics=_all_topics(deps.cfg, followed, game),
+                    subject=deps.cfg.ai.subject,
+                    sleep=deps.sleep,
+                )
     except TimeoutError:
         # A hung call would otherwise hold this game's claim, and every game
         # after it in the prepare run, until somebody restarted the bot.
@@ -372,6 +403,17 @@ def _save_sync(
 def _backed_off(deps: SummaryDeps, game_key: str) -> bool:
     failed = deps.save_failures.get(game_key)
     return failed is not None and deps.now() < failed[1]
+
+
+def _should_alert(deps: SummaryDeps, game_key: str) -> bool:
+    """Whether a fallback for `game_key` should tell the owner: always, but the pick once a day."""
+    if game_key != INDUSTRY_KEY:
+        return True
+    today = deps.now().astimezone(UTC).date()
+    if deps.alerted_on.get(game_key) == today:
+        return False
+    deps.alerted_on[game_key] = today
+    return True
 
 
 def _note_save_failure(deps: SummaryDeps, game_key: str) -> None:
@@ -460,7 +502,8 @@ async def ensure_summary(
     reused). If nothing is, this
     claims the game (one caller wins, the rest wait and then reuse the result),
     optionally searches the web
-    (`search`, which replaces `coverage` with what the search reports),
+    (`search`, which replaces `coverage` with what the search reports; the industry
+    pick ignores both and is never searched, whoever asks),
     summarizes, saves, and releases. `None` means there was nothing to be had:
     an unknown game, a claim that never resolved inside its lease, or a game
     whose saves have been failing and is resting.
@@ -474,6 +517,10 @@ async def ensure_summary(
     the new owner's; it goes back to looking for the answer that won, at most
     `_MAX_LOST_CLAIMS` times, and then returns `None`.
     """
+    if game_key == INDUSTRY_KEY:
+        # The pick has no search and nothing for a coverage note to say; this comes before
+        # anything reads either, so no caller can switch them back on.
+        search, coverage = False, ()
     game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
     if game is None:
         return None
@@ -519,7 +566,7 @@ async def ensure_summary(
                 logger.warning("lost the summary claim for %s %d times; giving up", game_key, lost)
                 return None
             continue
-        if saved.status == "fallback":
+        if saved.status == "fallback" and _should_alert(deps, game_key):
             try:
                 await deps.alert(f"newsbot: summary for {game.name} fell back to headlines")
             except Exception:
@@ -651,16 +698,27 @@ def dry_run_lookup(
 def _needs_summary_sync(
     db_path: str, guild_id: int, game_key: str, due_at: datetime, day: date
 ) -> tuple[bool, Coverage | None]:
-    """Whether this server's digest has no summary it may reuse, and where its coverage left off."""
+    """Whether this server's digest has no summary it may reuse, and where its coverage left off.
+
+    A server whose digest for `day` is already done (`ok`, `partial` or `failed`) needs none:
+    `upcoming_dues` keeps a due time for a grace period after it passes, and a summary made
+    in that window would be for a digest that has already read what it was going to read.
+    A `pending` row isn't done; it may still be about to build.
+    """
     with closing(connect(db_path)) as conn:
+        digest = repo.get_guild_digest(conn, guild_id, day)
+        if digest is not None and digest.status in ("ok", "partial", "failed"):
+            return False, None
         coverage = repo.last_coverage(conn, guild_id, exclude_run_date=day, games=[game_key])
         after = coverage.for_game(game_key) if coverage else None
         return repo.get_game_summary(conn, game_key, due_at, after) is None, after
 
 
 def _follows_sync(db_path: str) -> list[CompedFollow]:
+    """Comped servers' games plus every server's industry follow, each pair once."""
     with closing(connect(db_path)) as conn:
-        return repo.comped_follows(conn)
+        comped = [f for f in repo.comped_follows(conn) if f.game_key != INDUSTRY_KEY]
+        return comped + repo.industry_follows(conn)
 
 
 async def _web_search(deps: SummaryDeps, game_keys: list[str]) -> list[str]:
@@ -681,18 +739,21 @@ async def _web_search(deps: SummaryDeps, game_keys: list[str]) -> list[str]:
 
 
 async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> list[str]:
-    """Make the summaries the next comped digests will need. Returns the games it worked on.
+    """Make the summaries the next digests will need. Returns the games it worked on.
 
     Meant to run every five minutes. A game needs one when some comped server
-    that follows it has a digest due within `LEAD` and no stored summary that
-    server may reuse (it starts where that server's coverage ended, and is at
-    most six hours older than this digest; a fallback counts, it isn't retried
-    today). The game is then searched and summarized for that server's window,
-    the search inside the same claim as the summary so overlapping jobs search
-    once. The new summary also serves every other server whose coverage ended
-    in the same place, which is what keeps this to about one call per distinct
-    comped cycle per game. A server whose window starts elsewhere gets its own
-    summary on a later pass (one per game per run, so one pass never makes two).
+    that follows it (for the industry pick, a server of any tier) has a digest
+    due within `LEAD` and no stored summary that server may reuse (it starts
+    where that server's coverage ended, and is at most six hours older than this
+    digest; a fallback counts, it isn't retried today). The game is then
+    searched and summarized for that server's window, the search inside the
+    same claim as the summary so overlapping jobs search once. The new summary
+    also serves every other server whose coverage ended in the same place, which
+    is what keeps this to about one call per distinct comped cycle per game. A
+    server whose window starts elsewhere gets its own summary on a later pass
+    (one per game per run, so one pass never makes two).
+    The industry pick is never searched; only games are. It is made first, and it is made
+    only here: a free server's digest reads the stored pick and never makes one.
     """
     now = now or deps.now()
     follows = await asyncio.to_thread(_follows_sync, deps.db_path)
@@ -709,6 +770,10 @@ async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> l
             if needs:
                 todo.append((game, due, run_date, after))
                 break
+    # The industry pick goes first (a stable sort, so games keep catalog order): it is the
+    # only thing a free server's digest waits on, and slow game calls ahead of it in the
+    # same pass shouldn't be able to starve it.
+    todo.sort(key=lambda t: t[0].key != INDUSTRY_KEY)
     done: list[str] = []
     for game, due, run_date, after in todo:
         try:

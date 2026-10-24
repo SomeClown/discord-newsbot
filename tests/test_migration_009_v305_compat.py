@@ -108,13 +108,13 @@ def test_v305_migrate_would_be_a_noop_on_a_v9_database(
         before = sorted(
             tuple(r) for r in c.execute("SELECT type, name, sql FROM sqlite_master ORDER BY 1, 2")
         )
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 10
     with monkeypatch.context() as m:
         m.setattr(db, "_MIGRATIONS_DIR", migrations_up_to(tmp_path / "shipped_with_v305", 8))
         with closing(connect(v22_db)) as c:
-            assert migrate(c) == 9
-            assert migrate(c) == 9
-            assert c.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert migrate(c) == 10
+            assert migrate(c) == 10
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 10
             after = sorted(
                 tuple(r)
                 for r in c.execute("SELECT type, name, sql FROM sqlite_master ORDER BY 1, 2")

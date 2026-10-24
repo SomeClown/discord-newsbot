@@ -329,7 +329,7 @@ def test_the_drafts_are_what_the_fixtures_say_and_the_final_migration_fixes_what
                 assert column not in names, (draft, entry)
     fresh = str(tmp_path / "fresh.db")
     with closing(connect(fresh)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
         for entry in DRAFT_MISSING["bd6cf46"]:
             table, column = entry.split(".")
             assert column in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
@@ -340,7 +340,7 @@ def test_a_fresh_database_passes_and_so_does_one_migrated_from_version_8(
 ):
     fresh = str(tmp_path / "fresh.db")
     with closing(connect(fresh)) as conn:
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
 
     upgraded = str(tmp_path / "upgraded.db")
     with monkeypatch.context() as m:
@@ -348,8 +348,8 @@ def test_a_fresh_database_passes_and_so_does_one_migrated_from_version_8(
         with closing(connect(upgraded)) as conn:
             assert migrate(conn) == 8
     with closing(connect(upgraded)) as conn:
-        assert migrate(conn) == 9
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
+        assert migrate(conn) == 10
 
 
 def test_a_database_newer_than_009_is_checked_too(stale_db):

@@ -16,7 +16,12 @@ Nothing here fetches anything. Collection already stored the items (plan
 §3.4); a free server's digest is a headline list built from the last window's
 stored items, and a comped server's is the shared Claude summary for that game
 and day (`game_summaries`, written by `summaries.py`, task 7), or headlines
-with a "Summary unavailable" note if there isn't one. Publishing is injected
+with a "Summary unavailable" note if there isn't one. The "Gaming industry" entry
+is the odd one out (design §18): every server that follows it gets the model's pick,
+but a free server posts the picked *source headlines*, never the model's text, and it
+never pays for the pick: its build (scheduled or not) reads what's stored and falls back
+to the newest five headlines, because only the prepare job makes the pick and a digest
+tick shouldn't wait on a model call for a free server. Publishing is injected
 (`GuildDigestDeps.publisher_for`), as is every way of telling a human
 something, so all of it runs in tests without a Discord in sight. Problems
 that belong to a server go to that server's own notifier, never the owner.
@@ -71,6 +76,7 @@ from newsbot.guilds.schedule import (
     item_floor,
     local_due_instant,
 )
+from newsbot.industry import INDUSTRY_KEY, INDUSTRY_MAX_STORIES
 from newsbot.pipeline.publisher import Publisher
 from newsbot.pipeline.run import RunKind, _publish_with_retry, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, StoryDraft
@@ -83,6 +89,7 @@ from newsbot.store.models import (
     GuildDigestRow,
     GuildGame,
     GuildSettings,
+    HeadlineItem,
     ItemRange,
 )
 from newsbot.text import plain_line
@@ -370,7 +377,7 @@ def summary_from_row(conn, row: GameSummaryRow) -> GameSummary:
             item_urls=list(v.urls),
             update_of_story_id=v.is_update_of,
         )
-        for v in repo.summary_stories(conn, row.id)
+        for v in repo.summary_stories(conn, row.id, link_order=row.game_key == INDUSTRY_KEY)
     ]
     return GameSummary(
         row.status,
@@ -423,6 +430,14 @@ async def _build(
     fell back. `fresh` (a preview or a run-now, which end at "now") refuses a stored summary
     that was made before items this range covers were stored; a scheduled digest ends at its
     due instant and takes the prepared summary as it stands.
+
+    The industry entry goes through the comped loop like a game (ranked stories, or the
+    newest five headlines under the usual note). A free server that follows it gets its own
+    block afterwards: the stored pick's source headlines in the model's order, never its
+    text. That block never makes or waits on a model call, on any path (scheduled, catch-up,
+    preview or run-now: `summary_for`, the preview's in-memory lookup and `retry_fallback`
+    are all ignored for it): the stored pick if one qualifies, else the newest five headlines
+    with no note. Neither case marks the digest degraded.
     """
     channels = {g.game_key: g.channel_id for g in followed}
     games = [g for g in deps.cfg.catalog if g.key in channels]
@@ -514,6 +529,52 @@ async def _build(
             # where there were headlines to stand in: a quiet game isn't a failure.
             if items_by_game.get(game.key):
                 degraded = True
+    picks_by_game: dict[str, list[HeadlineItem]] = {}
+    if guild.tier != "comped" and any(g.key == INDUSTRY_KEY for g in games):
+        # A free server shows the pick's source headlines, so all it needs from the pick
+        # is its URLs, and it only ever reads the stored one. Making the pick is the prepare
+        # job's work (`summaries.prepare_summaries`): the tick builds servers one after
+        # another, and an inline model call (or a wait on someone else's claim) here would
+        # hold up every server behind this one. With nothing stored, the renderer's newest
+        # five headlines stand in.
+        async def free_lookup(key, at, after):
+            return await _stored_summary(deps.db_path, key, at, after)
+
+        before = coverage_before.for_game(INDUSTRY_KEY) if coverage_before else None
+        allowed = max(min(deps.summary_timeout_s, deps.summary_budget_s), deps.summary_min_s)
+        try:
+            async with asyncio.timeout(allowed) as limit:
+                pick = await free_lookup(INDUSTRY_KEY, due_at, before)
+        except Exception:
+            if limit.expired():
+                logger.warning(
+                    "summary for %s took more than %.0f s; posting headlines",
+                    INDUSTRY_KEY,
+                    allowed,
+                    extra={"guild_id": guild.guild_id},
+                )
+            else:
+                logger.exception("summary lookup failed for %s", INDUSTRY_KEY)
+            pick = None
+        if pick is not None and pick.status == "ok":
+            if pick.items_upto is not None:
+                game_upto[INDUSTRY_KEY] = pick.items_upto
+            # Two stories can lead with the same item; the headline is listed once, at
+            # its first place, and that happens before the cut so it can't eat a slot.
+            urls = list(
+                dict.fromkeys(story.item_urls[0] for story in pick.stories if story.item_urls)
+            )
+
+            def _found_sync() -> dict[str, HeadlineItem]:
+                with closing(connect(deps.db_path)) as conn:
+                    return repo.headline_items_by_url(conn, urls)
+
+            found = await asyncio.to_thread(_found_sync)
+            # A story whose first item has since been pruned is skipped; none left means
+            # no post (never the newest-five fallback, which the renderer won't reach).
+            picks_by_game[INDUSTRY_KEY] = [found[u] for u in urls if u in found][
+                :INDUSTRY_MAX_STORIES
+            ]
     if coverage:
         degraded = True
     # Every game this digest follows records how far it got, a summary game by its summary's
@@ -522,6 +583,7 @@ async def _build(
         reached = game_upto.get(game.key, rng.upto)
         game_upto[game.key] = max(reached, marks.get(game.key) or 0)
 
+    capped = {INDUSTRY_KEY: INDUSTRY_MAX_STORIES} if INDUSTRY_KEY in channels else {}
     rendered = render_guild_digest(
         run_date,
         games,
@@ -530,15 +592,20 @@ async def _build(
         items_by_game=items_by_game,
         notes_by_game=notes_by_game,
         coverage_notes=coverage,
+        picks_by_game=picks_by_game,
+        capped=capped,
     )
-    counts = {
-        game.key: (
-            len(stories_by_game[game.key])
-            if game.key in stories_by_game
-            else len(items_by_game.get(game.key, []))
-        )
-        for game in games
-    }
+
+    def _count(key: str) -> int:
+        if key in stories_by_game:
+            return len(stories_by_game[key])
+        if key in picks_by_game:
+            return len(picks_by_game[key])
+        if key in capped:
+            return min(len(items_by_game.get(key, [])), capped[key])
+        return len(items_by_game.get(key, []))
+
+    counts = {game.key: _count(game.key) for game in games}
     return _Built(
         rendered,
         counts,

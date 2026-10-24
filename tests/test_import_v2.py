@@ -150,7 +150,7 @@ def test_upgrade_with_a_pending_digest_today_adopts_it_too(v4_db, cfg):
             "UPDATE digests SET status = 'pending', posted_message_ids = '[]' WHERE id = 12"
         )
         conn.commit()
-        assert migrate(conn) == 9
+        assert migrate(conn) == 10
     ensure_imported(v4_db, cfg, _clock)
     row = _rows(v4_db, "SELECT guild_id, status FROM digests WHERE run_date = '2026-09-30'")[0]
     assert (row["guild_id"], row["status"]) == (GUILD, "pending")
@@ -314,6 +314,20 @@ def test_eleven_topics_fails_with_nothing_written(v22_db, cfg):
         ensure_imported(v22_db, _legacy(cfg, games=games), _clock)
     assert _everything(v22_db) == before
     assert _count(v22_db, "guilds") == 0
+
+
+def test_the_industry_entry_does_not_count_toward_the_ten(v22_db, cfg):
+    games = [(f"game{i}", 1000 + i) for i in range(10)] + [("industry", 2000)]
+    ensure_imported(v22_db, _legacy(cfg, games=games), _clock)
+    assert _count(v22_db, "guild_games") == 11
+
+
+def test_eleven_topics_plus_industry_still_fails_with_nothing_written(v22_db, cfg):
+    games = [(f"game{i}", 1000 + i) for i in range(11)] + [("industry", 2000)]
+    before = _everything(v22_db)
+    with pytest.raises(ImportFailedError, match="follows 11 games.*at most 10"):
+        ensure_imported(v22_db, _legacy(cfg, games=games), _clock)
+    assert _everything(v22_db) == before
 
 
 @pytest.mark.parametrize(

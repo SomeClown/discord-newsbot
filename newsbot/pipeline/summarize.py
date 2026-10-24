@@ -340,17 +340,17 @@ def postprocess(
     return drafts
 
 
-async def summarize_topic(
+async def run_story_call(
     llm: LLMClient,
-    topic: GameInfo,
+    topic_key: str,
+    system: str,
+    user: str,
     items: list[TopicItem],
     prior: list[PriorStory],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    all_topics: Sequence[GameInfo] | None = None,
-    subject: str = "video games",
 ) -> TopicSummary:
-    """Summarize one topic's items, with retry and a fallback on repeated failure.
+    """Send one (system, user) pair to the model, with retry and a fallback.
 
     Three attempts, backing off 1s/2s/4s between them, triggered by any
     `LLMError` (a transient API problem, an invalid response). An
@@ -359,11 +359,10 @@ async def summarize_topic(
     again. Token usage accumulates across every attempt, successful or
     not; a response we can't use still cost money.
 
-    `all_topics` and `subject` just pass through to `build_prompt` (see
-    its docstring); the summaries job is the one real caller and always has
-    the followed games and `cfg.ai.subject` on hand to pass.
+    This is the loop that used to live inside `summarize_topic`. It moved out
+    so the industry pick can have its own prompt without growing its own
+    copy of the retry rules (two copies of a backoff table is how they drift).
     """
-    system, user = build_prompt(topic, items, prior, all_topics=all_topics, subject=subject)
     input_tokens = output_tokens = 0
 
     for attempt in range(len(_BACKOFF_S)):
@@ -383,7 +382,7 @@ async def summarize_topic(
             input_tokens += result.input_tokens
             output_tokens += result.output_tokens
             return TopicSummary(
-                topic_key=topic.key,
+                topic_key=topic_key,
                 stories=postprocess(result.stories, items, prior),
                 fallback=False,
                 note=None,
@@ -391,12 +390,35 @@ async def summarize_topic(
             )
 
     return TopicSummary(
-        topic_key=topic.key,
+        topic_key=topic_key,
         stories=[],
         fallback=True,
         note=_FALLBACK_NOTE,
         usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens),
     )
+
+
+async def summarize_topic(
+    llm: LLMClient,
+    topic: GameInfo,
+    items: list[TopicItem],
+    prior: list[PriorStory],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    all_topics: Sequence[GameInfo] | None = None,
+    subject: str = "video games",
+) -> TopicSummary:
+    """Summarize one topic's items, with retry and a fallback on repeated failure.
+
+    Builds the game prompt and hands it to `run_story_call`, which owns the
+    retry and fallback rules.
+
+    `all_topics` and `subject` just pass through to `build_prompt` (see
+    its docstring); the summaries job is the one real caller and always has
+    the followed games and `cfg.ai.subject` on hand to pass.
+    """
+    system, user = build_prompt(topic, items, prior, all_topics=all_topics, subject=subject)
+    return await run_story_call(llm, topic.key, system, user, items, prior, sleep=sleep)
 
 
 __all__ = [
@@ -414,5 +436,6 @@ __all__ = [
     "TopicSummary",
     "estimate_spend_usd",
     "postprocess",
+    "run_story_call",
     "summarize_topic",
 ]

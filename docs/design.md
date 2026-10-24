@@ -57,7 +57,7 @@ newsbot/
     fanout.py      (v3) release a code once, queue it for every eligible server, deliver per server; D14 follow-ups
     sweep.py       what's left of the v2 sweep: the poster protocol and the retry-without-a-second-ping rule
   store/
-    migrations/    numbered .sql files (001 to 008)
+    migrations/    numbered .sql files (001 to 010)
     db.py          connection, WAL, migration runner (incl. the foreign-keys-off rebuild)
     repo.py        all queries (no SQL elsewhere)
   bot/
@@ -200,7 +200,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 | Table | Columns |
 |---|---|
 | `guilds` | guild_id (PK), digest_time, timezone, admin_channel_id (nullable), tier (`free`/`comped`), set_up, joined_at, imported_at (set only by the v2 import), permission_problems (the last startup check's text, to notify only on change), updated_at |
-| `guild_games` | guild_id (FK, CASCADE), game_key, channel_id, PK(guild_id, game_key); a trigger caps a guild at 10 |
+| `guild_games` | guild_id (FK, CASCADE), game_key, channel_id, PK(guild_id, game_key); a trigger caps a guild at 10 games (since migration 010, the `industry` row isn't counted; §18) |
 | `guild_shift` | guild_id (PK, FK, CASCADE), enabled, channel_id, ping (`none`, `everyone` or a role id), enabled_at, ping_day, ping_count |
 | `guild_code_posts` | guild_id (FK), code (FK `alerted_codes`), status, message_id, pinged, from_roundup, claimed_at, followup_ok (006); PK(guild_id, code). Delivery status per server; the global `alerted_codes` row means "released" |
 | `guild_code_followups` | guild_id, code, status (`queued`/`pending`/`posted`/`failed`/`skipped`), message_id, pinged, queued_at, claimed_at; PK(guild_id, code), which is what makes "at most one follow-up per server per code, ever" true (006) |
@@ -218,7 +218,7 @@ SQLite at `/data/newsbot.db` (a mounted volume) with WAL mode on.
 - **Double-post guard:** `claim_digest` refuses to hand out a `pending` row for `run_date` if one already exists with status `pending`, `ok` or `partial`; see the ordering in section 4 for why `pending` exists at all. `/newsbot run-now` can force past any of those states after confirmation, replacing that day's row in place (same id). A `failed` row always allows a reclaim, since that day never actually posted.
 - **Record-then-post guard (§12):** `alerted_codes` plays the same role for code alerts that `claim_digest`'s `pending` row plays for the digest: a batch of codes and the day's ping budget are claimed as `pending` in one transaction *before* anything is sent, and only flipped to `posted` once the send actually lands. A process that dies in between leaves codes `pending`; `fail_pending_codes()` flips those to `failed` at the next startup (and the admin channel is told which codes), so a future sweep never retries a post that might already be sitting in the channel.
 - **Retention:** a nightly job (03:30 in `owner_report.timezone`) deletes items and stories older than 90 days, and, since v3, shared summaries and server notices older than 90 days. `alerted_codes`, `alert_state` and `guild_code_posts` are never touched by retention: there's no lookback window on "have we ever alerted this code before." A server's own rows (settings, digest records, SHiFT post records) live until the bot is removed from it, then go at once (§15).
-- **Migrations:** numbered `.sql` files are applied at startup, and the applied version is tracked in `PRAGMA user_version`. Migration 002 (v1.2) is purely additive: a pre-1.2 binary still starts up fine against a database already migrated to version 2, it just never reads or writes the two new tables.
+- **Migrations:** numbered `.sql` files are applied at startup, and the applied version is tracked in `PRAGMA user_version`. Migration 002 (v1.2) is purely additive: a pre-1.2 binary still starts up fine against a database already migrated to version 2, it just never reads or writes the two new tables. Migration 010 (v3.3.0, §18) replaces the 10-game trigger and touches no rows; 3.2.2 runs against it unchanged.
 - **Backups:** a host cron job runs `sqlite3 /data/newsbot.db ".backup ..."` each day and keeps the 7 newest. A restore can cause a SHiFT code to re-alert (its `alerted_codes` row rolls back too), bounded by `max_item_age_hours` and `max_pings_per_day`; see `docs/deploy.md`'s restore runbook.
 
 ## 6. Discord interface
@@ -1180,3 +1180,97 @@ The follow-up capacity hazard above, fixed the way the owner picked (1B on 2026-
 - **Known and left alone:** a server that turns its ping off in the moment between loading and claiming still gets a pinged burst (v3.1.4 did the same, and the window is one thread hop); the delivery log line says `pinged: false` for a follow-up-only turn.
 - **The preview script** gained case 12, "A follow-up that continues", so it runs 15 cases; case 10's roundup went from 22 codes to 17 and the screenshot windows grew to 7,900 (desktop) and 8,000 (phone) pixels to stay under the 8,192 ceiling.
 - **No migration, config key or command change.** Rollback is `TAG=3.2.0` with no config change.
+
+## 18. General gaming news, as an option (v3.3.0, approved 2026-10-23)
+
+Some of the week's biggest gaming news isn't about any one game. When BioWare's shutdown broke, the owner saw it on Facebook and everywhere else, and the bot said nothing, because every item it posts has to match a game a server follows. This section adds that news as something a server can choose: studios closing, layoffs, acquisitions, new games and new hardware announced, platform and policy changes. It shows up as one more entry in the catalog, "Gaming industry", which a server follows like a game, in a channel of its own, with a short daily post. The point is a few things worth knowing each day, not a firehose.
+
+**Owner decisions (2026-10-23):**
+- How a server turns it on: **a "Gaming industry" entry in the catalog**, followed like any game, with its own channel (1A). A separate setting with its own command may come later (1B), but this is the starting point.
+- Where the news comes from: **industry and trade press feeds only**, dedicated to the entry, each checked from the Droplet before it goes in (2A). No keyword pulls from the general press feeds.
+- How much: **at most 5 stories a day** (3A).
+- Choosing them: **one AI pick a day, shared by every server** (4A). Comped servers get those stories summarized; free servers get the same stories as the source's own headline and a link.
+- Rumors: **allowed from vetted press**, and comped summaries keep their existing "rumor" label (5A). The owner's words: stay away from rumors unless they come from very reputable sources.
+- Parts 1 to 4 below were approved as written.
+- After the builder check (2026-10-23): **one pick per distinct digest time**, through the existing per-cycle summary machinery, so every server's news is fresh at its own posting time (1A; a handful of calls a day instead of literally one). **"Gaming industry" doesn't count toward a server's 10 games** (2A). **No rumor mark on a free server's post** (3A), the same as free headline lists today.
+
+**Goals.** A server that turns this on sees, once a day, the handful of industry stories a reasonably plugged-in player would want to know about, without having to follow anything else.
+
+**Non-goals.** Nothing about the existing games changes: their sources, prompts, matching and digests stay as they are. No new commands, no per-server tuning of the topics, no breaking-news posts during the day.
+
+**Anti-goals.** Any of these makes v3.3.0 a failure, however well it works:
+- a channel full of trade-press minutiae (executive hires, earnings footnotes, job ads, sponsored posts) instead of the stories that matter;
+- more than 5 stories in a day;
+- a story about one game leaking in because a general press feed happened to say "industry";
+- AI-written text in a free server's post;
+- a change, however small, to an existing game's digest or prompt.
+
+### Part 1: what a server sees
+
+"Gaming industry" appears in `/newsbot setup`'s game menu alongside the games. An admin who picks it gives it a channel the same way as any game. Once a day, at the server's usual digest time and with its game digests, that channel gets one post of at most 5 stories:
+- a **comped** server gets the AI's summary of each story with its source links, in the same embed style as a game's digest, each story labeled official, reported or rumor;
+- a **free** server gets the same stories as the source's own headline and a link, with no AI-written text.
+
+A day with nothing worth posting posts nothing, as a quiet game does today. `/news` works for it like for any game. The entry takes the catalog to 22 of the 24 games setup's menu can hold.
+
+### Part 2: where the news comes from
+
+Only industry and trade press feeds, where every story is industry news, dedicated to the "Gaming industry" entry. GamesIndustry.biz and Game Developer are the starting candidates; the final list comes out of research, and every feed is fetched from the Droplet before it goes in, because a feed that works from home proves nothing about a datacenter address (§15's Lodestone lesson, and 2026-10-23's Square Enix one). The entry never matches by keyword: its name isn't matched, it has no aliases or entities, and the general press feeds don't feed it, so a story about one game can't leak in. It has no Brave search queries either.
+
+If announcements and console news turn out thin, the next step is a big outlet's own "news" or "industry" category feed, still as a dedicated source, not keyword pulls.
+
+### Part 3: picking the 5
+
+For each digest cycle (a digest time that servers share, as with game summaries), one Claude call reads the industry items since the last cycle and returns at most 5 stories, ranked by significance. First in line: studios closing, layoffs, acquisitions and mergers, new game and new hardware announcements, platform and policy changes. Left out: executive hires and departures, earnings minutiae, job ads, sponsored posts. The same call writes the summaries, so comped servers get those 5 summarized, and free servers get the same 5 rendered as the source's own headline and link (the first linked item's title and URL; a story's AI headline is never shown to a free server).
+
+Unlike a game's summary, which is made only when a comped server follows the game, this call runs for any cycle with at least one server following the industry entry, comped or not. The stories keep the model's significance order for comped and free servers alike; a game digest's usual official-first sort doesn't apply (none of these sources is official, so it would only push a top-ranked rumor below filler). A free server's post shows no rumor mark, as free headline lists never have. As with game digests, stories already told in the last 3 days are left out, and a genuine new development of one is marked as an update. Rumors are allowed, since every source is vetted press, and keep their label.
+
+If the call fails, every server gets the newest 5 headlines instead (ordered the way free headlines already are), and comped servers see the existing "Summary unavailable" note above them.
+
+### Part 4: cost, limits, how it ships
+
+- **Cost:** one Haiku call per distinct digest cycle (a handful a day), a fraction of a cent in all, whatever the number of servers.
+- **The ranking rules are new prompt text**, so under the project's standing rule the owner reviews a preview of real output (the CLI `--dry-run`, which was accepted for v3.1.3) before release.
+- **No change** to existing games, their prompts or their digests, and no new commands. Nothing new about users is stored, so the privacy policy is unaffected.
+- **Ships as v3.3.0**, a minor release.
+
+### Calls I made
+
+- The entry's key is `industry` and its display name "Gaming industry"; it goes last in the catalog, so existing games keep their order.
+- It never pings and has nothing to do with SHiFT alerts.
+- A free server's post is still capped at 5 headlines; "+N more, use /news" isn't shown, because the cap is the point. `/news` still lists everything stored for it.
+- The 5-story cap applies to comped and free alike; on a day with fewer worthwhile stories, the post is shorter, and on a day with none, there's no post.
+- The fallback when the AI call fails is plain recency within trust order (the existing headline sort), capped at 5.
+- A free server's `/newsbot preview` never makes an AI call: it shows the stored pick for its cycle if there is one, or the fallback headlines. A comped server's preview and run-now behave as they do for games today.
+- The entry stays out of every other game's prompt (the `{games}` list), out of Brave search, and out of the follows that drive game summaries; config refuses a shared source with `games: [industry]` (that would be a keyword path in), and the "a game with `match_name: false` needs an alias" check gets an exception for it.
+- Its post comes last among a server's posts, in catalog order.
+- It doesn't count toward a server's 10 games (owner, 2A): setup's menu, `follow` and the "Following N of 10" replies leave it out of the count.
+
+### Left to the builder
+
+- How the entry is marked as "rank and cap at 5" (a catalog flag, or the key), how the selection prompt sits next to the existing summary prompt without changing it (the existing prompt's hash is pinned by a test), and how a free server's post is built from the stories.
+- How the summary job decides to run for this entry when no comped server follows it.
+- The exact source list, from research, with the owner's Droplet check before it goes in.
+
+### Open items
+
+- The source list (research, then the owner's Droplet check).
+
+### As built (2026-10-23)
+
+Built on `feat/industry-news` per `docs/plans/2026-10-23-industry-news.md`, released as v3.3.0. It supersedes the text above where they differ. What changed from the design during the build:
+
+- **The entry is marked by its key, not a flag.** `newsbot/industry.py` holds `INDUSTRY_KEY = "industry"`, the cap of 5 and `counts_toward_limit`. A catalog flag would only have given the SQL trigger a second way to disagree with the code, since the trigger has to name a key anyway. Config checks are startup errors, not warnings: `match_name: false`, no aliases, entities or search queries, the last catalog entry, at least one source of its own, every one of them `type: rss` with `trust: press` (fix batch 3; before that, only "not codes-only, not a `shift_table`"), and no shared source or `shift.games` entry naming it.
+- **Migration 010 (`010_industry_limit.sql`).** Migration 005's trigger counted every `guild_games` row toward the 10, so a server with ten games couldn't follow the entry. 010 drops it and creates one that skips `industry` on both sides (the error text is unchanged, because `follow_game` and `apply_guild_setup` look for it). A second trigger, `BEFORE UPDATE OF guild_id, game_key`, closes a hole 010 would otherwise have opened: with one row free, renaming it to a game, or moving a game's row to a full server, made an eleventh counted game without an INSERT. The qa pass found that one. `DROP TRIGGER` has no `IF EXISTS` on purpose: a database without the trigger is wrong in a way worth failing on, and the migration rolls back. No rows are touched. Along the way `migrate` learned to check for a draft-009 database before applying anything, so a database it is going to refuse is left untouched instead of being migrated to 10 and then refused.
+- **Who makes the pick (fix batch 2).** Only the prepare job (`summaries.prepare_summaries`, every 5 minutes) makes an industry pick, for a server of any tier, and it does the industry pick first in each pass, so slow game calls can't starve it. A free server never calls the model on any path: its scheduled digest, catch-up, preview and run-now read the stored pick, and with none stored they show the capped fallback (the newest headlines, 5 at most). The first draft let a free scheduled build make the call inline, which could hold up the one-at-a-time digest tick for up to 120 seconds. A comped server's preview and run-now behave as they do for games. Prepare skips a server whose digest for the day already finished (`ok`, `partial` or `failed`), and the owner alert for an industry fallback goes out once a day, since an outage makes one fallback row per diverged chain (game fallbacks still alert every time).
+- **Each cycle's pick sees only its own chain (fix batch 1).** The first draft told every pick the headlines of all earlier industry picks, so a later digest time lost stories an earlier one had picked, which defeats owner decision 1A. Now the prior headlines are the stories the asking cycle's own servers were shown (`repo.chain_headlines`). A server whose coverage mark has no pick of its own behind it (a new server's first digest) borrows the newest earlier pick, which can widen its prior by a story or two; I'd take that over an empty prior that re-announces old news.
+- **Stored picks keep the model's link order (fix batch 2).** A free server's headline is the pick's first linked item, and that is the model's first link, not the lowest item id, so it's the headline the owner reviewed.
+- **The pick reuses the game summaries' output schema and storage.** `pick_industry_stories` has its own prompt, in its own module (`newsbot/pipeline/industry.py`; `newsbot/pipeline/prompts.py` didn't change, and its pinned hash still passes), but it returns the same shape a game's summary does and is stored in `game_summaries` under the key `industry`. A comped server's post is built from that exactly as a game's is, minus the official-first sort. The prompt was reviewed by the owner as a real preview (below).
+- **The cap of 5 applies after postprocess.** The model is asked for at most 5, but the cut is made in code, after stories with no usable link are dropped, so a model that returns 7 still posts 5 and a dropped story doesn't leave a hole. The fallback drops unusable URLs before cutting for the same reason, so a server still gets 5 lines when there are 5 to give.
+- **A free post shows each story's first linked item, nothing of the model's.** The title and URL are the first linked item's own, looked up by URL in the items table (`headline_items_by_url`). Two stories that share a first URL are deduped by URL before the cut to 5, so one headline never takes two slots. A story with no links is skipped.
+- **The Task 10 review (2026-10-23, 22:52 PT).** The owner ran a real preview. The pick was 4 stories: Arkane's buyer deadline, Xbox and Netflix licensing, GameMaker's GMRT, and Capcom's data breach, all labeled reported, with the cross-feed merges right and no minutiae. The owner approved the prompt as written.
+- **The source list is four feeds**, all `type: rss` with `trust: press`, all fetched from the Droplet on 2026-10-23: GamesIndustry.biz (`/feed/news`), Game Developer, VGC's news category and Gematsu Industry. The design named two candidates and the plan four. PC Gamer's industry tag was a fifth: dropped on a reading of the dedupe rule stricter than the code, added back on 2026-10-23 at the owner's word once the reading was corrected, and dropped again on 2026-10-24 (owner), because across passes the first stored copy of a URL decides its tags, so a story the tag feed stored first could carry the industry tag only and miss a game's digest. Config now refuses any industry source that isn't plain RSS with press trust (fix batch 3). The research, including what was tried and failed, is in `docs/sources-research.md`, "Gaming industry feeds (2026-10-23)".
+- **Cost is bounded by the prepare job, not by servers.** Only prepare makes an industry pick, and it makes at most one per 5-minute pass: 288 a day at the very most, well under $1 at current prices. In practice it's one pick per digest time that servers share (servers on the same coverage mark share one), a handful a day. A server whose coverage mark has diverged (a failing digest, or a free run-now that fell back) can cost a pick of its own on a later pass; that is still one per pass, and no story posts twice. I didn't add a separate daily cap; the per-pass bound does that job. Spend shows in the Anthropic console; the owner report has no spend line for it.
+- **Smaller calls.** A comped story with more than 3 links keeps the `+N more` on its link line, as in every game digest. A server that unfollows its last game but still follows the entry gets no "follows no games" warning, since it still posts. The entry stays out of every other game's `{games}` list, out of Brave search and out of the follows that drive game summaries, as designed.
+- **The privacy and terms pages did change, pending the owner's approval; no new command.** Part 4's "the privacy policy is unaffected" above is superseded. Nothing new about users is stored, but who sees public news text did change: Anthropic now receives it for the industry pick for any server that follows the entry, free or not (never anything about a server or its members). So `site/privacy.html` says that, and `site/terms.html` says the free tier's game digests have no AI while the optional industry post's headlines are AI-chosen (a free server's post is the sources' own headlines and links, picked by the model). Both are the owner's text and were edited on this branch; the owner reads them before release.
+- **Rollback is `cp config.pre-industry.yaml config.yaml` plus `TAG=3.2.2`.** 3.2.2's loader refuses the industry entry ("match_name is false ... no aliases"), so the tag alone isn't enough, and neither is a database restore: the database stays at version 10, and 3.2.2 skips newer migrations and runs against it (the looser trigger is harmless to it). Until a server's admin rolls forward, a server that follows the entry gets an "industry: not in the catalog any more, skipped" note and partial digests, and a 3.2.2 setup save drops its industry row. Prod's config gets the entry by the owner's `awk` append between the `industry-step` markers of `config.example.yaml`, after a backup as `config.pre-industry.yaml`.
