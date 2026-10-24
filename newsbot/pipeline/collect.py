@@ -71,6 +71,7 @@ from newsbot.collectors.base import (
     run_collectors,
 )
 from newsbot.config import AppConfig, Secrets, WebSearchSource
+from newsbot.industry import INDUSTRY_KEY
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import run_lock_or_skip
 from newsbot.pipeline.normalize import canonicalize, canonicalize_items, normalize
@@ -673,14 +674,15 @@ async def collect_web_search(
     The summaries job calls this once per game per day, for the games a
     comped server follows; `run_collection` never does (D1). Keys that
     aren't in the catalog are ignored, and so is a missing web_search block
-    or API key: there's nothing to search with, which is not an error. No
-    lock here; the caller decides what it needs, and the writes are
-    transactions either way.
+    or API key: there's nothing to search with, which is not an error. The
+    industry entry is ignored too (it isn't a game, and its feeds are its
+    only source). No lock here; the caller decides what it needs, and the
+    writes are transactions either way.
     """
     from newsbot.collectors.web_search import WebSearchCollector
 
     cfg = deps.cfg
-    games = [g for g in cfg.catalog if g.key in set(game_keys)]
+    games = [g for g in cfg.catalog if g.key in set(game_keys) and g.key != INDUSTRY_KEY]
     if cfg.web_search is None or not api_key or not games:
         return CollectionOutcome()
 

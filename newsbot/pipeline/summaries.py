@@ -71,6 +71,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from newsbot.collectors.base import RawItem
 from newsbot.config import AppConfig, GameCfg
 from newsbot.guilds.schedule import digest_window, item_floor, local_due_instant
+from newsbot.industry import INDUSTRY_KEY
 from newsbot.pipeline.collect import CollectionDeps, collect_web_search
 from newsbot.pipeline.filter import TopicItem, _cap_key
 from newsbot.pipeline.guild_digest import (
@@ -170,8 +171,16 @@ def upcoming_dues(
 
 
 def _all_topics(cfg: AppConfig, followed: set[str], game: GameCfg) -> list[GameCfg]:
-    """Every game a comped server follows, in catalog order: what the prompt says we track."""
-    return [g for g in cfg.catalog if g.key in followed or g.key == game.key]
+    """Every game a comped server follows, in catalog order: what the prompt says we track.
+
+    The industry entry is never in the list. It isn't a game, and the prompt
+    says "the video games A, B and C"; a server following industry would
+    otherwise put "Gaming industry" in every other game's system prompt, and
+    change what each of those summaries is told it covers.
+    """
+    return [
+        g for g in cfg.catalog if (g.key in followed or g.key == game.key) and g.key != INDUSTRY_KEY
+    ]
 
 
 # --- Making one summary ---

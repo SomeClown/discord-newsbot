@@ -306,9 +306,12 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 
 ### Progress
 - Task 1: complete (from c643215; gate exit 0, 14680 passed; tests first, 18 of 22 failed before; adversarial: 71 cases, no bugs)
+- Task 2: complete (from 4637b8b; gate exit 0, 14768 passed; tests first, 8 of 12 failed before; adversarial: 76 tests, no bugs)
 
 ### Decisions made during the build
+- Ruling (Task 2): "no web-search collector when nothing is left" applies only when games were requested and industry was all of them; an originally empty `web_search_games` list still builds a collector that searches nothing. Why: `test_config_v3_adversarial.py::test_an_empty_web_search_games_list_still_builds_a_collector_that_searches_nothing` pins today's behavior, and the plan says existing behavior stays byte-identical. If wrong: none visible; an empty collector makes no request.
 
 ### Parked
 - Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
+- Task 2: until Task 5, a comped industry follow still goes through prepare_summaries as a game (game prompt); Task 5 routes it to the industry prompt. `_all_topics` never lists industry, so it must not feed industry's own prompt.
 

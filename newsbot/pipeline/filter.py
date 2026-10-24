@@ -19,6 +19,7 @@ from typing import Literal
 
 from newsbot.collectors.base import RawItem
 from newsbot.config import GameInfo
+from newsbot.industry import INDUSTRY_KEY
 
 _TRUST_RANK = {"official": 0, "press": 1, "community": 2}
 _MATCH_RANK = {"confident": 0, "uncertain": 1}
@@ -56,14 +57,24 @@ def _terms_pattern(terms: list[str]) -> re.Pattern[str] | None:
 
 
 def build_matchers(topics: Sequence[GameInfo]) -> dict[str, TopicMatcher]:
+    """One matcher per topic. The industry entry gets one that can never match.
+
+    Its stories come from its own feeds (the `dedicated_key` path in
+    `filter_items`), never from a keyword hit on somebody else's headline.
+    `load_config` already refuses industry terms; this is the second lock on the door.
+    """
     return {
-        topic.key: TopicMatcher(
-            # A game named like an ordinary word (Rust, Apex) matches on its
-            # aliases only; the bare name would hit every rusty gate in the news.
-            confident_re=_terms_pattern(
-                [topic.name, *topic.aliases] if topic.match_name else list(topic.aliases)
-            ),
-            entity_re=_terms_pattern(topic.entities),
+        topic.key: (
+            TopicMatcher(None, None)
+            if topic.key == INDUSTRY_KEY
+            else TopicMatcher(
+                # A game named like an ordinary word (Rust, Apex) matches on its
+                # aliases only; the bare name would hit every rusty gate in the news.
+                confident_re=_terms_pattern(
+                    [topic.name, *topic.aliases] if topic.match_name else list(topic.aliases)
+                ),
+                entity_re=_terms_pattern(topic.entities),
+            )
         )
         for topic in topics
     }

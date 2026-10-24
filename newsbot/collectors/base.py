@@ -31,6 +31,7 @@ from newsbot.config import (
     Trust,
     WebSearchSource,
 )
+from newsbot.industry import INDUSTRY_KEY
 
 if TYPE_CHECKING:
     # The collector imports this module, so the real import waits inside `build_catalog_collectors`.
@@ -371,8 +372,13 @@ def build_catalog_collectors(
             query_templates=cfg.web_search.query_templates,
             trust=cfg.web_search.trust,
         )
-        games = cfg.catalog if web_search_games is None else web_search_games
-        collectors.append(
-            WebSearchCollector(as_source, games, secrets.brave_api_key.get_secret_value())
-        )
+        requested = cfg.catalog if web_search_games is None else web_search_games
+        # Industry news isn't about a game, so a Brave query for it would only
+        # fetch other games' headlines under the wrong tag. If it was the only
+        # thing asked for, there's nothing to search and no collector to build.
+        games = [g for g in requested if g.key != INDUSTRY_KEY]
+        if games or not requested:
+            collectors.append(
+                WebSearchCollector(as_source, games, secrets.brave_api_key.get_secret_value())
+            )
     return collectors
