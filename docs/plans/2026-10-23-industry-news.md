@@ -308,6 +308,7 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 - Task 1: complete (from c643215; gate exit 0, 14680 passed; tests first, 18 of 22 failed before; adversarial: 71 cases, no bugs)
 - Task 2: complete (from 4637b8b; gate exit 0, 14768 passed; tests first, 8 of 12 failed before; adversarial: 76 tests, no bugs)
 - Task 3: complete (from 23f12dd; gate exit 0, 14855 passed; tests first, 22 failed before; qa spec check: matches, migration verified on a real v9 database and against the v3.2.2 binary; adversarial: 56 tests, 1 bug fixed in round 1 (BEFORE UPDATE trigger, which also closes moving a row into a full server))
+- Task 4: complete (from 8f07e10; gate exit 0, 14969 passed; prompt text checked word for word against the plan; adversarial: 98 tests incl. old-vs-new refactor equivalence and 3 injected faults caught, no bugs)
 
 ### Decisions made during the build
 - Ruling (Task 2): "no web-search collector when nothing is left" applies only when games were requested and industry was all of them; an originally empty `web_search_games` list still builds a collector that searches nothing. Why: `test_config_v3_adversarial.py::test_an_empty_web_search_games_list_still_builds_a_collector_that_searches_nothing` pins today's behavior, and the plan says existing behavior stays byte-identical. If wrong: none visible; an empty collector makes no request.
@@ -322,4 +323,5 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 - Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
 - Task 2: until Task 5, a comped industry follow still goes through prepare_summaries as a game (game prompt); Task 5 routes it to the industry prompt. `_all_topics` never lists industry, so it must not feed industry's own prompt.
 - Task 3: (the `UPDATE ... SET guild_id` hole, which predated 010, was closed by fix round 1 too.) Concurrent migration of one v9 file by several processes untested (one bot process, by rule).
+- Task 4: `pick_industry_stories` with no items still calls the model; Task 5 must make sure the summaries path skips an empty industry cycle as it does for games. Identical duplicate stories aren't merged by code (pinned as current behavior).
 
