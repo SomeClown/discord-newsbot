@@ -53,6 +53,12 @@ running and the caller gives up and falls back). A game whose saves keep failing
 is left alone for a while (30 minutes, doubling, kept in memory) instead of being
 paid for every five minutes.
 
+The industry entry is the one exception to "comped servers only". A server of
+any tier can follow it, and a free server posts the picked headlines, so the
+pick is made for whoever follows it. It has no Brave search (there's no game
+to search for) and its own prompt (`pipeline/industry.py`); the claim, the reuse
+rule and the one-call-per-cycle bound are the same as a game's.
+
 `NewsBot` runs `prepare_summaries` every five minutes and hands the lookups to the
 digest job.
 """
@@ -80,6 +86,7 @@ from newsbot.pipeline.guild_digest import (
     _stored_summary,
     summary_from_row,
 )
+from newsbot.pipeline.industry import pick_industry_stories
 from newsbot.pipeline.run import _PRIOR_HEADLINE_WINDOW, local_run_date
 from newsbot.pipeline.summarize import _FALLBACK_NOTE, LLMClient, TopicSummary, summarize_topic
 from newsbot.store import repo
@@ -307,15 +314,20 @@ async def _summarize(
         )
     try:
         async with asyncio.timeout(deps.summarize_timeout_s):
-            summary = await summarize_topic(
-                deps.llm,
-                game,
-                items,
-                prior,
-                all_topics=_all_topics(deps.cfg, followed, game),
-                subject=deps.cfg.ai.subject,
-                sleep=deps.sleep,
-            )
+            if game.key == INDUSTRY_KEY:
+                summary = await pick_industry_stories(
+                    deps.llm, game, items, prior, sleep=deps.sleep
+                )
+            else:
+                summary = await summarize_topic(
+                    deps.llm,
+                    game,
+                    items,
+                    prior,
+                    all_topics=_all_topics(deps.cfg, followed, game),
+                    subject=deps.cfg.ai.subject,
+                    sleep=deps.sleep,
+                )
     except TimeoutError:
         # A hung call would otherwise hold this game's claim, and every game
         # after it in the prepare run, until somebody restarted the bot.
@@ -469,7 +481,8 @@ async def ensure_summary(
     reused). If nothing is, this
     claims the game (one caller wins, the rest wait and then reuse the result),
     optionally searches the web
-    (`search`, which replaces `coverage` with what the search reports),
+    (`search`, which replaces `coverage` with what the search reports; the industry
+    pick ignores both and is never searched, whoever asks),
     summarizes, saves, and releases. `None` means there was nothing to be had:
     an unknown game, a claim that never resolved inside its lease, or a game
     whose saves have been failing and is resting.
@@ -483,6 +496,10 @@ async def ensure_summary(
     the new owner's; it goes back to looking for the answer that won, at most
     `_MAX_LOST_CLAIMS` times, and then returns `None`.
     """
+    if game_key == INDUSTRY_KEY:
+        # The pick has no search and nothing for a coverage note to say; this comes before
+        # anything reads either, so no caller can switch them back on.
+        search, coverage = False, ()
     game = next((g for g in deps.cfg.catalog if g.key == game_key), None)
     if game is None:
         return None
@@ -668,8 +685,10 @@ def _needs_summary_sync(
 
 
 def _follows_sync(db_path: str) -> list[CompedFollow]:
+    """Comped servers' games plus every server's industry follow, each pair once."""
     with closing(connect(db_path)) as conn:
-        return repo.comped_follows(conn)
+        comped = [f for f in repo.comped_follows(conn) if f.game_key != INDUSTRY_KEY]
+        return comped + repo.industry_follows(conn)
 
 
 async def _web_search(deps: SummaryDeps, game_keys: list[str]) -> list[str]:
@@ -690,18 +709,20 @@ async def _web_search(deps: SummaryDeps, game_keys: list[str]) -> list[str]:
 
 
 async def prepare_summaries(deps: SummaryDeps, now: datetime | None = None) -> list[str]:
-    """Make the summaries the next comped digests will need. Returns the games it worked on.
+    """Make the summaries the next digests will need. Returns the games it worked on.
 
     Meant to run every five minutes. A game needs one when some comped server
-    that follows it has a digest due within `LEAD` and no stored summary that
-    server may reuse (it starts where that server's coverage ended, and is at
-    most six hours older than this digest; a fallback counts, it isn't retried
-    today). The game is then searched and summarized for that server's window,
-    the search inside the same claim as the summary so overlapping jobs search
-    once. The new summary also serves every other server whose coverage ended
-    in the same place, which is what keeps this to about one call per distinct
-    comped cycle per game. A server whose window starts elsewhere gets its own
-    summary on a later pass (one per game per run, so one pass never makes two).
+    that follows it (for the industry pick, a server of any tier) has a digest
+    due within `LEAD` and no stored summary that server may reuse (it starts
+    where that server's coverage ended, and is at most six hours older than this
+    digest; a fallback counts, it isn't retried today). The game is then
+    searched and summarized for that server's window, the search inside the
+    same claim as the summary so overlapping jobs search once. The new summary
+    also serves every other server whose coverage ended in the same place, which
+    is what keeps this to about one call per distinct comped cycle per game. A
+    server whose window starts elsewhere gets its own summary on a later pass
+    (one per game per run, so one pass never makes two).
+    The industry pick is never searched; only games are.
     """
     now = now or deps.now()
     follows = await asyncio.to_thread(_follows_sync, deps.db_path)

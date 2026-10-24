@@ -27,7 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 
 from newsbot.guilds.schedule import MAX_ATTEMPTS, item_floor, lease_is_stale, retry_is_ready
-from newsbot.industry import counts_toward_limit
+from newsbot.industry import INDUSTRY_KEY, counts_toward_limit
 from newsbot.shift.details import (
     CLOCK_DAYS,
     SHIFT_TZ,
@@ -3802,6 +3802,36 @@ def items_for_window(
     return by_game
 
 
+def headline_items_by_url(conn: sqlite3.Connection, urls: Iterable[str]) -> dict[str, HeadlineItem]:
+    """The stored item behind each of `urls`, as a free server's digest lists it.
+
+    A URL nobody stored is skipped. Items here have no game (the pick can name a URL
+    from any item it was shown), so `uncertain` is always False; the rumor mark is a
+    per-game idea and the industry post doesn't use one.
+    """
+    url_list = list(urls)
+    found: dict[str, HeadlineItem] = {}
+    for i in range(0, len(url_list), _SQLITE_VARIABLE_CHUNK):
+        chunk = url_list[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a string of literal "?"s sized to the chunk; the values are bound.
+        query = (
+            "SELECT url, title, source_name, trust, published_at, collected_at "  # noqa: S608
+            f"FROM items WHERE url IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            found[row["url"]] = HeadlineItem(
+                url=row["url"],
+                title=row["title"],
+                source_name=row["source_name"],
+                trust=row["trust"],
+                published_at=_parse_dt(row["published_at"]),
+                collected_at=datetime.fromisoformat(row["collected_at"]),
+                uncertain=False,
+            )
+    return found
+
+
 # The most a stored summary may trail a digest's due instant and still be reused
 # (plan §3.6). The other half of the reuse rule is "newer than the server's last
 # digest", which is per server and so arrives as `after`.
@@ -3900,6 +3930,25 @@ def comped_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
     ]
 
 
+def industry_follows(conn: sqlite3.Connection) -> list[CompedFollow]:
+    """Every (set-up server of any tier, industry) pair: who needs the industry pick made.
+
+    The same shape and order as `comped_follows`, minus the tier condition. Games
+    are summarized for comped servers only, but the pick is made for every server
+    that follows the industry entry, because a free server posts the picked
+    headlines.
+    """
+    rows = conn.execute(
+        "SELECT gg.game_key, g.guild_id, g.digest_time, g.timezone "
+        "FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
+        "WHERE g.set_up = 1 AND gg.game_key = ? ORDER BY g.guild_id, gg.game_key",
+        (INDUSTRY_KEY,),
+    ).fetchall()
+    return [
+        CompedFollow(r["game_key"], r["guild_id"], r["digest_time"], r["timezone"]) for r in rows
+    ]
+
+
 def game_summary_by_id(conn: sqlite3.Connection, summary_id: int) -> GameSummaryRow | None:
     row = conn.execute(
         "SELECT id, game_key, run_date, status, window_start, window_end, coverage_notes, "
@@ -3931,6 +3980,9 @@ def summary_is_shared(
 ) -> bool:
     """True if some other set-up comped server follows the summary's game and could reuse it.
 
+    For the industry entry "comped" drops out: a server of any tier follows it, and any of
+    them could reuse the row.
+
     Nothing records which digests a summary served, so this asks `get_game_summary`'s own
     question from the other side: would another server's coverage of the game (as it stood
     before `run_date`) line up with this row? That is, the row starts exactly where that
@@ -3940,9 +3992,10 @@ def summary_is_shared(
     doesn't check the six-hour age rule, since two servers that line up on item ids are on
     the same cycle anyway.)
     """
+    tier_sql = "" if summary.game_key == INDUSTRY_KEY else "g.tier = 'comped' AND "
     others = conn.execute(
-        "SELECT g.guild_id FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "
-        "WHERE g.tier = 'comped' AND g.set_up = 1 AND gg.game_key = ? AND g.guild_id != ?",
+        "SELECT g.guild_id FROM guilds g JOIN guild_games gg ON gg.guild_id = g.guild_id "  # noqa: S608
+        "WHERE " + tier_sql + "g.set_up = 1 AND gg.game_key = ? AND g.guild_id != ?",
         (summary.game_key, guild_id),
     ).fetchall()
     for other in others:

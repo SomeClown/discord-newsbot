@@ -457,7 +457,12 @@ class ItemRange:
 
 @dataclass(frozen=True)
 class CompedFollow:
-    """One comped, set-up server following one game, with when its digest is due."""
+    """One comped, set-up server following one game, with when its digest is due.
+
+    Industry follows (`repo.industry_follows`) come from servers of any tier and reuse
+    this shape, so a "comped" follow can be a free server's when the game is the
+    industry entry.
+    """
 
     game_key: str
     guild_id: int
