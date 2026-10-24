@@ -9,13 +9,18 @@ from Tarkov), and at the time you choose it posts a digest of the day's news for
 each one, in the channel you pick. It can also announce new Borderlands SHiFT
 codes, and members can ask it for recent news or search it on demand.
 
+There's one more entry in the catalog, "Gaming industry", for news that isn't
+about any one game: studios closing, layoffs, acquisitions, new games and
+hardware announced. A server follows it like a game, in a channel of its own,
+and it posts at most 5 stories a day.
+
 It started as one bot for one ~50-person server and three games. Since v3.0
 it's one bot that any server can install: the maintainer runs a public copy,
 each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** The bot is public, and production runs v3.1.0.
+**Status.** The bot is public, and production runs v3.2.2; this branch is v3.3.0, which adds the Gaming industry entry and isn't deployed yet.
 
 ## Add it to your server
 
@@ -38,7 +43,9 @@ uses it. The same steps are on the [project page](https://someclown.github.io/di
 Two tiers, and only one of them costs the maintainer money.
 
 - **Free (every server):** a headline digest for each game you follow, plus
-  SHiFT code alerts if you turn them on. No AI is involved. The headlines come
+  SHiFT code alerts if you turn them on. No AI writes any of the text. (The
+  one place a model has a hand is Gaming industry's story pick, below; even
+  there, a free server only sees the source's own headlines.) The headlines come
   from the shared collection (official blogs, Steam announcements, Bluesky,
   gaming sites, and web search results), sorted official first, then
   press, then community. `/news recent` and `/news search` show those same
@@ -103,6 +110,18 @@ Sorted official, then reported, then rumor, each labeled so nobody mistakes a
 leak for a patch note. A coverage caveat ("Brave search skipped: quota
 exceeded"), if there is one that day, rides along in that game's embed footer.
 
+**Gaming industry** is the exception to "one message per game". It posts last,
+after a server's games, and holds at most 5 stories however many the day had.
+Once a day Claude reads what the five trade-press feeds collected (studio
+closures, layoffs, acquisitions, new games and hardware announced, platform
+and policy changes; not executive hires, earnings footnotes, job ads or
+sponsored posts) and picks the stories that matter, most significant first.
+Servers that post at the same time share one pick. A comped server gets it as summaries, in
+the style above. A free server gets the same stories as a short list of the
+source's own headlines and links, with no AI-written text and no rumor mark,
+the same as any free headline list. A day with nothing worth posting posts
+nothing.
+
 ## Commands
 
 Everything below is server-only (no DMs). Until an admin has run
@@ -140,11 +159,13 @@ only the person who ran the command can use.
 **Server admins (Manage Server, the `admin_permission` setting):**
 
 - **`/newsbot setup`**: a guided first run, shown only to you. Pick a time
-  zone, a digest time, up to 10 games, and the channel for them, then Save.
-  Run it again any time to edit.
+  zone, a digest time, up to 10 games (plus Gaming industry, which doesn't
+  count toward the 10), and the channel for them, then Save. Run it again
+  any time to edit.
 - **`/newsbot follow game: channel:`** and **`unfollow game:`**: add, move or
   drop one game (with autocomplete), so each game can have its own channel.
-  **`/newsbot games`** lists what you follow and the rest of the catalog.
+  **`/newsbot games`** lists what you follow and the rest of the catalog; its
+  "Following N of 10" count leaves Gaming industry out.
 - **`/newsbot settings time: timezone: admin_channel: clear_admin_channel:`**:
   change the digest time (`HH:MM`), the time zone (any IANA zone, with
   autocomplete), and where this server's own run reports and problem notes go.
@@ -528,6 +549,12 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
   ordinary words, like Rust), and its own `sources`. No channels: those are
   per server. Keep Borderlands 4, Palworld and Diablo IV first and in that
   order, because the AI prompt lists a comped server's games in catalog order.
+  The **Gaming industry** entry (`key: industry`) goes last, and it's picked
+  out by that key, not by a flag. Its rules are checked at startup and a break
+  stops the bot: `match_name: false`, no `aliases`, `entities` or
+  `search_queries`, at least one source of its own, none of them codes-only, no
+  `shift_table`, no shared source or `shift.games` entry naming it. Delete the
+  entry and the bot works as it did before; nothing else depends on it.
 - **`sources`** (under a game, or in **`shared_sources`** for feeds that cover
   many games): `rss`, `steam_news` and `bluesky_search` (plus `shift_table`,
   under a game only; see "SHiFT code alerts" below), each with a `trust`
@@ -564,7 +591,16 @@ comped server following three games:
   of what Haiku 4.5 cost on the same news (measured 2026-10-22). Summaries are made once per
   game per cycle and shared, so a second comped server on the same schedule
   costs next to nothing extra; servers on different schedules get their own.
-  Free servers cost nothing here.
+  Free servers cost nothing here, with one exception below.
+- **Claude, Gaming industry**: one Haiku call per distinct digest cycle (the
+  servers that follow it and post at the same time share one pick), a handful
+  of calls a day and a fraction of a cent in all, however many servers there
+  are. It's made for free servers too, since they get the pick's stories as
+  headlines, so this cost is there even if no server is comped. A free server
+  whose digests keep failing, or whose run-now fell back to the newest
+  headlines, can end up making a call of its own the next day. A free
+  server's `/newsbot preview` and run-now never call a model: they show the
+  stored pick, or the newest headlines if there isn't one.
 - **Brave Search**: 2 queries per game per day, only for games a comped server
   follows, so about **6 requests a day** and roughly **180 a month** for
   three games (comfortably inside Brave's free tier). It doesn't grow with the
@@ -577,6 +613,15 @@ comped server following three games:
 
 ## Limitations and known issues
 
+- **Gaming industry is trade press only.** Five feeds feed it (GamesIndustry.biz,
+  Game Developer, VGC's news category, Gematsu's industry feed and PC Gamer's
+  industry tag) and nothing else: no search, no keyword pulls from the general
+  press, no Reddit. A story that none of them runs doesn't appear, and the
+  trade press is sometimes a day behind the consumer outlets on a reported
+  story. Rumors from those outlets are allowed and keep their label on a
+  comped server. The pick is the model's judgment, so it can include a story
+  you'd have skipped; the prompt was checked against a real day's news before
+  release, not against every day's.
 - **Reddit is codes only.** Reddit denied this bot's Data API access request
   (2026-10-04) and its Responsible Builder Policy bars sharing Reddit content,
   so the one subreddit in the example, r/Borderlands4, is read only to spot

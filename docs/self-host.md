@@ -145,6 +145,11 @@ want it narrower or broader.
   **$0.30 to $0.60 a month** (a handful of dollars of prepaid credit
   covers a long time). Summaries are made once per game and reused, so a
   second comped server on the same schedule costs next to nothing extra.
+  The "Gaming industry" entry (§4) adds one more Haiku call per distinct
+  digest time, a fraction of a cent a day, and it's made for free servers too:
+  they get the pick's stories as headlines. So a copy with no comped servers
+  at all still spends that, as long as one server follows the entry and the
+  config still has it.
 - **`BRAVE_API_KEY`** (optional): powers the `web_search:` block, which
   catches press coverage not already in your RSS list. It runs once a day,
   for games a comped server follows. Free tier math
@@ -193,6 +198,22 @@ The file has three jobs:
   has the tier.
 - **What the bot knows about:** the `catalog:` of games, each with its own
   sources, and `shared_sources:` for wide feeds that cover many games.
+
+`config.example.yaml` ends its catalog with a "Gaming industry" entry
+(`key: industry`) for news that isn't about any one game: studios closing,
+layoffs, acquisitions, new games and hardware announced. It's optional.
+Delete the whole entry, which sits between the `industry-step` markers, and
+the bot is the one you had before; a server that was following it gets a note
+that it's gone and keeps its games. If you keep it, the config loader holds it
+to some rules and refuses to start when it breaks one: it is the last entry
+in the catalog; `match_name: false`; no `aliases`, `entities` or
+`search_queries`; at least one source of its own, none of them codes-only or
+a `shift_table`; and no `shared_sources:` entry or `shift.games` list names
+it. There are no keywords on purpose: only its own trade-press feeds (five in the example)
+reach it, so a story about one game can't wander in. A server follows it like
+a game, in a channel of its own, and it doesn't count toward the 10-game
+limit. It posts at most 5 stories a day, picked by one Claude call (§3 has the
+cost).
 
 Edit `config.yaml`: replace every placeholder value (marked as such in the
 comments) with real ones. There are no channel IDs in it. Which channel each
@@ -425,8 +446,8 @@ until you set it up. As an admin (Manage Server, unless you changed
 
 1. **`/newsbot setup`:** a short guided form, visible only to you. Pick a time
    zone, a digest time (on the hour; use `/newsbot settings` for minutes),
-   the games to follow (up to 10, from your catalog), and the channel they
-   post in, then Save. It checks the bot's permissions in that channel and
+   the games to follow (up to 10, from your catalog, plus Gaming industry if
+   you kept it), and the channel they post in, then Save. It checks the bot's permissions in that channel and
    says what's missing. Run it again any time to change things; it starts from
    the current values. The default zone is UTC until you pick one.
 2. **`/newsbot follow` and `unfollow`** add or drop one game, so each game can
@@ -641,8 +662,8 @@ Two ways to cover more than one Discord server, and either is fine.
   ever share a token, for the same reason two processes on the same token
   race each other within a single deployment.
 
-Limits worth knowing about either way: a server follows at most 10 games, a
-catalog holds at most 25, and the lounge (§13) works for one imported server
+Limits worth knowing about either way: a server follows at most 10 games
+(Gaming industry doesn't count), a catalog holds at most 25, and the lounge (§13) works for one imported server
 only.
 
 ## 13. Lounge welcomes and a daily quote
