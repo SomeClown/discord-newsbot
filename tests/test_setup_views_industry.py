@@ -82,6 +82,29 @@ def test_the_menu_never_asks_for_more_values_than_it_has_options(industry_cfg, v
     assert view.games_select.max_values == 11
 
 
+def test_a_small_catalog_does_not_count_the_entry_in_its_limit(industry_cfg, v3_db):
+    view = make_view(industry_cfg, v3_db)
+    assert len(view.catalog) == 4
+    assert view.max_games == 3
+    assert view.games_select.placeholder == "Games to follow (up to 3, plus Gaming industry)"
+    assert view.games_select.max_values == 4
+
+
+async def test_a_small_catalog_says_n_of_the_games_it_has(industry_cfg, v3_db):
+    view = make_view(industry_cfg, v3_db)
+    await view.on_games(click(), ["palworld", INDUSTRY_KEY])
+    assert "(1 of 3)" in view.render()
+    assert "of 4)" not in view.render()
+
+
+def test_a_catalog_under_the_limit_reads_the_same_with_and_without_the_entry(
+    industry_cfg, v3_cfg, v3_db
+):
+    without = make_view(v3_cfg, v3_db)
+    with_entry = make_view(industry_cfg, v3_db)
+    assert without.max_games == with_entry.max_games == 3
+
+
 def test_without_the_entry_the_menu_is_what_it_was(v3_cfg, v3_db):
     view = make_view(v3_cfg, v3_db)
     assert view.games_select.max_values == 3

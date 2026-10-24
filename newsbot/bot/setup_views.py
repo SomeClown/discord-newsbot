@@ -195,7 +195,12 @@ class SetupView(discord.ui.View):
         self.origin = origin
         self.catalog: list[GameInfo] = list(cfg.catalog)
         self.names = {game.key: game.name for game in self.catalog}
-        self.max_games = min(repo.MAX_GAMES_PER_GUILD, len(self.catalog))
+        # The limit is on games, so the industry entry doesn't count toward what a small
+        # catalog can offer ("up to 5" for five games, not "up to 6").
+        self.max_games = min(
+            repo.MAX_GAMES_PER_GUILD,
+            sum(1 for game in self.catalog if counts_toward_limit(game.key)),
+        )
         # The Gaming industry entry rides along: it takes a menu slot but not a game slot.
         self.industry_name = self.names.get(INDUSTRY_KEY)
 

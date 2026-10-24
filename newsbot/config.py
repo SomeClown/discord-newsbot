@@ -1301,10 +1301,28 @@ def _industry_problems(cfg: AppConfig, i: int, game: GameCfg) -> list[str]:
     if not game.sources:
         errors.append(f"{where}: the industry entry needs at least one source")
     for j, source in enumerate(game.sources):
-        if not isinstance(source, ShiftTableSource) and effective_codes_only(source):
+        if isinstance(source, ShiftTableSource | WebSearchSource):
+            continue  # reported on their own, by the shift_table and web_search rules
+        at = f"{where}.sources[{j}] ({source.name})"
+        if effective_codes_only(source):
             errors.append(
-                f"{where}.sources[{j}] ({getattr(source, 'name', None)}): a codes-only source "
-                "can't feed the industry entry (its items are never stored as news)"
+                f"{at}: a codes-only source can't feed the industry entry "
+                "(its items are never stored as news)"
+            )
+        if not isinstance(source, RssSource):
+            why = (
+                " (a keyword search is a keyword path in)"
+                if source.type == "bluesky_search"
+                else ""
+            )
+            errors.append(
+                f"{at}: the industry entry takes only plain rss feeds, "
+                f"and this is a {source.type} source{why}"
+            )
+        if source.trust != "press":
+            errors.append(
+                f"{at}: the industry entry takes only trust: press feeds, and this one is "
+                f"trust: {source.trust} (its stories would be labeled that way)"
             )
     return errors
 

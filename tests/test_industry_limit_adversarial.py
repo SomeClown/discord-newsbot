@@ -598,9 +598,11 @@ def utf16_len(text):
 @pytest.mark.parametrize(
     ("n_games", "has_industry", "max_values", "max_games"),
     [
-        (0, True, 1, 1),
-        (1, True, 2, 2),
-        (9, True, 10, 10),
+        # Fix batch 3: max_games counts games only, so the entry no longer adds one to a
+        # small catalog's "up to N".
+        (0, True, 1, 0),
+        (1, True, 2, 1),
+        (9, True, 10, 9),
         (10, True, 11, 10),
         (11, True, 11, 10),
         (14, True, 11, 10),

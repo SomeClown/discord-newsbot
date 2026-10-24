@@ -345,6 +345,7 @@ Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-indus
 - Owner decision (2026-10-24, qa pass): drop PC Gamer's industry tag again (A). Why: across passes a story the tag feed stored first is tagged industry only, so a game's digest can lose it (breaks §18's anti-goal). Done in fix batch 3; back to four feeds.
 - Ruling (fix batch 1, round 1): chain_headlines steps to the pick with the largest items_upto <= mark (exact when there is one), the window applied to rows found. Accepted trade-off: a mark with no pick of its own behind it (a new server's first digest) can borrow the newest earlier pick from another cycle, widening priors by a story or two, instead of an empty prior that re-announces old news. Not fixed by moving marks, which would re-offer fallback headlines.
 - Ruling (fix batch 2): the alert-once rule is industry-only (game fallbacks still alert every time, pinned); skipping ok/partial/failed digests in _needs_summary_sync accepted as briefed (a failed digest retried in the grace window reads what's stored); Task 7 tests that expected free scheduled builds to call summary_for were changed to the stored-only rule, scenarios kept.
+- Ruling (fix batch 3): a source breaking two industry rules gets one refusal line per broken rule (declined the adversarial round's three "exactly one line" xfails). Why: each line names a real problem, so both get fixed at once. If wrong: a slightly longer error message.
 
 ### Parked
 - Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
@@ -373,3 +374,4 @@ Declined or deferred:
 - PC Gamer's tag can strip a game tag across passes (MEDIUM): owner decision pending.
 - Fix batch 1: complete (from 4f2a9de; gate exit 0, 15481 passed; tests first, 10 of 12 failed before; adversarial: 22 tests incl. a 7-day 5-server scenario against a reference model, 2 bugs fixed in round 1 (a mark no pick ended at broke the chain))
 - Fix batch 2: complete (from f694f37; gate exit 0, 15556 passed; tests first, 11 of 18 failed before; adversarial: 57 tests, 25 fail on the base code, no bugs)
+- Fix batch 3: complete (from 305e549; gate exit 0, 15624 passed; tests first; adversarial: ~60 cases, 3 "one line per source" findings declined; PC Gamer Industry dropped again, owner A on 2026-10-24)

@@ -42,13 +42,12 @@ owner_channel_id: 1555677520806944859
 comped_guild_ids: [100000000000000001]
 """
 
-# The brief's list, in its order: (name, url). All five are trust: press.
-FIVE_SOURCES = [
+# The brief's list, in its order: (name, url). All four are trust: press.
+FOUR_SOURCES = [
     ("GamesIndustry.biz", "https://www.gamesindustry.biz/feed/news"),
     ("Game Developer", "https://www.gamedeveloper.com/rss.xml"),
     ("VGC", "https://www.videogameschronicle.com/category/news/feed/"),
     ("Gematsu Industry", "https://www.gematsu.com/c/industry/feed"),
-    ("PC Gamer Industry", "https://www.pcgamer.com/feeds/tag/gaming-industry/"),
 ]
 
 
@@ -159,7 +158,7 @@ def test_the_extracted_list_item_is_indented_like_the_catalogs_other_items(indus
     assert industry_indents == other_indents
 
 
-def test_the_extracted_block_is_one_catalog_entry_with_the_five_sources_exactly(industry_text):
+def test_the_extracted_block_is_one_catalog_entry_with_the_four_sources_exactly(industry_text):
     parsed = yaml.safe_load("catalog:\n" + industry_text)
     assert list(parsed) == ["catalog"]
     assert len(parsed["catalog"]) == 1
@@ -168,7 +167,7 @@ def test_the_extracted_block_is_one_catalog_entry_with_the_five_sources_exactly(
     assert entry["name"] == "Gaming industry"
     assert entry["match_name"] is False
     assert not {"aliases", "entities", "search_queries"} & set(entry)
-    assert [(s["name"], s["url"]) for s in entry["sources"]] == FIVE_SOURCES
+    assert [(s["name"], s["url"]) for s in entry["sources"]] == FOUR_SOURCES
     assert {s["type"] for s in entry["sources"]} == {"rss"}
     assert {s["trust"] for s in entry["sources"]} == {"press"}
     assert set(entry) == {"key", "name", "match_name", "sources"}
@@ -276,7 +275,7 @@ def test_running_the_append_twice_is_refused_loudly(tmp_path, prod_today, indust
     message = str(err.value)
     assert "duplicate game key 'industry'" in message
     assert "the industry entry must be the last catalog entry" in message
-    for name, _ in FIVE_SOURCES:
+    for name, _ in FOUR_SOURCES:
         assert f"duplicate source name '{name}'" in message
 
 
@@ -338,7 +337,7 @@ def test_an_unknown_key_with_a_block_list_after_the_catalog_logs_a_warning(
 # --- the entry against --check-sources, with no network ---
 
 
-async def test_check_sources_for_industry_lists_exactly_the_five_sources_in_order():
+async def test_check_sources_for_industry_lists_exactly_the_four_sources_in_order():
     cfg = load_config(EXAMPLE)
     seen: list[str] = []
 
@@ -355,18 +354,18 @@ async def test_check_sources_for_industry_lists_exactly_the_five_sources_in_orde
 
     # Only the industry entry is counted.
     assert list(report.topic_counts) == ["industry"]
-    # Its group lists the five sources, in the catalog's order, each fetched cleanly.
+    # Its group lists the four sources, in the catalog's order, each fetched cleanly.
     groups = dict(_group_results(cfg, report.results))
     names = [r.source_name for r in groups["Gaming industry"]]
-    assert names == [name for name, _ in FIVE_SOURCES]
+    assert names == [name for name, _ in FOUR_SOURCES]
     assert all(r.error is None for r in groups["Gaming industry"])
-    # Each of the five URLs was requested once, and no other game's own source was.
-    for _, url in FIVE_SOURCES:
+    # Each of the four URLs was requested once, and no other game's own source was.
+    for _, url in FOUR_SOURCES:
         assert seen.count(url) == 1
     other_games_sources = {s.name for g in cfg.catalog if g.key != "industry" for s in g.sources}
     assert not other_games_sources & {r.source_name for r in report.results}
     rendered = render_check_sources_report(cfg, report, web_search_note=None)
-    for name, _ in FIVE_SOURCES:
+    for name, _ in FOUR_SOURCES:
         assert name in rendered
 
 
@@ -386,4 +385,4 @@ async def test_check_sources_for_another_game_never_touches_the_industry_feeds()
         )
 
     assert list(report.topic_counts) == ["palworld"]
-    assert not {url for _, url in FIVE_SOURCES} & set(seen)
+    assert not {url for _, url in FOUR_SOURCES} & set(seen)

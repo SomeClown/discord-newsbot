@@ -624,8 +624,8 @@ catalog:
   # acquisitions, new games and hardware announced (docs/design.md, section 18).
   # It goes last, so every game keeps its place, and it has no keywords on
   # purpose: no aliases, no entities, no search queries, and its name is never
-  # matched. Only the five feeds below feed it, so a story about one game can't
-  # wander in because the word "industry" showed up. All five came back 200
+  # matched. Only the four feeds below feed it, so a story about one game can't
+  # wander in because the word "industry" showed up. All four came back 200
   # with a feed content type when the owner fetched them from the Droplet on
   # 2026-10-23 (docs/sources-research.md, "Gaming industry feeds (2026-10-23)").
   #   GamesIndustry.biz: the trade backbone, about 4 a day. The /feed/news path,
@@ -636,18 +636,19 @@ catalog:
   #     arrive here first, and the daily pick sorts out its consumer news.
   #   Gematsu Industry: new-game announcements and Japanese studio news, about
   #     0.6 a day.
-  #   PC Gamer Industry: its gaming-industry tag, about 1.8 a day of reported
-  #     stories the trade press is slower on.
   # If announcements and console news turn out thin, the next step is a big
   # outlet's own news or industry category feed, still as a source of this entry
   # and never as keyword pulls. One catch before adding one: across passes the
   # first copy of a URL wins (a stored URL is dropped before anything is merged).
   # If an outlet's main feed (already a shared source above) carried a story in an
   # earlier pass than the category feed did, the story is stored without the
-  # industry tag. Within one pass the tags of every copy merge
-  # (collect._merge_loser_tags), so most stories still get through. PC Gamer's
-  # gaming-industry tag was left out over this at first, on a stricter reading of
-  # the rule than the code has; the owner added it back on 2026-10-23.
+  # industry tag. Worse, if the category feed stores it first, the story carries
+  # the industry tag only and the game's own digest can lose it. Within one pass
+  # the tags of every copy merge (collect._merge_loser_tags), but a failed or
+  # lagging main feed is enough to break that. PC Gamer's gaming-industry tag was
+  # added here on 2026-10-23 and dropped again on 2026-10-24, on the owner's word,
+  # for exactly this: a Palworld layoff story stored from the tag feed first
+  # would have been tagged industry only, and Palworld's digest would have lost it.
   - key: industry
     name: "Gaming industry"
     match_name: false
@@ -656,7 +657,6 @@ catalog:
       - {type: rss, name: "Game Developer", url: "https://www.gamedeveloper.com/rss.xml", trust: press}
       - {type: rss, name: "VGC", url: "https://www.videogameschronicle.com/category/news/feed/", trust: press}
       - {type: rss, name: "Gematsu Industry", url: "https://www.gematsu.com/c/industry/feed", trust: press}
-      - {type: rss, name: "PC Gamer Industry", url: "https://www.pcgamer.com/feeds/tag/gaming-industry/", trust: press}
 # <<< industry-step: end
 
 # <<< catalog-step: end
