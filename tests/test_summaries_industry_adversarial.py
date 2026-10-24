@@ -15,12 +15,24 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from test_summaries import BER, BERLIN, BERLIN_DUE, FREE, PAC, World, ago
+from test_summaries import (
+    BER,
+    BERLIN,
+    BERLIN_DUE,
+    FREE,
+    PAC,
+    FakePublisher,
+    World,
+    _noop_notify,
+    ago,
+)
 
 from newsbot.industry import INDUSTRY_KEY
 from newsbot.pipeline import summaries
+from newsbot.pipeline.guild_digest import GuildDigestDeps, run_guild_digest
 from newsbot.pipeline.industry import INDUSTRY_SYSTEM_PROMPT
 from newsbot.pipeline.prompts import build_prompt
+from newsbot.pipeline.run import RunKind
 from newsbot.pipeline.summaries import (
     _TIMEOUT_NOTE,
     dry_run_lookup,
@@ -395,6 +407,20 @@ async def test_the_second_days_pick_is_told_the_first_days_headlines(world):
     world.guild(FREE, "free", BERLIN, [INDUSTRY_KEY])
     world.item(INDUSTRY_KEY, "studio closes", ago(3))
     await prepare_summaries(world.deps())
+    # The first day's digest has to go out for the server to have been shown the pick: a
+    # cycle's prior stories are the ones its servers were shown (`repo.chain_headlines`).
+    world.clock.t = BERLIN_DUE
+    digest_deps = GuildDigestDeps(
+        cfg=world.cfg,
+        db_path=world.db_path,
+        now=world.clock,
+        publisher_for=lambda *a: FakePublisher(),
+        notify_guild=_noop_notify,
+        summary_for=summary_lookup(world.deps()),
+        sleep=world.sleep,
+        pace_s=0,
+    )
+    await run_guild_digest(digest_deps, FREE, kind=RunKind.SCHEDULED)
     next_due = BERLIN_DUE + timedelta(days=1)
     world.item(INDUSTRY_KEY, "publisher sold", next_due - timedelta(hours=3))
     world.clock.t = next_due - timedelta(minutes=20)

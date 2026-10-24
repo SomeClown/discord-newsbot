@@ -272,7 +272,13 @@ def _inputs_sync(
             after_id=items_after,
             upto_id=upto,
         )
-        prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
+        if game.key == INDUSTRY_KEY:
+            # One pick per distinct digest time, over nearly the same items: the stories the
+            # 08:00 server was shown aren't "already covered" for the 09:00 server. Only the
+            # asking cycle's own chain is prior (see `repo.chain_headlines`).
+            prior = repo.chain_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW, items_after)
+        else:
+            prior = repo.recent_headlines(conn, game.key, end - _PRIOR_HEADLINE_WINDOW)
         followed = {f.game_key for f in repo.comped_follows(conn)}
     # The same cap `filter_items` applied in v2: confident before uncertain, then
     # trust, then recency, and only the top N make it to the model.

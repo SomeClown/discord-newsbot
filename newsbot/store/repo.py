@@ -210,6 +210,80 @@ def recent_headlines(conn: sqlite3.Connection, topic_key: str, since: datetime) 
     ]
 
 
+def chain_headlines(
+    conn: sqlite3.Connection, topic_key: str, since: datetime, mark: int | None
+) -> list[PriorStory]:
+    """Headlines `since` that servers standing at item id `mark` were shown, newest first.
+
+    `recent_headlines` for a pick that is made once per distinct digest time. A game has
+    one history, so every story of the last days is "prior". The industry pick is made for
+    each cycle over nearly the same items, so that history would hand the 08:00 server's
+    stories to the 09:00 server's pick as "already covered", and that server would never
+    hear them. What a cycle's servers were shown is on their chain: the pick that ended at
+    their mark (`items_upto == mark`), the pick that ended where that one began, and so
+    on back through `items_after`, as far as `since`. A fallback pick has no stories but
+    keeps the chain linked.
+
+    A mark isn't always a number a pick ended at. A digest records its own range end when
+    it had no pick to go by (a fallback day, a free run-now with nothing stored), and an
+    item usually lands between a pick and its digest, so that mark is newer than the pick
+    behind it. Servers at such a mark were shown the newest pick before it, so with no
+    exact match the walk takes the pick with the largest `items_upto` below the mark (the
+    age window applies to what it finds, not to the search, so an old chain ends instead
+    of borrowing some other cycle's pick). The cost is a mark with no pick of its own
+    behind it, such as a server's first digest with nothing stored, which can borrow the
+    newest pick before it, even another cycle's. That widens the prior list by a story
+    or two; the alternative was an empty list, which announces old news again.
+
+    When two cycles' picks happen to end at the same item, a server on that mark saw one
+    of them and nothing here says which, so both count ("could have been shown" is the
+    narrowest rule the records support). No mark (a first digest) has no prior stories.
+    """
+    if mark is None:
+        return []
+    since_iso = _utc_iso(since)
+    summary_ids: list[int] = []
+    seen = {mark}
+    pending = [mark]
+    while pending:
+        at = pending.pop()
+        # The pick that ended exactly here or, with none, the newest one before this mark
+        # (see above). One query: "the largest `items_upto` not past the mark" is both.
+        rows = conn.execute(
+            "SELECT id, items_after, created_at FROM game_summaries WHERE game_key = ? "
+            "AND items_upto = (SELECT MAX(items_upto) FROM game_summaries "
+            "WHERE game_key = ? AND items_upto <= ?)",
+            (topic_key, topic_key, at),
+        ).fetchall()
+        for row in rows:
+            if row["created_at"] < since_iso:
+                continue
+            summary_ids.append(row["id"])
+            before = row["items_after"]
+            if before is not None and before not in seen:
+                seen.add(before)
+                pending.append(before)
+    found: list[sqlite3.Row] = []
+    for i in range(0, len(summary_ids), _SQLITE_VARIABLE_CHUNK):
+        chunk = summary_ids[i : i + _SQLITE_VARIABLE_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        # placeholders is a string of literal "?"s sized to the chunk; the values are bound.
+        query = (
+            "SELECT id, headline, created_at FROM stories "  # noqa: S608
+            f"WHERE topic_key = ? AND created_at >= ? AND summary_id IN ({placeholders})"
+        )
+        found.extend(conn.execute(query, (topic_key, since_iso, *chunk)).fetchall())
+    found.sort(key=lambda row: row["created_at"], reverse=True)
+    return [
+        PriorStory(
+            id=row["id"],
+            headline=row["headline"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+        for row in found
+    ]
+
+
 def _insert_items(
     conn: sqlite3.Connection, items: list[StoredItem], now_iso: str
 ) -> tuple[dict[str, int], int]:
