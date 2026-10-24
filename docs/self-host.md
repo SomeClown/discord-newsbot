@@ -136,7 +136,8 @@ want it narrower or broader.
 - **`ANTHROPIC_API_KEY`** (required to start): the bot summarizes each day's
   items with Claude Haiku, but **only for comped servers**, the ones listed in
   `comped_guild_ids`. Any other server gets the free tier, a plain headline
-  list with no AI in it. On a copy that serves your own server, list your own
+  list with no AI in it (the Gaming industry pick, below, is the exception).
+  On a copy that serves your own server, list your own
   server there (§4), or you'll be reading the headline version of your own bot.
   The Anthropic console requires prepaid credits before
   a key can make any calls at all (there's no pay-later or free tier for
@@ -145,11 +146,13 @@ want it narrower or broader.
   **$0.30 to $0.60 a month** (a handful of dollars of prepaid credit
   covers a long time). Summaries are made once per game and reused, so a
   second comped server on the same schedule costs next to nothing extra.
-  The "Gaming industry" entry (§4) adds one more Haiku call per distinct
-  digest time, a fraction of a cent a day, and it's made for free servers too:
-  they get the pick's stories as headlines. So a copy with no comped servers
-  at all still spends that, as long as one server follows the entry and the
-  config still has it.
+  The "Gaming industry" entry (§4) adds one more Haiku call per digest time
+  that servers share, made only by the 5-minute summaries job and never more
+  than one per pass. That's a handful of calls a day, a few cents at most; the
+  hard ceiling is 288 a day, well under a dollar at current prices. It's made
+  for free servers too: they get the pick's stories as headlines. So a copy
+  with no comped servers at all still spends that, as long as one server
+  follows the entry and the config still has it.
 - **`BRAVE_API_KEY`** (optional): powers the `web_search:` block, which
   catches press coverage not already in your RSS list. It runs once a day,
   for games a comped server follows. Free tier math
@@ -203,15 +206,17 @@ The file has three jobs:
 (`key: industry`) for news that isn't about any one game: studios closing,
 layoffs, acquisitions, new games and hardware announced. It's optional.
 Delete the whole entry, which sits between the `industry-step` markers, and
-the bot is the one you had before; a server that was following it gets a note
-that it's gone and keeps its games. If you keep it, the config loader holds it
+nothing else depends on it. After that, each server that followed it gets an
+"industry: not in the catalog any more, skipped" note and a partial digest
+until an admin saves `/newsbot setup` again (`/newsbot unfollow` can't remove
+it). If you keep it, the config loader holds it
 to some rules and refuses to start when it breaks one: it is the last entry
 in the catalog; `match_name: false`; no `aliases`, `entities` or
-`search_queries`; at least one source of its own, none of them codes-only or
-a `shift_table`; and no `shared_sources:` entry or `shift.games` list names
-it. There are no keywords on purpose: only its own trade-press feeds (five in the example)
+`search_queries`; at least one source of its own, every one of them `type: rss`
+with `trust: press`; and no `shared_sources:` entry or `shift.games` list names
+it. There are no keywords on purpose: only its own trade-press feeds (four in the example)
 reach it, so a story about one game can't wander in. A server follows it like
-a game, in a channel of its own, and it doesn't count toward the 10-game
+a game, in whatever channel you give it (`/newsbot follow` gives it its own), and it doesn't count toward the 10-game
 limit. It posts at most 5 stories a day, picked by one Claude call (§3 has the
 cost).
 
@@ -636,7 +641,9 @@ database; if bad data (not bad code) is the problem, restore from a backup
 instead ([`docs/deploy.md` §9, "Restore from backup"](deploy.md#restore-from-backup)
 has the restore procedure, database path aside). Check the version you're
 rolling back past for a breaking config change first. [`docs/deploy.md`
-§8](deploy.md#8-rollback) lists the older ones.
+§8](deploy.md#8-rollback) lists the older ones. A copy that kept the Gaming
+industry entry can't roll back to 3.2.x without removing the entry from its
+config first (3.2.x refuses the config); the database needs no restore.
 
 ## 12. One bot for several servers, or one copy each
 

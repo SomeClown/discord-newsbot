@@ -11,8 +11,9 @@ codes, and members can ask it for recent news or search it on demand.
 
 There's one more entry in the catalog, "Gaming industry", for news that isn't
 about any one game: studios closing, layoffs, acquisitions, new games and
-hardware announced. A server follows it like a game, in a channel of its own,
-and it posts at most 5 stories a day.
+hardware announced. A server follows it like a game, in whatever channel you
+give it (`/newsbot follow` gives it its own), and it posts at most 5 stories a
+day.
 
 It started as one bot for one ~50-person server and three games. Since v3.0
 it's one bot that any server can install: the maintainer runs a public copy,
@@ -112,7 +113,7 @@ exceeded"), if there is one that day, rides along in that game's embed footer.
 
 **Gaming industry** is the exception to "one message per game". It posts last,
 after a server's games, and holds at most 5 stories however many the day had.
-Once a day Claude reads what the five trade-press feeds collected (studio
+Once a day Claude reads what the four trade-press feeds collected (studio
 closures, layoffs, acquisitions, new games and hardware announced, platform
 and policy changes; not executive hires, earnings footnotes, job ads or
 sponsored posts) and picks the stories that matter, most significant first.
@@ -388,8 +389,8 @@ thin adapter on top of it. Three jobs do the real work:
   sources once, normalize, dedupe, filter by game, store the items, run
   SHiFT detection, and queue codes for each server.
 - **Summaries every 5 minutes** (`pipeline/summaries.py`): make the comped
-  servers' Claude summaries ahead of time, once per game per cycle, so a
-  digest never waits on Claude.
+  servers' Claude summaries, and the Gaming industry pick, ahead of time,
+  once per game per cycle, so a digest never waits on Claude.
 - **Digests every minute** (`pipeline/guild_digest.py`, `guilds/schedule.py`):
   find the servers whose local digest time has passed with no digest for their
   day, then claim, render, post and save each one. Catch-up after downtime
@@ -552,9 +553,12 @@ example, and [`docs/design.md`](docs/design.md) (§3 for the original shape,
   The **Gaming industry** entry (`key: industry`) goes last, and it's picked
   out by that key, not by a flag. Its rules are checked at startup and a break
   stops the bot: `match_name: false`, no `aliases`, `entities` or
-  `search_queries`, at least one source of its own, none of them codes-only, no
-  `shift_table`, no shared source or `shift.games` entry naming it. Delete the
-  entry and the bot works as it did before; nothing else depends on it.
+  `search_queries`, at least one source of its own, every one of them `type:
+  rss` with `trust: press`, no shared source or `shift.games` entry naming it.
+  Nothing else depends on the entry, so you can delete it. After that, each
+  server that followed it gets an "industry: not in the catalog any more,
+  skipped" note and a partial digest until an admin saves `/newsbot setup`
+  again (`/newsbot unfollow` can't remove it).
 - **`sources`** (under a game, or in **`shared_sources`** for feeds that cover
   many games): `rss`, `steam_news` and `bluesky_search` (plus `shift_table`,
   under a game only; see "SHiFT code alerts" below), each with a `trust`
@@ -592,15 +596,14 @@ comped server following three games:
   game per cycle and shared, so a second comped server on the same schedule
   costs next to nothing extra; servers on different schedules get their own.
   Free servers cost nothing here, with one exception below.
-- **Claude, Gaming industry**: one Haiku call per distinct digest cycle (the
-  servers that follow it and post at the same time share one pick), a handful
-  of calls a day and a fraction of a cent in all, however many servers there
-  are. It's made for free servers too, since they get the pick's stories as
-  headlines, so this cost is there even if no server is comped. A free server
-  whose digests keep failing, or whose run-now fell back to the newest
-  headlines, can end up making a call of its own the next day. A free
-  server's `/newsbot preview` and run-now never call a model: they show the
-  stored pick, or the newest headlines if there isn't one.
+- **Claude, Gaming industry**: one Haiku call per digest time that servers
+  share (they share one pick), made only by the 5-minute summaries job, never
+  more than one call per pass. That's a handful of calls a day, a few cents at
+  most; the hard ceiling is 288 a day, well under a dollar at current prices.
+  It's made for free servers too, since they get the pick's stories as
+  headlines, so this cost is there even if no server is comped. A free
+  server's digest, `/newsbot preview` and run-now never call a model: they
+  show the stored pick, or the newest headlines if there isn't one.
 - **Brave Search**: 2 queries per game per day, only for games a comped server
   follows, so about **6 requests a day** and roughly **180 a month** for
   three games (comfortably inside Brave's free tier). It doesn't grow with the
@@ -613,9 +616,9 @@ comped server following three games:
 
 ## Limitations and known issues
 
-- **Gaming industry is trade press only.** Five feeds feed it (GamesIndustry.biz,
-  Game Developer, VGC's news category, Gematsu's industry feed and PC Gamer's
-  industry tag) and nothing else: no search, no keyword pulls from the general
+- **Gaming industry is trade press only.** Four feeds feed it (GamesIndustry.biz,
+  Game Developer, VGC's news category and Gematsu's industry feed) and nothing
+  else: no search, no keyword pulls from the general
   press, no Reddit. A story that none of them runs doesn't appear, and the
   trade press is sometimes a day behind the consumer outlets on a reported
   story. Rumors from those outlets are allowed and keep their label on a
