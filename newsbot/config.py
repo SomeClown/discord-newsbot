@@ -43,6 +43,7 @@ from pydantic import (
     model_validator,
 )
 
+from newsbot.industry import INDUSTRY_KEY
 from newsbot.lounge.default_sources import DEFAULT_WIKIQUOTE_PAGES
 from newsbot.lounge.welcome import ALLOWED_PLACEHOLDERS, unknown_placeholders, worst_case_length
 from newsbot.reddit import is_reddit_host
@@ -1278,6 +1279,36 @@ def _skip_pointless_reddit(cfg: AppConfig) -> AppConfig:
     return cfg.model_copy(update={"catalog": catalog, "shared_sources": shared})
 
 
+def _industry_problems(cfg: AppConfig, i: int, game: GameCfg) -> list[str]:
+    """What the industry entry has to look like (design.md §18).
+
+    Its stories come from its own feeds and the model's pick, never from a game's
+    keywords, so anything that would let a keyword or a search query reach it is an
+    error here. These are startup errors on purpose (owner, 2026-10-23): a quiet
+    warning is how an entry ends up doing the wrong job for a month. A `shift_table`
+    under it is reported by `_shift_table_game_problems`, so it isn't repeated.
+    """
+    where = f"catalog[{i}] ({INDUSTRY_KEY})"
+    errors = [
+        f"{where}: {field} must be empty (the industry entry is never keyword-matched or searched)"
+        for field in ("aliases", "entities", "search_queries")
+        if getattr(game, field)
+    ]
+    if game.match_name:
+        errors.append(f"{where}: match_name must be false (nothing is ever matched by name)")
+    if i != len(cfg.catalog) - 1:
+        errors.append(f"{where}: the industry entry must be the last catalog entry")
+    if not game.sources:
+        errors.append(f"{where}: the industry entry needs at least one source")
+    for j, source in enumerate(game.sources):
+        if not isinstance(source, ShiftTableSource) and effective_codes_only(source):
+            errors.append(
+                f"{where}.sources[{j}] ({getattr(source, 'name', None)}): a codes-only source "
+                "can't feed the industry entry (its items are never stored as news)"
+            )
+    return errors
+
+
 def _v3_problems(cfg: AppConfig) -> list[str]:
     """Cross-checks on a v3 catalog: keys, sources, and everything that names a game."""
     errors: list[str] = []
@@ -1293,7 +1324,9 @@ def _v3_problems(cfg: AppConfig) -> list[str]:
         if game.key in keys:
             errors.append(f"duplicate game key {game.key!r}")
         keys.add(game.key)
-        if not game.match_name and not game.aliases:
+        if game.key == INDUSTRY_KEY:
+            errors += _industry_problems(cfg, i, game)
+        elif not game.match_name and not game.aliases:
             errors.append(
                 f"match_name is false for {game.key} but it has no aliases, "
                 "so nothing would ever match"
@@ -1324,10 +1357,18 @@ def _v3_problems(cfg: AppConfig) -> list[str]:
         for g in shared.games or []:
             if g not in keys:
                 errors.append(f"shared_sources[{j}] ({shared.name}) names unknown game {g!r}")
+            elif g == INDUSTRY_KEY:
+                errors.append(
+                    f"shared_sources[{j}] ({shared.name}): the industry entry takes only its own "
+                    "dedicated sources, so a shared source can't list it in games: "
+                    "(a shared feed would be a keyword path in)"
+                )
 
     for g in cfg.shift.games:
         if g not in keys:
             errors.append(f"shift.games names unknown game {g!r}")
+        elif g == INDUSTRY_KEY:
+            errors.append("shift.games can't include industry (it has no SHiFT codes)")
 
     # source_health is keyed by name, so the check spans every place a source can live.
     names = [s.name for game in cfg.catalog for s in game.sources]
@@ -1529,6 +1570,11 @@ def load_config(path: str | Path) -> AppConfig:
                 if scope[0] not in seen_keys:
                     continue
             derivable.append(source)
+        errors += [
+            f"topics[{i}] ({INDUSTRY_KEY}): the industry entry needs the v3 catalog: shape"
+            for i, topic in enumerate(cfg.topics)
+            if topic.key == INDUSTRY_KEY
+        ]
         games, shared, web_search = _derive_catalog(cfg.topics, derivable)
         if "shared_sources" in raw:
             errors.append("shared_sources needs a catalog: (the v2 shape derives its own)")

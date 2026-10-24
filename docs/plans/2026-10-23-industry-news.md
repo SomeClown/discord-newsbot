@@ -299,3 +299,16 @@ On the owner's Mac, on this branch with the venv active, from the repo root:
 A separate setting or command (§18 1B); per-server topic tuning; breaking-news posts; Brave or keyword sources for industry; a different effort or model for industry; the privacy and terms pages, the architecture drawing, `config.minimal.yaml` and Reddit; deleting the classic SHiFT layout (on or after 2026-11-06); CLAUDE.md (the orchestrator, at the end).
 
 ## Build log
+
+Gate: `source .venv/bin/activate && ruff check . && ruff format --check . && pytest -q` (expect: the 2 APScheduler xfails only)
+Branch: feat/industry-news, from c643215 (main at 38b1e61 plus the design and plan commits)
+Work dir: /Users/someclown/dev/discord-newsbot/.git/foundry-run/2026-10-23-industry-news/
+
+### Progress
+- Task 1: complete (from c643215; gate exit 0, 14680 passed; tests first, 18 of 22 failed before; adversarial: 71 cases, no bugs)
+
+### Decisions made during the build
+
+### Parked
+- Task 1: the 25-entry catalog cap counts industry (one of the ~3 spare menu slots); a hybrid file with `alerts.topics: [industry]` loads (the import ignores it); a source name with a newline prints raw in the codes-only message, as the existing messages do. All harmless today.
+
