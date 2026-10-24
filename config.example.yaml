@@ -185,6 +185,15 @@ shared_sources:
     url: "https://www.bungie.net/en/Rss/News"
     games: [destiny2]
     trust: official
+  # Epic's public status page: the one Epic feed that isn't behind a Cloudflare
+  # challenge. Each Fortnite patch gets a "Fortnite: Downtime for vNN.NN Update"
+  # post; the rest is Epic Online Services and the store, so it's restricted to
+  # Fortnite by keyword the way Bungie News is to Destiny 2.
+  - type: rss
+    name: "Epic Games Status"
+    url: "https://status.epicgames.com/history.rss"
+    games: [fortnite]
+    trust: official
   - type: rss
     name: "PC Gamer"
     url: "https://www.pcgamer.com/rss/"
@@ -328,17 +337,24 @@ catalog:
 
   - key: fortnite
     name: "Fortnite"
-    aliases: []
+    # Whole-word matching means "Fortnitemares" (the Halloween event) never
+    # matched "Fortnite"; FNCS is the competitive series' own name.
+    aliases: ["Fortnitemares", "FNCS"]
     # "Epic Games" left out on purpose: it mostly matches the weekly Epic
     # Games Store freebie stories.
     entities: []
     search_queries:
       - "Fortnite news"
       - "Fortnite update OR season OR patch notes"
-    # No official source could be verified (fortnite.com/news returns 403; no
-    # domain-verified Bluesky account; not on Steam), and its subreddit is no
-    # longer a source (see r/Borderlands4 above). Coverage is keyword matches
-    # from the shared press feeds.
+    # Every Epic and Fortnite site (fortnite.com/news, epicgames.com,
+    # fortniteinsider.com, fortnite.gg) answers with a Cloudflare challenge,
+    # even from a home connection; there's no domain-verified Bluesky account,
+    # it isn't on Steam, and its subreddit is no longer a source (see
+    # r/Borderlands4 above). Epic's status page is in the shared sources below,
+    # restricted to Fortnite by keyword. Insider Gaming's tag feed got through
+    # from the Droplet on 2026-10-23 (about 4 a week).
+    sources:
+      - {type: rss, name: "Insider Gaming Fortnite", url: "https://insider-gaming.com/tag/fortnite/feed/", trust: press}
 
   - key: callofduty
     name: "Call of Duty"
@@ -376,9 +392,14 @@ catalog:
     search_queries:
       - "VALORANT news"
       - "VALORANT patch notes OR agent OR VCT"
-    # The domain-verified VALORANT and Riot Games Bluesky accounts both
-    # returned 0 items, and playvalorant.com has no RSS, so there is no
-    # source of its own; keyword matches from the shared press feeds only.
+    # Nothing official: the domain-verified VALORANT and Riot Games Bluesky
+    # accounts have never posted, VCT Americas last posted in December 2024,
+    # and playvalorant.com, valorantesports.com and riotgames.com have no RSS.
+    # Insider Gaming's tag feed (game and esports news, about 9 a week) got
+    # through from the Droplet on 2026-10-23. vlr.gg/rss works too, but it's
+    # about 30 esports-only posts a week, which would crowd out everything else.
+    sources:
+      - {type: rss, name: "Insider Gaming VALORANT", url: "https://insider-gaming.com/tag/valorant/feed/", trust: press}
 
   - key: cs2
     name: "Counter-Strike 2"
@@ -451,19 +472,25 @@ catalog:
 
   - key: ffxiv
     name: "Final Fantasy XIV"
-    # "Evercold" (from one PCGamesN headline) was dropped on 2026-09-30:
-    # nobody could confirm what it is, and an unverified alias is noise.
-    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail"]
+    # "Evercold" was dropped on 2026-09-30 as unconfirmed and came back on
+    # 2026-10-23: the official account names it as the next expansion.
+    aliases: ["FFXIV", "FF14", "Final Fantasy 14", "Dawntrail", "Evercold"]
     entities: ["Naoki Yoshida"]               # "Square Enix" dropped: every other Square Enix game
     search_queries:
       - "\"Final Fantasy XIV\" OR FFXIV news"
       - "FFXIV patch OR update OR \"Live Letter\""
     # The Lodestone's own feeds (news.xml and topics.xml) were dropped on
     # 2026-10-04: they load fine from a home connection but return 403 to the
-    # Droplet's datacenter address, every pass. Steam plus the press feeds
-    # carry the patches and Live Letters well enough.
+    # Droplet's datacenter address, every pass. On 2026-10-23 the same went for
+    # everything else on Square Enix's hosting (the EU Lodestone, the FFXIV blog,
+    # the official forum's notices feed) and for Siliconera. The official
+    # English account on Bluesky (en.finalfantasyxiv.com, about 19 posts a week,
+    # maintenance notices included) and Massively Overpowered's tag feed both
+    # got through.
     sources:
       - {type: steam_news, name: "Final Fantasy XIV Steam", app_id: 39210, trust: official}
+      - {type: rss, name: "Final Fantasy XIV Bluesky", url: "https://bsky.app/profile/did:plc:aquzm76xau5oikuadmsjbrhb/rss", trust: official}
+      - {type: rss, name: "Massively OP FFXIV", url: "https://massivelyop.com/tag/final-fantasy-xiv/feed/", trust: press}
 
   - key: aniimo
     name: "Aniimo"
@@ -503,13 +530,17 @@ catalog:
     search_queries:
       - "\"ARC Raiders\" news"
       - "\"ARC Raiders\" update OR patch OR expedition"
-    # Steam is the only dedicated source. arcraiders.com/news has no RSS (it's a
-    # Next.js page with no feed link), @arcraiders.bsky.social is a fan account
-    # by its own bio, and Embark's domain-verified Bluesky has never posted.
-    # Steam carries the patch notes and announcements about weekly, and the
-    # shared press feeds cover the rest by keyword.
+    # Nothing official beyond Steam. arcraiders.com/news has no RSS (it's a
+    # Next.js page with no feed link, and its sitemap 500s), @arcraiders.bsky.social
+    # is a fan account by its own bio, Embark's domain-verified Bluesky has still
+    # never posted (2026-10-23), and Embark's own blog feed is engineering posts.
+    # Steam carries the patch notes about weekly. Insider Gaming's tag feed (about
+    # 6 a week, half of them blueprint guides) got through from the Droplet on
+    # 2026-10-23; PC Gamer's and PCGamesN's tag feeds work too but add nothing
+    # their main feeds (shared, below) don't already bring.
     sources:
       - {type: steam_news, name: "ARC Raiders Steam", app_id: 1808500, trust: official}
+      - {type: rss, name: "Insider Gaming ARC Raiders", url: "https://insider-gaming.com/tag/arc-raiders/feed/", trust: press}
 
   - key: valheim
     name: "Valheim"

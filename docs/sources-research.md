@@ -283,3 +283,45 @@ The owner asked for ARC Raiders as the 16th game (it goes last in the catalog, s
 Aliases and entities: alias `ArcRaiders` only. Bare "Arc" and bare "Raiders" (an NFL team) are too generic. Embark Studios is not an entity because its other game is THE FINALS, and a free server would see those stories as ARC Raiders headlines. The name itself is distinctive, so `match_name` stays true.
 
 Because Steam is the only dedicated source, the game's digest depends on weekly patch notes plus press matches; that's thin but real.
+
+## Thin games: more sources (2026-10-23)
+
+Fortnite and VALORANT had no source of their own, and ARC Raiders and Final Fantasy XIV had only Steam. Candidates were found and fetched from a residential macOS connection with the bot's User-Agent format, parsed with the bot's own `feedparser`, and then fetched once more **from the Droplet** by the owner, because a feed that works from home proves nothing about a datacenter address (the Lodestone taught that one). Only shapes the collectors read were considered: RSS and Atom, official Bluesky profile RSS, Discourse group feeds. No Reddit, no YouTube, no scraping.
+
+### From the Droplet
+
+| URL | Droplet | Verdict |
+|---|---|---|
+| `bsky.app/profile/did:plc:aquzm76xau5oikuadmsjbrhb/rss` (FFXIV, `en.finalfantasyxiv.com`) | 200 | Added, official |
+| `massivelyop.com/tag/final-fantasy-xiv/feed/` | 200 | Added, press |
+| `forum.square-enix.com/ffxiv/external.php?type=RSS2&forumids=621,623,624` | 403 | Out |
+| `www.siliconera.com/tag/final-fantasy-xiv/feed/` | 403 | Out |
+| `eu.finalfantasyxiv.com/lodestone/news/topics.xml` | 403 | Out (same as the NA Lodestone) |
+| `na.finalfantasyxiv.com/blog/atom.xml` | 403 | Out |
+| `status.epicgames.com/history.rss` | 200 | Added, shared, `games: [fortnite]`, official |
+| `insider-gaming.com/tag/fortnite/feed/` | 200 | Added, press |
+| `www.dexerto.com/feed/category/fortnite/` | 200 | Not added (owner: 2A) |
+| `insider-gaming.com/tag/valorant/feed/` | 200 | Added, press |
+| `www.vlr.gg/rss` | 200 | Not added: about 30 esports-only posts a week |
+| `insider-gaming.com/tag/arc-raiders/feed/` | 200 | Added, press |
+| `kotaku.com/tag/arc-raiders/feed` | 200 | Not added (owner: 4A) |
+
+Everything on Square Enix's own hosting 403s from the datacenter, so FFXIV's official news reaches the bot through its Bluesky account or not at all. That account posts about 19 times a week, maintenance notices included.
+
+### What didn't work, so nobody checks it again
+
+- **Fortnite:** `fortnite.com/news`, `epicgames.com` (news and newsroom), `fortniteinsider.com` and `fortnite.gg` all answer with a Cloudflare challenge (403), even from home. No domain-verified Bluesky account. Not on Steam. Epic's status page is the one Epic feed that answers; it posts a "Fortnite: Downtime for vNN.NN Update" item per patch, and the rest is Epic Online Services and the store, hence the keyword restriction. Its scheduled-maintenance items carry the maintenance date, which can be in the future; that's harmless, because digests pick items by when they were collected, so a future-dated item shows up once, early.
+- **VALORANT:** the domain-verified VALORANT and Riot Games Bluesky accounts have never posted, VCT Americas last posted on 2024-12-11, and `playvalorant.com`, `valorantesports.com` and `riotgames.com` have no feed. vlr.gg's feed is fine but esports only, and only about 1 title in 20 says "Valorant", so it could only ever be a dedicated source, and at about 30 a week it would bury the game news.
+- **ARC Raiders:** Embark's domain-verified Bluesky still has no posts, `arcraiders.com` still has no feed (and its sitemap returns 500), and Embark's own blog feed is an engineering series. PC Gamer's and PCGamesN's ARC Raiders tag feeds work but only repeat what their main feeds (already shared sources) bring.
+- **FFXIV:** the routes that work from home but not from the Droplet are in the table above.
+
+### Keywords
+
+- `Evercold` is back for FFXIV: the official account names it as the next expansion ("Bastion, a new main tank, will arrive with Evercold"). It was dropped on 2026-09-30 as unconfirmed.
+- `Fortnitemares` and `FNCS` for Fortnite. Matching is by whole word, so "Fortnitemares" never counted as a Fortnite mention.
+
+### Owner decisions (2026-10-23)
+
+1A (FFXIV: the Bluesky account, Massively OP, and `Evercold`), 2A (Fortnite: Epic's status page by keyword, Insider Gaming, and the two aliases; no Dexerto), 3A (VALORANT: Insider Gaming; no vlr.gg), 4A (ARC Raiders: Insider Gaming; no Kotaku).
+
+`--check-sources` for the four games afterwards, from home: every new source ok (Insider Gaming 10 items each, the FFXIV account 30, Massively OP 50, Epic's status page 25).
