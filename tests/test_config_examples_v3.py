@@ -54,17 +54,20 @@ def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order()
     assert len(cfg.catalog) == 21
 
 
-def test_arc_raiders_keeps_steam_as_its_only_source():
+def test_arc_raiders_has_steam_first_and_one_press_tag_feed():
     # Added 2026-10-04 at the end so the first three keep their order. Steam is its only
-    # source (no official feed or Bluesky exists, and Reddit is codes only), and the studio
+    # official source (no official feed or Bluesky exists, and Reddit is codes only);
+    # Insider Gaming's tag feed joined on 2026-10-23, checked from the Droplet. The studio
     # isn't an entity because Embark's other game is THE FINALS.
     game = next(g for g in load_config(EXAMPLE).catalog if g.key == "arcraiders")
     assert (game.key, game.name) == ("arcraiders", "ARC Raiders")
     assert game.aliases == ["ArcRaiders"] and game.entities == []
     assert game.match_name is True
-    assert [(s.type, s.name, s.app_id, s.trust) for s in game.sources] == [
-        ("steam_news", "ARC Raiders Steam", 1808500, "official")
+    assert [(s.type, s.name, s.trust) for s in game.sources] == [
+        ("steam_news", "ARC Raiders Steam", "official"),
+        ("rss", "Insider Gaming ARC Raiders", "press"),
     ]
+    assert game.sources[0].app_id == 1808500
     assert len(game.search_queries) == 2
 
 
