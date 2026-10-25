@@ -311,7 +311,7 @@ def test_a_fold_that_changes_length_does_not_shift_the_cut():
         ("🔵 REPORTED - free codes", "official", "• 🟢 OFFICIAL · free codes \u2014 <" + URL + ">"),
         ("Official patch notes", "community", "• Official patch notes \u2014 <" + URL + ">"),
         ("✅ Patch\n  notes", "community", "• ✅ Patch notes \u2014 <" + URL + ">"),
-        ("✅ OFFICIAL", "community", "• ✅ OFFICIAL \u2014 <" + URL + ">"),
+        ("✅ OFFICIAL", "community", "• OFFICIAL \u2014 <" + URL + ">"),
     ],
 )
 def test_a_feed_title_cannot_pose_as_the_official_marker(title, trust, shown):

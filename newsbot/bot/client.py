@@ -51,6 +51,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from discord import app_commands
 
 from newsbot.bot.format import (
+    _MONTH_NAMES,
     RenderedAlert,
     RenderedDigest,
     esc,
@@ -168,22 +169,6 @@ HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not 
 _RETENTION_DAYS = 90
 # `app_state` key guarding the daily owner report against a second send.
 _OWNER_REPORT_KEY = "owner_report_date"
-# English month names for the owner's report, spelled out here because `strftime("%B")` follows
-# whatever locale the container happens to have, and the report should not.
-_MONTH_NAMES = (
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-)
 # `app_state` key prefix remembering that a server was told about the digest v2.2 left stuck.
 _STUCK_V22_KEY = repo.STUCK_V22_KEY_PREFIX
 _HEARTBEAT_INTERVAL_S = 60
