@@ -377,3 +377,4 @@ Declined or deferred:
 - Fix batch 2: complete (from f694f37; gate exit 0, 15556 passed; tests first, 11 of 18 failed before; adversarial: 57 tests, 25 fail on the base code, no bugs)
 - Fix batch 3: complete (from 305e549; gate exit 0, 15624 passed; tests first; adversarial: ~60 cases, 3 "one line per source" findings declined; PC Gamer Industry dropped again, owner A on 2026-10-24)
 - Fix batch 4: complete (from 9b34415; gate exit 0, 15624 passed; docs and legal wording only, no adversarial round; legal text pending owner approval)
+- Shipped: PR #71 merged as 1e9f0ed, tagged v3.3.0 (image checked locally first), deployed by the owner 2026-10-24 after 11:07 PT; prod config got the industry block by the awk append (validated 22 games, industry last; `--check-sources --game industry` from the Droplet: 9 ok, 0 failed).
