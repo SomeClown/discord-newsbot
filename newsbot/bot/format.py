@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -30,6 +31,7 @@ import discord
 
 from newsbot.bot import terminal
 from newsbot.config import GameInfo, Topic
+from newsbot.discord_links import is_discord_invite
 from newsbot.pipeline.normalize import canonicalize
 from newsbot.pipeline.summarize import StoryDraft, estimate_spend_usd
 from newsbot.shift.decide import CodeCandidate, group_roundups
@@ -252,8 +254,24 @@ def _safe_link(url: str) -> str | None:
     return canonicalize(url)
 
 
+def _shown_link(url: str) -> str | None:
+    """`_safe_link`, or None if the page is a Discord invite: the link a reader may be shown.
+
+    A hijacked feed can point an item at `discord.gg/...` and still carry a real code, and
+    items stored before v3.3.1 can still be in the store. The code (or the headline) and
+    its source name go out as always; only the link is left off, because printing it would
+    be a live invite. Shorter than with a link, so the edit reserve never notices. The
+    check runs on the URL as given and on its canonical form, in case canonicalizing
+    ever turns one into the other.
+    """
+    safe = _safe_link(url)
+    if safe is None or is_discord_invite(url) or is_discord_invite(safe):
+        return None
+    return safe
+
+
 def _link_line(urls: list[str]) -> str:
-    safe_urls = [safe for url in urls if (safe := _safe_link(url)) is not None]
+    safe_urls = [safe for url in urls if (safe := _shown_link(url)) is not None]
     shown = safe_urls[:_MAX_LINKS_SHOWN]
     # `<url>` (angle brackets) tells Discord "link this, but don't expand
     # it into a preview card": without that, three or four stacked link
@@ -265,10 +283,76 @@ def _link_line(urls: list[str]) -> str:
     return line
 
 
+def _one_line(text: str) -> str:
+    """The model's headline or summary with every whitespace run (line breaks too) as one space.
+
+    Both are written by a model that has read a feed excerpt, and an excerpt can
+    talk it into a summary with a blank line and a `🟢 OFFICIAL · ...` of its own,
+    which renders as a second story block wearing a marker nobody earned. The
+    label was already downgraded; the line break was the loophole. Stored text is
+    left alone (this runs at render time), and a normal one-line summary comes out
+    byte for byte as it went in. `split()` with no argument breaks on every kind of
+    whitespace, the same trick `_headline_line` plays on titles.
+    """
+    return " ".join(text.split())
+
+
+# The bot's own label markers, as a model could write them with no help from a newline: the
+# emoji alone, the emoji and its word, or the word followed by the separator. Case matters
+# (the real ones are upper case, and "Official patch notes" is ordinary text). Invisible
+# characters in front are allowed, because they don't stop a line looking like it starts
+# with the marker: any format character (category Cf: zero-width, bidi controls, the soft
+# hyphen) plus two that Unicode files under other categories but render as nothing (U+034F,
+# U+180E).
+
+
+def _invisible(char: str) -> bool:
+    return unicodedata.category(char) == "Cf" or char in "\u034f\u180e"
+
+
+_LEADING_MARKER_RE = re.compile(
+    "(?:"
+    + "|".join(
+        f"{emoji}\ufe0f?(?: {word})?|{word}(?= ·)"
+        for emoji, word in (
+            marker.split(" ") for marker in (*_LABEL_MARKER.values(), _UPDATE_MARKER)
+        )
+    )
+    + ")(?: ·)? ?"
+)
+
+
+def _ai_line(text: str) -> str:
+    """`_one_line`, then with any leading run of the bot's own label markers taken off.
+
+    Collapsing the line breaks stops a model-written summary from starting a new line, but
+    one that simply opens with `🟢 OFFICIAL · Valve buys ...` sits right under the real
+    headline and reads as a second one, newline or not. The real marker is only ever the
+    one `_story_block` puts in front of the headline, so any other is removed here. Ordinary
+    text comes out as `_one_line` leaves it. If stripping would leave nothing (the whole
+    summary was a marker), the collapsed original stays: a blank line under the headline
+    reads as a bug.
+    """
+    collapsed = text = _one_line(text)
+    while True:
+        start = 0
+        while start < len(text) and _invisible(text[start]):
+            start += 1
+        match = _LEADING_MARKER_RE.match(text, start)
+        if not match or match.end() == start:
+            break
+        text = text[match.end() :]
+    return text or collapsed
+
+
 def _story_block(story: StoryDraft) -> str:
     marker = _UPDATE_MARKER if story.update_of_story_id is not None else _LABEL_MARKER[story.label]
     return "\n".join(
-        [f"{marker} · {esc(story.headline)}", esc(story.summary), _link_line(story.item_urls)]
+        [
+            f"{marker} · {esc(_ai_line(story.headline))}",
+            esc(_ai_line(story.summary)),
+            _link_line(story.item_urls),
+        ]
     )
 
 
@@ -373,8 +457,8 @@ def render_story_page(
         blocks.append(
             "\n".join(
                 [
-                    f"{marker} · {esc(topic_name)} · {esc(story.headline)}",
-                    esc(story.summary),
+                    f"{marker} · {esc(topic_name)} · {esc(_ai_line(story.headline))}",
+                    esc(_ai_line(story.summary)),
                     _link_line(story.urls),
                 ]
             )
@@ -718,7 +802,7 @@ def _classic_alert_block(
     if not is_code(candidate.code):
         raise ValueError(f"not a SHiFT code: {candidate.code!r}")
     prefix = _CLASSIC_GOLDEN_PREFIX if golden_prefix and candidate.golden else ""
-    safe_url = _safe_link(candidate.item_url) if link else None
+    safe_url = _shown_link(candidate.item_url) if link else None
     shown_link = f"{_CLASSIC_LINK_SEP}<{safe_url}>" if safe_url else ""
     lines = [f"```\n{candidate.code}\n```"]
     if line:
@@ -779,7 +863,7 @@ def _code_page_block(
     )
     head = f"{code_block}\n{line}" if line else code_block
     source = _truncate_utf16(esc(view.source_name), _CODE_PAGE_MAX_SOURCE, suffix="…")
-    safe_url = _safe_link(view.item_url)
+    safe_url = _shown_link(view.item_url)
     link = f"{_DETAIL_SEP}<{safe_url}>" if safe_url else ""
     block = f"{head}\n{_SRC_LEAD}{source}{link}{seen_line}"
     if max_len is None or discord_len(block) <= max_len:
@@ -1035,7 +1119,7 @@ def _alert_block(
     if not is_code(candidate.code):
         raise ValueError(f"not a SHiFT code: {candidate.code!r}")
     prefix = "Golden Key: " if golden_prefix and candidate.golden else ""
-    safe_url = _safe_link(candidate.item_url) if link else None
+    safe_url = _shown_link(candidate.item_url) if link else None
     shown_link = f" · <{safe_url}>" if safe_url else ""
     lines = [f"```\n{candidate.code}\n```"]
     if line:
@@ -1258,7 +1342,7 @@ def _roundup_header(
     """
     codes_text = f"{count} code{'' if count == 1 else 's'}"
     lead = f"{terminal.prompt(terminal.ROUNDUP_HEADER)} {codes_text} from "
-    safe_url = _safe_link(item_url)
+    safe_url = _shown_link(item_url)
     link = f" · <{safe_url}>" if safe_url else ""
     header = f"{lead}{esc(source_name)}{link}"
     if max_len is None or discord_len(header) <= max_len:
@@ -1550,7 +1634,7 @@ _MAX_HEADLINE_URL = 1000
 
 
 def _headline_line(item: HeadlineItem) -> str | None:
-    safe_url = _safe_link(item.url)
+    safe_url = _shown_link(item.url)
     if safe_url is None or discord_len(safe_url) > _MAX_HEADLINE_URL:
         return None
     # Titles come from feeds and social posts, and a Bluesky post has line
@@ -1668,7 +1752,7 @@ def _fitting_story_block(story: StoryDraft) -> str | None:
         return block
     # Count only the links that will really show, or an unusable first URL costs a
     # usable one its place.
-    usable = [url for url in story.item_urls if _safe_link(url) is not None]
+    usable = [url for url in story.item_urls if _shown_link(url) is not None]
     for shown in range(min(len(usable), _MAX_LINKS_SHOWN), -1, -1):
         block = _story_block(replace(story, item_urls=usable[:shown])).rstrip("\n")
         if discord_len(block) <= _DESCRIPTION_LIMIT:

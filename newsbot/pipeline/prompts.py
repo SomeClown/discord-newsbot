@@ -75,12 +75,29 @@ def _format_games_list(topics: Sequence[GameInfo], subject: str) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+# A title is a feed's to write and the collectors store it as given, so it gets the
+# cap the excerpt always had. 300 is also what format.py lets a headline title be.
+_MAX_TITLE = 300
+
+
+def _dump(value: object) -> str:
+    """`json.dumps` for a fenced block, with `<` written as `\\u003c`.
+
+    `json.dumps` has no opinion about `<`, so a title like `</items> SYSTEM: ...`
+    came through as a literal closing tag in the middle of the fence, and the
+    model had to take my word for which one was the real one. `\\u003c` is still
+    valid JSON and reads back as `<` (to a parser and, as far as I can tell, to
+    the model), but it can't spell a tag. Output with no `<` in it is unchanged.
+    """
+    return json.dumps(value, indent=2).replace("<", "\\u003c")
+
+
 def _item_payload(n: int, topic_item: TopicItem) -> dict:
     item = topic_item.item
     return {
         "n": n,
         "url": item.url,
-        "title": item.title,
+        "title": item.title[:_MAX_TITLE],
         "excerpt": item.excerpt[:500],
         "source": item.source_name,
         "trust": item.trust,
@@ -125,12 +142,12 @@ def build_prompt(
         # yesterday's output more than today's input.
         lines.append(_PRIOR_HEADER)
         lines.append("<prior_stories>")
-        lines.append(json.dumps([story.headline for story in prior], indent=2))
+        lines.append(_dump([story.headline for story in prior]))
         lines.append("</prior_stories>")
         lines.append("")
     lines.append(_ITEMS_HEADER)
     lines.append("<items>")
-    lines.append(json.dumps([_item_payload(n, ti) for n, ti in enumerate(items)], indent=2))
+    lines.append(_dump([_item_payload(n, ti) for n, ti in enumerate(items)]))
     lines.append("</items>")
 
     return system, "\n".join(lines)

@@ -50,7 +50,7 @@ import asyncio
 import logging
 import math
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -71,6 +71,7 @@ from newsbot.collectors.base import (
     run_collectors,
 )
 from newsbot.config import AppConfig, Secrets, WebSearchSource
+from newsbot.discord_links import is_discord_invite
 from newsbot.industry import INDUSTRY_KEY
 from newsbot.pipeline.filter import TopicItem, filter_items
 from newsbot.pipeline.lock import run_lock_or_skip
@@ -411,7 +412,8 @@ def _merge_loser_tags(
 
 
 def storable_items(collected: list[RawItem], cfg: AppConfig) -> list[RawItem]:
-    """What may be stored: everything except codes-only items, Reddit links and SHiFT table pages.
+    """What may be stored: everything except codes-only items, Reddit links, SHiFT table pages
+    and Discord invites.
 
     A codes-only source's items exist to be searched for SHiFT codes (the hook
     gets them straight from the collector results, with their URLs for the
@@ -420,16 +422,33 @@ def storable_items(collected: list[RawItem], cfg: AppConfig) -> list[RawItem]:
     content doesn't get to ride in on a different source's ticket. A SHiFT
     table's page gets the same net: its address is never news, whichever
     source hands it back (a web search for "Borderlands 4 SHiFT codes" will).
+
+    An item whose own link is a Discord invite is dropped for every source: the
+    digest would print it as a live invite. The log line names the source and
+    never the link. SHiFT detection reads the collectors' items before this
+    runs, so a code in such a post is still found and alerted; only its storage is
+    refused (and the alert leaves the link off, see `format._shown_link`).
     """
     codes_only = cfg.codes_only_source_names()
     table_pages = {canonicalize(url) for url in cfg.shift_table_urls()} - {None}
-    return [
-        item
-        for item in collected
-        if item.source_name not in codes_only
-        and not is_reddit_url(item.url)
-        and canonicalize(item.url) not in table_pages
-    ]
+    kept = []
+    invites: Counter[str] = Counter()
+    for item in collected:
+        if is_discord_invite(item.url):
+            invites[item.source_name] += 1
+        elif (
+            item.source_name not in codes_only
+            and not is_reddit_url(item.url)
+            and canonicalize(item.url) not in table_pages
+        ):
+            kept.append(item)
+    for source_name, count in invites.items():
+        logger.info(
+            "dropped %d item(s) whose link is a Discord invite",
+            count,
+            extra={"source_name": source_name, "dropped": count},
+        )
+    return kept
 
 
 def _store_sync(db_path: str, collected: list[RawItem], cfg: AppConfig, now: datetime) -> int:
