@@ -2,9 +2,10 @@
 
 It exists so the owner can answer "how's the public bot doing?" without opening
 the database, and it's deliberately all numbers: counts of servers, tiers and
-digest outcomes, plus the month's summary spend. No server names, no channel
-names, nothing a stranger's settings could put in front of the owner. (The
-owner has enough to read. So does everyone.)
+digest outcomes, plus the month's summary spend (the month in `owner_report.timezone`,
+the same one the daily report counts). No server names, no channel names, nothing a
+stranger's settings could put in front of the owner. (The owner has enough to read. So
+does everyone.)
 
 Two locks keep it from being anyone else's command. It's registered only in the
 home guild (see `registration.py`), which stops it showing up elsewhere. And the
@@ -28,6 +29,7 @@ import discord
 from discord import app_commands
 
 from newsbot.bot.client import NewsBot
+from newsbot.bot.format import local_month
 from newsbot.config import AppConfig
 from newsbot.guilds.schedule import local_due_instant
 from newsbot.pipeline.summarize import estimate_spend_usd
@@ -86,8 +88,10 @@ def render_owner_servers(
     return "\n".join(lines)
 
 
-def _owner_numbers_sync(db_path: str, now: datetime) -> tuple[dict[str, int], Counter[str], float]:
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+def _owner_numbers_sync(
+    db_path: str, now: datetime, month_start: datetime
+) -> tuple[dict[str, int], Counter[str], float]:
+    """The numbers behind the reply. `month_start` is the month's first instant, in UTC."""
     with closing(connect(db_path)) as conn:
         counts = repo.guild_counts(conn)
         digests = summarize_digests(repo.due_candidates(conn), now)
@@ -121,9 +125,13 @@ def make_owner_group(cfg: AppConfig, bot: NewsBot) -> app_commands.Group:
             return
         await interaction.response.defer(ephemeral=True)
         now = datetime.now(UTC)
-        counts, digests, spend = await asyncio.to_thread(_owner_numbers_sync, bot.db_path, now)
+        # The owner's month, same as the daily report's spend line (they share this).
+        month = local_month(now, cfg.owner_report.timezone)
+        counts, digests, spend = await asyncio.to_thread(
+            _owner_numbers_sync, bot.db_path, now, month.start_utc
+        )
         await interaction.followup.send(
-            render_owner_servers(counts, digests, spend, now.strftime("%Y-%m")),
+            render_owner_servers(counts, digests, spend, month.label),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )

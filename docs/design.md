@@ -1305,9 +1305,9 @@ The windows are the last 24 hours, and the start of the current month in `owner_
 - Mid-line, any run of spaces or blank glyphs before the `·` goes with the marker ("x 🟢 OFFICIAL ⠀· y" becomes "x y").
 - The month start is built fresh (not with `replace()`), so a zone whose local midnight on the 1st repeats (America/Havana) doesn't carry `fold=1` and start an hour late.
 - The owner report is still capped at 2,000 units with the first two lines kept; the spend line is near the top so the cut doesn't reach it.
+- `/owner servers` counts the owner's local month too (done, owner 2026-10-25): both it and the report get the month's start and name from one helper, `format.local_month`, so they can't drift apart again.
 
 **Declined or left:**
-- `/owner servers` still counts the UTC month, while the report uses the owner's local month. The brief said leave `/owner servers` alone; the two can differ for a few hours around a month's end.
 - The classic details line (above).
 - Cosmetic leftovers: a cut after dropping an odd backslash can leave a space before the ellipsis ("ab …"); a label run cut by the 2,000 cap can leave a fragment ("OFFICIA"); a blank glyph right after a removed mid-line word with no dot stays; a variation selector after a punctuation emoji like ‼ next to a removed marker can be taken, so ‼ draws as text; an invisible separated from a mid-line marker by a space stays; a cut source name on `/shift` pages can still end `\…`.
 - Still accepted from the v3.3.1 list: a prior headline containing `<` may not match as an UPDATE.

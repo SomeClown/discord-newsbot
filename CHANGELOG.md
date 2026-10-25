@@ -17,7 +17,7 @@ old tag.
 
 ### Added
 
-- The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` still counts the UTC month, so the two can differ for a few hours around a month's end.
+- The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` counts the same month (and labels it that way), so the two agree around a month's end.
 
 ### Fixed
 

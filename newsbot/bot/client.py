@@ -51,10 +51,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from discord import app_commands
 
 from newsbot.bot.format import (
-    _MONTH_NAMES,
     RenderedAlert,
     RenderedDigest,
     esc,
+    local_month,
     outcome_from_digest,
     render_owner_report,
 )
@@ -1566,20 +1566,17 @@ class NewsBot(discord.Client):
 
         The spend line is the same estimate `/owner servers` shows, from the summaries'
         stored token counts (industry picks are stored there too): the last 24 hours, and
-        the month so far. The month is the owner's, in `owner_report.timezone`, so at 21:00
-        Pacific on the last evening of a month, when UTC has already turned over, it still
-        says that month. The query gets that month's start converted to UTC.
+        the month so far. The month is the owner's, in `owner_report.timezone` (`local_month`, which
+        `/owner servers` shares), so at 21:00 Pacific on the last evening of a month, when UTC
+        has already turned over, it still says that month.
         """
-        local_now = now.astimezone(ZoneInfo(self.cfg.owner_report.timezone))
-        # Built fresh rather than with `replace()`, which would carry over `fold=1` from a
-        # "now" in a zone's repeated hour and put the start an hour late.
-        month_start = datetime(local_now.year, local_now.month, 1, tzinfo=local_now.tzinfo)
+        month = local_month(now, self.cfg.owner_report.timezone)
         with closing(connect(self.db_path)) as conn:
             if repo.app_state_get(conn, _OWNER_REPORT_KEY) == today:
                 return None
             rows = repo.recent_guild_digests(conn, now - timedelta(hours=24))
             day_usage = repo.game_summary_tokens(conn, now - timedelta(hours=24))
-            month_usage = repo.game_summary_tokens(conn, month_start.astimezone(UTC))
+            month_usage = repo.game_summary_tokens(conn, month.start_utc)
             configured = self.cfg.configured_source_names()
             failing = [r for r in repo.failing_sources(conn) if r.source_name in configured]
             repo.app_state_set(conn, _OWNER_REPORT_KEY, today)
@@ -1589,7 +1586,7 @@ class NewsBot(discord.Client):
             failing,
             spend_24h_usd=estimate_spend_usd(day_usage.input_tokens, day_usage.output_tokens),
             spend_month_usd=estimate_spend_usd(month_usage.input_tokens, month_usage.output_tokens),
-            month_name=_MONTH_NAMES[local_now.month - 1],
+            month_name=month.name,
         )
 
     async def _owner_report_job(self) -> None:

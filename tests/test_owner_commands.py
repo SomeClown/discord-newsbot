@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from v3_fakes import GUILD_A, GUILD_B, HOME, OWNER_ID, FakeInteraction, command, make_guild
 
+from newsbot.bot import owner_commands as owner_commands_module
+from newsbot.bot.format import local_month
 from newsbot.bot.owner_commands import make_owner_group, render_owner_servers, summarize_digests
+from newsbot.config import OwnerReportCfg
 from newsbot.store import repo
 from newsbot.store.db import connect
 from newsbot.store.models import DueCandidate
@@ -98,6 +101,129 @@ async def test_the_reply_names_no_server_or_channel(owner, v3_db):
     await owner.call(interaction)
     for needle in (str(GUILD_A), "4242", "9191", "secret", "Rust"):
         assert needle not in interaction.text
+
+
+# --- the month is the owner's, same as the daily report's ---
+
+
+def _freeze_now(monkeypatch, moment: datetime) -> None:
+    """Pin `owner_commands.py`'s `datetime.now(UTC)`: the month it counts follows the clock."""
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+
+    monkeypatch.setattr(owner_commands_module, "datetime", _FrozenDatetime)
+
+
+def _summary_row(db_path, created_at: datetime, input_tokens: int = 0, output_tokens: int = 0):
+    with closing(connect(db_path)) as conn, conn:
+        conn.execute(
+            "INSERT INTO game_summaries (game_key, run_date, status, window_start, window_end, "
+            "input_tokens, output_tokens, created_at) VALUES "
+            "('rust', '2026-10-31', 'ok', 'a', 'b', ?, ?, ?)",
+            (input_tokens, output_tokens, created_at.isoformat()),
+        )
+
+
+async def _spend_line_at(v3_cfg, v3_db, monkeypatch, now: datetime, timezone: str) -> str:
+    cfg = v3_cfg.model_copy(update={"owner_report": OwnerReportCfg(timezone=timezone)})
+
+    async def is_owner(user):
+        return True
+
+    _freeze_now(monkeypatch, now)
+    group = make_owner_group(cfg, SimpleNamespace(db_path=v3_db, is_owner=is_owner))
+    interaction = FakeInteraction(guild_id=HOME, user_id=OWNER_ID)
+    await command(group, "servers").callback(interaction)
+    return interaction.text.split("\n")[-1]
+
+
+async def test_the_month_is_the_reports_not_utcs_in_a_zone_behind_utc(v3_cfg, v3_db, monkeypatch):
+    # 21:00 PDT on October 31st: UTC has already turned over to November.
+    _summary_row(v3_db, datetime(2026, 10, 31, 20, 0, tzinfo=UTC), 0, 1_000_000)  # $0.50
+    line = await _spend_line_at(
+        v3_cfg, v3_db, monkeypatch, datetime(2026, 11, 1, 4, 0, tzinfo=UTC), "America/Los_Angeles"
+    )
+    assert line == "Summary spend, 2026-10: about $0.50"
+
+
+async def test_the_month_is_the_reports_not_utcs_in_a_zone_ahead_of_utc(v3_cfg, v3_db, monkeypatch):
+    # 01:00 JST on November 1st: UTC is still in October.
+    _summary_row(v3_db, datetime(2026, 10, 31, 14, 59, tzinfo=UTC), 0, 2_000_000)  # October there
+    _summary_row(v3_db, datetime(2026, 10, 31, 15, 0, tzinfo=UTC), 0, 1_000_000)  # $0.50
+    line = await _spend_line_at(
+        v3_cfg, v3_db, monkeypatch, datetime(2026, 10, 31, 16, 0, tzinfo=UTC), "Asia/Tokyo"
+    )
+    assert line == "Summary spend, 2026-11: about $0.50"
+
+
+async def test_a_row_at_the_local_month_start_counts_and_one_just_before_does_not(
+    v3_cfg, v3_db, monkeypatch
+):
+    # Pacific midnight on November 1st is 07:00 UTC (PDT ends that night, at 02:00).
+    start = datetime(2026, 11, 1, 7, 0, tzinfo=UTC)
+    _summary_row(v3_db, start - timedelta(seconds=1), 0, 10_000_000)  # October there
+    _summary_row(v3_db, start, 0, 1_000_000)  # $0.50
+    line = await _spend_line_at(
+        v3_cfg, v3_db, monkeypatch, datetime(2026, 11, 1, 12, 0, tzinfo=UTC), "America/Los_Angeles"
+    )
+    assert line == "Summary spend, 2026-11: about $0.50"
+
+
+# --- the shared helper ---
+
+
+@pytest.mark.parametrize("hour", [4, 5, 6], ids=["first pass", "repeated hour", "after it"])
+def test_local_month_starts_at_the_first_midnight_when_a_zone_repeats_it(hour):
+    # Havana ends daylight time at 01:00 on 2026-11-01, so local midnight on the 1st
+    # happens twice (04:00 UTC, then 05:00 UTC). The first one is the month's start, even
+    # when "now" falls in the repeated hour (fold=1).
+    month = local_month(datetime(2026, 11, 1, hour, 30, tzinfo=UTC), "America/Havana")
+    assert month.start_utc == datetime(2026, 11, 1, 4, 0, tzinfo=UTC)
+    assert month.start_utc.tzinfo is UTC
+    assert (month.label, month.name) == ("2026-11", "November")
+
+
+@pytest.mark.parametrize(
+    ("zone", "now", "start", "label", "name"),
+    [
+        (
+            "UTC",
+            datetime(2026, 10, 31, 23, 59, 59, tzinfo=UTC),
+            (2026, 10, 1, 0),
+            "2026-10",
+            "October",
+        ),
+        ("UTC", datetime(2026, 11, 1, 0, 0, tzinfo=UTC), (2026, 11, 1, 0), "2026-11", "November"),
+        (
+            "America/Los_Angeles",
+            datetime(2026, 11, 1, 4, 0, tzinfo=UTC),
+            (2026, 10, 1, 7),
+            "2026-10",
+            "October",
+        ),
+        (
+            "Asia/Tokyo",
+            datetime(2026, 10, 31, 16, 0, tzinfo=UTC),
+            (2026, 10, 31, 15),
+            "2026-11",
+            "November",
+        ),
+        (
+            "Asia/Tokyo",
+            datetime(2026, 10, 31, 14, 59, tzinfo=UTC),
+            (2026, 9, 30, 15),
+            "2026-10",
+            "October",
+        ),
+    ],
+)
+def test_local_month_is_the_zones_month_as_a_utc_instant(zone, now, start, label, name):
+    month = local_month(now, zone)
+    assert month.start_utc == datetime(*start, tzinfo=UTC)
+    assert (month.label, month.name) == (label, name)
 
 
 # --- pure pieces ---

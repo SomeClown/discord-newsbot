@@ -22,8 +22,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from newsbot.bot.client import _MONTH_NAMES, NewsBot
+from newsbot.bot.client import NewsBot
 from newsbot.bot.format import (
+    _MONTH_NAMES,
     DigestOutcome,
     _ai_line,
     _headline_line,

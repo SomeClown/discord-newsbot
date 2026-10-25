@@ -24,7 +24,7 @@ import unicodedata
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Literal
+from typing import Literal, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -2692,6 +2692,42 @@ def _spend_amount(usd: float) -> str:
     return f"${usd:.2f}"
 
 
+class LocalMonth(NamedTuple):
+    """The owner's current month: where it starts (in UTC) and what to call it."""
+
+    start_utc: datetime
+    year: int
+    month: int
+
+    @property
+    def label(self) -> str:
+        """`2026-10`, the way `/owner servers` writes it."""
+        return f"{self.year:04d}-{self.month:02d}"
+
+    @property
+    def name(self) -> str:
+        """`October`, the way the daily report writes it."""
+        return _MONTH_NAMES[self.month - 1]
+
+
+def local_month(now: datetime, timezone: str) -> LocalMonth:
+    """The month `now` falls in, in `timezone`, with its first instant as UTC.
+
+    The daily report and `/owner servers` both add up "the month so far", and they
+    once disagreed for a few hours around every month's end because one counted
+    the owner's month and the other counted UTC's. This is the one place that
+    decides, so they can't drift apart again. `timezone` is an IANA name that the
+    config has already vetted.
+
+    The start is built fresh rather than with `replace()`, which would carry over
+    `fold=1` from a `now` inside a zone's repeated hour (Havana's midnight on
+    November 1st happens twice) and put the start an hour late.
+    """
+    local_now = now.astimezone(ZoneInfo(timezone))
+    start = datetime(local_now.year, local_now.month, 1, tzinfo=local_now.tzinfo)
+    return LocalMonth(start.astimezone(UTC), local_now.year, local_now.month)
+
+
 def render_owner_report(
     outcomes: Sequence[DigestOutcome],
     failing: Sequence[SourceHealthRow],
@@ -2818,6 +2854,7 @@ def render_guild_overview(
 __all__ = [
     "FOLLOWUP_MAX_CODES",
     "DigestOutcome",
+    "LocalMonth",
     "ReportClaude",
     "ReportSources",
     "RenderedAlert",
@@ -2827,6 +2864,7 @@ __all__ = [
     "details_reserve",
     "esc",
     "escape_list_start",
+    "local_month",
     "outcome_from_digest",
     "render_alert_edit",
     "render_code_alerts",
