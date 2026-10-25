@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 from test_codes_only import CODE, PASS_AT, FakeFeed, World, raw
+from test_text_hardening_adversarial import _exec_base
 
 from newsbot.bot.format import (
     discord_len,
@@ -43,7 +44,7 @@ from newsbot.pipeline.filter import TopicItem
 from newsbot.pipeline.prompts import build_prompt
 from newsbot.pipeline.summarize import StoryDraft
 from newsbot.shift.decide import CodeCandidate
-from newsbot.store.models import CodeView, PriorStory, StoryView
+from newsbot.store.models import CodeView, HeadlineItem, ItemView, PriorStory, StoryView
 
 REPO = Path(__file__).resolve().parent.parent
 BASE_COMMIT = "47577d1"
@@ -79,6 +80,24 @@ def old():
         yield module
     finally:
         sys.modules.pop(name, None)
+
+
+@pytest.fixture(scope="module")
+def old_prompts():
+    module = _exec_base("newsbot/pipeline/prompts.py", "_newsbot_prompts_v330_pin")
+    yield module
+    sys.modules.pop(module.__name__, None)
+
+
+@pytest.fixture(scope="module")
+def old_industry(old_prompts):
+    module = _exec_base(
+        "newsbot/pipeline/industry.py",
+        "_newsbot_industry_v330_pin",
+        swap={"newsbot.pipeline.prompts": old_prompts},
+    )
+    yield module
+    sys.modules.pop(module.__name__, None)
 
 
 # --- 1. a line break can't fake a story block ---
@@ -306,25 +325,38 @@ def test_a_long_title_is_cut_at_300_the_way_the_excerpt_is_cut_at_500():
     assert parsed["excerpt"] == "E" * 500
 
 
-def test_ordinary_prompts_are_byte_identical_to_v330():
-    # A title with no "<" and under the cap: the payload is what it always was.
-    _, user = build_prompt(TOPIC, [_topic_item(title="Patch 1.2 > 1.1")], [_prior("Old news")])
-    item = {
-        "n": 0,
-        "url": "https://example.com/a",
-        "title": "Patch 1.2 > 1.1",
-        "excerpt": "Body.",
-        "source": "Some Source",
-        "trust": "community",
-        "uncertain": False,
-    }
-    assert json.dumps([item], indent=2) in user
-    assert json.dumps(["Old news"], indent=2) in user
+def _ordinary_items():
+    long_excerpt = "A longish excerpt, with commas and a > sign. " * 20  # 900 characters
+    return [
+        _topic_item(title="Patch 1.2 > 1.1", excerpt="Body."),
+        _topic_item(title="Hotfix Tuesday", excerpt=long_excerpt),
+        _topic_item(title="T" * 300, excerpt="Short."),
+    ]
+
+
+def test_ordinary_prompts_are_byte_identical_to_v330(old_prompts, old_industry):
+    items = _ordinary_items()
+    prior = [_prior("Old news"), _prior("Older news, with a > in it")]
+    assert build_prompt(TOPIC, items, prior) == old_prompts.build_prompt(TOPIC, items, prior)
+    assert build_prompt(TOPIC, items, []) == old_prompts.build_prompt(TOPIC, items, [])
+    both = [BL4, GameCfg(key="palworld", name="Palworld")]
+    assert build_prompt(TOPIC, items, prior, all_topics=both) == old_prompts.build_prompt(
+        TOPIC, items, prior, all_topics=both
+    )
+    from newsbot.pipeline.industry import build_industry_prompt
+
+    assert build_industry_prompt(IND, items, prior) == old_industry.build_industry_prompt(
+        IND, items, prior
+    )
 
 
 # --- 3. an item whose own link is a Discord invite is dropped ---
 
 INVITES = [
+    "https://%44iscord.gg/abc",
+    "https://DISCORD%2EGG/abc",
+    "https://%44iscord.com/invite/abc",
+    "https://%EF%BC%A4iscord.gg/abc",
     "https://discord.gg/abc123",
     "http://discord.gg/abc123",
     "https://www.discord.gg/abc123",
@@ -581,6 +613,11 @@ LEADERS = [
     "🟢\ufe0f OFFICIAL · ",
     "OFFICIAL · ",
     "\u200b🟢 OFFICIAL · ",
+    "\u2066🟢 OFFICIAL · ",
+    "\u202e🟢 OFFICIAL · ",
+    "\u202a\u2069🟢 OFFICIAL · ",
+    "\u034f🟢 OFFICIAL · ",
+    "\u180e🟢 OFFICIAL · ",
     "🟢 OFFICIAL · 🔴 RUMOR · ",
 ]
 
@@ -628,3 +665,120 @@ def test_ordinary_text_that_only_resembles_a_marker_is_left_alone(old, text):
         .embed.description
     )
     assert new == was
+
+
+# --- round 2 of the fix passes: capital letters after a percent escape ---
+
+CASE_TRICKS = [
+    "https://%44iscord.gg/abc",
+    "https://DISCORD%2EGG/abc",
+    "https://%44iscord.com/invite/abc",
+    "https://%EF%BC%A4iscord.gg/abc",
+]
+
+
+@pytest.mark.parametrize("url", CASE_TRICKS)
+def test_a_capital_after_a_percent_escape_is_still_an_invite(prodlike, url):
+    assert is_discord_invite(url)
+    assert storable_items([_item(url)], prodlike) == []
+    (alert,) = render_code_alerts([_cand(url)], ping=False)
+    assert "<http" not in alert.content and CODE in alert.content
+
+
+# --- stored items from before the fix: /news and headline lists leave an invite out ---
+
+STORED_AT = datetime(2026, 10, 20, 12, tzinfo=UTC)
+
+
+def _headline(url, title="A stored title", trust="press"):
+    return HeadlineItem(
+        url=url,
+        title=title,
+        source_name="PC Gamer",
+        trust=trust,
+        published_at=STORED_AT,
+        collected_at=STORED_AT,
+        uncertain=False,
+    )
+
+
+def _item_view(url, title="A stored title"):
+    return ItemView(
+        id=1,
+        url=url,
+        title=title,
+        excerpt="",
+        source_name="PC Gamer",
+        trust="press",
+        published_at=STORED_AT,
+        collected_at=STORED_AT,
+        topic_keys=["borderlands4"],
+    )
+
+
+def _list_renders(fmt, url):
+    """Every place a stored item's link can print, as comparable text."""
+    game = GameCfg(key="borderlands4", name="Borderlands 4")
+    other = "https://example.com/other"
+    headlines = fmt.render_headlines_embed(game, [_headline(url), _headline(other, "Other")])
+    picked = fmt.render_picked_headlines_embed(game, [_headline(url), _headline(other, "Other")])
+    page = fmt.render_item_page(
+        [_item_view(url), _item_view(other, "Other")],
+        {"borderlands4": "Borderlands 4"},
+        "Recent",
+        1,
+        1,
+    )
+    stories = fmt.render_story_page(
+        [
+            StoryView(
+                id=1,
+                topic_key="borderlands4",
+                headline="H",
+                summary="S",
+                label="reported",
+                created_at=STORED_AT,
+                urls=[url, other],
+                is_update_of=None,
+            )
+        ],
+        {},
+        "Recent",
+        1,
+        1,
+    )
+    return {
+        "headlines": headlines.description,
+        "picked": picked.description,
+        "item page": page.description,
+        "story page": stories.description,
+    }
+
+
+@pytest.mark.parametrize("url", ["https://discord.gg/abc123", *CASE_TRICKS])
+def test_stored_invite_items_do_not_render_a_link(url):
+    import newsbot.bot.format as fmt
+
+    for where, text in _list_renders(fmt, url).items():
+        assert "discord" not in text.lower(), where
+        assert "https://example.com/other" in text, where  # the ordinary one is still there
+
+
+def test_the_stored_invite_attack_does_work_on_v330(old):
+    for where, text in _list_renders(old, INVITE).items():
+        assert INVITE in text, where
+
+
+def test_stored_items_with_ordinary_links_render_the_same_as_v330(old):
+    import newsbot.bot.format as fmt
+
+    assert _list_renders(fmt, ARTICLE) == _list_renders(old, ARTICLE)
+
+
+# --- the tail ends of the marker strip ---
+
+
+def test_a_summary_that_is_only_a_marker_is_not_blanked():
+    story = _story(summary="🟢 OFFICIAL")
+    lines = _digest_embed(story).description.split("\n")
+    assert lines[1] == "🟢 OFFICIAL"

@@ -427,7 +427,7 @@ def storable_items(collected: list[RawItem], cfg: AppConfig) -> list[RawItem]:
     digest would print it as a live invite. The log line names the source and
     never the link. SHiFT detection reads the collectors' items before this
     runs, so a code in such a post is still found and alerted; only its storage is
-    refused (and the alert leaves the link off, see `format._code_link`).
+    refused (and the alert leaves the link off, see `format._shown_link`).
     """
     codes_only = cfg.codes_only_source_names()
     table_pages = {canonicalize(url) for url in cfg.shift_table_urls()} - {None}

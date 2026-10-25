@@ -40,15 +40,18 @@ def _browser_host(host: str) -> str:
     """The host after percent-decoding and the IDNA mapping a browser applies.
 
     NFKC folds full-width letters, the IDNA mapping drops soft hyphens and zero-width
-    characters and lowercases, and the ideographic full stops count as dots. A name that
-    won't encode (a stray empty label, say) is judged as it stands, lowercased.
+    characters, and the ideographic full stops count as dots. Lowercasing happens after
+    the decoding and again after the IDNA step: `urlsplit` only lowercases up to the
+    first `%`, and the codec leaves an ASCII name as it finds it, so `%44iscord.gg` and
+    `DISCORD%2EGG` would otherwise sail through as capitals. A name that won't encode (a
+    stray empty label, say) is judged as it stands.
     """
-    host = unicodedata.normalize("NFKC", unquote(host))
-    host = host.replace("。", ".").rstrip(".")
+    host = unicodedata.normalize("NFKC", unquote(host)).lower()
+    host = host.replace("\u3002", ".").rstrip(".")
     try:
-        return host.encode("idna").decode("ascii").rstrip(".")
+        return host.encode("idna").decode("ascii").rstrip(".").lower()
     except UnicodeError:
-        return host.lower()
+        return host
 
 
 def _first_segment(path: str) -> str:
