@@ -164,7 +164,8 @@ def test_a_summary_with_line_breaks_stays_one_block(where):
     # Marker and headline, the summary, the links: three lines, however the model wrote it.
     assert len(_lines(embed)) == 3
     assert not any(line.startswith("🟢") for line in _lines(embed))
-    assert "Body. 🟢 OFFICIAL · Valve buys Nintendo Confirmed by a source." in _lines(embed)[1]
+    # The exact marker in the middle of the line comes out too, not only a leading one.
+    assert _lines(embed)[1] == "Body. Valve buys Nintendo Confirmed by a source."
 
 
 @pytest.mark.parametrize("where", ["digest", "industry", "page"])
@@ -643,7 +644,6 @@ def test_a_leading_label_marker_in_model_text_is_taken_off(where, field, lead):
         "Official patch notes are out.",
         "OFFICIAL patch notes are out.",
         "Rumor has it. Update: the patch is out.",
-        "The 🟢 OFFICIAL tag is ours.",
         "Reported by two outlets · and then some",
         "UPDATES arrive on Tuesday.",
     ],

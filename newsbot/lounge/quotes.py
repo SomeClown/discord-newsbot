@@ -24,7 +24,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from newsbot.bot.format import _ALERT_CONTENT_LIMIT, discord_len, esc
+from newsbot.bot.format import _ALERT_CONTENT_LIMIT, discord_len, esc, escape_list_start
 from newsbot.store.models import QuoteDeckState
 
 # The owner's wording (plan checkpoint B, 2026-09-29). A speakeasy pours one
@@ -61,11 +61,12 @@ class QuotePick:
 def render_quote_message(quote: Quote) -> str:
     """Build the lounge message: header, text, optional attribution, optional Wikiquote link.
 
-    Text and attribution go through `esc()`. The link line does not: it's
+    Text and attribution go through `esc()`, and a quote line that starts like a numbered
+    list ("1. ...") gets its dot escaped so it can't turn into one. The link line does not: it's
     wrapped in `<...>` (which also stops the link preview) and must only
     ever come from `urllib.parse.quote` output, which can't contain `>`.
     """
-    lines = [QUOTE_HEADER, esc(quote.text)]
+    lines = [QUOTE_HEADER, escape_list_start(esc(quote.text))]
     # One line, always. A multi-line attribution could otherwise dress its
     # last line up as the link line, and a whitespace-only one would earn a
     # line of its own for saying nothing.

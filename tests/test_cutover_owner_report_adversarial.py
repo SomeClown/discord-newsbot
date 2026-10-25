@@ -242,7 +242,7 @@ async def test_a_crash_after_the_date_is_written_costs_that_day_its_report(
     world = await make_world(now=DUE, owner_channel=True)
     digest(world, 61, "ok")
 
-    def boom(outcomes, failing):
+    def boom(*args, **kwargs):
         raise RuntimeError("renderer fell over")
 
     with monkeypatch.context() as broken:

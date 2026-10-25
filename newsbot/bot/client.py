@@ -88,7 +88,7 @@ from newsbot.pipeline.summaries import (
     retry_lookup,
     summary_lookup,
 )
-from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
+from newsbot.pipeline.summarize import AnthropicLLM, LLMClient, estimate_spend_usd
 from newsbot.shift.fanout import (
     FanoutDeps,
     deliver_queued_codes,
@@ -168,6 +168,22 @@ HEARTBEAT = Path("/tmp/newsbot-heartbeat")  # noqa: S108 (tmpfs in compose, not 
 _RETENTION_DAYS = 90
 # `app_state` key guarding the daily owner report against a second send.
 _OWNER_REPORT_KEY = "owner_report_date"
+# English month names for the owner's report, spelled out here because `strftime("%B")` follows
+# whatever locale the container happens to have, and the report should not.
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 # `app_state` key prefix remembering that a server was told about the digest v2.2 left stuck.
 _STUCK_V22_KEY = repo.STUCK_V22_KEY_PREFIX
 _HEARTBEAT_INTERVAL_S = 60
@@ -1562,16 +1578,34 @@ class NewsBot(discord.Client):
         last 24 hours; `partial` counts as posted
         (it did post, with something skipped or degraded), and `pending` and
         `failed` are the failures, grouped by `outcome_from_digest`'s reasons.
+
+        The spend line is the same estimate `/owner servers` shows, from the summaries'
+        stored token counts (industry picks are stored there too): the last 24 hours, and
+        the month so far. The month is the owner's, in `owner_report.timezone`, so at 21:00
+        Pacific on the last evening of a month, when UTC has already turned over, it still
+        says that month. The query gets that month's start converted to UTC.
         """
+        local_now = now.astimezone(ZoneInfo(self.cfg.owner_report.timezone))
+        # Built fresh rather than with `replace()`, which would carry over `fold=1` from a
+        # "now" in a zone's repeated hour and put the start an hour late.
+        month_start = datetime(local_now.year, local_now.month, 1, tzinfo=local_now.tzinfo)
         with closing(connect(self.db_path)) as conn:
             if repo.app_state_get(conn, _OWNER_REPORT_KEY) == today:
                 return None
             rows = repo.recent_guild_digests(conn, now - timedelta(hours=24))
+            day_usage = repo.game_summary_tokens(conn, now - timedelta(hours=24))
+            month_usage = repo.game_summary_tokens(conn, month_start.astimezone(UTC))
             configured = self.cfg.configured_source_names()
             failing = [r for r in repo.failing_sources(conn) if r.source_name in configured]
             repo.app_state_set(conn, _OWNER_REPORT_KEY, today)
         outcomes = [outcome_from_digest(status, notes) for status, notes in rows]
-        return render_owner_report(outcomes, failing)
+        return render_owner_report(
+            outcomes,
+            failing,
+            spend_24h_usd=estimate_spend_usd(day_usage.input_tokens, day_usage.output_tokens),
+            spend_month_usd=estimate_spend_usd(month_usage.input_tokens, month_usage.output_tokens),
+            month_name=_MONTH_NAMES[local_now.month - 1],
+        )
 
     async def _owner_report_job(self) -> None:
         """Once a day, at `owner_report.time`: the all-servers summary, to the owner."""

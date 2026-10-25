@@ -297,52 +297,293 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-# The bot's own label markers, as a model could write them with no help from a newline: the
-# emoji alone, the emoji and its word, or the word followed by the separator. Case matters
-# (the real ones are upper case, and "Official patch notes" is ordinary text). Invisible
-# characters in front are allowed, because they don't stop a line looking like it starts
-# with the marker: any format character (category Cf: zero-width, bidi controls, the soft
-# hyphen) plus two that Unicode files under other categories but render as nothing (U+034F,
-# U+180E).
+# The bot's own label markers, and the look-alikes of them, as a model (or a feed title) could
+# write them with no help from a newline. Invisible characters in front are allowed, because
+# they don't stop a line looking like it starts with the marker: any format character
+# (category Cf: zero-width, bidi controls, the soft hyphen) plus two that Unicode files under
+# other categories but render as nothing (U+034F, U+180E).
 
 
 def _invisible(char: str) -> bool:
     return unicodedata.category(char) == "Cf" or char in "\u034f\u180e"
 
 
-_LEADING_MARKER_RE = re.compile(
-    "(?:"
-    + "|".join(
-        f"{emoji}\ufe0f?(?: {word})?|{word}(?= ·)"
-        for emoji, word in (
-            marker.split(" ") for marker in (*_LABEL_MARKER.values(), _UPDATE_MARKER)
-        )
-    )
-    + ")(?: ·)? ?"
+# A look-alike is any colored dot or square, check mark or loop arrow a reader would take for
+# the bot's own marker (the bot's four are in the list: 1F7E2, 1F7E1, 1F534 and 1F501).
+_LOOKALIKE_EMOJI = (
+    "[\U0001f534\U0001f535\U0001f7e0-\U0001f7eb\u26aa\u26ab\u2b1b\u2b1c"
+    "\u2705\u2611\u2714\U0001f501-\U0001f504]"
 )
+_MARKER_EMOJI = (
+    "[" + "".join(m.split(" ")[0] for m in (*_LABEL_MARKER.values(), _UPDATE_MARKER)) + "]"
+)
+# What `_fold` writes in place of a combining mark. A private-use character, so it can't be
+# mistaken for anything a reader typed ("_" could) and no pattern but the ones below knows it.
+_MARK = "\ue000"
+# What can ride on an emoji and still be part of it: the variation selector, the five
+# skin-tone swatches and combining marks. (The zero-width joiner is invisible, so `_fold` has
+# dropped it already.)
+_EMOJI_TAIL = f"[\ufe0f\U0001f3fb-\U0001f3ff{_MARK}]*"
+# Matched against the folded (NFKC, upper case) text, where a combining mark has become
+# `_MARK`, so the word must end there: "UPDATES" is not "UPDATE", and neither is "UPDATE"
+# plus an accent on its last letter. A separator counts only when whitespace or the end of the text
+# follows it, which keeps "Update -5% off" and "Official:the patch" as the ordinary text they
+# are. Several look-alike emoji in a row (or one with spaces after it) are one lead-in.
+_LABEL_WORD = rf"(?:OFFICIAL|REPORTED|RUMOR|UPDATE)(?![\w{_MARK}])"
+_SEPARATOR = "[·:|\\-\u2013\u2014](?=\\s|$)"
+_TAIL = rf"\s*(?:{_SEPARATOR}\s*)?"
+# Tried in this order at each step. The three are separate patterns, and the run of bot emoji is
+# its own pattern, because one pattern that tries "a run of emoji, then a word" and falls back
+# to "one emoji" re-reads a long run once per emoji it takes off.
+_LEADING_LABEL_RES = (
+    re.compile(rf"\s*(?:{_LOOKALIKE_EMOJI}{_EMOJI_TAIL}\s*)+{_LABEL_WORD}{_TAIL}"),
+    re.compile(rf"\s*{_LABEL_WORD}\s*{_SEPARATOR}{_TAIL}"),
+    re.compile(rf"\s*(?:{_MARKER_EMOJI}{_EMOJI_TAIL}{_TAIL})+"),
+)
+# The bot's markers exactly as they render, wherever they sit: its emoji (with whatever rides
+# on it), one space, the word that goes with that emoji, and the " ·" after it if there is
+# one. This pattern only says whether `_drop_exact_markers` has any work to look for (one of
+# the bot's emoji; a space and a word won't do, since an invisible can sit between them); the
+# scan decides.
+_EXACT_MARKER_HINT_RE = re.compile(_MARKER_EMOJI)
+_EXACT_MARKER_WORDS = tuple(
+    (word, emoji)
+    for emoji, word in (marker.split(" ") for marker in (*_LABEL_MARKER.values(), _UPDATE_MARKER))
+)
+_MARK_CATEGORIES = ("Mn", "Mc", "Me")
+
+
+def _is_mark(char: str) -> bool:
+    """A combining mark (not the variation selector, which the patterns want as it is)."""
+    return char != "\ufe0f" and unicodedata.category(char) in _MARK_CATEGORIES
+
+
+def _rides_on_emoji(char: str) -> bool:
+    """True for what can follow an emoji and still be part of it (see `_EMOJI_TAIL`)."""
+    return char == "\ufe0f" or "\U0001f3fb" <= char <= "\U0001f3ff" or _is_mark(char)
+
+
+def _takes_selector(char: str) -> bool:
+    """True for what U+FE0F can turn into an emoji: a symbol, or a keycap's digit, # or *."""
+    return unicodedata.category(char).startswith("S") or char in "0123456789#*"
+
+
+def _hidden(text: str) -> list[bool]:
+    """For each character of `text`, whether it draws as nothing.
+
+    That's `_invisible`, plus a variation selector (U+FE0F) with no emoji to ride on. The
+    selector asks the character in front of it to draw as an emoji; after a letter, a space,
+    an invisible or the start of the line there's nobody to ask, so it draws as nothing and
+    hides a label word exactly as well as a zero-width space does. Riding means right after an
+    emoji, or after something that rides on one (green circle, skin tone, selector is one emoji
+    wearing two riders). The test for "an emoji" is any symbol, which is generous: a selector
+    on a math sign counts as riding and stays where it is, which is how it was before.
+    """
+    flags: list[bool] = []
+    on_emoji = False
+    for char in text:
+        if char == "\ufe0f":
+            flags.append(not on_emoji)
+        elif _invisible(char):
+            flags.append(True)
+            on_emoji = False
+        else:
+            flags.append(False)
+            if not _rides_on_emoji(char):
+                on_emoji = _takes_selector(char)
+    return flags
+
+
+def _fold(text: str) -> tuple[str, list[int]]:
+    """`text` folded for label matching, plus where each folded character came from.
+
+    NFKC turns full-width and mathematical-bold letters into plain ones, and upper-casing
+    makes the match case-blind. Both can change a character's length ("ﬃ" becomes three
+    letters), so the text is folded one character at a time and `origin[i]` is the index in
+    `text` that folded character `i` came from (with one more entry at the end for "all of
+    it"). A cut found in the folded copy is then made in the original.
+
+    Two more things happen here so the patterns can stay simple. Invisible characters are
+    left out of the folded copy (a zero-width space between the emoji and the word hides
+    nothing from a reader, so it shouldn't hide anything from us; `_hidden` says which, and
+    that includes a variation selector with no emoji under it), and a combining mark becomes
+    `_MARK` so that a word ending in an accented letter doesn't look like it ends early. A
+    variation selector riding on an emoji is a mark too, but the patterns want it as it is.
+    (A real private-use character `_MARK` in the text becomes U+FFFD, so it can't pose as one.)
+    """
+    folded: list[str] = []
+    origin: list[int] = []
+    hidden = _hidden(text)
+    for index, char in enumerate(text):
+        if hidden[index]:
+            continue
+        if char == _MARK:
+            piece = "\ufffd"
+        elif _is_mark(char):
+            piece = _MARK
+        else:
+            piece = unicodedata.normalize("NFKC", char).upper()
+        folded.append(piece)
+        origin.extend([index] * len(piece))
+    origin.append(len(text))
+    return "".join(folded), origin
+
+
+def _strip_leading_labels(text: str) -> str:
+    """`text` with leading label markers and look-alikes taken off, as often as they repeat."""
+    folded, origin = _fold(text)
+    cursor = 0
+    while True:
+        for pattern in _LEADING_LABEL_RES:
+            if match := pattern.match(folded, cursor):
+                cursor = match.end()
+                break
+        else:
+            break
+    return text[origin[cursor] :] if cursor else text
+
+
+def _drop_exact_markers(text: str) -> str:
+    """`text` (single spaces only) without the bot's exact markers, wherever they sit.
+
+    Each marker comes out and leaves one space, and runs of spaces collapse, which can make
+    the pieces on either side into a marker of their own ("<green> <yellow> REPORTED
+    OFFICIAL" is two). Doing that in rounds with a regex re-reads the whole string every
+    round, and a title built to nest them took a minute and a half. This reads the text once,
+    left to right, keeping what it has so far on a stack: when the end of the stack becomes a
+    whole marker, pop it. Whether a marker is whole depends only on what follows its word (no
+    letter or digit, and then the dot if there is one), and nothing later can change that, so
+    the answer is the same as the rounds'.
+
+    Characters that draw as nothing (`_hidden`) don't count when deciding whether something
+    is a marker, the same deal the leading strip gets from `_fold`: a zero-width joiner after
+    the emoji or a stray selector in front of the word doesn't make "<green> OFFICIAL" any
+    less of a marker to a reader. `shown` keeps where the drawn characters sit on the stack,
+    and the matching only looks at those. A marker that comes out takes the hidden characters
+    touching it on either side with it, so nothing is left in the gap selecting nothing.
+    """
+    hidden = _hidden(text)
+    n = len(text)
+
+    def past_hidden(at: int) -> int:
+        while at < n and hidden[at]:
+            at += 1
+        return at
+
+    out: list[str] = []
+    shown: list[int] = []
+    i = 0
+    while i < n:
+        char = text[i]
+        hide = hidden[i]
+        i += 1
+        if char == " ":
+            if out and out[-1] != " ":
+                shown.append(len(out))
+                out.append(" ")
+            continue
+        out.append(char)
+        if hide:
+            continue
+        shown.append(len(out) - 1)
+        for word, emoji in _EXACT_MARKER_WORDS:
+            size = len(word)
+            if char != word[-1] or len(shown) < size + 2 or out[shown[-size - 1]] != " ":
+                continue
+            if "".join(out[at] for at in shown[-size:]) != word:
+                continue
+            start = len(shown) - size - 2
+            while start >= 0 and _rides_on_emoji(out[shown[start]]):
+                start -= 1
+            if start < 0 or out[shown[start]] != emoji:
+                continue
+            after = past_hidden(i)
+            following = text[after] if after < n else ""
+            if following and (following.isalnum() or following == "_" or _is_mark(following)):
+                break
+            if following == "·":
+                after = past_hidden(after + 1)
+            elif following == " ":
+                dot = past_hidden(after + 1)
+                if text.startswith("·", dot):
+                    after = past_hidden(dot + 1)
+            i = after
+            del out[shown[start - 1] + 1 if start else 0 :]
+            del shown[start:]
+            if out and out[-1] != " ":
+                shown.append(len(out))
+                out.append(" ")
+            break
+    while out and out[-1] == " ":
+        out.pop()
+    return "".join(out)
+
+
+def _without_labels(text: str) -> str:
+    """`text` (already on one line) with the bot's label markers, and look-alikes, taken off.
+
+    Collapsing line breaks stops model-written or scraped text from starting a new line, but
+    one that simply opens with `🟢 OFFICIAL · Valve buys ...` sits right under (or in place
+    of) a real marker and reads as one, newline or not. The real marker is only ever the one
+    the renderer puts in front, so any other is removed here:
+
+    - from the front, as often as it repeats: one or more look-alike emoji (with any skin
+      tone, variation selector or combining mark riding on them) and a label word, a label
+      word with a separator (`UPDATE:`, `official -`), or one of the bot's four emoji alone,
+      matched after NFKC folding and without regard to case, plus the separator and spaces
+      left behind. Invisible characters anywhere in that run are skipped. A bare "Official
+      patch notes" is ordinary text and stays, and so is a label word whose last letter
+      carries an accent;
+    - from anywhere, the bot's exact markers (`🟢 OFFICIAL`, with or without the ` ·` or `·`
+      after it, and with the same things riding on the emoji), which is what a model that
+      has read our output tends to produce. Invisible characters inside one are skipped
+      here too. A label word on its own mid-line stays.
+
+    "Invisible" includes a variation selector that isn't riding on an emoji (see `_hidden`),
+    and a marker that comes out, from the front or the middle, takes the invisible characters
+    touching it along with it.
+
+    Text with none of these comes back byte for byte. If stripping would leave nothing, the
+    original stays: a blank line reads as a bug.
+    """
+    kept = text
+    while True:
+        before = kept
+        kept = _strip_leading_labels(kept)
+        if _EXACT_MARKER_HINT_RE.search(kept):
+            single = " ".join(kept.split())
+            reduced = _drop_exact_markers(single)
+            if reduced != single:
+                kept = reduced
+        if kept == before:
+            break
+    return kept or text
 
 
 def _ai_line(text: str) -> str:
-    """`_one_line`, then with any leading run of the bot's own label markers taken off.
+    """`_one_line`, then with the bot's label markers and look-alikes of them taken off.
 
-    Collapsing the line breaks stops a model-written summary from starting a new line, but
-    one that simply opens with `🟢 OFFICIAL · Valve buys ...` sits right under the real
-    headline and reads as a second one, newline or not. The real marker is only ever the
-    one `_story_block` puts in front of the headline, so any other is removed here. Ordinary
-    text comes out as `_one_line` leaves it. If stripping would leave nothing (the whole
-    summary was a marker), the collapsed original stays: a blank line under the headline
-    reads as a bug.
+    See `_without_labels` for exactly what goes. Ordinary text comes out as `_one_line`
+    leaves it.
     """
-    collapsed = text = _one_line(text)
-    while True:
-        start = 0
-        while start < len(text) and _invisible(text[start]):
-            start += 1
-        match = _LEADING_MARKER_RE.match(text, start)
-        if not match or match.end() == start:
-            break
-        text = text[match.end() :]
-    return text or collapsed
+    return _without_labels(_one_line(text))
+
+
+_LIST_START_RE = re.compile(r"^([ \t]*[0-9]+)\.(?=\s|$)", re.MULTILINE)
+
+
+def escape_list_start(text: str) -> str:
+    """`text` with a backslash before the dot of any line that starts like a numbered list.
+
+    Discord draws "2026. The year ..." as item 2026 of an ordered list, and
+    `escape_markdown` only knows about the bullets. Call this on a line that begins with
+    scraped or AI text, after `esc()`; it doesn't belong inside `esc()` itself, which runs
+    mid-line in a lot of places. Digits are ASCII only, the dot must be followed by
+    whitespace or the end of the line ("1.Valve" and "10) x" are plain text), and only the
+    first run on each line is touched. Spaces before the number are allowed, since Discord
+    allows them too.
+    """
+    return _LIST_START_RE.sub(r"\1\\.", text)
 
 
 def _story_block(story: StoryDraft) -> str:
@@ -350,14 +591,26 @@ def _story_block(story: StoryDraft) -> str:
     return "\n".join(
         [
             f"{marker} · {esc(_ai_line(story.headline))}",
-            esc(_ai_line(story.summary)),
+            escape_list_start(esc(_ai_line(story.summary))),
             _link_line(story.item_urls),
         ]
     )
 
 
 def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
-    return _truncate_utf16(text, limit, suffix="…")
+    """`text` cut to `limit` units with a "…", never leaving a lone backslash in front of it.
+
+    A cut can land right after a backslash `esc()` put in front of something. Left at the end
+    it would escape the "…", so an odd run of them loses one. (`_truncate_utf16` itself leaves
+    that alone: a source name's cut is pinned the old way, and I'd rather not move it.)
+    """
+    cut = _truncate_utf16(text, limit, suffix="…")
+    if cut == text:
+        return cut
+    head = cut.removesuffix("…")
+    if (len(head) - len(head.rstrip("\\"))) % 2:
+        head = head[:-1]
+    return head + "…"
 
 
 def _topic_embed(topic: GameInfo, stories: list[StoryDraft]) -> discord.Embed:
@@ -458,7 +711,7 @@ def render_story_page(
             "\n".join(
                 [
                     f"{marker} · {esc(topic_name)} · {esc(_ai_line(story.headline))}",
-                    esc(_ai_line(story.summary)),
+                    escape_list_start(esc(_ai_line(story.summary))),
                     _link_line(story.urls),
                 ]
             )
@@ -1641,7 +1894,12 @@ def _headline_line(item: HeadlineItem) -> str | None:
     # breaks. Left alone, one could start its own line in this list and pose as
     # an official headline, or as the renderer's own "+N more". split() with no
     # argument breaks on every kind of whitespace, so this flattens all of it.
-    title = _truncate_utf16(" ".join(item.title.split()), _MAX_HEADLINE_TITLE, suffix="…")
+    # The same goes for a title that dresses itself in our label: a community post called
+    # "🟢 OFFICIAL · free codes" would sit in this list looking like the real thing, so
+    # anything that reads as one of our markers comes off before the cut and the escape.
+    title = _truncate_utf16(
+        _without_labels(" ".join(item.title.split())), _MAX_HEADLINE_TITLE, suffix="…"
+    )
     marker = f"{_OFFICIAL_MARKER} · " if item.trust == "official" else ""
     return f"• {marker}{esc(title)} — <{safe_url}>"
 
@@ -2279,17 +2537,44 @@ def _redact_urls(text: str) -> str:
     return _URL_IN_TEXT.sub(one, text)
 
 
+def _spend_amount(usd: float) -> str:
+    """Dollars as the owner's report shows them: "$0.00" for none, "under $0.01", else "$X.XX"."""
+    if usd <= 0:
+        return "$0.00"
+    if usd < 0.01:
+        return "under $0.01"
+    return f"${usd:.2f}"
+
+
 def render_owner_report(
-    outcomes: Sequence[DigestOutcome], failing: Sequence[SourceHealthRow]
+    outcomes: Sequence[DigestOutcome],
+    failing: Sequence[SourceHealthRow],
+    *,
+    spend_24h_usd: float,
+    spend_month_usd: float,
+    month_name: str,
 ) -> str:
-    """The owner's daily report: the summary line, then every source that's currently failing (D8).
+    """The owner's daily report: the summary line, the Claude spend, then every failing source (D8).
+
+    The second line is the spend estimate: the last 24 hours, and the month so far
+    (`month_name` is the owner's local month, in English). It is always there; a copy with no
+    summaries yet shows "$0.00" twice. Both figures are dollars, already estimated from token
+    counts by the caller, so this stays a pure function of what it's handed. The 24-hour amount
+    gets an "about" once it's a cent or more; below that it reads "under $0.01".
 
     Capped at Discord's message limit; the source list is cut at 10 with a
-    "+N more" line so the summary line at the top always survives. Every URL
+    "+N more" line so the first two lines at the top always survive. Every URL
     in an error goes through `shown_url` first: httpx puts the whole address
     in its messages, credentials and token query strings included.
     """
-    lines = [f"newsbot daily: {render_digest_summary_line(outcomes)}"]
+    day = _spend_amount(spend_24h_usd)
+    if spend_24h_usd >= 0.01:
+        day = f"about {day}"
+    lines = [
+        f"newsbot daily: {render_digest_summary_line(outcomes)}",
+        f"Claude spend: {day} in the last 24 hours, "
+        f"{_spend_amount(spend_month_usd)} so far in {month_name} (estimate)",
+    ]
     if not failing:
         lines.append("All sources are healthy.")
     else:
@@ -2395,6 +2680,7 @@ __all__ = [
     "details_line",
     "details_reserve",
     "esc",
+    "escape_list_start",
     "outcome_from_digest",
     "render_alert_edit",
     "render_code_alerts",
