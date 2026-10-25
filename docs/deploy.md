@@ -77,11 +77,9 @@ sudo apt install -y sqlite3
 
 (Other distros: `dnf install sqlite`, `apk add sqlite`, etc.; same idea.)
 
-**A note on the OS itself:** Ubuntu 20.04 (focal) left standard support
-in mid-2025 and is now on paid Extended Security Maintenance only.
-Nothing in this runbook requires an OS upgrade today, but planning one
-(to 22.04 or 24.04) is recommended as a separate, deliberate piece of
-work; not bundled into a routine bot deploy.
+**A note on the OS itself:** the Droplet runs Ubuntu 26.04 LTS (since
+2026-10-25; §16 has how it got there from 20.04). An OS upgrade is always
+its own deliberate piece of work, never bundled into a routine bot deploy.
 
 **The server's clock runs in UTC**, not America/Los_Angeles. This
 matters wherever a time-of-day schedule gets translated to a cron or
@@ -800,11 +798,13 @@ Rolling this back out is just `alerts.enabled: false` (or removing the
 (it's additive and harmless either way; see §8, Rollback, above), the
 sweep simply stops running.
 
-## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04)
+## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04 → 26.04)
 
-**Done 2026-09-27:** the Droplet is on 24.04. This section is kept as
-the record of how, including the three things that went sideways (the
-mirror, DNS, and IPv6), in case another Droplet ever needs the same trip.
+**Done 2026-09-27 (24.04) and 2026-10-25 (26.04):** the Droplet is on
+26.04. This section is kept as the record of how, including the three
+things that went sideways on the way to 24.04 (the mirror, DNS, and IPv6),
+in case another Droplet ever needs the same trip. The 26.04 round, which
+went sideways in none of those ways, is at the end: "Round 3".
 
 Ubuntu 20.04 left standard support in May 2025, and this Droplet was still
 on it, getting fewer security fixes every month. Ubuntu only
@@ -992,10 +992,97 @@ hadn't posted yet, it posts within a couple of minutes.
 radius and should still be there; if `sqlite3` somehow went missing,
 `sudo apt install -y sqlite3`.
 
+### Round 3: 24.04 → 26.04 (2026-10-25)
+
+One round this time, about 30 minutes of upgrader plus checks, and the
+Droplet now runs **two** apps: the bot and pool-league-scheduler
+(`/opt/pool-league-scheduler`, its own compose project, behind the host's
+nginx with a certbot certificate). The bot doesn't care about the host OS;
+pool-league's HTTPS very much does, because nginx and certbot are host
+packages and the upgrade replaces both (nginx 1.24 to 1.28, certbot 2.9
+to 4.0). Both apps were down for about half an hour; digests that came due
+meanwhile post after the bot's first collection pass.
+
+**Read-only checks first:** `sudo do-release-upgrade -c` offers the new
+release; at least 5 GB free on `/`; `/etc/apt/sources.list.d/ubuntu.sources`
+points at `archive.ubuntu.com` (the DigitalOcean-mirror trouble from round
+1 can't happen); `/etc/netplan/50-droplet.yaml` is there; certbot comes
+from apt, not snap (`which certbot` is `/usr/bin/certbot`, and
+`certbot.timer` exists); `sudo nginx -t` is clean.
+
+**Before:**
+
+```bash
+cd /opt/newsbot && sudo ./scripts/backup.sh data/newsbot.db data/backups
+cd /opt/pool-league-scheduler && sudo ./scripts/backup.sh data/league.db data/backups
+cd /opt/newsbot && docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+cd /opt/pool-league-scheduler && docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+sudo systemctl stop newsbot-backup.timer pool-league-backup.timer
+```
+
+Then the snapshot, *after* the containers are down so both databases are
+quiet in it, and wait for it to finish. Then `sudo apt update && sudo apt
+full-upgrade -y`, reboot if `/var/run/reboot-required` says so, and check
+that cloud-init still leaves the network alone (`grep -rn "config:
+disabled" /etc/cloud/cloud.cfg.d/` prints the `network: {config:
+disabled}` line); a cloud-init update came with that full-upgrade.
+
+**The upgrade:** `sudo do-release-upgrade`, with the same answers as the
+earlier rounds (keep your current config files; third-party sources
+disabled is expected; restart services without asking; reboot at the end)
+and one that matters more than it looks:
+
+> **Remove obsolete packages? Answer `N`.** With Docker's repository
+> switched off, apt can't find docker-ce, containerd.io or the compose
+> plugin in any enabled source, so it lists them as obsolete, right
+> alongside the genuinely dead ones. A `y` there removes Docker. Tidy up
+> by hand afterwards, once Docker's repository is back and the list is
+> only the real leftovers.
+
+**After the reboot**, all checks before anything starts:
+
+```bash
+lsb_release -ds; uname -r
+for h in archive.ubuntu.com discord.com api.anthropic.com ghcr.io; do getent hosts $h >/dev/null && echo "ok   $h" || echo "FAIL $h"; done
+ip -br addr; ping -6 -c 2 ipv6.google.com
+sudo nginx -t; systemctl is-active nginx docker certbot.timer
+apt list '?obsolete' 2>/dev/null | cut -d/ -f1 | tail -n +2 | tr '\n' ' '; echo
+```
+
+DNS, IPv6 and the netplan network all came through untouched this time.
+Then re-add Docker's repository with the same block as round 1 (it reads
+the release name from the OS and writes `resolute`; the upgrader leaves the
+old file as `docker.list.disabled`), reinstall the Docker packages, and run
+the same three checks (versions, compose, `threads ok`). `dpkg -l docker-ce
+containerd.io` should show `ubuntu.26.04~resolute` builds. Last, `sudo
+certbot renew --dry-run` proves certbot 4.0 still drives nginx 1.28.
+
+**Bringing both apps back:**
+
+```bash
+sudo systemctl enable --now newsbot-backup.timer pool-league-backup.timer
+cd /opt/newsbot && ./scripts/deploy.sh
+cd /opt/pool-league-scheduler && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Pool-league gets `up -d` rather than its `deploy.sh`, which would pull a
+newer `latest` image; after an OS upgrade you want it back exactly as it
+was. Then both containers `(healthy)`, `curl -sI
+http://127.0.0.1:8000/login` says `200 OK`, the league site loads over
+HTTPS, and `/newsbot status` looks normal. On 2026-10-25 the bot's first
+pass after the upgrade read 51 of 51 sources, certbot's dry run succeeded,
+and the league site loaded over HTTPS.
+
+**Afterwards:** keep the snapshot about a week, then delete it (snapshots
+are billed). Once a few clean days have passed, review `apt list
+'?obsolete'` again (by then it should be the old 6.8 kernels, Python 3.12,
+Ruby 3.2, the old docker-compose 1.x and DigitalOcean agent leftovers, and
+no Docker) and remove what's on it, plus `sudo apt autoremove`.
+
 ### If it goes wrong
 
 Restore the snapshot from the control panel, which puts the Droplet back
-exactly as it was before round 1, bot and all. Then `./scripts/deploy.sh`
+exactly as it was before the round you started, apps and all. Then `./scripts/deploy.sh`
 and carry on with your day, having learned something about Ubuntu that you
 will forget by the next upgrade.
 
