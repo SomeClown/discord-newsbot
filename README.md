@@ -23,6 +23,20 @@ still works and is [documented](#run-your-own-copy) below.
 
 **Status.** The bot is public, and production runs v3.3.0 (since 2026-10-24), which added the Gaming industry entry.
 
+## What's new
+
+**v3.3.0 (2026-10-24).**
+
+- A "Gaming industry" entry you can follow like a game: studios closing,
+  layoffs, acquisitions, new games and hardware, from four trade-press feeds,
+  at most 5 stories a day. It doesn't count toward the 10-game limit.
+- Free servers get those stories as the sources' own headlines. Comped servers
+  get Claude summaries.
+- Self-hosters: it's opt-in, and the block to copy is in `config.example.yaml`.
+  Migration 010 runs on its own.
+
+The rest, back to v1.1.0, is in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## Add it to your server
 
 [**Add to Discord**](https://discord.com/oauth2/authorize?client_id=1553075538220941402)
@@ -764,6 +778,14 @@ The standard path from a change to a running production bot:
    push. That build makes the image for amd64 and arm64 and takes about
    15 minutes; wait for it to go green before deploying (see
    [`docs/deploy.md`](docs/deploy.md) §7).
+   The tag goes on the merge commit, so the PR you merged in step 2 has to
+   carry the release's docs already: `CHANGELOG.md`'s `[Unreleased]` entries
+   moved into a new `[X.Y.Z] - date` section (with its link at the bottom), and
+   this README's "What's new" refreshed. Once the tag is pushed, publish that
+   version's section as a GitHub Release:
+   ```bash
+   gh release create v3.2.1 --verify-tag --title "v3.2.1" --notes-file <that section, saved to a file>
+   ```
 5. **Deploy** with `./scripts/deploy.sh` on the Droplet: see
    [`docs/deploy.md`](docs/deploy.md). Pin `TAG=3.2.1` in the Droplet's
    `.env` for a deliberate upgrade; rolling back is changing `TAG` back
