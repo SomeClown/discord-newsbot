@@ -15,6 +15,25 @@ old tag.
 
 ## [Unreleased]
 
+## [3.3.1] - 2026-10-24
+
+A security release: three ways a hostile feed or a talked-into-it model could dress text up as something it isn't, all found reviewing v3.3.0.
+
+### Security
+
+- An AI-written headline or summary can no longer fake a second story block in a comped digest or on `/news`. Story text is shown on one line, and a leading copy of the bot's own labels ("🟢 OFFICIAL ·" and the rest) is removed, along with any invisible characters in front of it.
+- Feed text can no longer close the prompt's `<items>` or `<prior_stories>` section early: `<` is escaped inside the item data, and item titles sent to Claude are cut at 300 characters. The prompt's wording is unchanged.
+- An item whose own link is a Discord invite or gift link (`discord.gg`, `dsc.gg`, `discord.me`, `discord.gift`, and `discord.com` or `discordapp.com` invite and gift pages) is dropped at collection. The check reads the address the way a browser does, so percent-encoding, odd capitals, full-width letters, dot segments and backslashes don't sneak one past.
+- Such a link is never shown anywhere a stored link becomes clickable: digests, headline lists, `/news`, SHiFT alerts and `/shift history`. That covers items stored before this release. A SHiFT code from a post that linked an invite is still found and posted; only the link is left off.
+
+### Changed
+
+- A run of spaces inside an AI summary now shows as one space.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.3.0`.
+
 ## [3.3.0] - 2026-10-24
 
 ### Added
@@ -593,7 +612,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...HEAD
+[3.3.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...v3.3.1
 [3.3.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.2...v3.3.0
 [3.2.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.0...v3.2.1

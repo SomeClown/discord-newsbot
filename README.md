@@ -25,15 +25,15 @@ still works and is [documented](#run-your-own-copy) below.
 
 ## What's new
 
-**v3.3.0 (2026-10-24).**
+**v3.3.1 (2026-10-24), a security release.**
 
-- A "Gaming industry" entry you can follow like a game: studios closing,
-  layoffs, acquisitions, new games and hardware, from four trade-press feeds,
-  at most 5 stories a day. It doesn't count toward the 10-game limit.
-- Free servers get those stories as the sources' own headlines. Comped servers
-  get Claude summaries.
-- Self-hosters: it's opt-in, and the block to copy is in `config.example.yaml`.
-  Migration 010 runs on its own.
+- AI-written story text can't fake a second story or an OFFICIAL label any more.
+- Feed text can't break out of the item list Claude reads.
+- Discord invite and gift links are never stored or shown, in digests, `/news`
+  or SHiFT alerts; SHiFT codes from such posts still post, without the link.
+
+**v3.3.0 (2026-10-24)** added the optional "Gaming industry" entry: studios
+closing, layoffs, acquisitions and announcements, at most 5 stories a day.
 
 The rest, back to v1.1.0, is in [`CHANGELOG.md`](CHANGELOG.md).
 
