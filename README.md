@@ -21,7 +21,7 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** The bot is public, and production runs v3.3.1 (since 2026-10-24).
+**Status.** The bot is public, and production runs v3.4.0 (since 2026-10-29).
 
 ## What's new
 
