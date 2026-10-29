@@ -9,11 +9,11 @@ bad way to find out you're off by one.
 
 Everything user-facing that started life as scraped text goes through
 `esc()` before it reaches an embed. URLs never do: they go straight into
-link targets (`[domain](<url>)`; the angle brackets suppress Discord's preview embed
-instead of letting six of them stack up under one story), and only ever come from
-`StoryDraft.item_urls`, which `pipeline/summarize.py` has already checked
-against what we actually collected. A headline can lie about the news; it
-should not get to lie about where you're clicking.
+link targets (`[domain](<url>)`; the angle brackets suppress Discord's
+preview embed instead of letting six of them stack up under one story), and
+only ever come from `StoryDraft.item_urls`, which `pipeline/summarize.py`
+has already checked against what we actually collected. A headline can lie
+about the news; it should not get to lie about where you're clicking.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -273,9 +274,11 @@ def _shown_link(url: str) -> str | None:
 
 
 # What a masked link's text may be. The bot writes the text itself (the URL comes from the
-# feed), so the text only ever comes from this pattern: a host's own letters, digits, dots
-# and hyphens. An IPv6 literal's brackets would end the markdown early and an underscore
-# turns into italics, so those, and anything else odd, get the plain word below.
+# feed), so the host part of it only ever comes from this pattern: a host's own letters,
+# digits, dots and hyphens. (`_link_line` may add " (2)" or " (3)" after it when two links
+# on a line share a host; that's the only other thing in there.) An IPv6 literal's brackets
+# would end the markdown early and an underscore turns into italics, so those, and anything
+# else odd, get the plain word below.
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
 _MAX_LABEL = 40
 _FALLBACK_LABEL = "link"
@@ -294,7 +297,7 @@ def _link_label(url: str) -> str:
     """
     try:
         host = host_name(httpx.URL(url))
-    except httpx.InvalidURL, ValueError, UnicodeError:
+    except httpx.InvalidURL, ValueError:
         return _FALLBACK_LABEL
     host = host.lower().removeprefix("www.").rstrip(".")
     if len(host) > _MAX_LABEL or not _LABEL_RE.fullmatch(host):
@@ -308,18 +311,28 @@ def _masked_link(label: str, url: str) -> str:
 
 
 def _masked_shown_link(url: str) -> str | None:
-    """`_shown_link`, minus any URL with whitespace or `>` in it: what a masked link may point at.
+    """`_shown_link`, made safe to put inside `[domain](<...>)`: what a masked link may point at.
 
     `canonicalize()` leaves a space or a `>` in a host alone, and such a URL could never be a
-    working link (the `>` ends `<...>` early, the space ends it for every client). Inside
-    `[domain](<...>)` it would also be a place for a cut to lose track of where the link ends,
-    so the story and headline lines drop it like any other unusable link. The SHiFT surfaces
-    keep calling `_shown_link`.
+    working link (the `>` ends `<...>` early, the space ends it for every client). It also
+    leaves parentheses alone, and Discord's parser ends a link target at the first unbalanced
+    `)`, angle brackets or not, so `.../codes)https://discord.gg/x` would leave a live invite
+    after the link. So the story and headline lines drop a URL with whitespace or `>` anywhere
+    or a parenthesis in its host, and write every `(` and `)` in the rest as `%28` and `%29`
+    (always, so nothing leans on Discord's balancing rules; a Wikipedia-style path still
+    resolves). The returned URL is the one that gets shown, so length checks on it count the
+    encoded form. The SHiFT surfaces keep calling `_shown_link`.
     """
     shown = _shown_link(url)
     if shown is None or re.search(r"[\s>]", shown):
         return None
-    return shown
+    parts = urlsplit(shown)
+    if re.search(r"[()]", parts.netloc):
+        return None
+    front = f"{parts.scheme}://{parts.netloc}"
+    if not shown.startswith(front):
+        return None
+    return front + shown[len(front) :].replace("(", "%28").replace(")", "%29")
 
 
 def _link_line(urls: list[str]) -> str:
@@ -431,8 +444,10 @@ def _truncate_description(text: str, limit: int = _DESCRIPTION_LIMIT) -> str:
 
     Half of `[pcgamer.com](<https://pcg` is not a link, it's a mess with a bracket in
     it, and the one after it would swallow whatever came next. If the cut lands inside
-    one, it moves back to just before the `[`. Either way, a separator left hanging at the
-    end (a middle dot or a dash) goes too, so no line ends on one.
+    one, it moves back to just before that link's `[`, or further back if a stray `[` in a
+    title makes something earlier look like a link too (a longer cut is fine; half a link
+    isn't). Either way, a separator left hanging at the end (a middle dot or a dash) goes
+    too, so no line ends on one.
     """
     if discord_len(text) <= limit:
         return text
@@ -1739,7 +1754,8 @@ def render_headlines_embed(
     Ordered by D4 (see `_headline_sort_key`), with a `🟢 OFFICIAL` marker on official
     items only; a community item gets no "rumor" label, since a headline list makes no
     claim about whether it's true. Titles are flattened to one line and capped, then go
-    through `esc()`; URLs go through `_safe_link` and a URL that's too long is dropped
+    through `esc()`; URLs go through `_masked_shown_link` (which also drops invites, URLs with
+    whitespace or `>`, and hosts with parentheses) and a URL that's too long is dropped
     like an unusable one (see `_headline_line`). When the list doesn't fit under the
     4096-unit description limit, whole lines are shed from the bottom and the last line
     says `+N more, use /news`. Returns `None` when there's nothing to list (no items, or
@@ -2414,7 +2430,7 @@ def render_item_page(
 
     Free servers get headlines, not stories (owner decision D2), so this is
     `_headline_line`'s one-line format (official marker, flattened title, `[domain](<url>)`) under
-    a bold game name. An item whose URL won't survive `_safe_link` is dropped, same as in
+    a bold game name. An item whose URL won't survive `_masked_shown_link` is dropped, same as in
     the digest. `ItemView.topic_keys` is already limited to games this server follows.
     """
     embed = discord.Embed(title=_truncate_utf16(esc(title), _TITLE_LIMIT), color=_PALETTE[0])

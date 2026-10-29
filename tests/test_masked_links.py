@@ -178,6 +178,63 @@ def test_a_url_with_whitespace_or_a_closing_bracket_is_not_shown_on_these_lines(
     assert fmt._fitting_story_block(story) == fmt._story_block(replace(story, item_urls=good[:3]))
 
 
+def test_a_paren_cannot_close_the_link_early_and_leave_a_live_invite():
+    line = _link_line(["https://blog.example/codes)https://discord.gg/abcdef"])
+    assert line == "[blog.example](<https://blog.example/codes%29https://discord.gg/abcdef>)"
+    # The one `)` left is the one that closes the link.
+    assert line.count(")") == 1 and line.endswith(">)")
+
+
+def test_parens_in_path_query_and_fragment_are_encoded_whatever_their_balance():
+    assert _link_line(["https://en.wikipedia.org/wiki/Foo_(bar)"]) == (
+        "[en.wikipedia.org](<https://en.wikipedia.org/wiki/Foo_%28bar%29>)"
+    )
+    assert _link_line(["https://x.example/a?q=(b)&r=c)"]) == (
+        "[x.example](<https://x.example/a?q=%28b%29&r=c%29>)"
+    )
+    assert _link_line(["https://x.example/a?q=b)"]) == "[x.example](<https://x.example/a?q=b%29>)"
+    # canonicalize() drops a fragment, so none can carry a paren to the target.
+    assert _link_line(["https://x.example/a#f)oo"]) == "[x.example](<https://x.example/a>)"
+    assert _link_line(["https://x.example/a)**bold**"]) == (
+        "[x.example](<https://x.example/a%29**bold**>)"
+    )
+
+
+@pytest.mark.parametrize("host", ["ex)ample.com", "ex(ample.com", "a.com)b.com"])
+def test_a_url_with_a_paren_in_its_host_is_not_shown_and_costs_no_slot(host):
+    odd = f"https://{host}/x"
+    assert _link_line([odd]) == ""
+    assert fmt._headline_line(item(url=odd)) is None
+    good = [f"https://site{i}.example.com/p" for i in range(4)]
+    line = _link_line([odd, *good])
+    assert line.count("](<") == 3 and line.endswith(" · +1 more")
+    story = draft([odd, *good[:3]])
+    assert fmt._fitting_story_block(story) == fmt._story_block(replace(story, item_urls=good[:3]))
+
+
+def test_a_headline_url_is_measured_after_its_parens_are_encoded():
+    # 997 characters raw, 1,001 once the two parens become %28 and %29: over the cap.
+    over = "https://pcgamer.com/" + "a" * 975 + "()"
+    assert len(over) == 997
+    assert fmt._headline_line(item(url=over)) is None
+    # One paren fewer is 995 raw and 999 encoded: it fits.
+    assert fmt._headline_line(item(url="https://pcgamer.com/" + "a" * 975 + "(")) is not None
+
+
+def test_link_counts_still_finds_exactly_one_link_per_masked_link():
+    path = Path(__file__).parent.parent / "scripts" / "link_counts.py"
+    spec = importlib.util.spec_from_file_location("link_counts", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    line = _link_line(["https://a.example/x_(y)", "https://a.example/b)c", "https://b.example/z"])
+    assert module._LINK_RE.findall(line) == [
+        "https://a.example/x_%28y%29",
+        "https://a.example/b%29c",
+        "https://b.example/z",
+    ]
+
+
 def test_a_cut_just_before_a_link_or_inside_a_separator_leaves_no_separator():
     text = "Head\nSumm\n[a.com](<https://a.com/x>) · [b.com](<https://b.com/yyyyyyy>) · +2 more"
     for limit in range(1, discord_len(text)):

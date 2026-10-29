@@ -217,8 +217,6 @@ def test_a_percent_encoded_host_is_labelled_link(url):
         "https://a|b.com/x",
         "https://a~b.com/x",
         "https://a\\b.com/x",
-        "https://a)b.com/x",
-        "https://a(b.com/x",
         "https://a<b.com/x",
     ],
 )
@@ -419,7 +417,7 @@ def test_a_label_that_already_looks_numbered_cannot_exist():
     # second "x"; the only way to see "(2)" in a label is the numbering itself. (A host with a
     # space in it is not drawn at all, see the odd-host tests below.)
     assert shown_label("https://x.com/a") == "x.com"
-    assert shown_label("https://x(2).com/a") == "link"
+    assert _link_line(["https://x(2).com/a"]) == ""  # a paren in a host: not drawn at all
     assert _link_line(["https://x (2).com/a"]) == ""
 
 
@@ -667,7 +665,7 @@ def test_the_shift_surfaces_still_show_such_a_url_exactly_as_before(old_format, 
     assert new == old
 
 
-@pytest.mark.parametrize("host", ["a)b.com", "a(b.com", "a`b.com", "a|b.com", "a\\b.com"])
+@pytest.mark.parametrize("host", ["a`b.com", "a|b.com", "a\\b.com"])
 def test_odd_hosts_that_the_cut_pattern_does_know_are_cut_whole_or_not_at_all(host):
     link = _link_line([f"https://{host}/x"])
     text = f"Headline\nSummary\n{link}"
@@ -1050,6 +1048,7 @@ _NEW = {
     "_DANGLING_SEPARATOR_RE",
     "import:import httpx",
     "import:from newsbot.netguard import host_name",
+    "import:from urllib.parse import urlsplit",
 }
 
 
@@ -1342,24 +1341,31 @@ def test_the_label_function_only_swallows_what_it_means_to():
 # --- _masked_shown_link, and the three surfaces agreeing ---
 
 
-def test_masked_shown_link_is_shown_link_minus_whitespace_and_gt():
+def test_masked_shown_link_is_shown_link_minus_odd_hosts_with_parentheses_encoded():
     rng = random.Random(34)  # noqa: S311 (a reproducible sequence, not a secret)
-    pieces = ["www.", "a", "-", "_", ".", " ", ">", "<", ")", " ", "\x1f", "\x85", "ß", "日", "%41"]
-    seen_none = seen_same = 0
+    pieces = ["www.", "a", "-", "_", ".", " ", ">", "<", ")", "(", "\x1f", "\x85", "ß", "日", "%41"]
+    path_pieces = ["p", "(", ")", "%28", "%29", "/", "_(x)", ")(", "q"]
+    seen_none = seen_same = seen_encoded = 0
     for _ in range(4000):
         host = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 8)))
-        url = f"https://{host}/p"
+        path = "".join(rng.choice(path_pieces) for _ in range(rng.randint(0, 6)))
+        url = f"https://{host}/{path}"
         shown = fmt._shown_link(url)
         masked_shown = fmt._masked_shown_link(url)
         if shown is None:
             assert masked_shown is None
-        elif re.search(r"[\s>]", shown):
-            assert masked_shown is None
+            continue
+        netloc = shown.split("/", 3)[2]
+        if re.search(r"[\s>]", shown) or re.search(r"[()]", netloc):
+            assert masked_shown is None, url
             seen_none += 1
-        else:
-            assert masked_shown == shown
-            seen_same += 1
-    assert seen_none > 50 and seen_same > 50
+            continue
+        front = "https://" + netloc
+        assert masked_shown == front + shown[len(front) :].replace("(", "%28").replace(")", "%29")
+        assert "(" not in masked_shown and ")" not in masked_shown
+        seen_same += 1
+        seen_encoded += masked_shown != shown
+    assert seen_none > 50 and seen_same > 50 and seen_encoded > 20
 
 
 def test_link_line_headline_line_and_fitting_block_agree_on_every_url():
@@ -1611,3 +1617,388 @@ def test_text_that_fits_is_returned_even_if_it_ends_on_a_separator():
 
 def test_everything_stripped_leaves_only_the_ellipsis():
     assert _truncate_description(" · · · tail", 8) == "…"
+
+
+# =====================================================================================
+# Round 3: parentheses (qa fix batch 1): a parser-shaped check and the encoding
+# =====================================================================================
+
+# The link rule of simple-markdown (the library Discord's markdown comes from), ported to
+# Python: a label, then `(`, then an optional `<`, then a target that ends at the first `)`
+# that is not inside a `(...)` pair, whether the angle brackets are there or not.
+_SM_LINK = re.compile(
+    r"\[((?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*)\]"
+    r"\(\s*<?((?:\([^)]*\)|[^\s\\]|\\.)*?)>?(?:\s+['\"]([\s\S]*?)['\"])?\s*\)"
+)
+# The autolink rule: a bare `<scheme:/...>`.
+_SM_AUTOLINK = re.compile(r"<[^: >]+:/[^ >]+>")
+
+
+def sm_parse(text: str) -> tuple[list[tuple[str, str]], str]:
+    """Links as simple-markdown would read them: ([(label, target)], everything left over).
+
+    Backslash pairs are inert and dropped from the leftover; autolinks count as links.
+    """
+    links: list[tuple[str, str]] = []
+    left: list[str] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if char == "[" and (m := _SM_LINK.match(text, i)):
+            links.append((m.group(1), m.group(2)))
+            i = m.end()
+            continue
+        if char == "<" and (m := _SM_AUTOLINK.match(text, i)):
+            links.append(("", m.group(0)[1:-1]))
+            i = m.end()
+            continue
+        left.append(char)
+        i += 1
+    return links, "".join(left)
+
+
+_LIVE_LEFTOVER_RE = re.compile(r"https?://|[*_~|`\[\]<>]")
+
+
+def test_the_ported_parser_sees_the_bug_the_encoding_fixes():
+    raw = "[x](<https://blog.example/codes)https://discord.gg/abcdef>)"
+    links, left = sm_parse(raw)
+    assert links == [("x", "https://blog.example/codes")]
+    assert "https://discord.gg/abcdef" in left  # the live invite the fix exists to prevent
+    wiki = sm_parse("[x](<https://en.wikipedia.org/wiki/Foo_(bar)>)")
+    assert wiki == ([("x", "https://en.wikipedia.org/wiki/Foo_(bar)")], "")
+    assert sm_parse("[x](<https://a.com/x(y>)")[0] == [("x", "https://a.com/x(y")]
+
+
+_PAREN_URLS = [
+    "https://blog.example/codes)https://discord.gg/abcdef",
+    "https://a.com/x)**bold**",
+    "https://a.com/x)__under__ and ~~strike~~ and ||spoiler|| and `code`",
+    "https://a.com/x(unbalanced",
+    "https://a.com/x((y",
+    "https://a.com/x)(y",
+    "https://a.com/x)(<https://evil.example>)",
+    "https://a.com/x)[evil](https://evil.example)",
+    "https://en.wikipedia.org/wiki/Foo_(bar)",
+    "https://en.wikipedia.org/wiki/Foo_(bar)_(baz)",
+    "https://en.wikipedia.org/wiki/Foo_((x))",
+    "https://en.wikipedia.org/wiki/Foo_(bar))",
+    "https://a.com/p?q=)&r=(",
+    "https://a.com/p?q=a)b&c=(d",
+    "https://a.com/x%29y%28z",
+    "https://a.com/x%2529y%2528z",
+    "https://a.com/x#frag)https://discord.gg/abc",
+    "https://a.com/path with space)tail",
+    "https://a.com/x\\)y",
+    "https://a.com/x)\\",
+    "https://bücher.de/x)(y",
+    "https://[2001:db8::1]/x)y",
+    "https://a）b.com/x",  # fullwidth parenthesis in the host: not an ASCII one
+    "https://a＞b.com/x",  # fullwidth ">"
+    "https://a.com/)(",
+]
+_DROPPED_PAREN_URLS = [
+    "https://a)b.com/x",
+    "https://a(b.com/x",
+    "https://a.com)/x",
+    "https://a.com(x)/p",
+    "https://a)https://discord.gg/abc.com/x",
+]
+
+
+def parse_one_line(line: str, expected: list[str]) -> None:
+    links, left = sm_parse(line)
+    assert [target for _, target in links] == expected, line
+    assert not _LIVE_LEFTOVER_RE.search(left), (line, left)
+
+
+def drawn_targets(urls: list[str]) -> list[str]:
+    """What the masked surfaces should link to: each URL as `_masked_shown_link` writes it."""
+    shown = [u for url in urls if (u := fmt._masked_shown_link(url)) is not None]
+    return shown[:3]
+
+
+def check_all_surfaces(urls: list[str]) -> None:
+    want = drawn_targets(urls)
+    more = max(len([url for url in urls if fmt._masked_shown_link(url)]) - 3, 0)
+    # The link line, and the story block that carries it.
+    line = _link_line(urls)
+    parse_one_line(line.removesuffix(f" · +{more} more") if more else line, want)
+    block = fmt._story_block(draft(urls, headline="Plain headline", summary="Plain summary text."))
+    parse_one_line(
+        block.split("\n", 2)[2].removesuffix(f" · +{more} more")
+        if more
+        else block.split("\n", 2)[2],
+        want,
+    )
+    top = block.split("\n", 2)[:2]
+    assert not _LIVE_LEFTOVER_RE.search("\n".join(top)), top
+    # The comped /news page.
+    page = render_story_page(
+        [story_view(urls, summary="Plain summary.")], {"palworld": PAL}, "t", 1, 1
+    )
+    last = str(page.description).split("\n")[-1]
+    parse_one_line(last.removesuffix(f" · +{more} more") if more else last, want)
+    # One headline per URL, and the free /news page.
+    for url in urls:
+        wanted = drawn_targets([url])
+        headline = fmt._headline_line(item("Plain title", url=url))
+        encoded_len = discord_len(wanted[0]) if wanted else 0
+        if not wanted or encoded_len > 1000:
+            assert headline is None, url
+            continue
+        assert headline is not None
+        parse_one_line(headline, wanted)
+        items_page = render_item_page(
+            [item_view(url, "Plain title")], {"palworld": "Palworld"}, "t", 1, 1
+        )
+        body = str(items_page.description).split("\n", 1)[1]
+        parse_one_line(body, wanted)
+
+
+@pytest.mark.parametrize("url", _PAREN_URLS)
+def test_a_url_with_parentheses_parses_as_one_link_with_nothing_live_left_over(url):
+    assert fmt._masked_shown_link(url) is not None, url
+    check_all_surfaces([url])
+    check_all_surfaces([url, "https://pcgamer.com/a", url])  # numbered duplicates around it
+
+
+@pytest.mark.parametrize("url", _DROPPED_PAREN_URLS)
+def test_a_url_with_a_parenthesis_in_its_host_is_not_drawn_anywhere(url):
+    assert fmt._masked_shown_link(url) is None
+    assert _link_line([url]) == ""
+    assert fmt._headline_line(item(url=url)) is None
+    check_all_surfaces([url, "https://pcgamer.com/a"])
+
+
+def test_parentheses_in_the_path_are_all_encoded_and_the_target_is_the_whole_url():
+    shown = fmt._masked_shown_link("https://en.wikipedia.org/wiki/Foo_(bar)_(baz)")
+    assert shown == "https://en.wikipedia.org/wiki/Foo_%28bar%29_%28baz%29"
+    line = _link_line(["https://en.wikipedia.org/wiki/Foo_(bar)_(baz)"])
+    assert line == f"[en.wikipedia.org](<{shown}>)"
+
+
+def test_three_links_with_parentheses_and_a_plus_more_tail_parse_as_three_links():
+    urls = [f"https://s{i}.example.com/p)x(y" for i in range(5)]
+    line = _link_line(urls)
+    links, left = sm_parse(line)
+    assert [t for _, t in links] == drawn_targets(urls)
+    assert left == " ·  ·  · +2 more"
+
+
+def test_fuzzed_urls_parse_as_exactly_the_links_drawn_with_nothing_live_left():
+    rng = random.Random(37)  # noqa: S311 (a reproducible sequence, not a secret)
+    hosts = ["a.com", "www.b.org", "bücher.de", "[2001:db8::1]", "a\\b.com", "x.com\\", "a%29b.com",
+             "a）b.com", "a＞b.com", "a)b.com", "a(b.com", "日本語.jp"]  # fmt: skip
+    pieces = ["(", ")", "<", ">", "[", "]", "*", "_", "~", "|", "`", "\\", " ", "'", '"',
+              "https://", "discord.gg/abc", "%28", "%2528", "x", "/", "?", "=", "&", "#",
+              "**bold**", "))", "((", "(\\)", "​", "‮", "😀", "é"]  # fmt: skip
+    drawn = 0
+    for _ in range(4000):
+        urls = [
+            "https://"
+            + rng.choice(hosts)
+            + "/"
+            + "".join(rng.choice(pieces) for _ in range(rng.randint(0, 8)))
+            for _ in range(rng.randint(1, 4))
+        ]
+        want = drawn_targets(urls)
+        more = max(len([url for url in urls if fmt._masked_shown_link(url)]) - 3, 0)
+        line = _link_line(urls)
+        links, left = sm_parse(line.removesuffix(f" · +{more} more") if more else line)
+        assert [t for _, t in links] == want, (urls, line)
+        assert not _LIVE_LEFTOVER_RE.search(left), (urls, line, left)
+        drawn += len(want)
+        for url in urls:
+            headline = fmt._headline_line(item("Plain title", url=url))
+            wanted = drawn_targets([url])
+            if headline is None:
+                assert not wanted or discord_len(wanted[0]) > 1000
+                continue
+            parse_one_line(headline, wanted)
+    assert drawn > 2000
+
+
+def test_hostile_titles_next_to_parenthesised_urls_still_leave_only_the_real_links():
+    for title in _HOSTILE_TITLES:
+        for url in _PAREN_URLS[:12]:
+            headline = fmt._headline_line(item(title, url=url))
+            assert headline is not None
+            links, left = sm_parse(headline)
+            assert [t for _, t in links] == drawn_targets([url]), (title, url)
+            assert not re.search(r"https?://", left), (title, url, left)
+
+
+# --- trying to break the encoding ---
+
+
+def test_an_already_encoded_paren_is_left_alone_and_never_encoded_twice():
+    for raw, want in [
+        ("https://a.com/x%28y%29", "https://a.com/x%28y%29"),
+        ("https://a.com/x%2528y%2529", "https://a.com/x%2528y%2529"),
+        ("https://a.com/x%2528", "https://a.com/x%2528"),
+        ("https://a.com/x%252528", "https://a.com/x%252528"),
+        ("https://a.com/x(y", "https://a.com/x%28y"),
+    ]:
+        assert fmt._masked_shown_link(raw) == want, raw
+    # Encoding is idempotent on its own output: the shown URL goes back through unchanged.
+    for raw in ("https://a.com/x(y)", "https://a.com/(((", "https://a.com/x)(y?q=(1)"):
+        once = fmt._masked_shown_link(raw)
+        assert fmt._masked_shown_link(once) == once
+
+
+def test_a_paren_and_its_percent_encoding_draw_the_same_link():
+    a = _link_line(["https://en.wikipedia.org/wiki/Foo_(bar)"])
+    b = _link_line(["https://en.wikipedia.org/wiki/Foo_%28bar%29"])
+    c = _link_line(["https://en.wikipedia.org/wiki/Foo_%28bar%29".lower()])
+    assert a == b
+    assert c.count("](<") == 1
+
+
+def test_the_percent_form_of_a_host_paren_is_a_link_label_and_not_a_paren():
+    # %29 in a host is not an ASCII ")" to the parser, and the label rule sends it to "link".
+    line = _link_line(["https://a%29b.com/x"])
+    assert line == "[link](<https://a%29b.com/x>)"
+    parse_one_line(line, ["https://a%29b.com/x"])
+
+
+@pytest.mark.parametrize("host", ["a（b.com", "a）b.com", "a＞b.com", "a﹚b.com"])
+def test_look_alike_parentheses_in_a_host_are_inert_to_the_parser(host):
+    url = f"https://{host}/x"
+    line = _link_line([url])
+    if line:
+        parse_one_line(line, [fmt._masked_shown_link(url)])
+        assert _link_label(fmt._masked_shown_link(url)) == "link"
+
+
+def test_the_headline_cap_counts_the_encoded_url_exactly():
+    prefix = "https://pcgamer.com/"
+    # 20 + 3 * n + m units once every paren is "%28": land exactly on 1000 and 1001.
+    for n in (1, 10, 100, 300):
+        m = 1000 - len(prefix) - 3 * n
+        kept = fmt._headline_line(item(url=prefix + "(" * n + "a" * m))
+        dropped = fmt._headline_line(item(url=prefix + "(" * n + "a" * (m + 1)))
+        assert kept is not None, n
+        assert dropped is None, n
+        assert discord_len(re.search(r"\(<(.*)>\)$", kept).group(1)) == 1000
+    # A raw URL well under 1000 that grows past it once encoded is dropped.
+    assert fmt._headline_line(item(url=prefix + "(" * 340)) is None
+    assert fmt._headline_line(item(url=prefix + "(" * 326)) is not None  # 20 + 978
+
+
+def test_the_headline_cap_still_counts_plain_urls_the_old_way():
+    prefix = "https://pcgamer.com/"
+    assert fmt._headline_line(item(url=prefix + "a" * (1000 - len(prefix)))) is not None
+    assert fmt._headline_line(item(url=prefix + "a" * (1001 - len(prefix)))) is None
+
+
+def test_the_item_page_applies_the_same_cap_to_the_encoded_url():
+    prefix = "https://pcgamer.com/"
+    n = 330
+    page = render_item_page(
+        [item_view(prefix + "(" * n), item_view(prefix + "(" * 300, "kept")],
+        {"palworld": "Palworld"},
+        "t",
+        1,
+        1,
+    )
+    text = str(page.description)
+    assert text.count("](<") == 1 and "kept" in text
+
+
+def test_the_worst_headline_line_with_an_encoded_url_stays_under_1700():
+    host = "a" * 28 + ".example.com"
+    head = f"https://{host}/"
+    n = 100
+    url = head + "(" * n + "a" * (1000 - len(head) - 3 * n)
+    for title in ("*" * 300, "\\" * 300, "https://" * 37):
+        line = fmt._headline_line(item(title, url=url, trust="official"))
+        assert line is not None
+        assert discord_len(line) < 1700, (title[:6], discord_len(line))
+
+
+def test_a_story_block_counts_the_encoded_links_when_it_decides_what_fits():
+    # Parentheses cost two more units each once encoded: raw this block fits with three links,
+    # encoded it must shed one, and whatever it keeps must be whole and under the limit.
+    def url(i):
+        return f"https://site{i}.example.com/" + "(" * 200 + "p" * 600
+
+    story = draft([url(i) for i in range(3)], summary="s" * 1400)
+    raw_len = sum(discord_len(url(i)) for i in range(3))
+    assert raw_len < 2600
+    block = fmt._fitting_story_block(story)
+    assert block is not None
+    assert discord_len(block) <= LIMIT
+    assert open_link(block) is False
+    assert block.count("](<") == 2  # three encoded links would be over 4096
+    assert "(" not in "".join(re.findall(r"\(<([^>]*)>\)", block))
+
+
+def test_the_comped_digest_and_pages_count_encoded_lengths_too():
+    urls = [f"https://site{i}.example.com/" + "(" * 150 + "p" * 100 for i in range(3)]
+    stories = [draft(urls, headline=f"H{n}", summary="s" * 380) for n in range(8)]
+    text = str(fmt._topic_embed(PAL, stories).description)
+    assert discord_len(text) <= LIMIT and open_link(text) is False
+    kept = text.count("REPORTED")
+    assert text.endswith(f"+{8 - kept} more, use /news") if kept < 8 else True
+    views = [story_view(urls, summary="s" * 300, n=n) for n in range(10)]
+    page = str(render_story_page(views, {"palworld": PAL}, "t", 1, 1).description)
+    assert discord_len(page) <= LIMIT and open_link(page) is False
+
+
+def test_the_three_surfaces_agree_on_which_paren_urls_are_drawn_and_what_they_point_at():
+    pool = _PAREN_URLS + _DROPPED_PAREN_URLS + ["https://pcgamer.com/a", "https://discord.gg/abc"]
+    for url in pool:
+        want = drawn_targets([url])
+        line = _link_line([url])
+        headline = fmt._headline_line(item(url=url))
+        assert bool(line) == bool(want), url
+        assert (headline is not None) == bool(want), url
+        if want:
+            assert sm_parse(line)[0][0][1] == want[0] == sm_parse(headline)[0][0][1], url
+        # The story block sheds a link from the end when it is too long; with one link and a
+        # summary that leaves room, the same URL is kept as the same target.
+        block = fmt._fitting_story_block(draft([url], summary="s" * 200))
+        assert block is not None
+        got = [t for _, t in sm_parse(block.split("\n", 2)[2])[0]]
+        assert got == want, url
+
+
+def test_an_undrawn_url_still_never_costs_a_drawn_one_its_place_with_parens_in_play():
+    four = [f"https://site{i}.example.com/{'p' * 315}" for i in range(4)]
+    plain = fmt._fitting_story_block(draft(four, summary="s" * 3000))
+    for odd in ("https://a)b.com/x", "https://a(b.com/x", "https://a.com(x)/p"):
+        assert fmt._fitting_story_block(draft([odd, *four], summary="s" * 3000)) == plain, odd
+
+
+# --- the SHiFT surfaces and the lounge still do not see any of this ---
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://en.wikipedia.org/wiki/Foo_(bar)",
+        "https://blog.example/codes)https://discord.gg/abcdef",
+        "https://a.com/x)**bold**",
+        "https://a.com/x(unbalanced",
+        "https://a)b.com/post",
+        "https://a(b.com/post",
+        "https://a.com/x%2528y",
+    ],
+)
+def test_shift_surfaces_keep_parentheses_exactly_as_before(old_format, url):
+    code_a, code_b = "AAAA1-AAAAA-AAAAA-AAAAA-AAAAA", "BBBB2-BBBBB-BBBBB-BBBBB-BBBBB"
+    cands = [_cand(code_a, url), _cand(code_b, url)]
+    for ping in (True, False):
+        new = [m.content for m in render_code_alerts(cands, ping=ping)]
+        old = [m.content for m in old_format.render_code_alerts(cands, ping=ping)]
+        assert new == old
+        assert "%28" not in "".join(new) or "%28" in url
+    roundup = [_cand(code_a, url, roundup=True), _cand(code_b, url, roundup=True)]
+    assert [m.content for m in render_roundup_alerts(roundup)] == [
+        m.content for m in old_format.render_roundup_alerts(roundup)
+    ]
+    assert fmt._shown_link(url) == old_format._shown_link(url)
