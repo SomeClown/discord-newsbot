@@ -64,8 +64,9 @@ DAILY_ROWS = 14
 # The server counts the projection table is asked for.
 PROJECTION_SERVERS = (10, 25, 50, 75, 100, 200)
 
-# What a rendered link looks like: `<url>`, which is the only shape the renderers emit. Text
-# from feeds goes through `esc()` first, which defuses a scheme, so a title can't pose as one.
+# What a rendered link looks like: `<url>`, bare (SHiFT alerts) or inside the parentheses of a
+# masked `[domain](<url>)` (digests, since v3.4.0). Text from feeds goes through `esc()` first,
+# which defuses a scheme, so a title can't pose as one.
 _LINK_RE = re.compile(r"<(https?://[^>\s]+)>")
 
 # Link categories. SHiFT has three; a digest has two (the industry post is its own thing).

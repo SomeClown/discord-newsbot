@@ -329,9 +329,12 @@ async def test_a_preview_after_new_items_arrive_inside_the_ttl_recomputes(world)
             now=lambda: world.clock.t - timedelta(minutes=1),
         )
     world.clock.t += timedelta(minutes=5)
-    second = await preview_guild_digest(servers.digest_deps, A)
+    await preview_guild_digest(servers.digest_deps, A)
     assert len(world.llm.calls) > calls  # an item arrived: a fresh summary
-    assert "brand-new" in json.dumps([m.embed.to_dict() for m in second.rendered.messages])
+    # Whether the new story makes it onto the screen depends on how much of the 4096 units the
+    # older ones use up (masked links take a few more apiece than bare ones did), so this asks
+    # the model's side: the fresh summary was asked about the new item.
+    assert "brand-new" in world.llm.calls[-1][1]
 
 
 async def test_a_new_digest_changes_the_coverage_and_so_misses_the_preview_cache(world):

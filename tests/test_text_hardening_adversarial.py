@@ -33,6 +33,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from masked_old import mask_links_like_v340
 from test_codes_only import CODE, PASS_AT, PRODLIKE, FakeFeed, World, raw
 
 import newsbot.bot.format as fmt
@@ -104,7 +105,7 @@ def _exec_base(relpath: str, name: str, *, swap: dict[str, types.ModuleType] | N
 
 @pytest.fixture(scope="module")
 def old_format():
-    module = _exec_base("newsbot/bot/format.py", "_newsbot_format_v330_adv")
+    module = mask_links_like_v340(_exec_base("newsbot/bot/format.py", "_newsbot_format_v330_adv"))
     yield module
     sys.modules.pop(module.__name__, None)
 

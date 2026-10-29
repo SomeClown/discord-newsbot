@@ -88,13 +88,13 @@ def test_titles_are_escaped_and_links_are_suppressed_embeds():
     assert "\\*\\*bold\\*\\*" in text
     assert "<​#123>" in text
     assert "https:​//evil.example" in text
-    # The link is re-canonicalized (the space is percent-encoded) and wrapped in <>.
-    assert "— <https://example.com/a%20b>" in text
+    # The link is re-canonicalized (the space is percent-encoded) and masked with its domain.
+    assert "— [example.com](<https://example.com/a%20b>)" in text
 
 
 def test_an_item_with_an_unusable_url_is_dropped_and_not_counted():
     embed = render_headlines_embed(BL4, [item("bad", url="not a url"), item("good")])
-    assert lines(embed) == ["• good — <https://example.com/good>"]
+    assert lines(embed) == ["• good — [example.com](<https://example.com/good>)"]
     assert render_headlines_embed(BL4, [item("bad", url="not a url")]) is None
 
 
@@ -121,7 +121,7 @@ def test_over_the_limit_sheds_whole_lines_from_the_bottom_with_a_more_line():
     assert text.endswith(f"+{119 - shown} more, use /news")
     # The newest survive; every shown line is whole (ends with its link).
     assert "headline number 001" in body[1]
-    assert all(line.endswith(">") for line in body[1:])
+    assert all(line.endswith(">)") for line in body[1:])
 
 
 def test_the_limit_counts_utf16_units_not_characters():
