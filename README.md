@@ -25,6 +25,10 @@ still works and is [documented](#run-your-own-copy) below.
 
 ## What's new
 
+**v3.4.0 (2026-10-29), shorter links.** Digests, the Gaming industry post and
+`/news` show each source as the site's name (`pcgamer.com`) instead of the
+whole address, so posts read shorter on a phone. SHiFT alerts look the same.
+
 **v3.3.1 (2026-10-24), a security release.**
 
 - AI-written story text can't fake a second story or an OFFICIAL label any more.
@@ -98,9 +102,13 @@ that day posts nothing at all. A free server's looks something like this
 (illustrative only, not real scraped content):
 
 > **Borderlands 4**
-> • 🟢 OFFICIAL · Hotfix 5 now live — <https://example.com>
-> • Datamined patch notes point to a new Vault Hunter — <https://example.com>
-> • Mayhem 6 loot rates, explained by a very tired player — <https://example.com>
+> • 🟢 OFFICIAL · Hotfix 5 now live — [borderlands.com](<https://borderlands.com>)
+> • Datamined patch notes point to a new Vault Hunter — [pcgamer.com](<https://pcgamer.com>)
+> • Mayhem 6 loot rates, explained by a very tired player — [bsky.app](<https://bsky.app>)
+
+Each link shows the site's domain instead of the whole address (the full
+address is still behind it), so a line stays short on a phone. A host that
+isn't a plain name, like a raw IPv6 address, reads "link".
 
 Official items get the marker and go first, then press, then community, then
 newest. Nothing is labeled "rumor": a headline list makes no claim about
@@ -114,12 +122,12 @@ A comped server's digest has the AI-written stories instead:
 > 🟢 **OFFICIAL · Hotfix 5 now live**
 > Fixes a crash on the Vault of the Traveler boss fight and adjusts loot drop
 > rates on Mayhem 6+.
-> [Gearbox forums](https://example.com) · [Steam](https://example.com)
+> [borderlands.com](<https://borderlands.com>) · [store.steampowered.com](<https://store.steampowered.com>)
 >
 > 🟡 **REPORTED · Datamined patch notes point to a new Vault Hunter**
 > Several outlets are citing files pulled from the latest patch; nothing
 > official yet.
-> [PC Gamer](https://example.com) +2 more
+> [pcgamer.com](<https://pcgamer.com>) · +2 more
 
 Sorted official, then reported, then rumor, each labeled so nobody mistakes a
 leak for a patch note. A coverage caveat ("Brave search skipped: quota
