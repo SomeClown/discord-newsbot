@@ -19,13 +19,22 @@ from newsbot.bot.format import (
     discord_len,
     render_digest_summary_line,
     render_guild_status,
-    render_owner_report,
+)
+from newsbot.bot.format import (
+    render_owner_report as _render_owner_report,
 )
 from newsbot.store import repo
 from newsbot.store.db import connect, migrate
 from newsbot.store.models import Notice, SourceHealthRow
 
 T0 = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+
+
+def render_owner_report(outcomes, failing):
+    """The report with a fixed spend; these tests are about the rest of it."""
+    return _render_owner_report(
+        outcomes, failing, spend_24h_usd=0.04, spend_month_usd=0.62, month_name="October"
+    )
 
 
 def _src(name, fails, error="timeout"):
@@ -119,6 +128,7 @@ def test_exactly_ten_failing_sources_have_no_more_line_and_eleven_have_one():
 def test_the_report_with_no_outcomes_and_no_failures_is_still_a_report():
     assert render_owner_report([], []).splitlines() == [
         "newsbot daily: no server digests were due today",
+        "Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)",
         "All sources are healthy.",
     ]
 
@@ -216,7 +226,7 @@ def test_failing_sources_feed_the_report_end_to_end(conn):
     _health(conn, "ign", 12, error="timeout after 30s")
     _health(conn, "rss", 2, error="HTTP 503")
     report = render_owner_report([DigestOutcome(True)], repo.failing_sources(conn))
-    assert report.splitlines()[2:] == [
+    assert report.splitlines()[3:] == [
         "- ign (12 in a row): timeout after 30s",
         "- rss (2 in a row): HTTP 503",
     ]

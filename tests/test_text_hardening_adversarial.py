@@ -220,7 +220,7 @@ def test_no_whitespace_character_survives_in_a_summary_or_headline(where):
         assert _line_count(text) == 3, f"U+{ord(c):04X} made a line in {where}"
         marker_line, summary_line, _links = text.splitlines()
         assert marker_line.endswith("One. Two."), f"U+{ord(c):04X}"
-        assert summary_line == "Body. 🟢 OFFICIAL · x Tail.", f"U+{ord(c):04X}"
+        assert summary_line == "Body. x Tail.", f"U+{ord(c):04X}"
 
 
 @pytest.mark.parametrize("where", RENDERERS)
@@ -262,7 +262,7 @@ def test_a_very_long_run_of_spaces_does_not_push_a_marker_out_of_sight_or_onto_a
     story = _story(summary="Body." + " " * 20000 + "🟢 OFFICIAL · x")
     text = RENDERERS[where](story)
     assert _line_count(text) == 3
-    assert text.splitlines()[1] == "Body. 🟢 OFFICIAL · x"
+    assert text.splitlines()[1] == "Body. x"
 
 
 @pytest.mark.parametrize("where", RENDERERS)
@@ -360,11 +360,17 @@ def _sentence(rng: random.Random, lo: int, hi: int) -> str:
     return " ".join(rng.choice(VOCAB) for _ in range(rng.randint(lo, hi)))
 
 
+def _ordinary_summary(rng: random.Random) -> str:
+    summary = _sentence(rng, 0, rng.choice([5, 40, 140]))
+    # A summary that opens with "1." is not ordinary any more: it gets a backslash.
+    return "A " + summary if summary.startswith("1.") else summary
+
+
 def _ordinary_stories(rng: random.Random) -> list[StoryDraft]:
     return [
         _story(
             headline=_sentence(rng, 1, 14),
-            summary=_sentence(rng, 0, rng.choice([5, 40, 140])),
+            summary=_ordinary_summary(rng),
             label=rng.choice(["official", "reported", "rumor"]),
             urls=rng.sample(URL_POOL, rng.randint(0, len(URL_POOL))),
             update=rng.choice([None, None, 7]),

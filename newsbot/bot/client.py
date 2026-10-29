@@ -54,6 +54,7 @@ from newsbot.bot.format import (
     RenderedAlert,
     RenderedDigest,
     esc,
+    local_month,
     outcome_from_digest,
     render_owner_report,
 )
@@ -88,7 +89,7 @@ from newsbot.pipeline.summaries import (
     retry_lookup,
     summary_lookup,
 )
-from newsbot.pipeline.summarize import AnthropicLLM, LLMClient
+from newsbot.pipeline.summarize import AnthropicLLM, LLMClient, estimate_spend_usd
 from newsbot.shift.fanout import (
     FanoutDeps,
     deliver_queued_codes,
@@ -1562,16 +1563,31 @@ class NewsBot(discord.Client):
         last 24 hours; `partial` counts as posted
         (it did post, with something skipped or degraded), and `pending` and
         `failed` are the failures, grouped by `outcome_from_digest`'s reasons.
+
+        The spend line is the same estimate `/owner servers` shows, from the summaries'
+        stored token counts (industry picks are stored there too): the last 24 hours, and
+        the month so far. The month is the owner's, in `owner_report.timezone` (`local_month`, which
+        `/owner servers` shares), so at 21:00 Pacific on the last evening of a month, when UTC
+        has already turned over, it still says that month.
         """
+        month = local_month(now, self.cfg.owner_report.timezone)
         with closing(connect(self.db_path)) as conn:
             if repo.app_state_get(conn, _OWNER_REPORT_KEY) == today:
                 return None
             rows = repo.recent_guild_digests(conn, now - timedelta(hours=24))
+            day_usage = repo.game_summary_tokens(conn, now - timedelta(hours=24))
+            month_usage = repo.game_summary_tokens(conn, month.start_utc)
             configured = self.cfg.configured_source_names()
             failing = [r for r in repo.failing_sources(conn) if r.source_name in configured]
             repo.app_state_set(conn, _OWNER_REPORT_KEY, today)
         outcomes = [outcome_from_digest(status, notes) for status, notes in rows]
-        return render_owner_report(outcomes, failing)
+        return render_owner_report(
+            outcomes,
+            failing,
+            spend_24h_usd=estimate_spend_usd(day_usage.input_tokens, day_usage.output_tokens),
+            spend_month_usd=estimate_spend_usd(month_usage.input_tokens, month_usage.output_tokens),
+            month_name=month.name,
+        )
 
     async def _owner_report_job(self) -> None:
         """Once a day, at `owner_report.time`: the all-servers summary, to the owner."""

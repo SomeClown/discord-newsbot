@@ -9,11 +9,20 @@ from newsbot.bot.format import (
     discord_len,
     render_digest_summary_line,
     render_guild_status,
-    render_owner_report,
+)
+from newsbot.bot.format import (
+    render_owner_report as _render_owner_report,
 )
 from newsbot.store.models import Notice, SourceHealthRow
 
 T0 = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+
+
+def render_owner_report(outcomes, failing):
+    """The report with a fixed spend; these tests are about the rest of it."""
+    return _render_owner_report(
+        outcomes, failing, spend_24h_usd=0.04, spend_month_usd=0.62, month_name="October"
+    )
 
 
 def _ok(n):
@@ -76,9 +85,10 @@ def test_report_leads_with_the_summary_then_lists_failing_sources():
     report = render_owner_report(_ok(2), [_src("ign", 12), _src("rss: pal", 3, "503 from host")])
     lines = report.splitlines()
     assert lines[0] == "newsbot daily: digests posted to 2 of 2 servers"
-    assert lines[1] == "2 failing sources:"
-    assert "ign (12 in a row): timeout" in lines[2]
-    assert "rss: pal (3 in a row): 503 from host" in lines[3]
+    assert lines[1].startswith("Claude spend: ")
+    assert lines[2] == "2 failing sources:"
+    assert "ign (12 in a row): timeout" in lines[3]
+    assert "rss: pal (3 in a row): 503 from host" in lines[4]
 
 
 def test_report_with_no_failing_sources():
@@ -101,12 +111,12 @@ def test_source_error_and_name_are_defused_and_one_line():
         _ok(1), [_src("@everyone feed", 3, "bad\n<@123456789012345678> https://x.test")]
     )
     assert "@everyone" not in report and "<@123456789012345678>" not in report
-    assert len(report.splitlines()) == 3
+    assert len(report.splitlines()) == 4
 
 
 def test_source_with_no_error_text():
     report = render_owner_report(_ok(1), [_src("a", 2, None)])
-    assert report.splitlines()[2] == "- a (2 in a row)"
+    assert report.splitlines()[3] == "- a (2 in a row)"
 
 
 def test_guild_status_lists_newest_first_and_caps():

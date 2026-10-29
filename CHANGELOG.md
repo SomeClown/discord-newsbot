@@ -15,6 +15,16 @@ old tag.
 
 ## [Unreleased]
 
+### Added
+
+- The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` counts the same month (and labels it that way), so the two agree around a month's end.
+
+### Fixed
+
+- A summary that starts with a number ("2026. The year...") no longer shows as a numbered list in digests, on `/news` pages (comped servers) or in the lounge's daily quote.
+- Labels in disguise are stripped from AI text and from the headlines in a free server's lists. A leading copy of the bot's own labels is removed in any capitalization, in full-width or bold letters, behind look-alike emoji (other colored circles and squares, check marks, repeat arrows) and with any of `·`, `:`, `-`, `|`, `–` or `—` after it; the bot's exact markers ("🟢 OFFICIAL ·" and the rest) are removed anywhere in the line. A real title can lose a leading label word: "Update: Hotfix 1.0.3" shows as "Hotfix 1.0.3". A bare word ("Official patch notes") is left alone.
+- A very long feed title (megabytes) no longer slows down rendering a headline list.
+
 ## [3.3.1] - 2026-10-24
 
 A security release: three ways a hostile feed or a talked-into-it model could dress text up as something it isn't, all found reviewing v3.3.0.

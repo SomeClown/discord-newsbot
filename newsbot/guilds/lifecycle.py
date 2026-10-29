@@ -25,7 +25,7 @@ from typing import Any
 
 import discord
 
-from newsbot.bot.format import discord_len, esc
+from newsbot.bot.format import _INVISIBLE_EXTRA, discord_len, esc
 from newsbot.text import plain_line
 
 logger = logging.getLogger(__name__)
@@ -68,14 +68,6 @@ VALVE_FRACTION = 0.10
 _NAME_JUNK_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 # A lone surrogate can't be encoded, and Discord's own client would choke on it.
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
-# Characters that print nothing but aren't format characters or spaces: the
-# Hangul and Khmer fillers, the braille blank, the combining grapheme joiner and
-# the variation selectors. Only used to decide whether a name is "(unnamed)";
-# a visible name keeps its joiners, or every family emoji would fall apart.
-_INVISIBLE_EXTRA = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0") | frozenset(
-    chr(c) for c in (*range(0x180B, 0x180F), *range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0))
-)
-
 # Longest name a summary shows per server. Ten of them, escaped, plus ids has to
 # fit in one message, so the summaries are stricter than a lone join alert.
 SUMMARY_NAME_CAP = 60
@@ -84,6 +76,9 @@ SUMMARY_NAME_CAP = 60
 SUMMARY_LIMIT = 1900
 
 
+# A space, a control or format character, or one of `format._INVISIBLE_EXTRA` (fillers, the
+# braille blank, the variation selectors and the like). Only used to decide whether a name is
+# "(unnamed)"; a visible name keeps its joiners, or every family emoji would fall apart.
 def _is_invisible(ch: str) -> bool:
     return ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf") or ch in _INVISIBLE_EXTRA
 
