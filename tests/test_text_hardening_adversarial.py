@@ -33,6 +33,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from dated_prompt_old import date_prompts_like_v341
 from masked_old import mask_links_like_v340
 from test_codes_only import CODE, PASS_AT, PRODLIKE, FakeFeed, World, raw
 
@@ -112,7 +113,9 @@ def old_format():
 
 @pytest.fixture(scope="module")
 def old_prompts():
-    module = _exec_base("newsbot/pipeline/prompts.py", "_newsbot_prompts_v330_adv")
+    module = date_prompts_like_v341(
+        _exec_base("newsbot/pipeline/prompts.py", "_newsbot_prompts_v330_adv")
+    )
     yield module
     sys.modules.pop(module.__name__, None)
 

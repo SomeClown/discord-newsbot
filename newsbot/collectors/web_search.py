@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from newsbot import text
+from newsbot import netguard, text
 from newsbot.collectors.base import QuotaExceeded, RawItem
 from newsbot.config import GameInfo, WebSearchSource
 
@@ -32,6 +32,20 @@ def _parse_page_age(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _is_excluded(url: str, domains: Sequence[str]) -> bool:
+    """Whether `url`'s host is one of `domains` or a subdomain of one.
+
+    Hosts compare the way the rest of the bot compares them (IDNA 2008, lowercased),
+    with a trailing dot ignored. A URL whose host can't be read isn't excluded here;
+    the other checks can have it.
+    """
+    try:
+        host = netguard.host_name(httpx.URL(url)).removesuffix(".")
+    except httpx.InvalidURL:
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
 
 
 class WebSearchCollector:
@@ -97,6 +111,11 @@ class WebSearchCollector:
             url = result.get("url")
             title = result.get("title")
             if not (url and title):
+                continue
+            # Some sites stamp every page with the moment it's served, and Brave's
+            # `page_age` believes them (a June article looked a day old). Clearing the
+            # date wouldn't help: an undated item is kept. So the result goes.
+            if _is_excluded(url, self._source.exclude_domains):
                 continue
             # `.get(..., "")` only covers a *missing* key; Brave has sent
             # an explicit `"description": null` in the wild, which sails

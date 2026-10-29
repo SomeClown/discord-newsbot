@@ -371,6 +371,7 @@ def build_catalog_collectors(
             queries_per_topic=cfg.web_search.queries_per_game,
             query_templates=cfg.web_search.query_templates,
             trust=cfg.web_search.trust,
+            exclude_domains=cfg.web_search.exclude_domains,
         )
         requested = cfg.catalog if web_search_games is None else web_search_games
         # Industry news isn't about a game, so a Brave query for it would only

@@ -395,7 +395,12 @@ async def test_the_real_client_through_all_three_paths_gives_one_answer(old, nam
 
 
 def test_summarize_topic_keeps_its_signature_and_public_names(old):
-    assert str(inspect.signature(summarize_topic)) == str(inspect.signature(old.summarize_topic))
+    # v3.4.1 added the keyword-only `today`; everything else is as it was.
+    now_params = dict(inspect.signature(summarize_topic).parameters)
+    assert now_params.pop("today").default is None
+    assert str(inspect.signature(summarize_topic).replace(parameters=now_params.values())) == str(
+        inspect.signature(old.summarize_topic)
+    )
     assert set(old.__all__) <= set(new_summarize.__all__)
 
 

@@ -1106,14 +1106,16 @@ def test_every_top_level_definition_in_format_py_is_identical_except_the_four_th
     assert set(new) - set(old) == _NEW
 
 
+# (prompts.py and summarize.py were on this list until v3.4.1, which changed both on purpose: the
+# dates rule, `published` and `today`. "The rest is unchanged" is covered elsewhere now: the
+# signature test in test_industry_pick_adversarial.py, and the old-versus-new prompt comparisons
+# in test_text_hardening*.py.)
 @pytest.mark.parametrize(
     "relpath",
     [
         "newsbot/lounge/quotes.py",
         "newsbot/discord_links.py",
         "newsbot/pipeline/normalize.py",
-        "newsbot/pipeline/summarize.py",
-        "newsbot/pipeline/prompts.py",
         "newsbot/pipeline/industry.py",
         "newsbot/bot/terminal.py",
     ],

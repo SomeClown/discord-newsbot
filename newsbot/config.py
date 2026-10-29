@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
+import httpx
 import yaml
 from pydantic import (
     BaseModel,
@@ -116,6 +117,51 @@ def _check_search_queries(v: list[str]) -> list[str]:
     if any(not q.strip() for q in v):
         raise ValueError("search_queries entries must be non-empty strings")
     return v
+
+
+# Brave results from these are dropped: the site stamps every page with the time you load it,
+# so Brave's `page_age` calls a months-old article a day old (v3.4.1). One entry for now.
+_DEFAULT_EXCLUDE_DOMAINS = ["playstationcouch.com"]
+
+
+_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+_HOSTNAME = re.compile(rf"{_LABEL}(?:\.{_LABEL})+")
+
+
+def _check_exclude_domains(v: list[str]) -> list[str]:
+    """Clean `exclude_domains`: each entry a bare hostname, lowercased, no trailing dot.
+
+    A scheme, a path, a port, a `@` or a space means somebody pasted a URL, and a URL
+    would sit in the list matching nothing while the stale news sailed through. So it's
+    an error, not a shrug. A non-ASCII name is stored in the IDNA 2008 form the
+    connection uses, which is also what the collector compares against. It needs at
+    least two labels, so a bare top-level domain can't take a whole TLD with it.
+    """
+    cleaned = []
+    for entry in v:
+        name = entry.strip().lower().removesuffix(".")
+        bad = (
+            not name
+            or any(not label for label in name.split("."))
+            or re.search(r"[\s/\\:@?#*]", name) is not None
+        )
+        if not bad:
+            try:
+                name = httpx.URL(f"https://{name}/").raw_host.decode("ascii")
+            except httpx.InvalidURL:
+                bad = True
+        # What's left has to be a name a host can really equal: two or more labels of
+        # letters, digits and inner hyphens. (`com` alone would drop a whole TLD; `%41.x`
+        # and `a<b.x` would sit in the list matching nothing.)
+        if not bad and _HOSTNAME.fullmatch(name) is None:
+            bad = True
+        if bad:
+            raise ValueError(
+                f"exclude_domains entry {entry!r} isn't a bare hostname "
+                "(no scheme, path, port, @ or spaces; example: news.example.com)"
+            )
+        cleaned.append(name)
+    return cleaned
 
 
 class GameInfo(Protocol):
@@ -278,9 +324,16 @@ class WebSearchSource(BaseModel):
     queries_per_topic: int = 2
     query_templates: list[str] = ["{name} news", "{name} update OR patch OR leak"]
     trust: Trust
+    # Setting this replaces the default list; `[]` turns the check off.
+    exclude_domains: list[str] = list(_DEFAULT_EXCLUDE_DOMAINS)
     # Only here so a stray `codes_only: true` gets a message instead of being
     # ignored; load_config rejects it (Brave never feeds SHiFT detection).
     codes_only: bool | None = None
+
+    @field_validator("exclude_domains")
+    @classmethod
+    def _validate_exclude_domains(cls, v: list[str]) -> list[str]:
+        return _check_exclude_domains(v)
 
 
 class ShiftTableSource(BaseModel):
@@ -421,6 +474,13 @@ class WebSearchCfg(BaseModel, extra="forbid"):
     queries_per_game: int = Field(2, ge=1)
     query_templates: list[str] = ["{name} news", "{name} update OR patch OR leak"]
     trust: Trust = "press"
+    # Sites whose dates can't be trusted; see `WebSearchSource.exclude_domains`.
+    exclude_domains: list[str] = list(_DEFAULT_EXCLUDE_DOMAINS)
+
+    @field_validator("exclude_domains")
+    @classmethod
+    def _validate_exclude_domains(cls, v: list[str]) -> list[str]:
+        return _check_exclude_domains(v)
 
 
 class ShiftCfg(BaseModel, extra="forbid"):
@@ -1021,6 +1081,7 @@ def _derive_catalog(
                     queries_per_game=_at_least_one(source.queries_per_topic, "queries_per_topic"),
                     query_templates=source.query_templates,
                     trust=source.trust,
+                    exclude_domains=source.exclude_domains,
                 )
             else:
                 logging.getLogger(__name__).warning(
