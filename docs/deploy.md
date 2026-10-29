@@ -1272,3 +1272,84 @@ is additive and v2.1.1 never reads its tables. The `lounge:` block can stay
 in `config.yaml` (v2.1.1 ignores unrecognized top-level keys), and so can
 the portal intent and the cache directory `/data/newsbot-lounge-cache/`
 (assuming the default `newsbot.db` path).
+
+## 19. Comping a server
+
+A comped server gets Claude summaries and web search on the owner's keys
+instead of free headlines (`docs/design.md` §15, D6 and D12). There's no
+command for it: a server is comped by listing its ID in `comped_guild_ids`
+in `config.yaml`. The bot sets a listed server to comped when it joins and
+again at every startup, and it never downgrades anyone on its own, which is
+why taking a comp back (below) needs a hand-run database change.
+
+**Before you comp anyone:**
+- **Never the home or test server** (PacketQueue, PacketQueue Dev).
+- **It changes the prompt for everyone comped.** The summarizer's prompt
+  names every game any comped server follows, so a new comped server
+  following other games changes Rage Quit Tavern's prompt too.
+- **It costs real money.** Summaries are shared only between comped servers
+  that follow exactly the same games; otherwise each pays its own way, about
+  $0.01 per game per day (a server following 10 games is roughly $3 a
+  month). The industry pick is one call per digest time whoever follows it.
+- **Get the server's ID.** It's in the join alert in `#prod-alerts`
+  (`Joined a new server: <name> (<id>), ...`), or the server's owner can copy
+  it (Developer Mode on, right-click the server icon, Copy Server ID).
+
+The server doesn't have to have installed the bot yet. Comp it ahead of time
+and it joins as comped (the join alert ends in "comped"); either way nothing
+posts until one of its admins runs `/newsbot setup`.
+
+1. **Edit a copy, not the live file,** and keep the old one:
+   ```bash
+   cd /opt/newsbot
+   cp -p config.yaml config.pre-comp-$(date +%Y%m%d).yaml
+   cp -p config.yaml config.next.yaml
+   vi config.next.yaml
+   ```
+   Add the ID to `comped_guild_ids`, written the same way as the IDs already
+   there (`:set paste` before pasting).
+2. **Validate the copy** with the image you're running (only the `TAG` line
+   of `.env` is read; never `docker compose ... config`). No output means it
+   loaded:
+   ```bash
+   docker run --rm -v "$PWD/config.next.yaml:/app/config.yaml:ro" \
+     ghcr.io/someclown/discord-newsbot:$(grep -E '^TAG=' .env | cut -d= -f2) \
+     python -c "from newsbot.config import load_config; load_config('/app/config.yaml')"
+   ```
+3. **Put it in place and restart.** Not `deploy.sh`: with the same `TAG` its
+   `up -d` leaves the running container alone, and the bot only reads
+   `config.yaml` at startup. Same windows as any deploy: never 09:00 to 09:15
+   Pacific, and avoid about 07:55 to 08:05 (the lounge quote).
+   ```bash
+   mv config.next.yaml config.yaml
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart newsbot
+   ```
+4. **Check it.** For a server that's already in, the log has a
+   `server <id> comped (comped_guild_ids)` line, and `/owner servers` shows
+   one more comped server:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --since 5m | grep -i comped
+   ```
+5. **Once they've run setup,** look at `/newsbot preview` on the new server
+   and on Rage Quit Tavern, since the prompt's game list changed for both.
+6. **Record it:** the comped list in CLAUDE.md's "Prod config gotcha", and
+   the backup's delete-by date (a clean week, as with the other
+   `config.pre-*` files).
+
+**Taking a comp back.** Copying the old config back isn't enough: the server
+stays comped in the database, because nothing downgrades. Take the ID out of
+the list the same way (steps 1 to 3, but skip the restart), then:
+```bash
+cd /opt/newsbot
+./scripts/backup.sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop
+sudo sqlite3 data/newsbot.db "UPDATE guilds SET tier = 'free' WHERE guild_id = <id>; SELECT guild_id, tier FROM guilds WHERE guild_id = <id>;"
+ls -ln data/newsbot.db*
+docker compose -f docker-compose.yml -f docker-compose.prod.yml start
+```
+The `SELECT` should print the ID with `free`, and `ls` should show only
+`newsbot.db`, still owned by uid 10001 (if a `-wal` or `-shm` file owned by
+root is left over, `sudo chown 10001:10001 data/newsbot.db*` before the
+start). Order matters: if the ID is still listed when the bot starts, it
+comps the server straight back. Then look at the remaining comped servers'
+`/newsbot preview`, since their prompt changed again.
