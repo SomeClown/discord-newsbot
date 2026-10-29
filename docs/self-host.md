@@ -166,6 +166,12 @@ want it narrower or broader.
   stamps every page with the moment it's loaded, so Brave called a June
   article a day old). Entries are bare hostnames and cover subdomains too.
   Setting the list replaces the default, and `[]` turns the check off.
+  A web result is only kept if it names the game, one of its aliases (a
+  confident match) or its studio from `entities` (an uncertain one); Brave
+  matches loosely and sends back other games' news. A game with
+  `match_name: false` therefore needs aliases or entities that show up in press
+  text, or its web search finds nothing worth keeping. Its own feeds don't
+  have to name it.
 - **`BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD`** (optional): only needed for
   `bluesky_search` sources (searching Bluesky for mentions of your game). An
   official account's own posts are available over plain RSS with no

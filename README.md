@@ -25,6 +25,12 @@ still works and is [documented](#run-your-own-copy) below.
 
 ## What's new
 
+**v3.4.2 (2026-10-29), web search stays on topic.** A web search for one game
+could come back with another game's news and file it under the first (a week of
+Borderlands 4 results had Modern Warfare 4 patch notes and Tarkov in it). A web
+result now has to name its game, an alias or its studio to be kept, so expect
+fewer, more relevant web-search headlines.
+
 **v3.4.1 (2026-10-29), no more old news dressed up as new.** An old article came
 through web search with a faked fresh date and landed in a digest as "upcoming".
 That site is now blocked (`web_search.exclude_domains`), and summaries are told

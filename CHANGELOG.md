@@ -15,6 +15,26 @@ old tag.
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-10-29
+
+Web search results have to name the game they were found for, so a Borderlands 4 search stops filing other games' news under Borderlands 4.
+
+### Fixed
+
+- Brave Search results were filed under the game whose query found them, whether or not they mentioned it. A week of production data showed 25 of 50 web results under Borderlands 4 never named it (Modern Warfare 4 patch notes, Assassin's Creed IV, Tarkov, Minecraft). Comped servers' summaries threw those out, but a free server's headline list shows stored items as they are, and so do a comped server's fallback headlines. A web result now has to name its game or one of its aliases (a confident match) or its studio from `entities` (an uncertain one), or it isn't stored. A game's own feeds are unchanged and still don't have to name the game.
+- A game name written with a non-breaking space or a doubled space between its words now matches, for every source; it used to be missed. A name is also checked in the title and the excerpt separately, so a title ending in "Borderlands" and an excerpt starting "4 reasons" no longer add up to Borderlands 4.
+- A Brave result whose title or link isn't text is skipped, where it used to fail that game's whole web search.
+
+### Changed
+
+- Expect fewer, more relevant web-search headlines, and lower web-search counts from `--check-sources`.
+- A game set to `match_name: false` (Rust in the example catalog) now keeps a web result only if it says one of its aliases or its studio (for Rust, "Facepunch"), so give such a game aliases or entities that show up in press text.
+- Items already stored under the wrong game are left to age out; there is no cleanup.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.1`.
+
 ## [3.4.1] - 2026-10-29
 
 Fixes an old article showing up in a digest as if it were today's news, by blocking the site that faked its date and by telling the summary what day it is.
@@ -639,7 +659,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.2...HEAD
+[3.4.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...v3.4.2
 [3.4.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...v3.4.1
 [3.4.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...v3.3.1

@@ -112,6 +112,10 @@ class WebSearchCollector:
             title = result.get("title")
             if not (url and title):
                 continue
+            # A truthy title that isn't text (2026, true) is just as malformed, and
+            # the matcher downstream would rather not be handed a number to read.
+            if not (isinstance(url, str) and isinstance(title, str)):
+                continue
             # Some sites stamp every page with the moment it's served, and Brave's
             # `page_age` believes them (a June article looked a day old). Clearing the
             # date wouldn't help: an undated item is kept. So the result goes.
@@ -131,6 +135,8 @@ class WebSearchCollector:
                     trust=self._source.trust,
                     published_at=_parse_page_age(result.get("page_age")),
                     topics=(topic_key,),
+                    # The query that found this isn't a vote that it's on topic.
+                    needs_match=True,
                     # Brave only ever gives us a snippet, never full-page
                     # text: this is the same source `excerpt` is built
                     # from, just uncapped at 500 characters, not some

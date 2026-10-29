@@ -231,6 +231,8 @@ shared_sources:
 # wide feeds live in shared_sources above. `match_name: false` is for names
 # that are also ordinary words (Rust): the name doesn't match on its own and
 # the aliases and entities do the work. A game with it false needs aliases.
+# Web search results never get the dedicated pass: they're kept only if they
+# name the game, an alias or one of its entities.
 # There's no channel_id here; channels are per server now (/newsbot follow).
 
 catalog:
