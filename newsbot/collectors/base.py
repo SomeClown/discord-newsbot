@@ -125,6 +125,13 @@ class RawItem:
     topics this item can match: `None` means "let keyword matching
     against every topic decide" (see `pipeline/filter.py`, SPEC-DEV 3).
 
+    `needs_match` says the single topic in `topics` is only the query that
+    found the item, not proof the item is about it. Web search sets it: a
+    Steam feed for one game can skip the keyword check, but a web search for
+    Borderlands can come back with another game's patch notes, and I learned
+    that from a digest. The filter still only considers that one topic; it
+    just makes the item earn the match.
+
     `full_text` is the untruncated companion to `excerpt`, added for the
     SHiFT code sweep (design.md §12): a code five paragraphs into a
     patch-notes post never shows up in a 500-character excerpt. It's
@@ -145,6 +152,7 @@ class RawItem:
     trust: Trust
     published_at: datetime | None
     topics: tuple[str, ...] | None = None
+    needs_match: bool = False
     full_text: str | None = field(default=None, compare=False, repr=False)
     details: ItemDetails | None = field(default=None, compare=False, repr=False)
 
