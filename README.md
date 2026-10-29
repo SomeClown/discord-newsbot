@@ -25,6 +25,11 @@ still works and is [documented](#run-your-own-copy) below.
 
 ## What's new
 
+**v3.4.1 (2026-10-29), no more old news dressed up as new.** An old article came
+through web search with a faked fresh date and landed in a digest as "upcoming".
+That site is now blocked (`web_search.exclude_domains`), and summaries are told
+today's date and each story's date so they can drop news that's weeks old.
+
 **v3.4.0 (2026-10-29), shorter links.** Digests, the Gaming industry post and
 `/news` show each source as the site's name (`pcgamer.com`) instead of the
 whole address, so posts read shorter on a phone. SHiFT alerts look the same.

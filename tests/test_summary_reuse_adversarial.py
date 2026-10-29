@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from contextlib import closing
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 from test_comped_per_server_windows import A2, FIRST_DAY, LA, A, B, Servers, store_hourly
@@ -233,6 +233,7 @@ async def test_the_friends_model_input_on_day_two_is_still_byte_identical_to_v22
         prior,
         all_topics=w.v2.topics,
         subject=w.v2.digest.subject,
+        today=w.clock.t.astimezone(UTC).date(),  # the prepare path now says the day (v3.4.1)
     )
     before = len(w.llm.calls)
     await prepare_summaries(w.deps())

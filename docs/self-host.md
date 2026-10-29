@@ -161,6 +161,11 @@ want it narrower or broader.
   asked for a card on file for its free tier before; check their current
   pricing page, since this is the kind of detail that changes without
   this doc necessarily catching up.
+  Results from a short block list of sites are dropped before they're stored:
+  `web_search.exclude_domains`, default `[playstationcouch.com]` (that site
+  stamps every page with the moment it's loaded, so Brave called a June
+  article a day old). Entries are bare hostnames and cover subdomains too.
+  Setting the list replaces the default, and `[]` turns the check off.
 - **`BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD`** (optional): only needed for
   `bluesky_search` sources (searching Bluesky for mentions of your game). An
   official account's own posts are available over plain RSS with no

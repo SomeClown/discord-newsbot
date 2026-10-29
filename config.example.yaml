@@ -121,6 +121,10 @@ web_search:
   queries_per_game: 2
   query_templates: ["{name} news", "{name} update OR patch OR leak"]
   trust: press
+  # Results from these sites (and their subdomains) are dropped. They stamp every page
+  # with the time you load it, so Brave thinks a months-old article is new. The default
+  # is [playstationcouch.com]; setting this replaces it, and [] turns it off.
+  # exclude_domains: [playstationcouch.com]
 
 # SHiFT code detection (design.md §12 and §15). Detection is global: the bot
 # looks for codes in every source of the games listed here, once per

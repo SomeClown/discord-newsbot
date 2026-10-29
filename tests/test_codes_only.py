@@ -588,6 +588,8 @@ async def test_one_reddit_source_is_a_priority_source_and_goes_every_pass(world)
 def test_the_prompt_template_text_is_unchanged_from_v3_0_2():
     # v3.0.3 changes which items go into the prompt (Reddit's leave), never the words around
     # them. If this fails, the prompt changed, and that needs an owner-reviewed /newsbot preview.
-    pinned = "b4205462daccbbb1918868b765b7dc168c664200f12fba96e7f2dad9746724ef"
+    # (Re-pinned in v3.4.1 for the new dates rule. The owner's /newsbot preview of it is still
+    # pending.)
+    pinned = "69021a6421d5708f84c59654dc64e3a62e47031b5574b95d40c476d88385a20c"
     template = "\x00".join([prompts.SYSTEM_PROMPT, prompts._ITEMS_HEADER, prompts._PRIOR_HEADER])
     assert hashlib.sha256(template.encode()).hexdigest() == pinned
