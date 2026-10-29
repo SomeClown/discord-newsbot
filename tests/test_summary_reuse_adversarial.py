@@ -243,10 +243,10 @@ async def test_the_friends_model_input_on_day_two_is_still_byte_identical_to_v22
 # --- 3. the preview cache ---
 
 
-def a_preview_world(world, *, tier="comped"):
+def a_preview_world(world, *, tier="comped", hours=24 * 4):
     """A comped server with a stored coverage mark, a clock at noon, and a preview lookup."""
     due = local_due_instant(FIRST_DAY, "09:00", LA)
-    store_hourly(world, due - timedelta(days=2), 24 * 4)
+    store_hourly(world, due - timedelta(days=2), hours)
     servers = Servers(world, {A: (LA, "09:00")})
     return due, servers
 
@@ -304,11 +304,14 @@ async def test_a_preview_at_exactly_the_ttl_makes_a_fresh_summary(world):
 async def test_a_preview_after_new_items_arrive_inside_the_ttl_recomputes(world):
     """The cache key includes the newest stored item id: a preview with nothing new still hits,
     and one after an item arrived makes the summary again and so can show it."""
-    due, servers = a_preview_world(world)
+    # A small world on purpose: the point is what the preview draws, so the few stories it
+    # has (and the fresh one) all have to fit under the 4096-unit limit, links and all.
+    due, servers = a_preview_world(world, hours=24 * 2 + 6)
     await servers.run_day(FIRST_DAY)
     world.clock.t = due + timedelta(days=1) - timedelta(hours=6)
     servers.digest_deps.preview_summary_for = dry_run_lookup(world.deps())
-    await preview_guild_digest(servers.digest_deps, A)
+    first = await preview_guild_digest(servers.digest_deps, A)
+    assert "brand-new" not in json.dumps([m.embed.to_dict() for m in first.rendered.messages])
     calls = len(world.llm.calls)
     await preview_guild_digest(servers.digest_deps, A)
     assert len(world.llm.calls) == calls  # nothing new: the memory answers
@@ -331,7 +334,9 @@ async def test_a_preview_after_new_items_arrive_inside_the_ttl_recomputes(world)
     world.clock.t += timedelta(minutes=5)
     second = await preview_guild_digest(servers.digest_deps, A)
     assert len(world.llm.calls) > calls  # an item arrived: a fresh summary
-    assert "brand-new" in json.dumps([m.embed.to_dict() for m in second.rendered.messages])
+    rendered = json.dumps([m.embed.to_dict() for m in second.rendered.messages])
+    assert "more, use /news" not in rendered  # everything fits, so the new story is on screen
+    assert "brand-new" in rendered
 
 
 async def test_a_new_digest_changes_the_coverage_and_so_misses_the_preview_cache(world):

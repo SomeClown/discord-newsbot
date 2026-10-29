@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
+from masked_old import mask_links_like_v340
 from test_codes_only import CODE, PASS_AT, FakeFeed, World, raw
 from test_text_hardening_adversarial import _exec_base
 
@@ -77,6 +78,7 @@ def old():
     sys.modules[name] = module  # dataclasses look their module up by name
     try:
         exec(compile(source, module.__file__, "exec"), module.__dict__)  # noqa: S102
+        mask_links_like_v340(module)
         yield module
     finally:
         sys.modules.pop(name, None)

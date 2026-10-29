@@ -15,6 +15,16 @@ old tag.
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-29
+
+Links in digests, the Gaming industry post and `/news` show the site's name instead of the whole address, so posts read shorter on a phone.
+
+### Changed
+
+- Digests, the Gaming industry post and `/news` now show each source as a link with the site's name, like `pcgamer.com`, instead of the whole web address. It reads shorter on a phone. A headline keeps its text and gets the link at the end; a comped story's links read `pcgamer.com · store.steampowered.com`, with a second link to the same site numbered `pcgamer.com (2)`. SHiFT alerts, `/shift` replies and the admin run report look the same as before.
+- Messages already posted keep their old links. The full address is still underneath each new link, so a very long list can move a story or headline into "+N more" a little sooner than before.
+- A link whose address contains a space or `>`, or `(` or `)` in the site name, is left off these lists instead of shown. Any other `(` or `)` in an address is written `%28` or `%29`, which nearly every site reads the same.
+
 ## [3.3.1] - 2026-10-24
 
 A security release: three ways a hostile feed or a talked-into-it model could dress text up as something it isn't, all found reviewing v3.3.0.
@@ -612,7 +622,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...HEAD
+[3.4.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...v3.3.1
 [3.3.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.2...v3.3.0
 [3.2.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.1...v3.2.2
