@@ -7,12 +7,13 @@ different set of instructions, so it gets its own prompt instead of a flag on th
 old one. It returns the same `TopicSummary` a game does, so postprocess, storage,
 `/news` and the stub LLM never have to know the difference.
 
-`prompts.py` stays untouched on purpose. Its text is pinned by a hash (the game
-digests have been reviewed by a human, and I'd like to keep it that way), and
-bolting an "unless this is the industry entry" branch onto it would mean the game
-prompt could change by accident. The user message is the game one, built by the
-same `build_prompt`, so the `<items>` fencing, the untrusted-data header and the
-prior headlines come along for free.
+I left `prompts.py` alone on purpose: bolting an "unless this is the industry entry"
+branch onto the game prompt would mean it could change by accident. The user message
+is the game one, built by the same `build_prompt`, so the `<items>` fencing, the
+untrusted-data header and the prior headlines come along for free. That includes
+(since v3.4.1) each item's `published` date, which comes from the shared
+`_item_payload`. The industry call passes no `today`, so there is no "Today's date"
+line, and the industry system prompt below didn't change.
 
 Any edit to `INDUSTRY_SYSTEM_PROMPT` needs an owner-reviewed preview before it
 merges, same as the game prompt. The pin in `tests/test_industry_pick.py` is there

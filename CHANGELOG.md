@@ -15,6 +15,23 @@ old tag.
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-10-29
+
+Fixes an old article showing up in a digest as if it were today's news, by blocking the site that faked its date and by telling the summary what day it is.
+
+### Fixed
+
+- A June article came through web search with a made-up fresh date and ended up in a comped server's digest as an "upcoming" patch. The site (playstationcouch.com) stamps every page with the moment you load it, and Brave Search passed that date along, so the 24-hour lookback believed it. Results from that site are now dropped before they're stored.
+- Summaries (comped servers) now get today's date and each story's date, and drop a story whose own text shows it's weeks or months old, such as an "upcoming" date that has already passed. Guides, deals that are still running and live codes are kept whatever their date. The Gaming industry pick now sees each story's date too.
+
+### Added
+
+- `web_search.exclude_domains`: a list of sites whose Brave results are dropped. Each entry is a hostname like `example.com` (no `https://`, path or port), and it covers the site's subdomains too. The default is `[playstationcouch.com]`. Setting the list replaces the default, so keep that entry if you still want it blocked, and `[]` turns the check off. A bad entry is a startup error that names it.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.0`.
+
 ## [3.4.0] - 2026-10-29
 
 Links in digests, the Gaming industry post and `/news` show the site's name instead of the whole address, so posts read shorter on a phone.
@@ -622,7 +639,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...HEAD
+[3.4.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...v3.4.1
 [3.4.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...v3.3.1
 [3.3.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.2...v3.3.0
