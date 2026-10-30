@@ -25,6 +25,13 @@ still works and is [documented](#run-your-own-copy) below.
 
 ## What's new
 
+**v3.4.3 (2026-10-29), no more content-farm links.** Web search for a small game
+could return junk pages: a language model's rewrite of a Reddit thread on a
+website that has nothing to do with games, with the game's name in the title.
+They got through the name check and into stories. A web result is now dropped
+when its picture is borrowed from Reddit or Bing, which real press doesn't do.
+Stories already posted can't be taken back.
+
 **v3.4.2 (2026-10-29), web search stays on topic.** A web search for one game
 could come back with another game's news and file it under the first (a week of
 Borderlands 4 results had Modern Warfare 4 patch notes and Tarkov in it). A web

@@ -15,6 +15,26 @@ old tag.
 
 ## [Unreleased]
 
+## [3.4.3] - 2026-10-29
+
+Web search stops handing out content-farm pages: results whose picture is borrowed from Reddit or Bing are dropped.
+
+### Fixed
+
+- Brave's news search returns content-farm pages for small games: language-model rewrites of Reddit threads, hosted on unrelated domains that were taken over, with titles ending in the year. They name the game, so the name check from v3.4.2 keeps them, and the summary model accepted all 10 of the ones found for WARDOGS in the last two weeks as stories. Comped servers that follow WARDOGS were sent links to them. A Brave result is now dropped, for every game, when its picture is hotlinked from Reddit's media domain (`redd.it` and everything under it, such as `preview.redd.it` and `i.redd.it`) or from Bing's thumbnail search (`*.mm.bing.net/th...`). Real press hosts its own pictures. On live Brave checks over an afternoon and evening it caught all 9 farm pages it saw and flagged none of the real press.
+- Brave only sends its own proxy address for a picture, with the original address encoded inside it in a format that isn't documented. If a picture's address can't be read, the result is kept. If Brave changes the format, this filter quietly stops catching farms; nothing breaks.
+
+### Changed
+
+- A search that drops any farm results logs one INFO line with the count, with the fields `source_name`, `topic` and `farm_dropped`. If those lines stop showing up while farm pages keep appearing, Brave probably changed its format.
+- Expect lower web-search counts from `--check-sources`.
+- There is no setting for this filter, and `web_search.exclude_domains: []` does not turn it off.
+- Items already stored from farm pages are left to age out. Stories already posted can't be taken back.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.2`.
+
 ## [3.4.2] - 2026-10-29
 
 Web search results have to name the game they were found for, so a Borderlands 4 search stops filing other games' news under Borderlands 4.
@@ -659,7 +679,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.2...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.3...HEAD
+[3.4.3]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.2...v3.4.3
 [3.4.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...v3.4.2
 [3.4.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...v3.4.1
 [3.4.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...v3.4.0
