@@ -27,7 +27,9 @@ _QUERY_GAP_S = 1.1
 
 # Brave's proxy URL for a thumbnail carries the original image after this segment.
 _ORIGIN_MARKER = "/g:ce/"
-_FARM_IMAGE_HOSTS = frozenset({"preview.redd.it", "external-preview.redd.it", "i.redd.it"})
+# Reddit's media-only domain: preview, external-preview, cf.preview, i, v and whatever it
+# grows next. I first listed hosts one by one, and then a cf.preview one walked right past me.
+_REDDIT_MEDIA_DOMAIN = "redd.it"
 # Bing's thumbnail service: ts1, ts2, tse1 and friends, all answering at /th?q=<title>.
 _BING_THUMB_SUFFIX = ".mm.bing.net"
 _BING_THUMB_PATH = "/th"
@@ -92,7 +94,9 @@ def _thumbnail_origin(result: dict) -> httpx.URL | None:
 
 
 def _is_farm_thumbnail(result: dict) -> bool:
-    """Whether the result's picture is hotlinked from Reddit or Bing's thumbnail search.
+    """Whether the result's picture is hotlinked from Reddit's media domain or Bing's thumbnails.
+
+    Reddit's is `redd.it` and every subdomain of it; Bing's is `*.mm.bing.net` under `/th`.
 
     The content-farm pages that turn up for small games (a language model's rewrite of a
     Reddit thread, on a domain that used to sell wine) name the game, so the name check keeps
@@ -104,7 +108,11 @@ def _is_farm_thumbnail(result: dict) -> bool:
     if origin is None:
         return False
     host = netguard.host_name(origin).removesuffix(".")
-    if host in _FARM_IMAGE_HOSTS:
+    # httpx escapes what it can't parse as a host (a space, a stray bracket) instead of
+    # refusing it, and "redd.it" at the end of that is no proof of anything. Fail open.
+    if "%" in host or "" in host.split("."):
+        return False
+    if host == _REDDIT_MEDIA_DOMAIN or host.endswith("." + _REDDIT_MEDIA_DOMAIN):
         return True
     return host.endswith(_BING_THUMB_SUFFIX) and origin.path.startswith(_BING_THUMB_PATH)
 

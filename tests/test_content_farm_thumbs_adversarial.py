@@ -307,15 +307,10 @@ async def test_a_page_of_large_payloads_does_not_lose_the_real_result_among_them
         pytest.param("https://preview.redd.it\\@evil.example/a.jpg", id="backslash-then-at"),
         pytest.param("https://xn--preview-redd-it-xxxx.example/a.jpg", id="punycode-lookalike"),
         pytest.param("https://preview.redd.іt/a.jpg", id="cyrillic-i-lookalike"),
-        pytest.param("https://prеview.redd.it/a.jpg", id="cyrillic-e-lookalike"),
         pytest.param("https://preview.redd.it../a.jpg", id="two-trailing-dots"),
-        pytest.param("https://.preview.redd.it/a.jpg", id="leading-dot-is-a-subdomain-of-nothing"),
+        pytest.param("https://.preview.redd.it/a.jpg", id="leading-dot-is-an-empty-label"),
         pytest.param("https://preview-redd.it/a.jpg", id="hyphen-for-dot"),
-        pytest.param("https://v.redd.it/a.mp4", id="redd-it-video-host"),
-        pytest.param("https://old.redd.it/a.jpg", id="another-redd-it-host"),
-        pytest.param("https://www.redd.it/a.jpg", id="www-redd-it"),
         pytest.param("https://b.thumbs.redditmedia.com/a.jpg", id="reddit-media-thumbs"),
-        pytest.param("https://a.preview.redd.it/a.jpg", id="subdomain-of-a-farm-host"),
         pytest.param("https://[::1]/a.jpg", id="ipv6-loopback"),
         pytest.param("https://[2606:4700::6810:84e5]:443/th", id="ipv6-with-port-and-th"),
         pytest.param("https://127.0.0.1/th", id="ipv4"),
@@ -336,6 +331,17 @@ async def test_lookalike_origins_keep_the_result(origin):
     [
         pytest.param("https://evil.example@preview.redd.it/a.jpg", id="userinfo-then-farm-host"),
         pytest.param("https://:@preview.redd.it/a.jpg", id="empty-userinfo"),
+        pytest.param("https://v.redd.it/a.mp4", id="video-host"),
+        pytest.param("https://old.redd.it/a.jpg", id="another-redd-it-host"),
+        pytest.param("https://www.redd.it/a.jpg", id="www-redd-it"),
+        pytest.param("https://redd.it/a.jpg", id="the-bare-domain"),
+        pytest.param("https://a.preview.redd.it/a.jpg", id="subdomain-of-a-named-farm-host"),
+        pytest.param("https://cf.preview.redd.it/a.png", id="the-live-miss"),
+        pytest.param("https://a.b.c.d.redd.it/a.jpg", id="deep-subdomain"),
+        pytest.param("https://pr\u0435view.redd.it/a.jpg", id="cyrillic-e-is-an-xn-label"),
+        pytest.param("https://\u00fcber.redd.it/a.jpg", id="non-ascii-label-under-redd-it"),
+        pytest.param("https://xn--bcher-kva.redd.it/a.jpg", id="punycode-label-under-redd-it"),
+        pytest.param("https://" + "a" * 63 + ".redd.it/a.jpg", id="longest-legal-label"),
         pytest.param("https://preview.redd.it:8443/a.jpg", id="port"),
         pytest.param("https://preview.redd.it:/a.jpg", id="empty-port"),
         pytest.param("HTTPS://preview.redd.it/a.jpg", id="uppercase-scheme"),
@@ -352,6 +358,138 @@ async def test_lookalike_origins_keep_the_result(origin):
 async def test_farm_hosts_in_costume_are_still_dropped(origin):
     """The connection goes to the farm host in each of these, so the verdict does too."""
     assert await _kept([_result("farm", _proxy(origin))]) == []
+
+
+# Reddit's rule is "redd.it or any subdomain of it" (owner, after cf.preview.redd.it got through).
+# The tests below lean on the edges of that: what merely ends in the same letters, and what httpx
+# turns into something that ends in `.redd.it` without anyone having meant a subdomain.
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param("https://xredd.it/a.jpg", id="letter-glued-on"),
+        pytest.param("https://a.xredd.it/a.jpg", id="letter-glued-on-with-subdomain"),
+        pytest.param("https://notredd.it/a.jpg", id="word-glued-on"),
+        pytest.param("https://reddXit/a.jpg", id="x-for-the-dot"),
+        pytest.param("https://a.reddXit/a.jpg", id="x-for-the-dot-with-subdomain"),
+        pytest.param("https://redd.it.evil.example/a.jpg", id="redd-it-as-a-prefix"),
+        pytest.param("https://a.redd.it.evil.example/a.jpg", id="subdomain-then-evil"),
+        pytest.param("https://redd.it-evil.example/a.jpg", id="hyphen-after"),
+        pytest.param("https://redd.it_/a.jpg", id="underscore-after"),
+        pytest.param("https://a_redd.it/a.jpg", id="underscore-before"),
+        pytest.param("https://redd.itt/a.jpg", id="extra-letter-after"),
+        pytest.param("https://redd.it.com/a.jpg", id="redd-it-dot-com"),
+        pytest.param("https://redd.io/a.jpg", id="other-tld"),
+        pytest.param("https://reddit.com/a.jpg", id="reddit-com"),
+        pytest.param("https://r.edd.it/a.jpg", id="dot-in-the-wrong-place"),
+        pytest.param("https://it/a.jpg", id="just-the-tld"),
+        pytest.param("https://a.redd.\u0456t/a.jpg", id="cyrillic-i-in-the-tld"),
+        pytest.param("https://xn--redd-it.example/a.jpg", id="punycode-lookalike-of-the-domain"),
+        pytest.param("https://a.redd.xn--t-evb/a.jpg", id="punycode-tld"),
+        pytest.param("https://\uff52\uff45\uff44\uff44.it/a.jpg", id="fullwidth-redd"),
+        pytest.param("https://a.redd.it\u200b/a.jpg", id="zero-width-space-after"),
+        pytest.param("https://a\u200b.redd.it/a.jpg", id="zero-width-space-before-the-dot"),
+        pytest.param("https://a.\u00adredd.it/a.jpg", id="soft-hyphen"),
+    ],
+)
+async def test_hosts_that_only_end_in_the_same_letters_as_redd_it_keep_the_result(origin):
+    assert await _kept([_result("keep", _proxy(origin))]) == ["keep"]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param("https://a redd.it/a.jpg", id="space-for-the-dot"),
+        pytest.param("https://a .redd.it/a.jpg", id="space-before-the-dot"),
+        pytest.param("https://preview%20.redd.it/a.jpg", id="encoded-space"),
+        pytest.param("https://[preview.redd.it/a.jpg", id="open-bracket"),
+        pytest.param("https://%5Bpreview.redd.it/a.jpg", id="encoded-bracket"),
+        pytest.param("https://a%2eredd.it/a.jpg", id="encoded-dot"),
+        pytest.param("https://a%2Eredd.it/a.jpg", id="encoded-dot-uppercase"),
+        pytest.param("https://a%252eredd.it/a.jpg", id="double-encoded-dot"),
+        pytest.param("https://a<b.redd.it/a.jpg", id="angle-bracket-httpx-escapes"),
+        pytest.param("https://a^b.redd.it/a.jpg", id="caret-httpx-escapes"),
+        pytest.param("https://.redd.it/a.jpg", id="leading-dot"),
+        pytest.param("https://..redd.it/a.jpg", id="two-leading-dots"),
+        pytest.param("https://a..redd.it/a.jpg", id="consecutive-dots"),
+        pytest.param("https://a.b..redd.it/a.jpg", id="consecutive-dots-deeper"),
+        pytest.param("https://redd.it../a.jpg", id="bare-domain-two-trailing-dots"),
+        pytest.param("https://a.redd.it../a.jpg", id="subdomain-two-trailing-dots"),
+        pytest.param("https://a.redd.it\x00/a.jpg", id="nul-after"),
+        pytest.param("https://a\x00.redd.it/a.jpg", id="nul-before-the-dot"),
+        pytest.param("https://a?b.redd.it/a.jpg", id="question-mark-ends-the-host"),
+        pytest.param("https://a#b.redd.it/a.jpg", id="hash-ends-the-host"),
+        pytest.param("https://a.redd.it:80:80/a.jpg", id="two-ports"),
+        pytest.param("https://redd.it:abc/a.jpg", id="port-not-a-number"),
+        pytest.param("https://[::1].redd.it/a.jpg", id="ipv6-then-a-domain"),
+        pytest.param("https://[::ffff:redd.it]/a.jpg", id="ipv6-with-letters-in-it"),
+        pytest.param("https://[::1]/a.jpg", id="ipv6"),
+        pytest.param("https://\t.redd.it/a.jpg", id="tab-label"),
+        pytest.param("https://a.redd.it\n/a.jpg", id="newline-after"),
+    ],
+)
+async def test_hosts_httpx_escapes_or_mangles_keep_the_result(origin):
+    """Ending in `.redd.it` after httpx's escaping is not the same as being under it.
+
+    The guard in the app code keeps anything with a `%` or an empty label; the rest of these
+    never leave httpx as a host at all (so there's nothing to judge) or come out as something
+    else.
+    """
+    assert await _kept([_result("keep", _proxy(origin))]) == ["keep"]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param("https://i.redd.it/a.png", id="i"),
+        pytest.param("https://v.redd.it/abc/DASH_720.mp4", id="v"),
+        pytest.param("https://preview.redd.it/a.jpeg", id="preview"),
+        pytest.param("https://external-preview.redd.it/a.jpeg", id="external-preview"),
+        pytest.param("https://cf.preview.redd.it/a.png", id="cf-preview"),
+        pytest.param("https://emoji.redd.it/a.png", id="emoji"),
+        pytest.param("https://redd.it/a.png", id="bare-domain"),
+        pytest.param("https://REDD.IT/a.png", id="bare-domain-uppercase"),
+        pytest.param("https://I.Redd.It./a.png", id="mixed-case-trailing-dot"),
+        pytest.param("https://i.redd.it:443/a.png", id="port"),
+        pytest.param("https://us%20er:p%40ss@i.redd.it/a.png", id="encoded-userinfo"),
+        pytest.param("https://i.redd.it/a%20b.png?x=%41&y=%", id="percent-in-path-and-query"),
+        pytest.param("https://i.redd.it/a b.png", id="space-in-path"),
+        pytest.param("https://i.redd.it/\u00fc.png", id="non-ascii-path"),
+        pytest.param("https://1.2.3.4.redd.it/a.png", id="digits-are-still-labels"),
+        pytest.param("https://0x7f.redd.it/a.png", id="hex-looking-label"),
+        pytest.param("https://a-b.redd.it/a.png", id="hyphen-label"),
+        pytest.param("https://-a.redd.it/a.png", id="leading-hyphen-label"),
+        pytest.param("https://xn--bcher-kva.redd.it/a.png", id="punycode-label"),
+        pytest.param("https://a.redd.it\u3002/a.png", id="ideographic-trailing-stop"),
+        pytest.param("https://a\u3002redd\u3002it/a.png", id="ideographic-stops-throughout"),
+    ],
+)
+async def test_the_guard_never_makes_a_real_redd_it_host_keep_its_result(origin):
+    assert await _kept([_result("farm", _proxy(origin))]) == []
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param("a" * 63, id="63-chars"),
+        pytest.param("a" * 64, id="64-chars"),
+        pytest.param("a" * 300, id="300-chars"),
+    ],
+)
+async def test_a_very_long_label_under_redd_it_is_dropped_without_a_crash(label):
+    """Records what it does: httpx doesn't enforce DNS's 63-character label cap.
+
+    A name that can't exist is still a name under redd.it, and nobody sends one anyway.
+    """
+    assert await _kept([_result("farm", _proxy(f"https://{label}.redd.it/a.png"))]) == []
+
+
+async def test_a_host_of_two_hundred_labels_deep_under_redd_it_is_dropped_quickly():
+    started = time.perf_counter()
+    assert await _kept([_result("farm", _proxy("https://" + "a." * 200 + "redd.it/a"))]) == []
+    # The budget is there to catch a pathological slowdown, not to time ordinary runs.
+    assert time.perf_counter() - started < 30.0
 
 
 @pytest.mark.parametrize(
