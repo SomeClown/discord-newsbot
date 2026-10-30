@@ -124,6 +124,7 @@ web_search:
   # Results from these sites (and their subdomains) are dropped. They stamp every page
   # with the time you load it, so Brave thinks a months-old article is new. The default
   # is [playstationcouch.com]; setting this replaces it, and [] turns it off.
+  # The content-farm picture check (Reddit and Bing thumbnails) is separate and has no setting.
   # exclude_domains: [playstationcouch.com]
 
 # SHiFT code detection (design.md §12 and §15). Detection is global: the bot
