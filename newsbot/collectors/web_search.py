@@ -11,6 +11,8 @@ for "the whole run got 429'd because we fired six requests at once".
 from __future__ import annotations
 
 import asyncio
+import base64
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
@@ -22,6 +24,15 @@ from newsbot.config import GameInfo, WebSearchSource
 
 _NEWS_URL = "https://api.search.brave.com/res/v1/news/search"
 _QUERY_GAP_S = 1.1
+
+# Brave's proxy URL for a thumbnail carries the original image after this segment.
+_ORIGIN_MARKER = "/g:ce/"
+_FARM_IMAGE_HOSTS = frozenset({"preview.redd.it", "external-preview.redd.it", "i.redd.it"})
+# Bing's thumbnail service: ts1, ts2, tse1 and friends, all answering at /th?q=<title>.
+_BING_THUMB_SUFFIX = ".mm.bing.net"
+_BING_THUMB_PATH = "/th"
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_page_age(value: str | None) -> datetime | None:
@@ -46,6 +57,56 @@ def _is_excluded(url: str, domains: Sequence[str]) -> bool:
     except httpx.InvalidURL:
         return False
     return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _thumbnail_origin(result: dict) -> httpx.URL | None:
+    """The URL a result's thumbnail was copied from, or None if it can't be read.
+
+    Brave only sends its own proxy URL, with the original image base64url-encoded after
+    `/g:ce/`, with a `/` inserted every 16 characters. Nobody promised me that format, so
+    anything that doesn't decode cleanly to an http(s) URL with a host is None, and None
+    means "nothing to say about this result".
+    """
+    thumbnail = result.get("thumbnail")
+    if not isinstance(thumbnail, dict):
+        return None
+    src = thumbnail.get("src")
+    if not isinstance(src, str):
+        return None
+    _, marker, encoded = src.partition(_ORIGIN_MARKER)
+    encoded = encoded.replace("/", "")
+    if not (marker and encoded):
+        return None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(padded, altchars=b"-_", validate=True).decode("utf-8")
+        origin = httpx.URL(decoded)
+    except ValueError, httpx.InvalidURL:
+        # ValueError is on purpose: bad base64 (binascii.Error), bytes that aren't UTF-8
+        # (UnicodeDecodeError) and a non-ASCII str all land here. Narrow it to
+        # binascii.Error and the other two crash the whole search.
+        return None
+    if origin.scheme not in ("http", "https") or not origin.raw_host:
+        return None
+    return origin
+
+
+def _is_farm_thumbnail(result: dict) -> bool:
+    """Whether the result's picture is hotlinked from Reddit or Bing's thumbnail search.
+
+    The content-farm pages that turn up for small games (a language model's rewrite of a
+    Reddit thread, on a domain that used to sell wine) name the game, so the name check keeps
+    them. What they can't fake is that they have no pictures of their own: they borrow
+    Reddit's or Bing's. Real press hosts its own images, and none of the real results I
+    looked at did this. Hosts compare the way `_is_excluded` does them.
+    """
+    origin = _thumbnail_origin(result)
+    if origin is None:
+        return False
+    host = netguard.host_name(origin).removesuffix(".")
+    if host in _FARM_IMAGE_HOSTS:
+        return True
+    return host.endswith(_BING_THUMB_SUFFIX) and origin.path.startswith(_BING_THUMB_PATH)
 
 
 class WebSearchCollector:
@@ -101,6 +162,7 @@ class WebSearchCollector:
 
         data = response.json()
         results = []
+        farm_dropped = 0
         for result in data.get("results", []):
             if not isinstance(result, dict):
                 # Brave's shape is trusted about as far as any third-party
@@ -120,6 +182,11 @@ class WebSearchCollector:
             # `page_age` believes them (a June article looked a day old). Clearing the
             # date wouldn't help: an undated item is kept. So the result goes.
             if _is_excluded(url, self._source.exclude_domains):
+                continue
+            # The page borrows its picture from Reddit or Bing; real press hosts its own
+            # (see `_is_farm_thumbnail`). The name check can't tell, since the farm names the game.
+            if _is_farm_thumbnail(result):
+                farm_dropped += 1
                 continue
             # `.get(..., "")` only covers a *missing* key; Brave has sent
             # an explicit `"description": null` in the wild, which sails
@@ -143,5 +210,17 @@ class WebSearchCollector:
                     # additional fetch of the whole article.
                     full_text=text.plain_text(description) if description else None,
                 )
+            )
+        if farm_dropped:
+            logger.info(
+                "%s: dropped %d content-farm result(s) for %s",
+                self._source.name,
+                farm_dropped,
+                topic_key,
+                extra={
+                    "source_name": self._source.name,
+                    "topic": topic_key,
+                    "farm_dropped": farm_dropped,
+                },
             )
         return results
