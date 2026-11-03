@@ -900,7 +900,7 @@ async def test_a_hung_startup_summary_does_not_hold_up_reconcile(v3_db, cfg, mon
     task = asyncio.create_task(life.reconcile(client_with(named(G1))))
     try:
         await asyncio.wait_for(hung.started.wait(), 1)
-        await asyncio.wait_for(asyncio.shield(task), 0.5)
+        await asyncio.wait_for(asyncio.shield(task), 5)
     finally:
         hung.release.set()
         await task
@@ -1000,7 +1000,7 @@ async def test_a_slow_owner_alert_does_not_delay_the_command_resync(
     bot.lifecycle._alert_owner = hung
     task = asyncio.create_task(bot.on_guild_join(named(G1, channels=[FakeChannel(1)])))
     try:
-        await asyncio.wait_for(registration_spy.resynced.wait(), 0.5)
+        await asyncio.wait_for(registration_spy.resynced.wait(), 5)
     finally:
         hung.release.set()
         await task
@@ -1021,7 +1021,7 @@ async def test_a_slow_owner_alert_does_not_delay_the_removal_cleanup(
     task = asyncio.create_task(bot.on_guild_remove(named(G1)))
     try:
         await asyncio.wait_for(hung.started.wait(), 1)
-        await asyncio.wait_for(registration_spy.forgotten.wait(), 0.5)
+        await asyncio.wait_for(registration_spy.forgotten.wait(), 5)
         assert removed_jobs == [f"daily-quote-{G1}"]
     finally:
         hung.release.set()

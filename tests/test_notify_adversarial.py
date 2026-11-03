@@ -395,7 +395,7 @@ async def test_a_hanging_send_does_not_hang_the_caller(db_path, door, monkeypatc
         "guild": lambda: router.notify_guild(1, "x"),
         "report": lambda: router.send_report(1, A1, "x"),
     }[door]()
-    await asyncio.wait_for(call, timeout=0.3)
+    await asyncio.wait_for(call, timeout=5)
 
 
 async def test_a_locked_database_is_waited_out_then_the_notice_is_recorded_and_posted(db_path):

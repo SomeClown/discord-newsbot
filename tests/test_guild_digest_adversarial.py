@@ -1002,7 +1002,11 @@ async def test_a_hung_publisher_does_not_stall_the_guilds_behind_it(world):
         world.add_guild(g, games=(BL4,))
     world.add_item(BL4, "item-0001", in_window())
     world.channels[ch(G1, 1)].hang = True
-    deps = world.deps(guild_timeout_s=0.3)  # the real limit is minutes; the test won't wait
+    # The real limit is minutes. 0.3 seconds was too tight: on a busy CI runner the healthy guild
+    # outlasted it and counted as failed (2026-11-03). The slow send is longer than that old
+    # limit, so it can't creep back.
+    world.channels[ch(G2, 1)].slow = 0.4
+    deps = world.deps(guild_timeout_s=2.0)
 
     outcomes = await asyncio.wait_for(run_due_guilds(deps), 5)
 
