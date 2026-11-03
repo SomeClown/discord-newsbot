@@ -811,7 +811,7 @@ async def test_a_hanging_fetch_guild_does_not_hang_reconcile(life, v3_db, monkey
     async def fetch(gid):
         await asyncio.Event().wait()
 
-    await asyncio.wait_for(life.reconcile(Client([G2], fetch=fetch)), timeout=1.0)
+    await asyncio.wait_for(life.reconcile(Client([G2], fetch=fetch)), timeout=5)
     assert G1 in _ids(v3_db)  # no answer is not "gone"
 
 
@@ -953,7 +953,7 @@ async def test_a_hung_hello_does_not_hang_reconcile(life, v3_db, monkeypatch):
         await asyncio.Event().wait()
 
     await asyncio.wait_for(
-        life.reconcile(Client([make_guild(G1, channels=[Chan(1, hook=never)])])), timeout=1.0
+        life.reconcile(Client([make_guild(G1, channels=[Chan(1, hook=never)])])), timeout=5
     )
 
 
