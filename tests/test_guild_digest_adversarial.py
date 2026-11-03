@@ -85,6 +85,7 @@ class FakeChannel:
         self.gate: asyncio.Event | None = None  # first send waits for this
         self.entered = asyncio.Event()
         self.hang = False
+        self.slow = 0.0  # real seconds a send takes, for a healthy send on a busy machine
         self.on_send = None  # a hook: called (sync) right before a send lands
         self.attempts = 0
 
@@ -92,6 +93,8 @@ class FakeChannel:
         self.attempts += 1
         if self.hang:
             await asyncio.Event().wait()
+        if self.slow:
+            await asyncio.sleep(self.slow)
         if self.gate is not None:
             gate, self.gate = self.gate, None
             self.entered.set()

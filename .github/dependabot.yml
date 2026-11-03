@@ -21,6 +21,15 @@ updates:
       # on 2026-10-22; this now holds 3.x back).
       - dependency-name: "anthropic"
         update-types: ["version-update:semver-major"]
+    groups:
+      # One half of each pair pins the other to an exact version, so a PR that
+      # bumps only one half can't install, and CI goes red on all of them. Two
+      # rounds of these got fixed by hand (#59, #67) before this; #83 and #84
+      # were the third.
+      httpx2:
+        patterns: ["httpx2", "httpcore2"]
+      pydantic:
+        patterns: ["pydantic", "pydantic-core"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
