@@ -740,6 +740,16 @@ a file (see §2, "A file, not a directory"); this is the single most
 likely cause of an otherwise-inexplicable startup crash on a brand new
 `/opt/newsbot` setup.
 
+**A reboot never comes back: SSH connects but says nothing.** Port 22
+accepts the connection, no banner ever arrives, ports 80 and 443 are closed,
+and the web console says `droplet-agent` isn't running. That's a shutdown
+stuck on the display driver, not a boot problem; the full story is in §16,
+"The tidy, and the reboot that wasn't". Open the Droplet's **Settings** tab,
+then **Recovery console** and **Launch Console**, to look at the screen (the
+**Web Console** button won't work, because it needs `droplet-agent`). If the
+console won't take keystrokes either, power-cycle it from the control panel,
+then check both databases with `PRAGMA integrity_check`.
+
 ## 15. Enabling SHiFT code alerts
 
 New in v1.2.0 (`design.md` §12). Off by default; nothing below changes
@@ -1073,11 +1083,89 @@ HTTPS, and `/newsbot status` looks normal. On 2026-10-25 the bot's first
 pass after the upgrade read 51 of 51 sources, certbot's dry run succeeded,
 and the league site loaded over HTTPS.
 
-**Afterwards:** keep the snapshot about a week, then delete it (snapshots
-are billed). Once a few clean days have passed, review `apt list
-'?obsolete'` again (by then it should be the old 6.8 kernels, Python 3.12,
-Ruby 3.2, the old docker-compose 1.x and DigitalOcean agent leftovers, and
-no Docker) and remove what's on it, plus `sudo apt autoremove`.
+**Afterwards:** keep the snapshot until the tidy below is done, then delete
+it (snapshots are billed). Give it a few clean days before starting the
+tidy.
+
+### The tidy, and the reboot that wasn't (2026-11-04)
+
+Ten days after round 3, `apt list '?obsolete'` listed 42 packages. There were
+no old kernels and no Docker. I'd written here that everything on the list
+should go, which was wrong about three of them:
+
+- **Keep `droplet-agent`, `droplet-agent-keyring` and `do-agent`.** They're
+  running. The first powers the control panel's Web Console and the last feeds
+  the Monitoring graphs. They only show as obsolete because the upgrader
+  disabled their apt source, and that source (`repos.sonar.digitalocean.com`)
+  hasn't changed since 2017 anyway, so turning it back on gets you nothing.
+  DigitalOcean's current repos are `repos.insights.digitalocean.com` and
+  `repos-droplet.digitalocean.com`; moving means running their install
+  scripts, each of which purges the old package first. Not done yet.
+- **Never run `apt purge '?obsolete'`.** Name the packages, and dry-run the
+  list first, so you can read what apt really plans to do:
+
+  ```bash
+  apt-get -s purge <names> 2>/dev/null | grep -E '^(Purg|Remv|Inst) '
+  ```
+
+  Anything you didn't name is the warning, `docker`, `containerd`, `nginx`,
+  `certbot` or `apt` above all, and so is any `Inst` line.
+- **Check who still uses Python 3.12 before removing it.** Pool-league's old
+  rollback venv lived on it. As it turned out, that venv's `python` had
+  pointed at 3.14 since the upgrade while its packages stayed under
+  `lib/python3.12`, so the rollback had been quietly dead for ten days. It was
+  retired with the Decommission steps in pool-league's `docs/deploy.md`.
+
+Removed, in this order: 31 leftovers (`azure-cli`, GCC 9, Ruby 3.2, Perl 5.38,
+`libssl1.1`, docker-compose 1.x and friends), the 8 Python 3.12 packages, the
+dead apt sources, then `apt full-upgrade`, a reboot, and 38 more through
+`autoremove`. `sudo apt-mark manual bind9-dnsutils` first, or `dig` goes with
+the transitional `dnsutils` package.
+
+**Then the reboot hung, and it took me a while to read it correctly.** The
+Droplet stopped answering at 01:47 UTC on 2026-11-05 and stayed down for about
+25 minutes, until a power cycle. From outside it looked like a boot stuck
+halfway. Port 22 accepted connections and never sent a banner, 80 and 443 were
+closed, the Web Console blamed `droplet-agent`, and the Recovery Console showed
+a login prompt that wouldn't take a keystroke. It hadn't booted at all: the
+journal's previous boot ran on until the power cycle, still on the old kernel,
+and `systemd` was stuck in the middle of *shutting down*.
+
+The cause was already there, and nothing had noticed. The virtual display was
+`qxl`, and from 02:27 UTC on 2026-11-02, three days before anyone touched a
+package, the kernel had logged `[TTM] Buffer eviction failed` every 15 seconds.
+Nothing cared, because nothing was using the console. Then shutdown had
+`systemd` write to it, and it blocked on `drm_modeset_lock` behind the stuck
+display code. Everything else follows from that: a blocked `systemd` can't
+start `sshd` for the socket it's holding open, and the keyboard's echo path
+needs a lock `systemd` was holding. The closest public report is
+[Debian bug #1054514](https://lists.debian.org/debian-kernel/2025/12/msg00106.html),
+same driver and same trace on a different kernel. What set it off on 11-02 I
+still don't know; the log around it shows only the usual SSH scanners.
+
+The power cycle brought the VM back with a different virtual display,
+`virtio_gpu`, which has logged no TTM errors, and a test reboot on it was
+clean. That change came from DigitalOcean's side and I don't know why, so I
+can't promise it stays. Hence the check, **before any planned reboot**:
+
+```bash
+sudo journalctl -b -k -g TTM --no-pager | tail -1
+```
+
+`-- No entries --` is what you want. Anything else means the bug is back, so
+expect the reboot to hang, and keep the control panel open for the power cycle.
+
+**Still open from that night:** `cloud-init-main` fails on every boot, which is
+why `systemctl is-system-running` says `degraded`. Two local dpkg diversions
+(`DataSourceDigitalOcean.py` and `helpers/digitalocean.py`) put old copies in
+front of the packaged files, and the old ones use `from cloudinit import log
+as logging`, which cloud-init 26.2 no longer supports. It isn't what hung the
+reboot: the same error is in the log from 2026-10-25, and the Droplet boots in
+14 seconds regardless. `cloud-final` also failed with status 2 on the test
+reboot, after `autoremove`, though not on the boot before it. No log line names
+a removed package, but that isn't proof, so look there first when repairing.
+A working cloud-init might re-run first-boot steps, so that repair gets its
+own snapshot and its own evening.
 
 ### If it goes wrong
 
