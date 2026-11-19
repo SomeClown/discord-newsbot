@@ -427,6 +427,8 @@ The first pass stopped at three press tag feeds, the way the catalog's small gam
 
 The bot's own `--check-sources --game gta6` from home, against the example config: all nine new sources read (PlayStation Blog 7 items, Xbox Wire 3, Insider Gaming 10, Kotaku 20, Push Square 25, Pure Xbox 25, GameSpot 15, IGN 20, RockstarINTEL 10), and the game hit the 60-item cap on the first pass. The cap keeps official items first, then the newest.
 
+In production the same evening (about 19:10 PT): the owner's `--check-sources --game gta6` through the running image passed, and the first hourly pass after the restart read the new feeds with the same counts (Kotaku 20, Push Square 25, Pure Xbox 25, GameSpot 15, IGN 20, RockstarINTEL 10 in the log lines the owner pasted; 59 of 60 sources ok overall, the one failure being the Reddit codes feed, which has nothing to do with this game).
+
 ### What didn't work, so nobody checks it again
 
 - **Rockstar's Newswire** (`rockstargames.com/newswire`) is a JavaScript page with no feed link; `/newswire.rss`, `/newswire/rss` and `/rss` all 404. Reading it would take a collector of its own. Nobody has written one.
