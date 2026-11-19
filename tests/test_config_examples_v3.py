@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from newsbot.config import effective_codes_only, load_config
+from newsbot.pipeline.filter import _terms_pattern
 
 ROOT = Path(__file__).parent.parent
 EXAMPLE = ROOT / "config.example.yaml"
@@ -51,7 +52,7 @@ def test_the_example_catalog_keeps_the_three_original_games_first_and_in_order()
     # three would change the friend's prompt (and need an owner-reviewed /newsbot preview).
     cfg = load_config(EXAMPLE)
     assert [g.key for g in cfg.catalog][:3] == ["borderlands4", "palworld", "diablo4"]
-    assert len(cfg.catalog) == 22
+    assert len(cfg.catalog) == 23
 
 
 def test_arc_raiders_has_steam_first_and_one_press_tag_feed():
@@ -73,11 +74,12 @@ def test_arc_raiders_has_steam_first_and_one_press_tag_feed():
 
 def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
     # Added 2026-10-21 for a friend's new server, after ARC Raiders so the first three keep
-    # their order (the industry entry now follows them, hence the slice that skips the last).
+    # their order (Grand Theft Auto VI and the industry entry now follow them, hence the
+    # slice that skips the last two).
     # Each has its official Steam news; Valheim alone also has a verified, official Bluesky
     # account. None of the studios offers a usable feed (JavaScript sites, and DayZ's answers a
     # datacenter with a Cloudflare 403), so Steam is the backbone.
-    games = load_config(EXAMPLE).catalog[-6:-1]
+    games = load_config(EXAMPLE).catalog[-7:-2]
     assert [(g.key, g.name) for g in games] == [
         ("valheim", "Valheim"),
         ("scum", "SCUM"),
@@ -107,6 +109,62 @@ def test_the_five_games_added_for_a_comped_server_come_last_with_steam_first():
     assert games[4].aliases == ["Tarkov", "EFT", "EscapeFromTarkov"]
     # "active matter" on Bluesky is physics, so that game must never get a Bluesky search.
     assert all(s.type != "bluesky_search" for s in games[3].sources)
+
+
+def test_grand_theft_auto_vi_has_no_rockstar_feed_and_never_matches_its_older_sibling():
+    # Added 2026-11-18, the day before launch, after Tarkov and ahead of the industry entry.
+    # It's console only, so there's no Steam news; Rockstar's Newswire has no feed and its
+    # verified Bluesky account has never posted. The two console makers' blogs stand in as
+    # official, four press tag feeds follow, and three wide feeds are shared for it alone.
+    cfg = load_config(EXAMPLE)
+    game = cfg.catalog[-2]
+    assert (game.key, game.name) == ("gta6", "Grand Theft Auto VI")
+    assert game.match_name is True
+    assert game.aliases == ["GTA VI", "GTA 6", "GTA6", "GTAVI", "Grand Theft Auto 6"]
+    # Rockstar would also match Red Dead and GTA Online; Take-Two, everything 2K publishes.
+    assert game.entities == []
+    assert len(game.search_queries) == 2
+    assert [(s.type, s.name, str(s.url), s.trust) for s in game.sources] == [
+        (
+            "rss",
+            "PlayStation Blog GTA VI",
+            "https://blog.playstation.com/tag/grand-theft-auto-vi/feed/",
+            "official",
+        ),
+        (
+            "rss",
+            "Xbox Wire GTA VI",
+            "https://news.xbox.com/en-us/tag/grand-theft-auto-vi/feed/",
+            "official",
+        ),
+        (
+            "rss",
+            "Insider Gaming GTA 6",
+            "https://insider-gaming.com/tag/grand-theft-auto-6/feed/",
+            "press",
+        ),
+        ("rss", "Kotaku GTA 6", "https://kotaku.com/tag/gta-6/feed", "press"),
+        ("rss", "Push Square GTA 6", "https://www.pushsquare.com/feeds/latest/tags/gta-6", "press"),
+        ("rss", "Pure Xbox GTA 6", "https://www.purexbox.com/feeds/latest/tags/gta-6", "press"),
+    ]
+    # GameSpot, IGN and RockstarINTEL cover far more than this game (RockstarINTEL covers
+    # Red Dead too), so they're shared and restricted to it: only stories that name it count.
+    only_gta6 = [(s.name, str(s.url), s.trust) for s in cfg.shared_sources if s.games == ["gta6"]]
+    assert only_gta6 == [
+        ("GameSpot", "https://www.gamespot.com/feeds/game-news/", "press"),
+        ("IGN", "https://feeds.feedburner.com/ign/games-all", "press"),
+        ("RockstarINTEL", "https://rockstarintel.com/feed/", "press"),
+    ]
+    # Bare "GTA" as an alias would hand this game every GTA V and GTA Online story, and
+    # those have been coming weekly since 2013. Pin the terms against the titles that matter.
+    pattern = _terms_pattern([game.name, *game.aliases])
+    assert pattern is not None
+    wanted = ("GTA 6 review", "#GTA6 is out", "Grand Theft Auto VI\u2019s launch", "GTA\u00a0VI")
+    unwanted = ("Grand Theft Auto V gets a patch", "GTA Online weekly update", "GTA: Vice City")
+    for title in wanted:
+        assert pattern.search(title), title
+    for title in unwanted:
+        assert not pattern.search(title), title
 
 
 def test_the_industry_entry_is_last_with_no_keywords_and_four_press_feeds():

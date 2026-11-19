@@ -91,7 +91,7 @@ def industry_text() -> str:
 
 @pytest.fixture(scope="module")
 def prod_today() -> str:
-    """Prod-like config as it stands today: v2 shape, prod extras, the 21-game catalog step."""
+    """Prod-like config before the append: v2 shape, prod extras, every game, no industry."""
     blocks = _awk(CATALOG_AWK)
     return FIXTURE.read_text() + PROD_EXTRAS + "\n" + _without_industry(blocks)
 
@@ -140,7 +140,7 @@ def test_the_extracted_block_carries_no_top_level_key_and_no_tab(industry_text):
 
 
 def test_the_extracted_list_item_is_indented_like_the_catalogs_other_items(industry_text):
-    # The append only works because `  - key: industry` lines up with the `  - key: tarkov`
+    # The append only works because `  - key: industry` lines up with the `  - key: gta6`
     # above it in production's file. Take the indent from the example, not from a constant.
     example_lines = EXAMPLE.read_text().splitlines()
     catalog_at = example_lines.index("catalog:")
@@ -220,7 +220,7 @@ def test_appending_after_an_awkward_end_of_file_still_adds_industry_last(
         before = prod_today + spec
     cfg = load_config(_write(tmp_path, _append(before, industry_text)))
     assert [g.key for g in cfg.catalog][-1] == "industry"
-    assert len(cfg.catalog) == 22
+    assert len(cfg.catalog) == 23
     assert cfg.model_dump() == _reference(tmp_path, prod_today, industry_text).model_dump()
 
 
@@ -239,10 +239,10 @@ def test_a_crlf_file_still_gets_industry_last(tmp_path, prod_today, industry_tex
     text = _append(prod_today, industry_text).replace("\n", "\r\n")
     cfg = load_config(_write(tmp_path, text))
     assert [g.key for g in cfg.catalog][-1] == "industry"
-    assert len(cfg.catalog) == 22
+    assert len(cfg.catalog) == 23
 
 
-def test_the_backup_copy_made_before_the_append_is_the_unchanged_21_game_config(
+def test_the_backup_copy_made_before_the_append_is_the_unchanged_config_without_industry(
     tmp_path, prod_today, industry_text
 ):
     live = _write(tmp_path, prod_today)
@@ -250,9 +250,9 @@ def test_the_backup_copy_made_before_the_append_is_the_unchanged_21_game_config(
     shutil.copy(live, backup)  # cp config.yaml config.pre-industry.yaml
     with live.open("a") as handle:
         handle.write("\n" + industry_text)
-    assert len(load_config(backup).catalog) == 21
-    assert load_config(backup).catalog[-1].key == "tarkov"
-    assert len(load_config(live).catalog) == 22
+    assert len(load_config(backup).catalog) == 22
+    assert load_config(backup).catalog[-1].key == "gta6"
+    assert len(load_config(live).catalog) == 23
     # The backup is a prefix of the live file: the append only ever added to the end.
     assert live.read_text().startswith(backup.read_text())
 

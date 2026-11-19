@@ -215,6 +215,29 @@ shared_sources:
     name: "PCGamesN"
     url: "https://www.pcgamesn.com/mainrss.xml"
     trust: press
+  # Three wide feeds that are here for one game. Grand Theft Auto VI is console
+  # only, and the four press feeds above lean PC, so these fill in the console
+  # side: GameSpot's news feed, IGN's games feed (through Feedburner, because
+  # ign.com itself answers a datacenter address with 403), and RockstarINTEL, a
+  # site that covers nothing but Rockstar. Each is restricted to GTA VI by
+  # keyword, so Red Dead and every other game's stories stay out. Opening them
+  # to the whole catalog would change every game's headlines, which is a bigger
+  # decision than one launch.
+  - type: rss
+    name: "GameSpot"
+    url: "https://www.gamespot.com/feeds/game-news/"
+    games: [gta6]
+    trust: press
+  - type: rss
+    name: "IGN"
+    url: "https://feeds.feedburner.com/ign/games-all"
+    games: [gta6]
+    trust: press
+  - type: rss
+    name: "RockstarINTEL"
+    url: "https://rockstarintel.com/feed/"
+    games: [gta6]
+    trust: press
 
 # --- The catalog ---
 #
@@ -625,6 +648,41 @@ catalog:
     # unofficial or quiet since March.
     sources:
       - {type: steam_news, name: "Escape from Tarkov Steam", app_id: 3932890, trust: official}
+
+  - key: gta6
+    name: "Grand Theft Auto VI"
+    # Whole-word matching keeps "Grand Theft Auto VI" out of Grand Theft Auto V
+    # stories, and the other way round. Bare "GTA" is left out for the same
+    # reason: it would bring in GTA V and GTA Online, a 2013 game that still
+    # makes news most weeks.
+    aliases: ["GTA VI", "GTA 6", "GTA6", "GTAVI", "Grand Theft Auto 6"]
+    # Rockstar and Take-Two are left out, the way Bungie is for Destiny 2:
+    # Rockstar's name would also match Red Dead and GTA Online, and Take-Two's
+    # would match everything 2K publishes.
+    entities: []
+    search_queries:
+      - "\"GTA 6\" news"
+      - "\"Grand Theft Auto VI\" update OR patch OR online"
+    # Console only at launch (PS5 and Xbox Series, 2026-11-19), so there's no
+    # Steam news to lean on. Rockstar's Newswire is a JavaScript page with no
+    # feed (the old RSS paths 404), its domain-verified Bluesky account has
+    # 76,000 followers and no posts (2026-11-18), and Take-Two's press-release
+    # feed answers the Droplet with 403. The nearest thing to official that a
+    # feed reader can reach is the two console makers' own blogs: pre-load
+    # times, launch posts, hardware. They're marked official for that reason,
+    # which is a stretch worth knowing about: it's Sony's and Microsoft's word,
+    # not Rockstar's. The rest is press tag feeds, several stories a day each
+    # around launch, guides included. Three more wide feeds are in
+    # shared_sources above, restricted to this game; PC Gamer, Eurogamer,
+    # GamesRadar+ and PCGamesN cover it by name from there too, so PCGamesN's
+    # own tag feed would add nothing.
+    sources:
+      - {type: rss, name: "PlayStation Blog GTA VI", url: "https://blog.playstation.com/tag/grand-theft-auto-vi/feed/", trust: official}
+      - {type: rss, name: "Xbox Wire GTA VI", url: "https://news.xbox.com/en-us/tag/grand-theft-auto-vi/feed/", trust: official}
+      - {type: rss, name: "Insider Gaming GTA 6", url: "https://insider-gaming.com/tag/grand-theft-auto-6/feed/", trust: press}
+      - {type: rss, name: "Kotaku GTA 6", url: "https://kotaku.com/tag/gta-6/feed", trust: press}
+      - {type: rss, name: "Push Square GTA 6", url: "https://www.pushsquare.com/feeds/latest/tags/gta-6", trust: press}
+      - {type: rss, name: "Pure Xbox GTA 6", url: "https://www.purexbox.com/feeds/latest/tags/gta-6", trust: press}
 
 # >>> industry-step: start
   # Industry news that isn't about any one game: studios closing, layoffs,
