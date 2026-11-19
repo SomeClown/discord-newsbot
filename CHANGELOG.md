@@ -15,6 +15,10 @@ old tag.
 
 ## [Unreleased]
 
+### Added
+
+- Grand Theft Auto VI in the example catalog, after Escape from Tarkov (22 games, plus the industry entry). It's console only at launch, so there's no Steam news, and Rockstar's Newswire has no feed. Its own sources are the PlayStation Blog's and Xbox Wire's posts about it (marked official: the console makers' word, not Rockstar's) and four press tag feeds (Insider Gaming, Kotaku, Push Square, Pure Xbox). Three wide feeds join the shared sources for this game alone (GameSpot, IGN through Feedburner, RockstarINTEL), and the existing shared press feeds and web search cover it by name. "GTA 6" and "GTA VI" match it; bare "GTA" doesn't, so Grand Theft Auto V and GTA Online stories stay out. A bot that's already running gets it by adding the entry to its own `config.yaml` and restarting.
+
 ## [3.4.3] - 2026-10-29
 
 Web search stops handing out content-farm pages: results whose picture is borrowed from Reddit or Bing are dropped.

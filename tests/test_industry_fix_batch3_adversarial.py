@@ -404,7 +404,7 @@ async def test_a_one_game_catalog_with_the_entry_refuses_an_unknown_key(industry
 def test_the_real_example_catalog_still_reads_up_to_ten_plus_the_entry(v3_db):
     cfg = load_config(EXAMPLE)
     view = make_view(cfg, v3_db)
-    assert len(cfg.catalog) == 22
+    assert len(cfg.catalog) == 23
     assert view.max_games == 10
     assert view.games_select.placeholder == "Games to follow (up to 10, plus Gaming industry)"
     assert view.games_select.max_values == 11

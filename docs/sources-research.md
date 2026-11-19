@@ -399,3 +399,50 @@ The same caution applies to the next step in `docs/design.md` §18, Part 2 (an o
 2A (follow-up, after the dedupe reading was corrected): PC Gamer's gaming-industry tag (`https://www.pcgamer.com/feeds/tag/gaming-industry/`, named "PC Gamer Industry", `trust: press`) is added back as the fifth feed, so the set is five.
 
 A (2026-10-24, after the final qa pass): PC Gamer's tag is dropped again, so the set is four (GamesIndustry.biz, Game Developer, VGC, Gematsu Industry), all `trust: press`. Across passes the first stored copy of a URL decides its tags, so a story the tag feed stored before PC Gamer's main feed could be tagged industry only and a game's digest could lose it. Config now also requires every industry source to be a plain `rss` feed with `trust: press`.
+
+## Grand Theft Auto VI (2026-11-18)
+
+Added the day before launch, on the owner's word, as the catalog's 22nd game (the industry entry makes 23 entries, and the cap is 24, so nothing had to leave to make room and one slot is left). It's console only at launch (PS5 and Xbox Series), which rules out Steam news, the backbone of nearly every other entry. Candidates were fetched from a residential macOS connection first; the Droplet column is the owner's `curl` from the datacenter the same evening.
+
+The first pass stopped at three press tag feeds, the way the catalog's small games each have one or two. The owner pointed out that this is one of the biggest launches in years and asked where the official sources and the rest of the press were. Fair. The second pass is the bottom two-thirds of the table.
+
+### The candidates
+
+| URL | From home | Droplet | Verdict |
+|---|---|---|---|
+| `insider-gaming.com/tag/grand-theft-auto-6/feed/` | 200, 10 items, all from the last two days | 200 | Added, press |
+| `www.pushsquare.com/feeds/latest/tags/gta-6` | 200, 25 items, 8 on launch eve | 200 | Added, press (PS5 side) |
+| `www.purexbox.com/feeds/latest/tags/gta-6` | 200, 25 items, about 2 a day through November | 200 | Added, press (Xbox side) |
+| `blog.playstation.com/tag/grand-theft-auto-vi/feed/` | 200, 7 items, 3 in November | 200 | Added, official (Sony's own posts) |
+| `news.xbox.com/en-us/tag/grand-theft-auto-vi/feed/` | 200, 3 items, 1 in November | 200 | Added, official (Microsoft's own posts) |
+| `ir.take2games.com/rss/news-releases.xml` | 200, 10 items back to September | 403 | Out. It would have been shared and limited to this game, since it also carries NBA 2K and Zynga |
+| `kotaku.com/tag/gta-6/feed` | 200, 20 items in about two days | 200 | Added, press |
+| `rockstarintel.com/feed/` | 200, 10 items a day at launch | 200 | Added, press, shared with `games: [gta6]` (it covers Red Dead and GTA Online too) |
+| `www.gamespot.com/feeds/game-news/` | 200, 15 items a day, all games | 200 | Added, press, shared with `games: [gta6]` |
+| `feeds.feedburner.com/ign/games-all` | 200, 20 items, games only | 200 | Added, press, shared with `games: [gta6]`. The owner suggested IGN; `ign.com` itself has answered the Droplet with 403 since 2026-09-25, so this is its Feedburner copy |
+| `www.pcgamesn.com/grand-theft-auto-vi/feed` | 200, 25 items | not checked | Not added: PCGamesN's main feed is already shared |
+| `massivelyop.com/tag/grand-theft-auto-vi/feed/` | 200, 15 items since 2023 | not checked | Not added: about one a month, mostly business roundups that mention the game in passing |
+| `www.dexerto.com/feed/category/gta/` | 200, 50 items | not checked | Not added: the category mixes in unrelated stories, and the owner turned Dexerto down for Fortnite |
+| `www.polygon.com/rss/index.xml` | 200, 10 items | not checked | Not added: a short feed, much of it film and TV |
+
+The bot's own `--check-sources --game gta6` from home, against the example config: all nine new sources read (PlayStation Blog 7 items, Xbox Wire 3, Insider Gaming 10, Kotaku 20, Push Square 25, Pure Xbox 25, GameSpot 15, IGN 20, RockstarINTEL 10), and the game hit the 60-item cap on the first pass. The cap keeps official items first, then the newest.
+
+### What didn't work, so nobody checks it again
+
+- **Rockstar's Newswire** (`rockstargames.com/newswire`) is a JavaScript page with no feed link; `/newswire.rss`, `/newswire/rss` and `/rss` all 404. Reading it would take a collector of its own. Nobody has written one.
+- **Rockstar on Bluesky:** `rockstargames.com` is domain-verified, has about 76,000 followers and has never posted. `rockstargames.bsky.social` calls itself official and isn't the verified one. The rest are mirrors and fan accounts by their own bios.
+- **Take-Two's press releases:** 403 from the Droplet, fine from home.
+- **Tag feeds that don't exist:** Insider Gaming's `gta-6` and `grand-theft-auto-vi` tags (403; the working tag is `grand-theft-auto-6`), VGC's game and tag pages (404, or a feed with nothing in it), and the per-game paths on GamesRadar+, PC Gamer, Eurogamer and Rock Paper Shotgun (404). Push Square's and Pure Xbox's per-game feed paths answer 200 with no items; the tag feeds above are the ones with stories in them.
+- **Rockstar's service status page** dropped the connection.
+
+### Keywords
+
+- Aliases: `GTA VI`, `GTA 6`, `GTA6`, `GTAVI`, `Grand Theft Auto 6`. Matching is by whole word, so none of them fires on "Grand Theft Auto V", "GTA V" or "GTA: Vice City" (a test pins this).
+- Bare `GTA` is out: it would hand the game every GTA V and GTA Online story.
+- No entities. `Rockstar Games` would also match Red Dead and GTA Online, and `Take-Two` everything 2K publishes. If GTA VI's own online mode gets a name of its own, that name is the next alias.
+
+### Who decided what (2026-11-18)
+
+The owner asked for the game, said Fortnite could go if room was needed (it wasn't), asked for more sources than the first three, and suggested IGN. The feeds, the aliases and the empty entity list were the builder's picks, reported with the change. Two of those picks the owner was asked about and kept: limiting the three wide feeds to this game instead of opening them to the whole catalog, and marking the two console makers' blogs `official`. That last one is a stretch worth knowing about: `official` puts their posts first in a headline list and lets a summary call a story official, and it's Sony's and Microsoft's word, not Rockstar's.
+
+One cost of nine feeds: the same story arrives several times. Summaries merge the copies; a free server's headline list doesn't, so "GTA 6 review" from five outlets is five lines there.
