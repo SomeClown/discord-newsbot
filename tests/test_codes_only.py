@@ -282,16 +282,18 @@ def test_the_prodlike_v2_config_has_one_codes_only_subreddit_and_two_skipped(mon
     assert is_reddit_source(bl4) and bl4.codes_only is None
 
 
-def test_the_example_config_keeps_only_r_borderlands4_and_marks_it_codes_only():
+def test_the_example_config_has_no_reddit_source_left():
+    # r/Borderlands4 was the last one, read only for codes. Reddit retired its public RSS
+    # feeds (every subreddit feed has answered 404 since 2026-11-17), so it left the example
+    # on 2026-11-21. The codes-only handling itself is still tested above with its own configs.
     cfg = load_config(EXAMPLE)
     sources = [s for g in cfg.catalog for s in g.sources] + list(cfg.shared_sources)
-    reddit = [s for s in sources if is_reddit_source(s)]
-    assert [s.name for s in reddit] == ["r/Borderlands4"]
-    assert reddit[0].codes_only is True  # spelled out in the file, not just the default
-    # mentalmars is the other codes-only source: a shift_table page, read for codes and details.
-    assert cfg.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
-    # And the file itself has no other Reddit source for the loader to be quietly skipping.
-    assert EXAMPLE.read_text().count("reddit.com/r/") == 1
+    assert [s.name for s in sources if is_reddit_source(s)] == []
+    # mentalmars is the codes-only source that's left: a shift_table page, read for codes
+    # and details.
+    assert cfg.codes_only_source_names() == {"mentalmars"}
+    # And the file has no Reddit address at all, not even one the loader would quietly skip.
+    assert "reddit.com/r/" not in EXAMPLE.read_text()
 
 
 # --- the pass: detected, sighted, never stored ---

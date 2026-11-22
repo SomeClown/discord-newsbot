@@ -448,3 +448,24 @@ In production the same evening (about 19:10 PT): the owner's `--check-sources --
 The owner asked for the game, said Fortnite could go if room was needed (it wasn't), asked for more sources than the first three, and suggested IGN. The feeds, the aliases and the empty entity list were the builder's picks, reported with the change. Two of those picks the owner was asked about and kept: limiting the three wide feeds to this game instead of opening them to the whole catalog, and marking the two console makers' blogs `official`. That last one is a stretch worth knowing about: `official` puts their posts first in a headline list and lets a summary call a story official, and it's Sony's and Microsoft's word, not Rockstar's.
 
 One cost of nine feeds: the same story arrives several times. Summaries merge the copies; a free server's headline list doesn't, so "GTA 6 review" from five outlets is five lines there.
+
+## Reddit's feeds are gone (2026-11-17)
+
+`r/Borderlands4` was the last Reddit source, read only to spot SHiFT codes. It started failing in production and the owner asked whether the Grand Theft Auto VI edit had broken it. It hadn't: Reddit switched off its public RSS feeds.
+
+### The evidence
+
+- **Production's log:** the feed returned 20 items at 17:24 UTC on 2026-11-17 and `404 Not Found` on the next hourly pass, 18:24 UTC, and on every pass since. The GTA VI entry went into prod's config at 03:10 UTC on 2026-11-19, about 33 hours later, and that edit added lines in two other places.
+- **From a home connection, 2026-11-21,** one request every 40 seconds (Reddit allows about one every 35): `r/Borderlands4` as `/top/.rss?t=day`, `/top/.rss`, `/new/.rss`, `/hot/.rss`, `.rss` and its search feed, and `r/Borderlands/top/.rss?t=day`, all answered 404 with the same 266-byte Atom document titled "Not Found" whose id is `https://rss.reddit.com/`. That's the RSS service saying no, not a block page and not a rate limit (those are a 429 with an empty body, which two of the nine requests got). `r/Borderlands4/about.json` answered 403 with a block page.
+- **Reddit said it would.** It announced on 2026-09-30 that RSS support would end on 2026-11-13, with no replacement outside its moderator tools, and that public API access ends in March 2027. I read that in press reports ([TechCrunch](https://techcrunch.com/2026/09/30/reddit-is-killing-rss-feeds-ending-public-api-access-because-of-ai-bots/), [TechRepublic](https://www.techrepublic.com/article/news-reddit-rss-public-api-shutdown/)), not in Reddit's own post: its help pages refuse automated readers.
+- **Others saw the same hour.** Another project's fetcher logged its last good Reddit fetch at 17:40 UTC on 2026-11-17 and 404s from 19:08 ([its issue](https://github.com/nuntz/sema/issues/72)), and a feed-reader vendor dates subreddit feeds going dark to the same day ([Feeder](https://feeder.co/knowledge-base/rss-feed-creation/reddit-rss/)).
+
+### What was done (owner: option A, 2026-11-21)
+
+The source left `config.example.yaml` and prod's `config.yaml`, and the docs and the privacy page stopped saying the bot reads Reddit. The Reddit handling in the code (`newsbot/reddit.py`, the turn-taking and backoff in `pipeline/collect.py`, the codes-only rule) stays for now: it does nothing without a Reddit source, a lot of tests lean on it, and taking it out is its own cleanup for a later release.
+
+There's no way back in through Reddit: the Data API request was denied on 2026-10-04 with a policy that forbids reapplying, the API is closed to new requests, and the `.json` addresses are blocked.
+
+### What the bot lost
+
+One of its three community sightings of SHiFT codes. The mentalmars tables and the Bluesky search are still two independent community sources, so a community code can still be confirmed and earn its ping, and the official feeds still ping on their own. A code that shows up on Reddit first now arrives when one of the others carries it. Replacement sources are being researched separately.

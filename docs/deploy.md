@@ -704,20 +704,18 @@ and `CLAUDE.md`. Find and stop the second one (a leftover local dev
 process is the usual culprit); don't touch the code, this isn't a bug in
 the bot.
 
-**Reddit returns 403 or 429.** Expected from datacenter IPs and generic
-user agents; Reddit does this to a lot of cloud providers, not just this
-one. The collector already sends a descriptive User-Agent and prefers
-`/new/.rss`. Collection runs hourly now, so a source that fails 12
-collections in a row (half a day) sends one alert to your admin channel,
-and the daily owner report lists every failing source; `/newsbot status`
-in a server shows "N of M sources ok" for its games. That's the designed
-behavior, not a fresh problem each time it happens. If it persists, that's an
-owner decision (drop Reddit as a source, or accept the gap) per
-`docs/design.md` §4, not something to patch around here. Since v3.0.3 the only
-Reddit feed is `r/Borderlands4`, read just to spot SHiFT codes, so a Reddit
-failure costs code alerts and nothing else. The collector still spaces any
-Reddit feeds 35 seconds apart; a pass that takes more than half the interval
-is logged as a warning.
+**A Reddit feed returns 404 (or 403, or 429).** Take it out of
+`config.yaml`; it isn't coming back. Reddit switched off its public RSS
+feeds in November 2026, and production's `r/Borderlands4` feed, read only
+to spot SHiFT codes, went from 20 items at 17:24 UTC on 2026-11-17 to a 404
+an hour later and has answered 404 since. Every other subreddit and address
+form does the same, and the `.json` addresses answer 403. Before that, a 403
+or 429 from Reddit was routine for a datacenter address and the collector
+spaced Reddit requests 35 seconds apart to live with it; that code is still
+there and has nothing left to space. A failing source is never a crash: one
+that fails 12 collections in a row (half a day) sends one alert to your admin
+channel, the daily owner report lists it, and `/newsbot status` shows "N of M
+sources ok".
 
 **A YouTube feed 404s.** YouTube's channel RSS feeds occasionally 404
 upstream for reasons outside this bot's control (a channel's video ID

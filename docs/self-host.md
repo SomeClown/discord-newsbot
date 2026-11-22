@@ -552,7 +552,7 @@ moment; there's no backlog. A few things to know before choosing a ping:
 - `shift: max_pings_per_day` (default 3) is **per server, per that server's own
   day**. `0` means codes post but never ping, a reasonable way to start quiet;
   `/shift history` lists every code the bot has seen either way.
-- A code seen only by a community source (a Reddit thread, a Bluesky search)
+- A code seen only by a community source (a fan site's list, a Bluesky search)
   posts without a ping. If a second independent source, or an official or
   press one, sees it within 24 hours, each server with pinging on gets one
   follow-up headed `> confirmed by a second source ▌`, with its chosen ping,

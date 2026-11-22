@@ -546,4 +546,5 @@ def test_deleting_the_table_line_from_the_example_still_loads(tmp_path):
     text = (ROOT / "config.example.yaml").read_text()
     kept = [line for line in text.splitlines(keepends=True) if "type: shift_table" not in line]
     cfg = _load(tmp_path, "".join(kept))
-    assert _tables(cfg) == [] and cfg.codes_only_source_names() == {"r/Borderlands4"}
+    # No table and, since Reddit's feeds went away, no subreddit either: nothing is codes-only.
+    assert _tables(cfg) == [] and cfg.codes_only_source_names() == set()
