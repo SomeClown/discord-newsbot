@@ -19,7 +19,7 @@ httpcore2==2.16.0
 httpx==0.28.1
 httpx2==2.16.0
 idna==3.20
-jiter==0.17.0
+jiter==0.18.0
 multidict==6.9.1
 opentelemetry-api==1.45.1
 propcache==0.5.4
