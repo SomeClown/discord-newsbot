@@ -23,8 +23,9 @@ import itertools
 import logging
 import re
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import discord
 import pytest
@@ -374,7 +375,8 @@ async def test_an_empty_database_still_answers(v3_cfg, v3_db):
     interaction = FakeInteraction(guild_id=HOME, user_id=OWNER_ID)
     await servers_callback(v3_cfg, bot)(interaction)
     assert interaction.text.startswith("Servers: 0 (0 set up)")
-    assert f"Summary spend, {datetime.now(UTC).strftime('%Y-%m')}: about $0.00" in interaction.text
+    month = datetime.now(ZoneInfo(v3_cfg.owner_report.timezone)).strftime("%Y-%m")
+    assert f"Summary spend, {month}: about $0.00" in interaction.text
 
 
 # --- plan_scopes: every mix ---

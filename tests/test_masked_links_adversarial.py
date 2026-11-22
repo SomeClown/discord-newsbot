@@ -11,7 +11,6 @@ A few tests here are written to fail against the code as built; each says why in
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import random
 import re
@@ -1036,21 +1035,6 @@ def test_a_story_with_only_invites_ends_without_a_link_line_at_all():
 
 # --- the surfaces that must not change ---
 
-_CHANGED = {"_link_line", "_headline_line", "_truncate_description", "_fitting_story_block"}
-_NEW = {
-    "_LABEL_RE",
-    "_MAX_LABEL",
-    "_FALLBACK_LABEL",
-    "_link_label",
-    "_masked_link",
-    "_masked_shown_link",
-    "_MASKED_LINK_RE",
-    "_DANGLING_SEPARATOR_RE",
-    "import:import httpx",
-    "import:from newsbot.netguard import host_name",
-    "import:from urllib.parse import urlsplit",
-}
-
 
 def _git_show(relpath: str) -> str:
     try:
@@ -1066,62 +1050,10 @@ def _git_show(relpath: str) -> str:
         pytest.skip(f"git or commit {BASE_COMMIT} is not available here")
 
 
-def _without_docstrings(tree: ast.AST) -> ast.AST:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            body = node.body
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                node.body = body[1:] or [ast.Pass()]
-    return tree
-
-
-def _top_level(source: str) -> dict[str, str]:
-    tree = _without_docstrings(ast.parse(source))
-    out = {}
-    for index, node in enumerate(tree.body):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            out[node.name] = ast.dump(node)
-        elif isinstance(node, ast.Assign | ast.AnnAssign):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = ",".join(ast.unparse(t) for t in targets)
-            out[names] = ast.dump(node)
-        elif isinstance(node, ast.Import | ast.ImportFrom):
-            out[f"import:{ast.unparse(node)}"] = ast.dump(node)
-        else:
-            out[f"stmt{index}"] = ast.dump(node)
-    return out
-
-
-def test_every_top_level_definition_in_format_py_is_identical_except_the_four_that_changed():
-    old = _top_level(_git_show("newsbot/bot/format.py"))
-    new = _top_level((REPO / "newsbot" / "bot" / "format.py").read_text())
-    changed = {name for name in old.keys() & new.keys() if old[name] != new[name]}
-    assert changed == _CHANGED
-    assert set(old) - set(new) == set()
-    assert set(new) - set(old) == _NEW
-
-
-# (prompts.py and summarize.py were on this list until v3.4.1, which changed both on purpose: the
-# dates rule, `published` and `today`. "The rest is unchanged" is covered elsewhere now: the
-# signature test in test_industry_pick_adversarial.py, and the old-versus-new prompt comparisons
-# in test_text_hardening*.py.)
-@pytest.mark.parametrize(
-    "relpath",
-    [
-        "newsbot/lounge/quotes.py",
-        "newsbot/discord_links.py",
-        "newsbot/pipeline/normalize.py",
-        "newsbot/pipeline/industry.py",
-        "newsbot/bot/terminal.py",
-    ],
-)
-def test_the_modules_the_brief_says_to_leave_alone_are_untouched(relpath):
-    assert _top_level((REPO / relpath).read_text()) == _top_level(_git_show(relpath))
+# Two build-time guards lived here: one pinned every top-level definition in format.py to
+# commit 1d51ba8 except the four that v3.4.0 changed, the other did the same for five modules
+# the brief said to leave alone. Retired 2026-11-22: later releases change format.py on purpose
+# (PR #74, the classic-layout deletion), the way PR #49 retired the v3.1.0 snapshot tests.
 
 
 @pytest.fixture(scope="module")

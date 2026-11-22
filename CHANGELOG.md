@@ -21,7 +21,14 @@ old tag.
 
 ### Added
 
+- The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` counts the same month (and labels it that way), so the two agree around a month's end.
 - Grand Theft Auto VI in the example catalog, after Escape from Tarkov (22 games, plus the industry entry). It's console only at launch, so there's no Steam news, and Rockstar's Newswire has no feed. Its own sources are the PlayStation Blog's and Xbox Wire's posts about it (marked official: the console makers' word, not Rockstar's) and four press tag feeds (Insider Gaming, Kotaku, Push Square, Pure Xbox). Three wide feeds join the shared sources for this game alone (GameSpot, IGN through Feedburner, RockstarINTEL), and the existing shared press feeds and web search cover it by name. "GTA 6" and "GTA VI" match it; bare "GTA" doesn't, so Grand Theft Auto V and GTA Online stories stay out. A bot that's already running gets it by adding the entry to its own `config.yaml` and restarting.
+
+### Fixed
+
+- A summary that starts with a number ("2026. The year...") no longer shows as a numbered list in digests, on `/news` pages (comped servers) or in the lounge's daily quote.
+- Labels in disguise are stripped from AI text and from the headlines in a free server's lists. A leading copy of the bot's own labels is removed in any capitalization, in full-width or bold letters, behind look-alike emoji (other colored circles and squares, check marks, repeat arrows) and with any of `·`, `:`, `-`, `|`, `–` or `—` after it; the bot's exact markers ("🟢 OFFICIAL ·" and the rest) are removed anywhere in the line. A real title can lose a leading label word: "Update: Hotfix 1.0.3" shows as "Hotfix 1.0.3". A bare word ("Official patch notes") is left alone.
+- A very long feed title (megabytes) no longer slows down rendering a headline list.
 
 ## [3.4.3] - 2026-10-29
 

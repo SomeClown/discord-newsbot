@@ -249,10 +249,13 @@ def test_leading_backslash_in_attribution_cannot_eat_the_prefix_space():
     assert line.startswith(ATTRIBUTION_PREFIX + "\\\\")
 
 
-def test_numbered_list_marker_passes_through_documented_gap():
-    # "1. x" renders as a list in Discord, and esc() doesn't escape it. It's
-    # cosmetic (no ping, can't reach the attribution) so it's pinned, not failed.
-    assert render_quote_message(Quote("1. one\n2. two")).split("\n")[1:3] == ["1. one", "2. two"]
+def test_numbered_list_marker_is_escaped():
+    # "1. x" renders as a list in Discord, and esc() doesn't escape it. It was a pinned gap
+    # (cosmetic: no ping, can't reach the attribution) until escape_list_start closed it.
+    assert render_quote_message(Quote("1. one\n2. two")).split("\n")[1:3] == [
+        "1\\. one",
+        "2\\. two",
+    ]
 
 
 def test_indented_heading_marker_passes_through_documented_gap():
