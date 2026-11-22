@@ -8,10 +8,11 @@ Three things get leaned on here.
 2. `render_alert_edit` with a v3.1 header, or anything that isn't a terminal one: since v3.5.0
    it is edited in today's layout, the header goes back out as stored, and hostile input
    either fits in 2,000 units or raises ValueError.
-3. The v3.1.4 packer's `ping_prefix`, nonces and codes still agree with today's. The old
-   `format.py` is read out of git (commit 1fcd04b) as a throwaway module; if git or that
-   commit isn't around (a shallow clone), that test skips with a reason rather than passing
-   by accident.
+3. A source name run through `esc()` can't forge the terminal marker in a header.
+
+(The test that compared today's packer with v3.1.4's went in v3.5.0, with the classic layout.
+The `old` fixture stays only because `test_terminal_task3_adversarial.py` imports it; it
+skips with a reason when git or commit 1fcd04b isn't around.)
 """
 
 from __future__ import annotations
@@ -421,25 +422,6 @@ def test_golden_prefix_true_prefixes_only_golden_candidates_under_a_v31_header()
         golden_prefix=True,
     )
     assert got.count("Golden Key: r/Borderlands4") == 1
-
-
-def test_nonces_and_ping_prefix_from_the_v314_packer_are_unchanged(old):
-    # The nonce is what makes a retried send safe to repeat, so a changed look must not
-    # change it: today's packer and v3.1.4's agree on nonce, ping_prefix and codes.
-    from newsbot.bot import format as new
-
-    cands = [_cand(golden=True), _cand("BBBB2-BBBBB-BBBBB-BBBBB-BBBBB")]
-    for kwargs in (
-        dict(ping=True),
-        dict(ping=True, ping_mention="<@&123>"),
-        dict(ping=False),
-        dict(ping=True, test=True),
-    ):
-        a = new.render_code_alerts(cands, nonce_scope="1:2", **kwargs)
-        b = old.render_code_alerts(cands, nonce_scope="1:2", **kwargs)
-        assert [x.nonce for x in a] == [x.nonce for x in b]
-        assert [x.ping_prefix for x in a] == [x.ping_prefix for x in b]
-        assert [x.codes for x in a] == [x.codes for x in b]
 
 
 @pytest.mark.parametrize("name", ["▌`", "x▌`y", "▌ `", "▌\\`", "`▌`", "▌``", "▌" * 20 + "`" * 20])

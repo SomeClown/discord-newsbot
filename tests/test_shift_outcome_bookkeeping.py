@@ -19,6 +19,7 @@ from contextlib import closing
 import pytest
 from test_shift_fanout_adversarial import (
     V3,
+    FakeChannel,
     Harness,
     _code,
     add_guild,
@@ -270,3 +271,70 @@ async def test_a_lost_mark_still_logs_the_error_and_leaves_the_codes_pending(
     assert delivery_lines(caplog) == []  # an errored turn still logs no INFO line
     statuses = status_of(h.db_path)
     assert [statuses[c] for c in codes[:20]] == ["pending"] * 20
+
+
+# --- why a follow-up lost its ping, in the same words the alert path uses ---
+
+
+async def test_a_followup_dropped_for_lack_of_permission_says_no_permission(h, monkeypatch, caplog):
+    add_guild(h.db_path, 1, ping="everyone")
+    [old] = await burst(h, 1)
+    h.channels = {1: FakeChannel(can_mention_everyone=False)}
+    caplog.set_level(logging.INFO, logger=fanout.logger.name)
+    caplog.clear()
+
+    [outcome] = await one_turn(
+        h, monkeypatch, [sighting_item(BLUESKY, "community", old, at=h.clock)]
+    )
+
+    assert outcome.followups_posted == 1 and outcome.pinged is False
+    assert outcome.reasons == ("no_permission",)
+    [line] = delivery_lines(caplog)
+    assert line.unpinged_or_stripped_because == "no_permission"
+
+
+async def test_a_followup_stripped_after_an_ambiguous_failure_says_so(h, monkeypatch, caplog):
+    add_guild(h.db_path, 1, ping="everyone")
+    [old] = await burst(h, 1)
+    script_posts(h, PublishError("timeout"))
+    caplog.set_level(logging.INFO, logger=fanout.logger.name)
+    caplog.clear()
+
+    [outcome] = await one_turn(
+        h, monkeypatch, [sighting_item(BLUESKY, "community", old, at=h.clock)]
+    )
+
+    assert outcome.followups_posted == 1 and outcome.pinged is False
+    assert outcome.reasons == ("ping_stripped_after_ambiguous_failure",)
+    [line] = delivery_lines(caplog)
+    assert line.unpinged_or_stripped_because == "ping_stripped_after_ambiguous_failure"
+
+
+async def test_a_reason_both_the_alert_and_the_followup_hit_appears_once(h, monkeypatch):
+    add_guild(h.db_path, 1, ping="everyone")
+    [old] = await burst(h, 1)
+    h.channels = {1: FakeChannel(can_mention_everyone=False)}
+
+    [outcome] = await one_turn(
+        h,
+        monkeypatch,
+        [
+            sighting_item("Gearbox", "official", _code(2), at=h.clock),
+            sighting_item(BLUESKY, "community", old, at=h.clock),
+        ],
+    )
+
+    assert outcome.posted == 1 and outcome.followups_posted == 1
+    assert outcome.reasons.count("no_permission") == 1
+
+
+async def test_a_clean_pinging_followup_adds_no_reason(h, monkeypatch):
+    add_guild(h.db_path, 1, ping="everyone")
+    [old] = await burst(h, 1)
+    h.channels = {1: FakeChannel(can_mention_everyone=True)}
+
+    [outcome] = await one_turn(
+        h, monkeypatch, [sighting_item(BLUESKY, "community", old, at=h.clock)]
+    )
+
+    assert outcome.pinged is True and outcome.reasons == ()

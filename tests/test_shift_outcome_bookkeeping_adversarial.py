@@ -52,6 +52,7 @@ from test_shift_followups import (
     FOLLOWUP_PROMPT,
     REDDIT,
     T0,
+    ScriptedPoster,
     burst,
     script_posts,
     sighting_item,
@@ -155,6 +156,15 @@ def lose_marks(module, lose, tripped):
     finally:
         for p in reversed(patches):
             p.stop()
+
+
+async def deliver_with(h, *, lose=()):
+    """`deliver`, for a harness whose factory is already set (`permission_posts`)."""
+    deps = h.deps()
+    tripped: set = set()
+    with lose_marks(fanout, set(lose), tripped):
+        outcomes = await fanout.deliver_queued_codes(deps)
+    return outcomes, h.made, tripped
 
 
 async def deliver(h, module=fanout, *, script=(), lose=(), preview=False):
@@ -730,6 +740,241 @@ async def test_a_lost_followup_mark_keeps_the_next_server_turn(tmp_path):
 
     assert [(o.guild_id, o.error) for o in outcomes] == [(1, ERROR), (2, None)]
     assert outcomes[1].followups_posted == 1 and outcomes[1].pinged is True
+
+
+# --- why a follow-up lost its ping: the reason strings, their order, and where they stop ---
+
+STRIPPED = "ping_stripped_after_ambiguous_failure"
+NO_PERMISSION = "no_permission"
+
+
+class PermissionPoster(ScriptedPoster):
+    """A scripted poster that raises `missing_ping_permission` the way the real one does.
+
+    The real poster sets the flag when a message that asks for a ping lands without the role
+    to deliver it, and `begin_batch` clears it at the start of each turn. `lacking` names the
+    servers whose role can't mention anyone.
+    """
+
+    lacking: frozenset[int] = frozenset()
+
+    def __init__(self, guild_id, channel_id, ping, script):
+        super().__init__(guild_id, channel_id, ping, script)
+        self.missing_ping_permission = False
+
+    def begin_batch(self):
+        self.missing_ping_permission = False
+
+    async def post(self, alert):
+        message_id = await super().post(alert)
+        if alert.ping and self.guild_id in self.lacking:
+            self.missing_ping_permission = True
+        return message_id
+
+
+def permission_posts(h, *, alert=(), followup=(), lacking=(1,), lacking_alerts=False):
+    """Install `PermissionPoster`s. A server's turn builds its alert poster first and its
+    follow-up poster second, so each gets its own script; `lacking_alerts` extends the
+    missing-permission servers to the alert poster as well.
+    """
+    made: list[PermissionPoster] = []
+    built: dict[int, int] = {}
+
+    def factory(guild_id, channel_id, ping, notify):
+        # A turn with nothing to alert about never builds its alert poster.
+        n = built[guild_id] = built.get(guild_id, 0) + 1 + (0 if h.has_alerts else 1)
+        poster = PermissionPoster(guild_id, channel_id, ping, alert if n == 1 else followup)
+        poster.lacking = frozenset(lacking) if (n > 1 or lacking_alerts) else frozenset()
+        made.append(poster)
+        return poster
+
+    h.factory = factory
+    h.made = made
+
+
+async def reasons_world(
+    tmp_path, name, *, alert_items=(), burst_size=1, ping="everyone", guilds=(1,)
+):
+    """Follow-ups waiting for every server in `guilds`, plus `alert_items` for the same turn."""
+    h = make_harness(tmp_path, name)
+    for g in guilds:
+        add_guild(h.db_path, g, ping=ping)
+    codes = await burst(h, burst_size)
+    items = list(alert_items) + [sighting_item(BLUESKY, "community", c, at=h.clock) for c in codes]
+    await queue(h, items)
+    h.has_alerts = bool(alert_items)
+    return h, codes
+
+
+def official(n):
+    return [sighting_item("Gearbox", "official", _code(n), at=T0 + timedelta(hours=20))]
+
+
+async def test_an_alert_stripped_and_a_followup_without_permission_list_alerts_first(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r1", alert_items=official(200))
+    permission_posts(h, alert=[PublishError("t")])  # its retry goes out stripped
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.posted == 1 and outcome.followups_posted == 1
+    # Sorted would put no_permission first; alerts-first is the requirement.
+    assert outcome.reasons == (STRIPPED, NO_PERMISSION)
+
+
+async def test_an_alert_without_permission_and_a_stripped_followup_list_alerts_first(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r2", alert_items=official(200))
+    permission_posts(h, followup=[PublishError("t")], lacking_alerts=True)
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.posted == 1 and outcome.followups_posted == 1
+    assert outcome.reasons == (NO_PERMISSION, STRIPPED)
+
+
+async def test_the_same_reason_from_alert_and_followup_is_listed_once_in_the_log_line(
+    tmp_path, caplog
+):
+    h, _ = await reasons_world(tmp_path, "r3", alert_items=official(200))
+    permission_posts(h, lacking_alerts=True)
+    caplog.set_level(logging.INFO, logger=fanout.logger.name)
+    caplog.clear()
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.reasons == (NO_PERMISSION,)
+    [line] = [r for r in caplog.records if hasattr(r, "unpinged_or_stripped_because")]
+    assert line.unpinged_or_stripped_because == NO_PERMISSION
+
+
+async def test_a_stripped_first_message_with_a_clean_continuation_reports_the_reason_once(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r4", burst_size=50)
+    [outcome], made, _ = await deliver(h, script=[PublishError("t")])
+
+    assert [a.ping for a in made[0].sent] == [False, False, False]
+    assert outcome.followups_posted == 50 and outcome.pinged is False
+    assert outcome.reasons == (STRIPPED,)
+
+
+async def test_a_burst_without_permission_reports_it_once_across_three_messages(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r5", burst_size=50)
+    permission_posts(h)
+    [outcome], made, _ = await deliver_with(h)
+
+    assert len(made[-1].sent) == 3 and outcome.followups_posted == 50
+    assert outcome.pinged is False and outcome.reasons == (NO_PERMISSION,)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        [RuntimeError("gone")],
+        [PublishError("t"), RuntimeError("gone")],
+    ],
+    ids=["dies at once", "ambiguous then dies"],
+)
+async def test_a_followup_that_never_went_out_gives_no_reason(tmp_path, script):
+    h, _ = await reasons_world(tmp_path, "r6")
+    permission_posts(h, followup=script)
+    [outcome], made, _ = await deliver_with(h)
+
+    assert made[-1].sent == [] and outcome.followups_posted == 0
+    assert outcome.pinged is False and outcome.reasons == ()
+
+
+async def test_a_later_message_that_dies_keeps_only_the_first_messages_reason(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r7", burst_size=50)
+    permission_posts(h, followup=[None, RuntimeError("gone")])
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.followups_posted == 20
+    assert outcome.reasons == (NO_PERMISSION,)
+
+
+async def test_a_role_ping_without_permission_says_no_permission_too(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r8", ping=ROLE)
+    permission_posts(h)
+    [outcome], made, _ = await deliver_with(h)
+
+    assert made[-1].sent[0].content.startswith(f"<@&{ROLE}> ")
+    assert outcome.pinged is False and outcome.reasons == (NO_PERMISSION,)
+
+
+async def test_a_stripped_role_ping_says_stripped(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r9", ping=ROLE)
+    [outcome], _, _ = await deliver(h, script=[PublishError("t")])
+
+    assert outcome.pinged is False and outcome.reasons == (STRIPPED,)
+
+
+async def test_an_untrusted_alert_reason_stays_first_when_a_followup_loses_its_ping(tmp_path):
+    community = [sighting_item(REDDIT, "community", _code(200), at=T0 + timedelta(hours=20))]
+    h, _ = await reasons_world(tmp_path, "r10", alert_items=community)
+    permission_posts(h)
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.posted == 1 and outcome.followups_posted == 1
+    assert outcome.reasons == ("untrusted", NO_PERMISSION)
+
+
+async def test_a_ping_off_server_keeps_its_reason_and_gets_no_followup_reason(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r11", alert_items=official(200))
+    with closing(connect(h.db_path)) as conn, conn:
+        conn.execute("UPDATE guild_shift SET ping = 'none' WHERE guild_id = 1")
+    permission_posts(h)
+    [outcome], _, _ = await deliver_with(h)
+
+    assert outcome.followups_posted == 0 and outcome.reasons == ("ping_off",)
+
+
+async def test_a_followup_reason_does_not_leak_to_the_next_server(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r12", guilds=(1, 2))
+    permission_posts(h, lacking=(1,))
+    outcomes, _, _ = await deliver_with(h)
+
+    by_guild = {o.guild_id: o for o in outcomes}
+    assert by_guild[1].reasons == (NO_PERMISSION,) and by_guild[1].pinged is False
+    assert by_guild[2].reasons == () and by_guild[2].pinged is True
+
+
+async def test_a_followup_reason_does_not_leak_through_the_real_poster_either(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r13", guilds=(1, 2))
+    h.channels = {
+        1: FakeChannel(can_mention_everyone=False),
+        2: FakeChannel(can_mention_everyone=True),
+    }
+    outcomes = await fanout.deliver_queued_codes(h.deps())
+
+    by_guild = {o.guild_id: o for o in outcomes}
+    assert by_guild[1].reasons == (NO_PERMISSION,)
+    assert by_guild[2].reasons == () and by_guild[2].pinged is True
+
+
+async def test_a_lost_followup_mark_does_not_crash_on_reasons_and_keeps_the_alert_ones(tmp_path):
+    community = [sighting_item(REDDIT, "community", _code(200), at=T0 + timedelta(hours=20))]
+    h, codes = await reasons_world(tmp_path, "r14", alert_items=community)
+    permission_posts(h)
+    [outcome], _, _ = await deliver_with(h, lose=[(1, codes[0])])
+
+    assert outcome.error == ERROR and outcome.posted == 1
+    assert isinstance(outcome.reasons, tuple)
+    assert outcome.reasons[0] == "untrusted"
+    assert len(set(outcome.reasons)) == len(outcome.reasons)
+
+
+async def test_a_lost_mark_on_the_only_followup_still_yields_a_plain_error_outcome(tmp_path):
+    h, codes = await reasons_world(tmp_path, "r15")
+    permission_posts(h)
+    [outcome], _, _ = await deliver_with(h, lose=[(1, codes[0])])
+
+    assert outcome.error == ERROR
+    assert isinstance(outcome.reasons, tuple)
+    assert len(set(outcome.reasons)) == len(outcome.reasons)
+
+
+async def test_a_lost_alert_mark_does_not_crash_on_reasons(tmp_path):
+    h, _ = await reasons_world(tmp_path, "r16", alert_items=official(200))
+    permission_posts(h)
+    [outcome], _, _ = await deliver_with(h, lose=[(1, _code(200))])
+
+    assert outcome.error == ERROR
+    assert isinstance(outcome.reasons, tuple)
 
 
 # --- None-safety and the loop's other exits ---

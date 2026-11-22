@@ -309,7 +309,8 @@ async def _post_batch(
     "may or may not have posted", which is true of the one that did and a gentle fib
     about the rest.
     """
-    posted = 0
+    # Counted after each mark is written, so what's returned is what the database holds. The
+    # list of failed codes is only here for the admin notice's text.
     failed_codes: list[str] = []
     failed_from_here = False
     recorded_posted = recorded_failed = 0
@@ -344,7 +345,6 @@ async def _post_batch(
                 raise
             recorded_failed += len(alert.codes)
             continue
-        posted += len(alert.codes)
         message = record(alert, stripped) if record is not None else None
         try:
             await _record(
@@ -366,7 +366,7 @@ async def _post_batch(
             "newsbot: a SHiFT code alert couldn't be posted in your SHiFT channel; "
             "codes never posted: " + ", ".join(failed_codes),
         )
-    return posted, len(failed_codes)
+    return recorded_posted, recorded_failed
 
 
 def _mark_failed_sync(db_path: str, guild_id: int, codes: list[str]) -> None:
@@ -856,14 +856,14 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     begin_batch = getattr(poster, "begin_batch", None)
     if begin_batch is not None:
         begin_batch()
-    posted, pinged = await _post_followups(deps, guild_id, poster, rendered)
-    return GuildOutcome(guild_id, followups_posted=posted, pinged=pinged)
+    posted, pinged, reasons = await _post_followups(deps, guild_id, poster, rendered)
+    return GuildOutcome(guild_id, followups_posted=posted, pinged=pinged, reasons=reasons)
 
 
 async def _post_followups(
     deps: FanoutDeps, guild_id: int, poster: CodeAlertPoster, rendered: list[RenderedAlert]
-) -> tuple[int, bool]:
-    """Post a claimed follow-up's messages in order; return (codes landed, whether one pinged).
+) -> tuple[int, bool, tuple[str, ...]]:
+    """Post a claimed follow-up's messages in order; return (codes landed, pinged, reasons).
 
     A message pinged when it carried a ping that wasn't stripped on the way and it landed
     and was recorded; only the first message of a burst carries one.
@@ -877,6 +877,7 @@ async def _post_followups(
     """
     posted = 0
     pinged = False
+    reasons: list[str] = []
     failed_from_here = False
     for alert in rendered:
         message_id: int | None = None
@@ -924,13 +925,16 @@ async def _post_followups(
         # The poster raises its flag when the bot's role can't deliver a ping (the message
         # still posts, and Discord drops the notification). It's per turn (`begin_batch`)
         # and only a message that asks for a ping can set it, which in a burst is the first.
+        no_permission = getattr(poster, "missing_ping_permission", False)
         pinged = pinged or (
-            alert.ping
-            and not stripped
-            and bool(alert.ping_prefix)
-            and not getattr(poster, "missing_ping_permission", False)
+            alert.ping and not stripped and bool(alert.ping_prefix) and not no_permission
         )
-    return posted, pinged
+        # The same reason strings as the alert path, for a message that did land.
+        if alert.ping and stripped and "ping_stripped_after_ambiguous_failure" not in reasons:
+            reasons.append("ping_stripped_after_ambiguous_failure")
+        if alert.ping and no_permission and "no_permission" not in reasons:
+            reasons.append("no_permission")
+    return posted, pinged, tuple(sorted(reasons))
 
 
 def _followup_mark_sync(
@@ -1025,6 +1029,11 @@ async def deliver_queued_codes(
                         outcome,
                         followups_posted=followup.followups_posted,
                         pinged=outcome.pinged or followup.pinged,
+                        # Alert reasons first, then any follow-up reason not already there.
+                        reasons=(
+                            *outcome.reasons,
+                            *(r for r in followup.reasons if r not in outcome.reasons),
+                        ),
                     )
             except MarkLostError as lost:
                 # The message went out and the database never let us say so. What was
