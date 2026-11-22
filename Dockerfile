@@ -5,7 +5,7 @@
 # C compiler along for the ride.
 
 # ---- builder ----------------------------------------------------------
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ COPY newsbot ./newsbot
 RUN pip install --no-cache-dir --no-deps .
 
 # ---- runtime ------------------------------------------------------------
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 # uid 10001 is fixed (not "the next free uid") so the bind-mounted ./data
 # on the host can be chown'd once, in the runbook, and keep working across
