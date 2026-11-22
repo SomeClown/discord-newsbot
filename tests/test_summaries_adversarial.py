@@ -287,6 +287,7 @@ async def test_the_friends_model_input_stays_v22s_however_the_inputs_are_arrange
         in_range,
         all_topics=w.v2.topics,
         subject=w.v2.digest.subject,
+        today=end.astimezone(UTC).date(),  # the prepare path now says what day it is (v3.4.1)
     )
 
     w.clock.t = end

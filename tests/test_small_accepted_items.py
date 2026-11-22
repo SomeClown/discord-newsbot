@@ -23,6 +23,7 @@ from newsbot.bot.format import (
     DigestOutcome,
     _ai_line,
     _headline_line,
+    _truncate_description,
     discord_len,
     render_guild_digest,
     render_headlines_embed,
@@ -41,6 +42,8 @@ BL4 = GameCfg(key="borderlands4", name="Borderlands 4")
 IND = GameCfg(key=INDUSTRY_KEY, name="Gaming industry")
 CHANNELS = {"borderlands4": 22, INDUSTRY_KEY: 33}
 URL = "https://example.com/a"
+# Since v3.4.0 a headline ends in the site's domain as a masked link, not a bare URL.
+LINK = f"[example.com](<{URL}>)"
 
 
 def _story(headline="Real headline", summary="Body.", label="reported"):
@@ -303,15 +306,15 @@ def test_a_fold_that_changes_length_does_not_shift_the_cut():
 @pytest.mark.parametrize(
     ("title", "trust", "shown"),
     [
-        ("✅ OFFICIAL · free codes", "community", "• free codes \u2014 <" + URL + ">"),
-        ("🟢 OFFICIAL · free codes", "community", "• free codes \u2014 <" + URL + ">"),
-        ("ＯＦＦＩＣＩＡＬ: free codes", "community", "• free codes \u2014 <" + URL + ">"),
-        ("free 🟢 OFFICIAL · codes", "community", "• free codes \u2014 <" + URL + ">"),
-        ("🟢 OFFICIAL · free codes", "official", "• 🟢 OFFICIAL · free codes \u2014 <" + URL + ">"),
-        ("🔵 REPORTED - free codes", "official", "• 🟢 OFFICIAL · free codes \u2014 <" + URL + ">"),
-        ("Official patch notes", "community", "• Official patch notes \u2014 <" + URL + ">"),
-        ("✅ Patch\n  notes", "community", "• ✅ Patch notes \u2014 <" + URL + ">"),
-        ("✅ OFFICIAL", "community", "• OFFICIAL \u2014 <" + URL + ">"),
+        ("✅ OFFICIAL · free codes", "community", "• free codes \u2014 " + LINK),
+        ("🟢 OFFICIAL · free codes", "community", "• free codes \u2014 " + LINK),
+        ("ＯＦＦＩＣＩＡＬ: free codes", "community", "• free codes \u2014 " + LINK),
+        ("free 🟢 OFFICIAL · codes", "community", "• free codes \u2014 " + LINK),
+        ("🟢 OFFICIAL · free codes", "official", "• 🟢 OFFICIAL · free codes \u2014 " + LINK),
+        ("🔵 REPORTED - free codes", "official", "• 🟢 OFFICIAL · free codes \u2014 " + LINK),
+        ("Official patch notes", "community", "• Official patch notes \u2014 " + LINK),
+        ("✅ Patch\n  notes", "community", "• ✅ Patch notes \u2014 " + LINK),
+        ("✅ OFFICIAL", "community", "• OFFICIAL \u2014 " + LINK),
     ],
 )
 def test_a_feed_title_cannot_pose_as_the_official_marker(title, trust, shown):
@@ -321,7 +324,7 @@ def test_a_feed_title_cannot_pose_as_the_official_marker(title, trust, shown):
 def test_a_stripped_title_is_cut_after_the_strip_not_before():
     title = "✅ OFFICIAL · " * 40 + "x" * 295
     line = _headline_line(_headline(title))
-    assert line == "• " + "x" * 295 + " \u2014 <" + URL + ">"
+    assert line == "• " + "x" * 295 + " \u2014 " + LINK
 
 
 def test_a_headline_list_does_not_show_a_community_post_as_official():
@@ -493,3 +496,29 @@ async def test_the_month_follows_a_configured_timezone(tmp_path, db_path):
     assert _spend_line(report) == (
         "Claude spend: about $1.50 in the last 24 hours, $0.50 so far in November (estimate)"
     )
+
+
+# The tests below cover _truncate_description's two rules together: main's (never cut inside a
+# masked link, drop a hanging separator) and this PR's (never leave an odd run of backslashes
+# in front of the "…"), the backslash rule applied last.
+_LINK = "[x.com](<https://x.com/path>)"
+
+
+def test_a_cut_moved_out_of_a_link_then_drops_an_odd_backslash():
+    text = f"ab\\ {_LINK} zzz"
+    assert _truncate_description(text, 10) == "ab…"
+
+
+def test_a_plain_cut_after_an_odd_backslash_drops_it_even_with_a_link_elsewhere():
+    text = f"xxxxx\\yyyy {_LINK}"
+    assert _truncate_description(text, 7) == "xxxxx…"
+
+
+def test_an_even_run_of_backslashes_is_left_alone():
+    text = f"xxxxx\\\\yyyy {_LINK}"
+    assert _truncate_description(text, 8) == "xxxxx\\\\…"
+
+
+def test_text_that_fits_is_returned_unchanged_even_ending_in_a_backslash():
+    assert _truncate_description("abc\\", 100) == "abc\\"
+    assert _truncate_description("abc\\", 4) == "abc\\"

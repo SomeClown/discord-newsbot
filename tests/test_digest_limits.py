@@ -42,7 +42,7 @@ async def test_a_digest_that_times_out_every_time_is_abandoned_once_with_one_not
     world.add_guild(G1, games=(BL4,))
     world.add_item(BL4, "item-1", DUE - timedelta(hours=2))
     world.channels[ch(G1, 1)].hang = True  # Discord never answers
-    deps = world.deps(guild_timeout_s=0.1)
+    deps = world.deps(guild_timeout_s=1.0)  # the real limit is minutes; see the test below
     world.clock = DUE + timedelta(seconds=20)
     for attempt in range(1, MAX_ATTEMPTS + 1):
         await run_due_guilds(deps)  # the tick gives up on it; the row stays pending
@@ -70,7 +70,10 @@ async def test_what_posted_before_the_cutoff_stays_recorded_and_the_next_day_sta
     world.add_item(BL4, "item-1", DUE - timedelta(hours=2))
     world.add_item(PAL, "item-2", DUE - timedelta(hours=2))
     world.channels[ch(G1, 2)].hang = True  # palworld never posts; borderlands does
-    deps = world.deps(guild_timeout_s=0.1)
+    # The real limit is minutes. A tenth of a second was too tight: on a busy CI runner the
+    # healthy next day outlasted it and stayed pending (2026-10-25). One second still makes the
+    # hung game time out, and the healthy day below gets a limit nothing should ever reach.
+    deps = world.deps(guild_timeout_s=1.0)
     world.clock = DUE + timedelta(seconds=20)
     for _ in range(MAX_ATTEMPTS):
         await run_due_guilds(deps)
@@ -80,9 +83,10 @@ async def test_what_posted_before_the_cutoff_stays_recorded_and_the_next_day_sta
     assert row.status == "failed" and list(row.posted_by_game) == [BL4]
 
     world.channels[ch(G1, 2)].hang = False
+    world.channels[ch(G1, 2)].slow = 0.15  # longer than the old limit, so this can't creep back
     world.add_item(PAL, "item-3", DUE + timedelta(hours=3))
     world.clock = DUE + timedelta(days=1, seconds=20)
-    await run_due_guilds(deps)
+    await run_due_guilds(world.deps(guild_timeout_s=60))
     assert world.digest(G1, DAY + timedelta(days=1)).status == "ok"
     # Coverage is per game: BL4 went out, so it chains from the abandoned digest, but Palworld
     # never did, so its news (item-2) is still owed and arrives with the new day's.

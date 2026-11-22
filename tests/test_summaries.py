@@ -561,6 +561,7 @@ async def test_the_model_input_for_the_friends_server_is_byte_identical_to_v22s(
         prior,
         all_topics=w.v2.topics,
         subject=w.v2.digest.subject,
+        today=date(2026, 10, 1),  # the prepare path now says what day it is (v3.4.1)
     )
 
     w.clock.t = PACIFIC_DUE - timedelta(minutes=10)

@@ -161,6 +161,25 @@ want it narrower or broader.
   asked for a card on file for its free tier before; check their current
   pricing page, since this is the kind of detail that changes without
   this doc necessarily catching up.
+  Results from a short block list of sites are dropped before they're stored:
+  `web_search.exclude_domains`, default `[playstationcouch.com]` (that site
+  stamps every page with the moment it's loaded, so Brave called a June
+  article a day old). Entries are bare hostnames and cover subdomains too.
+  Setting the list replaces the default, and `[]` turns that list off (and only that list).
+  A web result is only kept if it names the game, one of its aliases (a
+  confident match) or its studio from `entities` (an uncertain one); Brave
+  matches loosely and sends back other games' news. A game with
+  `match_name: false` therefore needs aliases or entities that show up in press
+  text, or its web search finds nothing worth keeping. Its own feeds don't
+  have to name it.
+  A third filter always runs, with no setting: Brave's news search also
+  returns content-farm pages (rewrites of Reddit threads on unrelated
+  domains) that do name the game, so a result is dropped when its picture is
+  borrowed from Reddit's image hosts or Bing's thumbnail search. Real press
+  hosts its own. A search that drops any logs the count at INFO
+  (`farm_dropped`). Brave's picture addresses are undocumented, so one that
+  can't be read is kept; if Brave changes the format, the filter quietly
+  stops catching farms.
 - **`BLUESKY_HANDLE`/`BLUESKY_APP_PASSWORD`** (optional): only needed for
   `bluesky_search` sources (searching Bluesky for mentions of your game). An
   official account's own posts are available over plain RSS with no
@@ -533,7 +552,7 @@ moment; there's no backlog. A few things to know before choosing a ping:
 - `shift: max_pings_per_day` (default 3) is **per server, per that server's own
   day**. `0` means codes post but never ping, a reasonable way to start quiet;
   `/shift history` lists every code the bot has seen either way.
-- A code seen only by a community source (a Reddit thread, a Bluesky search)
+- A code seen only by a community source (a fan site's list, a Bluesky search)
   posts without a ping. If a second independent source, or an official or
   press one, sees it within 24 hours, each server with pinging on gets one
   follow-up headed `> confirmed by a second source ▌`, with its chosen ping,

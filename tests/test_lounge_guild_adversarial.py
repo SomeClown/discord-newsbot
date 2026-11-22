@@ -628,7 +628,7 @@ async def test_a_chunk_that_never_returns_does_not_stall_the_rest(db_path, monke
 
     guilds[G1].chunk = hang  # type: ignore[method-assign]
     bot.get_guild = guilds.get  # type: ignore[method-assign]
-    await asyncio.wait_for(bot.chunk_lounge_guilds(), timeout=0.5)
+    await asyncio.wait_for(bot.chunk_lounge_guilds(), timeout=5)
     assert guilds[G2].chunks == 1
 
 

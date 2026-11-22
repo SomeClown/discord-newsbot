@@ -85,6 +85,7 @@ class FakeChannel:
         self.gate: asyncio.Event | None = None  # first send waits for this
         self.entered = asyncio.Event()
         self.hang = False
+        self.slow = 0.0  # real seconds a send takes, for a healthy send on a busy machine
         self.on_send = None  # a hook: called (sync) right before a send lands
         self.attempts = 0
 
@@ -92,6 +93,8 @@ class FakeChannel:
         self.attempts += 1
         if self.hang:
             await asyncio.Event().wait()
+        if self.slow:
+            await asyncio.sleep(self.slow)
         if self.gate is not None:
             gate, self.gate = self.gate, None
             self.entered.set()
@@ -999,7 +1002,11 @@ async def test_a_hung_publisher_does_not_stall_the_guilds_behind_it(world):
         world.add_guild(g, games=(BL4,))
     world.add_item(BL4, "item-0001", in_window())
     world.channels[ch(G1, 1)].hang = True
-    deps = world.deps(guild_timeout_s=0.3)  # the real limit is minutes; the test won't wait
+    # The real limit is minutes. 0.3 seconds was too tight: on a busy CI runner the healthy guild
+    # outlasted it and counted as failed (2026-11-03). The slow send is longer than that old
+    # limit, so it can't creep back.
+    world.channels[ch(G2, 1)].slow = 0.4
+    deps = world.deps(guild_timeout_s=2.0)
 
     outcomes = await asyncio.wait_for(run_due_guilds(deps), 5)
 

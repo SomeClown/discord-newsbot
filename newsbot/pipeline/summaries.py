@@ -35,6 +35,9 @@ game in the config". With only the friend's server comped that's the same
 three games in the same order, so the text is byte-for-byte what v2 sent (a
 test pins it). Add a comped server that follows something else and the list,
 and so the prompt, changes: that needs an owner `/newsbot preview` first.
+Since v3.4.1 it also says what day it is (`today`, the UTC date when the prompt is built)
+and each item carries its `published` date, because a summary that can't tell "June 25"
+is behind us will happily call it upcoming. The rest is as above.
 
 Failure is boring on purpose. A summary that can't be made is saved as
 `fallback` (the digest then posts headlines with "Summary unavailable"), the
@@ -336,6 +339,7 @@ async def _summarize(
                     prior,
                     all_topics=_all_topics(deps.cfg, followed, game),
                     subject=deps.cfg.ai.subject,
+                    today=end.astimezone(UTC).date(),
                     sleep=deps.sleep,
                 )
     except TimeoutError:

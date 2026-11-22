@@ -15,15 +15,87 @@ old tag.
 
 ## [Unreleased]
 
+### Removed
+
+- `r/Borderlands4` from the example config. Reddit switched off its public RSS feeds in November 2026: every subreddit feed has answered 404 since 2026-11-17, and there's no replacement for a bot like this one. If your `config.yaml` has a reddit.com source, take it out; until you do it's listed as a failing source in `/newsbot status` and the owner's report. SHiFT codes still come from the community code list, the Bluesky search and the official feeds, so a code that appears on Reddit first may now arrive later. The Reddit handling in the code (turn-taking, backoff, codes-only reading) is unchanged and idle.
+
 ### Added
 
 - The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` counts the same month (and labels it that way), so the two agree around a month's end.
+- Grand Theft Auto VI in the example catalog, after Escape from Tarkov (22 games, plus the industry entry). It's console only at launch, so there's no Steam news, and Rockstar's Newswire has no feed. Its own sources are the PlayStation Blog's and Xbox Wire's posts about it (marked official: the console makers' word, not Rockstar's) and four press tag feeds (Insider Gaming, Kotaku, Push Square, Pure Xbox). Three wide feeds join the shared sources for this game alone (GameSpot, IGN through Feedburner, RockstarINTEL), and the existing shared press feeds and web search cover it by name. "GTA 6" and "GTA VI" match it; bare "GTA" doesn't, so Grand Theft Auto V and GTA Online stories stay out. A bot that's already running gets it by adding the entry to its own `config.yaml` and restarting.
 
 ### Fixed
 
 - A summary that starts with a number ("2026. The year...") no longer shows as a numbered list in digests, on `/news` pages (comped servers) or in the lounge's daily quote.
 - Labels in disguise are stripped from AI text and from the headlines in a free server's lists. A leading copy of the bot's own labels is removed in any capitalization, in full-width or bold letters, behind look-alike emoji (other colored circles and squares, check marks, repeat arrows) and with any of `·`, `:`, `-`, `|`, `–` or `—` after it; the bot's exact markers ("🟢 OFFICIAL ·" and the rest) are removed anywhere in the line. A real title can lose a leading label word: "Update: Hotfix 1.0.3" shows as "Hotfix 1.0.3". A bare word ("Official patch notes") is left alone.
 - A very long feed title (megabytes) no longer slows down rendering a headline list.
+
+## [3.4.3] - 2026-10-29
+
+Web search stops handing out content-farm pages: results whose picture is borrowed from Reddit or Bing are dropped.
+
+### Fixed
+
+- Brave's news search returns content-farm pages for small games: language-model rewrites of Reddit threads, hosted on unrelated domains that were taken over, with titles ending in the year. They name the game, so the name check from v3.4.2 keeps them, and the summary model accepted all 10 of the ones found for WARDOGS in the last two weeks as stories. Comped servers that follow WARDOGS were sent links to them. A Brave result is now dropped, for every game, when its picture is hotlinked from Reddit's media domain (`redd.it` and everything under it, such as `preview.redd.it` and `i.redd.it`) or from Bing's thumbnail search (`*.mm.bing.net/th...`). Real press hosts its own pictures. On live Brave checks over an afternoon and evening it caught all 9 farm pages it saw and flagged none of the real press.
+- Brave only sends its own proxy address for a picture, with the original address encoded inside it in a format that isn't documented. If a picture's address can't be read, the result is kept. If Brave changes the format, this filter quietly stops catching farms; nothing breaks.
+
+### Changed
+
+- A search that drops any farm results logs one INFO line with the count, with the fields `source_name`, `topic` and `farm_dropped`. If those lines stop showing up while farm pages keep appearing, Brave probably changed its format.
+- Expect lower web-search counts from `--check-sources`.
+- There is no setting for this filter, and `web_search.exclude_domains: []` does not turn it off.
+- Items already stored from farm pages are left to age out. Stories already posted can't be taken back.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.2`.
+
+## [3.4.2] - 2026-10-29
+
+Web search results have to name the game they were found for, so a Borderlands 4 search stops filing other games' news under Borderlands 4.
+
+### Fixed
+
+- Brave Search results were filed under the game whose query found them, whether or not they mentioned it. A week of production data showed 25 of 50 web results under Borderlands 4 never named it (Modern Warfare 4 patch notes, Assassin's Creed IV, Tarkov, Minecraft). Comped servers' summaries threw those out, but a free server's headline list shows stored items as they are, and so do a comped server's fallback headlines. A web result now has to name its game or one of its aliases (a confident match) or its studio from `entities` (an uncertain one), or it isn't stored. A game's own feeds are unchanged and still don't have to name the game.
+- A game name written with a non-breaking space or a doubled space between its words now matches, for every source; it used to be missed. A name is also checked in the title and the excerpt separately, so a title ending in "Borderlands" and an excerpt starting "4 reasons" no longer add up to Borderlands 4.
+- A Brave result whose title or link isn't text is skipped, where it used to fail that game's whole web search.
+
+### Changed
+
+- Expect fewer, more relevant web-search headlines, and lower web-search counts from `--check-sources`.
+- A game set to `match_name: false` (Rust in the example catalog) now keeps a web result only if it says one of its aliases or its studio (for Rust, "Facepunch"), so give such a game aliases or entities that show up in press text.
+- Items already stored under the wrong game are left to age out; there is no cleanup.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.1`.
+
+## [3.4.1] - 2026-10-29
+
+Fixes an old article showing up in a digest as if it were today's news, by blocking the site that faked its date and by telling the summary what day it is.
+
+### Fixed
+
+- A June article came through web search with a made-up fresh date and ended up in a comped server's digest as an "upcoming" patch. The site (playstationcouch.com) stamps every page with the moment you load it, and Brave Search passed that date along, so the 24-hour lookback believed it. Results from that site are now dropped before they're stored.
+- Summaries (comped servers) now get today's date and each story's date, and drop a story whose own text shows it's weeks or months old, such as an "upcoming" date that has already passed. Guides, deals that are still running and live codes are kept whatever their date. The Gaming industry pick now sees each story's date too.
+
+### Added
+
+- `web_search.exclude_domains`: a list of sites whose Brave results are dropped. Each entry is a hostname like `example.com` (no `https://`, path or port), and it covers the site's subdomains too. The default is `[playstationcouch.com]`. Setting the list replaces the default, so keep that entry if you still want it blocked, and `[]` turns the check off. A bad entry is a startup error that names it.
+
+**Upgrading**
+
+- Nothing to do: no config change and no migration. Rollback is `TAG=3.4.0`.
+
+## [3.4.0] - 2026-10-29
+
+Links in digests, the Gaming industry post and `/news` show the site's name instead of the whole address, so posts read shorter on a phone.
+
+### Changed
+
+- Digests, the Gaming industry post and `/news` now show each source as a link with the site's name, like `pcgamer.com`, instead of the whole web address. It reads shorter on a phone. A headline keeps its text and gets the link at the end; a comped story's links read `pcgamer.com · store.steampowered.com`, with a second link to the same site numbered `pcgamer.com (2)`. SHiFT alerts, `/shift` replies and the admin run report look the same as before.
+- Messages already posted keep their old links. The full address is still underneath each new link, so a very long list can move a story or headline into "+N more" a little sooner than before.
+- A link whose address contains a space or `>`, or `(` or `)` in the site name, is left off these lists instead of shown. Any other `(` or `)` in an address is written `%28` or `%29`, which nearly every site reads the same.
 
 ## [3.3.1] - 2026-10-24
 
@@ -622,7 +694,11 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.3...HEAD
+[3.4.3]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.2...v3.4.3
+[3.4.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...v3.4.2
+[3.4.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...v3.4.1
+[3.4.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.3.0...v3.3.1
 [3.3.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.2...v3.3.0
 [3.2.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.2.1...v3.2.2

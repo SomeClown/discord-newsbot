@@ -1122,14 +1122,16 @@ async def test_web_search_tags_each_result_to_the_game_it_was_searched_for(cfg, 
     seen: list[str] = []
     async with httpx.AsyncClient(transport=brave(seen)) as client:
         deps = make_deps(cfg, db_path, client, [], alerts)
-        outcome = await collect_web_search(deps, ("rust", "palworld"), "k", sleep=no_sleep)
-    assert outcome.new_items == 4
+        # Not Rust: its name is an ordinary word, so a result has to say "Rust game" or
+        # "Facepunch" to match, and this fake Brave only echoes the query back.
+        outcome = await collect_web_search(deps, ("borderlands4", "palworld"), "k", sleep=no_sleep)
+    assert outcome.new_items == 3  # Borderlands 4 has the one search query, Palworld both
     by_game: dict[str, int] = {}
     for found in tags(db_path).values():
         assert len(found) == 1
         (game,) = found
         by_game[game] = by_game.get(game, 0) + 1
-    assert by_game == {"palworld": 2, "rust": 2}
+    assert by_game == {"palworld": 2, "borderlands4": 1}
 
 
 async def test_web_search_timeout_grows_with_the_game_list(cfg, db_path, alerts, monkeypatch):

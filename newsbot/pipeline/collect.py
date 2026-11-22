@@ -711,6 +711,7 @@ async def collect_web_search(
         queries_per_topic=cfg.web_search.queries_per_game,
         query_templates=cfg.web_search.query_templates,
         trust=cfg.web_search.trust,
+        exclude_domains=cfg.web_search.exclude_domains,
     )
     collector = WebSearchCollector(source, games, api_key, sleep=sleep or deps.sleep)
     started = deps.clock()

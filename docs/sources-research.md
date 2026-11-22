@@ -399,3 +399,113 @@ The same caution applies to the next step in `docs/design.md` §18, Part 2 (an o
 2A (follow-up, after the dedupe reading was corrected): PC Gamer's gaming-industry tag (`https://www.pcgamer.com/feeds/tag/gaming-industry/`, named "PC Gamer Industry", `trust: press`) is added back as the fifth feed, so the set is five.
 
 A (2026-10-24, after the final qa pass): PC Gamer's tag is dropped again, so the set is four (GamesIndustry.biz, Game Developer, VGC, Gematsu Industry), all `trust: press`. Across passes the first stored copy of a URL decides its tags, so a story the tag feed stored before PC Gamer's main feed could be tagged industry only and a game's digest could lose it. Config now also requires every industry source to be a plain `rss` feed with `trust: press`.
+
+## Grand Theft Auto VI (2026-11-18)
+
+Added the day before launch, on the owner's word, as the catalog's 22nd game (the industry entry makes 23 entries, and the cap is 24, so nothing had to leave to make room and one slot is left). It's console only at launch (PS5 and Xbox Series), which rules out Steam news, the backbone of nearly every other entry. Candidates were fetched from a residential macOS connection first; the Droplet column is the owner's `curl` from the datacenter the same evening.
+
+The first pass stopped at three press tag feeds, the way the catalog's small games each have one or two. The owner pointed out that this is one of the biggest launches in years and asked where the official sources and the rest of the press were. Fair. The second pass is the bottom two-thirds of the table.
+
+### The candidates
+
+| URL | From home | Droplet | Verdict |
+|---|---|---|---|
+| `insider-gaming.com/tag/grand-theft-auto-6/feed/` | 200, 10 items, all from the last two days | 200 | Added, press |
+| `www.pushsquare.com/feeds/latest/tags/gta-6` | 200, 25 items, 8 on launch eve | 200 | Added, press (PS5 side) |
+| `www.purexbox.com/feeds/latest/tags/gta-6` | 200, 25 items, about 2 a day through November | 200 | Added, press (Xbox side) |
+| `blog.playstation.com/tag/grand-theft-auto-vi/feed/` | 200, 7 items, 3 in November | 200 | Added, official (Sony's own posts) |
+| `news.xbox.com/en-us/tag/grand-theft-auto-vi/feed/` | 200, 3 items, 1 in November | 200 | Added, official (Microsoft's own posts) |
+| `ir.take2games.com/rss/news-releases.xml` | 200, 10 items back to September | 403 | Out. It would have been shared and limited to this game, since it also carries NBA 2K and Zynga |
+| `kotaku.com/tag/gta-6/feed` | 200, 20 items in about two days | 200 | Added, press |
+| `rockstarintel.com/feed/` | 200, 10 items a day at launch | 200 | Added, press, shared with `games: [gta6]` (it covers Red Dead and GTA Online too) |
+| `www.gamespot.com/feeds/game-news/` | 200, 15 items a day, all games | 200 | Added, press, shared with `games: [gta6]` |
+| `feeds.feedburner.com/ign/games-all` | 200, 20 items, games only | 200 | Added, press, shared with `games: [gta6]`. The owner suggested IGN; `ign.com` itself has answered the Droplet with 403 since 2026-09-25, so this is its Feedburner copy |
+| `www.pcgamesn.com/grand-theft-auto-vi/feed` | 200, 25 items | not checked | Not added: PCGamesN's main feed is already shared |
+| `massivelyop.com/tag/grand-theft-auto-vi/feed/` | 200, 15 items since 2023 | not checked | Not added: about one a month, mostly business roundups that mention the game in passing |
+| `www.dexerto.com/feed/category/gta/` | 200, 50 items | not checked | Not added: the category mixes in unrelated stories, and the owner turned Dexerto down for Fortnite |
+| `www.polygon.com/rss/index.xml` | 200, 10 items | not checked | Not added: a short feed, much of it film and TV |
+
+The bot's own `--check-sources --game gta6` from home, against the example config: all nine new sources read (PlayStation Blog 7 items, Xbox Wire 3, Insider Gaming 10, Kotaku 20, Push Square 25, Pure Xbox 25, GameSpot 15, IGN 20, RockstarINTEL 10), and the game hit the 60-item cap on the first pass. The cap keeps official items first, then the newest.
+
+In production the same evening (about 19:10 PT): the owner's `--check-sources --game gta6` through the running image passed, and the first hourly pass after the restart read the new feeds with the same counts (Kotaku 20, Push Square 25, Pure Xbox 25, GameSpot 15, IGN 20, RockstarINTEL 10 in the log lines the owner pasted; 59 of 60 sources ok overall, the one failure being the Reddit codes feed, which has nothing to do with this game).
+
+### What didn't work, so nobody checks it again
+
+- **Rockstar's Newswire** (`rockstargames.com/newswire`) is a JavaScript page with no feed link; `/newswire.rss`, `/newswire/rss` and `/rss` all 404. Reading it would take a collector of its own. Nobody has written one.
+- **Rockstar on Bluesky:** `rockstargames.com` is domain-verified, has about 76,000 followers and has never posted. `rockstargames.bsky.social` calls itself official and isn't the verified one. The rest are mirrors and fan accounts by their own bios.
+- **Take-Two's press releases:** 403 from the Droplet, fine from home.
+- **Tag feeds that don't exist:** Insider Gaming's `gta-6` and `grand-theft-auto-vi` tags (403; the working tag is `grand-theft-auto-6`), VGC's game and tag pages (404, or a feed with nothing in it), and the per-game paths on GamesRadar+, PC Gamer, Eurogamer and Rock Paper Shotgun (404). Push Square's and Pure Xbox's per-game feed paths answer 200 with no items; the tag feeds above are the ones with stories in them.
+- **Rockstar's service status page** dropped the connection.
+
+### Keywords
+
+- Aliases: `GTA VI`, `GTA 6`, `GTA6`, `GTAVI`, `Grand Theft Auto 6`. Matching is by whole word, so none of them fires on "Grand Theft Auto V", "GTA V" or "GTA: Vice City" (a test pins this).
+- Bare `GTA` is out: it would hand the game every GTA V and GTA Online story.
+- No entities. `Rockstar Games` would also match Red Dead and GTA Online, and `Take-Two` everything 2K publishes. If GTA VI's own online mode gets a name of its own, that name is the next alias.
+
+### Who decided what (2026-11-18)
+
+The owner asked for the game, said Fortnite could go if room was needed (it wasn't), asked for more sources than the first three, and suggested IGN. The feeds, the aliases and the empty entity list were the builder's picks, reported with the change. Two of those picks the owner was asked about and kept: limiting the three wide feeds to this game instead of opening them to the whole catalog, and marking the two console makers' blogs `official`. That last one is a stretch worth knowing about: `official` puts their posts first in a headline list and lets a summary call a story official, and it's Sony's and Microsoft's word, not Rockstar's.
+
+One cost of nine feeds: the same story arrives several times. Summaries merge the copies; a free server's headline list doesn't, so "GTA 6 review" from five outlets is five lines there.
+
+## Reddit's feeds are gone (2026-11-17)
+
+`r/Borderlands4` was the last Reddit source, read only to spot SHiFT codes. It started failing in production and the owner asked whether the Grand Theft Auto VI edit had broken it. It hadn't: Reddit switched off its public RSS feeds.
+
+### The evidence
+
+- **Production's log:** the feed returned 20 items at 17:24 UTC on 2026-11-17 and `404 Not Found` on the next hourly pass, 18:24 UTC, and on every pass since. The GTA VI entry went into prod's config at 03:10 UTC on 2026-11-19, about 33 hours later, and that edit added lines in two other places.
+- **From a home connection, 2026-11-21,** one request every 40 seconds (Reddit allows about one every 35): `r/Borderlands4` as `/top/.rss?t=day`, `/top/.rss`, `/new/.rss`, `/hot/.rss`, `.rss` and its search feed, and `r/Borderlands/top/.rss?t=day`, all answered 404 with the same 266-byte Atom document titled "Not Found" whose id is `https://rss.reddit.com/`. That's the RSS service saying no, not a block page and not a rate limit (those are a 429 with an empty body, which two of the nine requests got). `r/Borderlands4/about.json` answered 403 with a block page.
+- **Reddit said it would.** It announced on 2026-09-30 that RSS support would end on 2026-11-13, with no replacement outside its moderator tools, and that public API access ends in March 2027. I read that in press reports ([TechCrunch](https://techcrunch.com/2026/09/30/reddit-is-killing-rss-feeds-ending-public-api-access-because-of-ai-bots/), [TechRepublic](https://www.techrepublic.com/article/news-reddit-rss-public-api-shutdown/)), not in Reddit's own post: its help pages refuse automated readers.
+- **Others saw the same hour.** Another project's fetcher logged its last good Reddit fetch at 17:40 UTC on 2026-11-17 and 404s from 19:08 ([its issue](https://github.com/nuntz/sema/issues/72)), and a feed-reader vendor dates subreddit feeds going dark to the same day ([Feeder](https://feeder.co/knowledge-base/rss-feed-creation/reddit-rss/)).
+
+### What was done (owner: option A, 2026-11-21)
+
+The source left `config.example.yaml` and prod's `config.yaml`, and the docs and the privacy page stopped saying the bot reads Reddit. The Reddit handling in the code (`newsbot/reddit.py`, the turn-taking and backoff in `pipeline/collect.py`, the codes-only rule) stays for now: it does nothing without a Reddit source, a lot of tests lean on it, and taking it out is its own cleanup for a later release.
+
+There's no way back in through Reddit: the Data API request was denied on 2026-10-04 with a policy that forbids reapplying, the API is closed to new requests, and the `.json` addresses are blocked.
+
+### What the bot lost
+
+One of its three community sightings of SHiFT codes. The mentalmars tables and the Bluesky search are still two independent community sources, so a community code can still be confirmed and earn its ping, and the official feeds still ping on their own. A code that shows up on Reddit first now arrives when one of the others carries it. Replacement sources were researched the same day; see the next section.
+
+## SHiFT code sources after Reddit (2026-11-21)
+
+The owner asked for replacements and mentioned the Facebook pages where he sees codes. Everything here was fetched from a home connection with a plain bot User-Agent; nothing was tested from the Droplet. Conclusion first: **nothing was added**, because the one usable candidate turned out to be a source the bot already reads by another route.
+
+### Facebook: no
+
+There's no login-free way to read a public page (page RSS answers 404, the Graph API answers 400 without a token). The sanctioned route, Page Public Content Access, needs App Review and business verification ([Meta's feature reference](https://developers.facebook.com/docs/features-reference/page-public-content-access)), and Meta's terms say "You may not access or collect data from our Products using automated means" ([its developer docs](https://developers.facebook.com/docs/development/terms-and-policies/automated-data-collection/)); `facebook.com/robots.txt` ends in `Disallow: /`. That's Reddit's terms problem again, so it isn't for a hobby bot.
+
+### The candidate: a Bluesky account that only posts codes
+
+`shift.jedillama.social` ("Gearbox SHiFT Codes", a community account on its own Bluesky server, about 1,000 followers; who runs it and where it gets codes isn't known). Feed: `https://bsky.app/profile/did:plc:sden5674t33reyexxna44ytg/rss`, which the `rss` reader takes as it is. It posts 3 to 14 codes a month, 93 of its last 100 naming Borderlands 4, and it carried two November codes mentalmars' table never listed.
+
+**Why it wasn't added.** The owner ran six recent codes through production's `code_sightings`:
+
+| Code | Sighted by (UTC) | The account posted |
+|---|---|---|
+| `3S6B3…` | Steam 11-16 18:24, mentalmars 19:24, Bluesky search 20:24 | 11-17 01:58 |
+| `S6RJJ…` | mentalmars 11-11 19:24, Bluesky search 22:24 | 11-11 21:36 |
+| `5HWB3…` | Bluesky search 11-05 13:24, nothing else | 11-05 12:33 |
+| `S6X33…` | Bluesky search 11-04 07:16, nothing else | 11-04 07:16 |
+| `CZKJJ…` | mentalmars and r/Borderlands4 11-02 19:16, Bluesky search 21:16 | 11-02 21:36 |
+| `J9R33…` | Bluesky search 11-01 05:16, mentalmars 10:16 | 11-01 05:02 |
+
+The "Borderlands 4" Bluesky search already picks this account's posts up on the next hourly pass, including the two codes mentalmars missed. So production has it in effect. Adding it under its own name would be worse than pointless: one post would be sighted under two source names, and a second name is what earns a community code its ping, so the account would confirm itself.
+
+Two things the table shows in passing. Reddit sighted one of the six codes, level with mentalmars and never alone, so losing it costs little on this evidence. And the two codes only the search saw posted unpinged and stayed that way, which is the second-source rule doing what it was built to do.
+
+If the Bluesky search ever goes away (it needs an app password), this feed is the fallback, as a replacement for the search and not alongside it. About 7 in 100 of its posts are for older games only, so it would want a "names Borderlands 4" check.
+
+### Ruled out, so nobody checks again
+
+- **shift.orcicorn.com:** doesn't connect; its last archived feed ends in 2023 and it never listed Borderlands 4.
+- **Other trackers and GitHub lists** (`ugoogalizer/autoshift-codes` and friends): copies of mentalmars by their own account, so not a second source. The autoshift JSON would do as a fallback if mentalmars' page ever blocked the Droplet; it would need a JSON reader.
+- **mentalmars' own Bluesky and Mastodon feeds:** the same origin as the table, so they'd let mentalmars confirm itself.
+- **Press lists:** GamesRadar's had all six codes, but its publisher's terms bar robots and scrapers; PC Gamer's, PCGamesN's and Insider Gaming's were months stale; several smaller sites answer with a challenge page even from home.
+- **Gearbox's SHiFT site:** no codes without a login, and 403 to a bot User-Agent. The official Borderlands Bluesky account has posted two codes since March.
+- **Discord:** following the official server's announcements would need the Message Content privileged intent, which has to be justified again at verification. An option, not a plan.
+- **X:** unchanged since the 2026-10-31 look.
+- **Not checked:** whether any of these answer the Droplet, and whether the two codes only the relay had actually redeem.

@@ -103,6 +103,7 @@ def test_item_text_mimicking_the_output_schema_stays_a_json_string_value():
             "excerpt": fake_schema,
             "source": "Some Source",
             "trust": "community",
+            "published": None,
             "uncertain": False,
         }
     ]

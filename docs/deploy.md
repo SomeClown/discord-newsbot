@@ -77,11 +77,9 @@ sudo apt install -y sqlite3
 
 (Other distros: `dnf install sqlite`, `apk add sqlite`, etc.; same idea.)
 
-**A note on the OS itself:** Ubuntu 20.04 (focal) left standard support
-in mid-2025 and is now on paid Extended Security Maintenance only.
-Nothing in this runbook requires an OS upgrade today, but planning one
-(to 22.04 or 24.04) is recommended as a separate, deliberate piece of
-work; not bundled into a routine bot deploy.
+**A note on the OS itself:** the Droplet runs Ubuntu 26.04 LTS (since
+2026-10-25; §16 has how it got there from 20.04). An OS upgrade is always
+its own deliberate piece of work, never bundled into a routine bot deploy.
 
 **The server's clock runs in UTC**, not America/Los_Angeles. This
 matters wherever a time-of-day schedule gets translated to a cron or
@@ -706,20 +704,18 @@ and `CLAUDE.md`. Find and stop the second one (a leftover local dev
 process is the usual culprit); don't touch the code, this isn't a bug in
 the bot.
 
-**Reddit returns 403 or 429.** Expected from datacenter IPs and generic
-user agents; Reddit does this to a lot of cloud providers, not just this
-one. The collector already sends a descriptive User-Agent and prefers
-`/new/.rss`. Collection runs hourly now, so a source that fails 12
-collections in a row (half a day) sends one alert to your admin channel,
-and the daily owner report lists every failing source; `/newsbot status`
-in a server shows "N of M sources ok" for its games. That's the designed
-behavior, not a fresh problem each time it happens. If it persists, that's an
-owner decision (drop Reddit as a source, or accept the gap) per
-`docs/design.md` §4, not something to patch around here. Since v3.0.3 the only
-Reddit feed is `r/Borderlands4`, read just to spot SHiFT codes, so a Reddit
-failure costs code alerts and nothing else. The collector still spaces any
-Reddit feeds 35 seconds apart; a pass that takes more than half the interval
-is logged as a warning.
+**A Reddit feed returns 404 (or 403, or 429).** Take it out of
+`config.yaml`; it isn't coming back. Reddit switched off its public RSS
+feeds in November 2026, and production's `r/Borderlands4` feed, read only
+to spot SHiFT codes, went from 20 items at 17:24 UTC on 2026-11-17 to a 404
+an hour later and has answered 404 since. Every other subreddit and address
+form does the same, and the `.json` addresses answer 403. Before that, a 403
+or 429 from Reddit was routine for a datacenter address and the collector
+spaced Reddit requests 35 seconds apart to live with it; that code is still
+there and has nothing left to space. A failing source is never a crash: one
+that fails 12 collections in a row (half a day) sends one alert to your admin
+channel, the daily owner report lists it, and `/newsbot status` shows "N of M
+sources ok".
 
 **A YouTube feed 404s.** YouTube's channel RSS feeds occasionally 404
 upstream for reasons outside this bot's control (a channel's video ID
@@ -741,6 +737,16 @@ whether `config.yaml` or `.env` ended up as an empty directory instead of
 a file (see §2, "A file, not a directory"); this is the single most
 likely cause of an otherwise-inexplicable startup crash on a brand new
 `/opt/newsbot` setup.
+
+**A reboot never comes back: SSH connects but says nothing.** Port 22
+accepts the connection, no banner ever arrives, ports 80 and 443 are closed,
+and the web console says `droplet-agent` isn't running. That's a shutdown
+stuck on the display driver, not a boot problem; the full story is in §16,
+"The tidy, and the reboot that wasn't". Open the Droplet's **Settings** tab,
+then **Recovery console** and **Launch Console**, to look at the screen (the
+**Web Console** button won't work, because it needs `droplet-agent`). If the
+console won't take keystrokes either, power-cycle it from the control panel,
+then check both databases with `PRAGMA integrity_check`.
 
 ## 15. Enabling SHiFT code alerts
 
@@ -800,11 +806,13 @@ Rolling this back out is just `alerts.enabled: false` (or removing the
 (it's additive and harmless either way; see §8, Rollback, above), the
 sweep simply stops running.
 
-## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04)
+## 16. Upgrading the Droplet's OS (Ubuntu 20.04 → 22.04 → 24.04 → 26.04)
 
-**Done 2026-09-27:** the Droplet is on 24.04. This section is kept as
-the record of how, including the three things that went sideways (the
-mirror, DNS, and IPv6), in case another Droplet ever needs the same trip.
+**Done 2026-09-27 (24.04) and 2026-10-25 (26.04):** the Droplet is on
+26.04. This section is kept as the record of how, including the three
+things that went sideways on the way to 24.04 (the mirror, DNS, and IPv6),
+in case another Droplet ever needs the same trip. The 26.04 round, which
+went sideways in none of those ways, is at the end: "Round 3".
 
 Ubuntu 20.04 left standard support in May 2025, and this Droplet was still
 on it, getting fewer security fixes every month. Ubuntu only
@@ -992,10 +1000,175 @@ hadn't posted yet, it posts within a couple of minutes.
 radius and should still be there; if `sqlite3` somehow went missing,
 `sudo apt install -y sqlite3`.
 
+### Round 3: 24.04 → 26.04 (2026-10-25)
+
+One round this time, about 30 minutes of upgrader plus checks, and the
+Droplet now runs **two** apps: the bot and pool-league-scheduler
+(`/opt/pool-league-scheduler`, its own compose project, behind the host's
+nginx with a certbot certificate). The bot doesn't care about the host OS;
+pool-league's HTTPS very much does, because nginx and certbot are host
+packages and the upgrade replaces both (nginx 1.24 to 1.28, certbot 2.9
+to 4.0). Both apps were down for about half an hour; digests that came due
+meanwhile post after the bot's first collection pass.
+
+**Read-only checks first:** `sudo do-release-upgrade -c` offers the new
+release; at least 5 GB free on `/`; `/etc/apt/sources.list.d/ubuntu.sources`
+points at `archive.ubuntu.com` (the DigitalOcean-mirror trouble from round
+1 can't happen); `/etc/netplan/50-droplet.yaml` is there; certbot comes
+from apt, not snap (`which certbot` is `/usr/bin/certbot`, and
+`certbot.timer` exists); `sudo nginx -t` is clean.
+
+**Before:**
+
+```bash
+cd /opt/newsbot && sudo ./scripts/backup.sh data/newsbot.db data/backups
+cd /opt/pool-league-scheduler && sudo ./scripts/backup.sh data/league.db data/backups
+cd /opt/newsbot && docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+cd /opt/pool-league-scheduler && docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+sudo systemctl stop newsbot-backup.timer pool-league-backup.timer
+```
+
+Then the snapshot, *after* the containers are down so both databases are
+quiet in it, and wait for it to finish. Then `sudo apt update && sudo apt
+full-upgrade -y`, reboot if `/var/run/reboot-required` says so, and check
+that cloud-init still leaves the network alone (`grep -rn "config:
+disabled" /etc/cloud/cloud.cfg.d/` prints the `network: {config:
+disabled}` line); a cloud-init update came with that full-upgrade.
+
+**The upgrade:** `sudo do-release-upgrade`, with the same answers as the
+earlier rounds (keep your current config files; third-party sources
+disabled is expected; restart services without asking; reboot at the end)
+and one that matters more than it looks:
+
+> **Remove obsolete packages? Answer `N`.** With Docker's repository
+> switched off, apt can't find docker-ce, containerd.io or the compose
+> plugin in any enabled source, so it lists them as obsolete, right
+> alongside the genuinely dead ones. A `y` there removes Docker. Tidy up
+> by hand afterwards, once Docker's repository is back and the list is
+> only the real leftovers.
+
+**After the reboot**, all checks before anything starts:
+
+```bash
+lsb_release -ds; uname -r
+for h in archive.ubuntu.com discord.com api.anthropic.com ghcr.io; do getent hosts $h >/dev/null && echo "ok   $h" || echo "FAIL $h"; done
+ip -br addr; ping -6 -c 2 ipv6.google.com
+sudo nginx -t; systemctl is-active nginx docker certbot.timer
+apt list '?obsolete' 2>/dev/null | cut -d/ -f1 | tail -n +2 | tr '\n' ' '; echo
+```
+
+DNS, IPv6 and the netplan network all came through untouched this time.
+Then re-add Docker's repository with the same block as round 1 (it reads
+the release name from the OS and writes `resolute`; the upgrader leaves the
+old file as `docker.list.disabled`), reinstall the Docker packages, and run
+the same three checks (versions, compose, `threads ok`). `dpkg -l docker-ce
+containerd.io` should show `ubuntu.26.04~resolute` builds. Last, `sudo
+certbot renew --dry-run` proves certbot 4.0 still drives nginx 1.28.
+
+**Bringing both apps back:**
+
+```bash
+sudo systemctl enable --now newsbot-backup.timer pool-league-backup.timer
+cd /opt/newsbot && ./scripts/deploy.sh
+cd /opt/pool-league-scheduler && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Pool-league gets `up -d` rather than its `deploy.sh`, which would pull a
+newer `latest` image; after an OS upgrade you want it back exactly as it
+was. Then both containers `(healthy)`, `curl -sI
+http://127.0.0.1:8000/login` says `200 OK`, the league site loads over
+HTTPS, and `/newsbot status` looks normal. On 2026-10-25 the bot's first
+pass after the upgrade read 51 of 51 sources, certbot's dry run succeeded,
+and the league site loaded over HTTPS.
+
+**Afterwards:** keep the snapshot until the tidy below is done, then delete
+it (snapshots are billed). Give it a few clean days before starting the
+tidy.
+
+### The tidy, and the reboot that wasn't (2026-11-04)
+
+Ten days after round 3, `apt list '?obsolete'` listed 42 packages. There were
+no old kernels and no Docker. I'd written here that everything on the list
+should go, which was wrong about three of them:
+
+- **Keep `droplet-agent`, `droplet-agent-keyring` and `do-agent`.** They're
+  running. The first powers the control panel's Web Console and the last feeds
+  the Monitoring graphs. They only show as obsolete because the upgrader
+  disabled their apt source, and that source (`repos.sonar.digitalocean.com`)
+  hasn't changed since 2017 anyway, so turning it back on gets you nothing.
+  DigitalOcean's current repos are `repos.insights.digitalocean.com` and
+  `repos-droplet.digitalocean.com`; moving means running their install
+  scripts, each of which purges the old package first. Not done yet.
+- **Never run `apt purge '?obsolete'`.** Name the packages, and dry-run the
+  list first, so you can read what apt really plans to do:
+
+  ```bash
+  apt-get -s purge <names> 2>/dev/null | grep -E '^(Purg|Remv|Inst) '
+  ```
+
+  Anything you didn't name is the warning, `docker`, `containerd`, `nginx`,
+  `certbot` or `apt` above all, and so is any `Inst` line.
+- **Check who still uses Python 3.12 before removing it.** Pool-league's old
+  rollback venv lived on it. As it turned out, that venv's `python` had
+  pointed at 3.14 since the upgrade while its packages stayed under
+  `lib/python3.12`, so the rollback had been quietly dead for ten days. It was
+  retired with the Decommission steps in pool-league's `docs/deploy.md`.
+
+Removed, in this order: 31 leftovers (`azure-cli`, GCC 9, Ruby 3.2, Perl 5.38,
+`libssl1.1`, docker-compose 1.x and friends), the 8 Python 3.12 packages, the
+dead apt sources, then `apt full-upgrade`, a reboot, and 38 more through
+`autoremove`. `sudo apt-mark manual bind9-dnsutils` first, or `dig` goes with
+the transitional `dnsutils` package.
+
+**Then the reboot hung, and it took me a while to read it correctly.** The
+Droplet stopped answering at 01:47 UTC on 2026-11-05 and stayed down for about
+25 minutes, until a power cycle. From outside it looked like a boot stuck
+halfway. Port 22 accepted connections and never sent a banner, 80 and 443 were
+closed, the Web Console blamed `droplet-agent`, and the Recovery Console showed
+a login prompt that wouldn't take a keystroke. It hadn't booted at all: the
+journal's previous boot ran on until the power cycle, still on the old kernel,
+and `systemd` was stuck in the middle of *shutting down*.
+
+The cause was already there, and nothing had noticed. The virtual display was
+`qxl`, and from 02:27 UTC on 2026-11-02, three days before anyone touched a
+package, the kernel had logged `[TTM] Buffer eviction failed` every 15 seconds.
+Nothing cared, because nothing was using the console. Then shutdown had
+`systemd` write to it, and it blocked on `drm_modeset_lock` behind the stuck
+display code. Everything else follows from that: a blocked `systemd` can't
+start `sshd` for the socket it's holding open, and the keyboard's echo path
+needs a lock `systemd` was holding. The closest public report is
+[Debian bug #1054514](https://lists.debian.org/debian-kernel/2025/12/msg00106.html),
+same driver and same trace on a different kernel. What set it off on 11-02 I
+still don't know; the log around it shows only the usual SSH scanners.
+
+The power cycle brought the VM back with a different virtual display,
+`virtio_gpu`, which has logged no TTM errors, and a test reboot on it was
+clean. That change came from DigitalOcean's side and I don't know why, so I
+can't promise it stays. Hence the check, **before any planned reboot**:
+
+```bash
+sudo journalctl -b -k -g TTM --no-pager | tail -1
+```
+
+`-- No entries --` is what you want. Anything else means the bug is back, so
+expect the reboot to hang, and keep the control panel open for the power cycle.
+
+**Still open from that night:** `cloud-init-main` fails on every boot, which is
+why `systemctl is-system-running` says `degraded`. Two local dpkg diversions
+(`DataSourceDigitalOcean.py` and `helpers/digitalocean.py`) put old copies in
+front of the packaged files, and the old ones use `from cloudinit import log
+as logging`, which cloud-init 26.2 no longer supports. It isn't what hung the
+reboot: the same error is in the log from 2026-10-25, and the Droplet boots in
+14 seconds regardless. `cloud-final` also failed with status 2 on the test
+reboot, after `autoremove`, though not on the boot before it. No log line names
+a removed package, but that isn't proof, so look there first when repairing.
+A working cloud-init might re-run first-boot steps, so that repair gets its
+own snapshot and its own evening.
+
 ### If it goes wrong
 
 Restore the snapshot from the control panel, which puts the Droplet back
-exactly as it was before round 1, bot and all. Then `./scripts/deploy.sh`
+exactly as it was before the round you started, apps and all. Then `./scripts/deploy.sh`
 and carry on with your day, having learned something about Ubuntu that you
 will forget by the next upgrade.
 
@@ -1185,3 +1358,84 @@ is additive and v2.1.1 never reads its tables. The `lounge:` block can stay
 in `config.yaml` (v2.1.1 ignores unrecognized top-level keys), and so can
 the portal intent and the cache directory `/data/newsbot-lounge-cache/`
 (assuming the default `newsbot.db` path).
+
+## 19. Comping a server
+
+A comped server gets Claude summaries and web search on the owner's keys
+instead of free headlines (`docs/design.md` §15, D6 and D12). There's no
+command for it: a server is comped by listing its ID in `comped_guild_ids`
+in `config.yaml`. The bot sets a listed server to comped when it joins and
+again at every startup, and it never downgrades anyone on its own, which is
+why taking a comp back (below) needs a hand-run database change.
+
+**Before you comp anyone:**
+- **Never the home or test server** (PacketQueue, PacketQueue Dev).
+- **It changes the prompt for everyone comped.** The summarizer's prompt
+  names every game any comped server follows, so a new comped server
+  following other games changes Rage Quit Tavern's prompt too.
+- **It costs real money.** Summaries are shared only between comped servers
+  that follow exactly the same games; otherwise each pays its own way, about
+  $0.01 per game per day (a server following 10 games is roughly $3 a
+  month). The industry pick is one call per digest time whoever follows it.
+- **Get the server's ID.** It's in the join alert in `#prod-alerts`
+  (`Joined a new server: <name> (<id>), ...`), or the server's owner can copy
+  it (Developer Mode on, right-click the server icon, Copy Server ID).
+
+The server doesn't have to have installed the bot yet. Comp it ahead of time
+and it joins as comped (the join alert ends in "comped"); either way nothing
+posts until one of its admins runs `/newsbot setup`.
+
+1. **Edit a copy, not the live file,** and keep the old one:
+   ```bash
+   cd /opt/newsbot
+   cp -p config.yaml config.pre-comp-$(date +%Y%m%d).yaml
+   cp -p config.yaml config.next.yaml
+   vi config.next.yaml
+   ```
+   Add the ID to `comped_guild_ids`, written the same way as the IDs already
+   there (`:set paste` before pasting).
+2. **Validate the copy** with the image you're running (only the `TAG` line
+   of `.env` is read; never `docker compose ... config`). No output means it
+   loaded:
+   ```bash
+   docker run --rm -v "$PWD/config.next.yaml:/app/config.yaml:ro" \
+     ghcr.io/someclown/discord-newsbot:$(grep -E '^TAG=' .env | cut -d= -f2) \
+     python -c "from newsbot.config import load_config; load_config('/app/config.yaml')"
+   ```
+3. **Put it in place and restart.** Not `deploy.sh`: with the same `TAG` its
+   `up -d` leaves the running container alone, and the bot only reads
+   `config.yaml` at startup. Same windows as any deploy: never 09:00 to 09:15
+   Pacific, and avoid about 07:55 to 08:05 (the lounge quote).
+   ```bash
+   mv config.next.yaml config.yaml
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart newsbot
+   ```
+4. **Check it.** For a server that's already in, the log has a
+   `server <id> comped (comped_guild_ids)` line, and `/owner servers` shows
+   one more comped server:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --since 5m | grep -i comped
+   ```
+5. **Once they've run setup,** look at `/newsbot preview` on the new server
+   and on Rage Quit Tavern, since the prompt's game list changed for both.
+6. **Record it:** the comped list in CLAUDE.md's "Prod config gotcha", and
+   the backup's delete-by date (a clean week, as with the other
+   `config.pre-*` files).
+
+**Taking a comp back.** Copying the old config back isn't enough: the server
+stays comped in the database, because nothing downgrades. Take the ID out of
+the list the same way (steps 1 to 3, but skip the restart), then:
+```bash
+cd /opt/newsbot
+./scripts/backup.sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop
+sudo sqlite3 data/newsbot.db "UPDATE guilds SET tier = 'free' WHERE guild_id = <id>; SELECT guild_id, tier FROM guilds WHERE guild_id = <id>;"
+ls -ln data/newsbot.db*
+docker compose -f docker-compose.yml -f docker-compose.prod.yml start
+```
+The `SELECT` should print the ID with `free`, and `ls` should show only
+`newsbot.db`, still owned by uid 10001 (if a `-wal` or `-shm` file owned by
+root is left over, `sudo chown 10001:10001 data/newsbot.db*` before the
+start). Order matters: if the ID is still listed when the bot starts, it
+comps the server straight back. Then look at the remaining comped servers'
+`/newsbot preview`, since their prompt changed again.

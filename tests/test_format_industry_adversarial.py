@@ -29,8 +29,10 @@ import types
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
+from masked_old import mask_links_like_v340
 
 from newsbot.bot.format import (
     _coverage_footer,
@@ -121,8 +123,13 @@ def live_syntax(text):
     return _LIVE.findall(text)
 
 
+def masked(url, label=None):
+    """`[host](<url>)`, written out by hand (every URL in this file is on a plain ASCII host)."""
+    return f"[{label or urlsplit(url).hostname}](<{url}>)"
+
+
 def line_for(title, url):
-    return f"• {title} — <{url}>"
+    return f"• {title} — {masked(url)}"
 
 
 # --- 1. AI text never reaches a free post ---
@@ -340,8 +347,9 @@ def test_a_hostile_pick_title_stays_one_inert_line(title):
     embed = render_picked_headlines_embed(IND, [item(title, url="https://example.com/ok")])
     text = str(embed.description)
     assert "\n" not in text  # flattened: nothing can start a forged line
-    assert text.startswith("• ") and text.endswith("— <https://example.com/ok>")
-    assert live_syntax(text.split(" — <https://example.com/ok>")[0]) == []
+    link = masked("https://example.com/ok")
+    assert text.startswith("• ") and text.endswith(f"— {link}")
+    assert live_syntax(text.split(f" — {link}")[0]) == []
     assert "discord.gg/" not in text and "/invite/" not in text
 
 
@@ -358,7 +366,8 @@ def test_a_hostile_ranked_headline_and_summary_get_the_same_escaping(title):
     text = str(
         embed_of(digest(stories_by_game={INDUSTRY_KEY: [s]}, capped={INDUSTRY_KEY: 5})).description
     )
-    assert live_syntax(text) == []
+    # The story's one real link is a masked link, and its "](" is the only one allowed.
+    assert live_syntax(text.replace(masked("https://example.com/ok"), "")) == []
 
 
 def test_the_game_name_and_the_note_are_escaped_too():
@@ -372,7 +381,7 @@ def test_an_empty_or_blank_title_still_makes_a_link_line():
     text = str(
         render_picked_headlines_embed(IND, [item("", url="https://example.com/e")]).description
     )
-    assert text.endswith("<https://example.com/e>")
+    assert text.endswith(masked("https://example.com/e"))
     assert "\n" not in text
 
 
@@ -399,7 +408,7 @@ def test_five_longest_possible_lines_shed_whole_lines_and_never_exceed_the_limit
     )
     assert discord_len(text) <= LIMIT
     for ln in text.split("\n"):
-        assert ln.startswith("• ") and ln.endswith(">") and "<https://example.com/" in ln
+        assert ln.startswith("• ") and ln.endswith(">)") and "(<https://example.com/" in ln
 
 
 # --- 4. The 4096 edge, exactly ---
@@ -474,7 +483,7 @@ def test_one_unit_over_4096_sheds_exactly_the_last_whole_line(renderer, with_hea
 
 def test_ranked_stories_at_exactly_4096_are_kept_and_one_over_sheds_the_second():
     def block(headline, summary, url):
-        return f"🟡 REPORTED · {headline}\n{summary}\n<{url}>"
+        return f"🟡 REPORTED · {headline}\n{summary}\n{masked(url)}"
 
     url1, url2 = "https://example.com/one", "https://example.com/two"
     first = block("H1", "s" * 1000, url1)
@@ -510,7 +519,7 @@ def test_a_long_note_squeezes_the_lines_but_stays_on_top_and_whole():
     text = str(render_capped_headlines_embed(IND, items, note, 6).description)
     lines = text.split("\n")
     assert lines[0] == note
-    assert all(ln.startswith("• ") and ln.endswith(">") for ln in lines[1:])
+    assert all(ln.startswith("• ") and ln.endswith(">)") for ln in lines[1:])
     assert discord_len(text) <= LIMIT
 
 
@@ -526,7 +535,7 @@ def test_an_oversize_first_story_never_leaves_half_a_link():
             digest(stories_by_game={INDUSTRY_KEY: [story(0, urls=urls)]}, capped={INDUSTRY_KEY: 5})
         ).description
     )
-    assert text.count("<https") == text.count(">")
+    assert text.count("](<https") == text.count(">)")
 
 
 # --- 5. Which input wins ---
@@ -814,6 +823,7 @@ def old():
     sys.modules[name] = module
     try:
         exec(compile(source, module.__file__, "exec"), module.__dict__)  # noqa: S102
+        mask_links_like_v340(module)
         yield module
     finally:
         sys.modules.pop(name, None)
@@ -869,7 +879,11 @@ def draft(n, summary="s" * 100, urls=None, label="reported"):
 def ref_block(story, shown=None):
     """The block the spec describes, written out by hand (headline and summary are plain ASCII)."""
     urls = story.item_urls if shown is None else story.item_urls[:shown]
-    line = " · ".join(f"<{u}>" for u in urls[:3])
+    # Every URL here shares one host, so the second link on a line is "(2)" and the third "(3)".
+    line = " · ".join(
+        masked(u, "example.com" if k == 0 else f"example.com ({k + 1})")
+        for k, u in enumerate(urls[:3])
+    )
     if len(urls) > 3:
         line += f" · +{len(urls) - 3} more"
     return f"{_MARKERS[story.label]} · {story.headline}\n{story.summary}\n{line}"
@@ -901,9 +915,9 @@ def ranked_text(stories, cap=5):
 
 
 def assert_no_half_link(text):
-    assert text.count("<http") == text.count(">"), text
-    for part in text.split("<http")[1:]:
-        assert ">" in part.split("\n")[0], part[:80]
+    assert text.count("](<http") == text.count(">)"), text
+    for part in text.split("](<http")[1:]:
+        assert ">)" in part.split("\n")[0], part[:80]
 
 
 def small(n):
@@ -916,7 +930,7 @@ def big(n):
 
 
 def links_in(text, n):
-    return text.split(f"H{n}\n", 1)[1].split("\n\n")[0].count("<http")
+    return text.split(f"H{n}\n", 1)[1].split("\n\n")[0].count("](<http")
 
 
 @pytest.mark.parametrize(
@@ -1079,12 +1093,12 @@ def test_ranked_posts_match_the_spec_for_random_mixes_of_oversize_stories(seed):
 
 
 def test_an_unusable_first_url_does_not_cost_the_story_a_link_that_would_fit():
-    four = [long_url(i, 331) for i in range(4)]
+    four = [long_url(i, 315) for i in range(4)]
     story = draft(0, summary="s" * 3000, urls=["javascript:x", *four])
     assert discord_len(ref_block(replace(story, item_urls=four))) > LIMIT  # suffix pushes it over
     assert discord_len(ref_block(replace(story, item_urls=four[:3]))) <= LIMIT
     text = ranked_text([story])
-    assert text.count("<http") == 3
+    assert text.count("](<http") == 3
 
 
 # --- 9. The head note and the cap, after the fix ---
@@ -1098,14 +1112,14 @@ def test_a_note_that_leaves_room_for_one_line_stays_and_the_extra_lines_are_shed
     assert lines[0] == note
     assert 1 <= len(lines) - 1 < 5
     assert discord_len(text) <= LIMIT
-    assert all(ln.startswith("• ") and ln.endswith(">") for ln in lines[1:])
+    assert all(ln.startswith("• ") and ln.endswith(">)") for ln in lines[1:])
 
 
 def test_a_note_that_leaves_no_room_for_even_one_line_gives_way_to_the_line_not_half_of_it():
     items = [item("w" * 300, age_h=1, url=long_url(0, 20))]
     note = "N" * 4090
     text = str(render_capped_headlines_embed(IND, items, note, 5).description)
-    assert text.startswith("• w") and text.endswith(">")
+    assert text.startswith("• w") and text.endswith(">)")
     assert "N" not in text  # the note was dropped, whole, rather than cutting the headline
     assert discord_len(text) <= LIMIT
 

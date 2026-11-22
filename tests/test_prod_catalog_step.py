@@ -15,10 +15,10 @@ accounts, two more press feeds, the mentalmars code tables), so health continuit
 a superset check, and the one source that vanishes is named below so nobody finds out
 the hard way.
 
-The 22nd catalog entry, "Gaming industry", sits inside its own nested pair of markers
-(industry-step) so production, whose config is already on the 21 games, gets it with one
-more awk line. The catalog step as written today is therefore 22 games; production's copy
-of it, cut without the industry region, is 21.
+The "Gaming industry" entry sits inside its own nested pair of markers (industry-step)
+so production, whose config was already on the 21 games of the day, got it with one more
+awk line. Grand Theft Auto VI joined on 2026-11-18, ahead of the industry markers, so the
+catalog step as written today is 23 entries, and cut without the industry region it's 22.
 """
 
 from __future__ import annotations
@@ -191,12 +191,12 @@ def test_the_markers_appear_once_and_cut_out_no_top_level_key_prod_already_has()
 # --- 1 and 2: it loads, friend's games first ---
 
 
-def test_it_loads_with_twenty_two_games_and_the_friends_three_first_in_v2_order(before, after):
+def test_it_loads_with_twenty_three_games_and_the_friends_three_first_in_v2_order(before, after):
     assert [g.key for g in before.catalog] == FRIENDS_GAMES
     keys = [g.key for g in after.catalog]
-    assert len(keys) == 22
+    assert len(keys) == 23
     assert keys[:3] == ["borderlands4", "palworld", "diablo4"]
-    assert keys[-2] == "tarkov"
+    assert keys[-2] == "gta6"
     assert keys[-1] == "industry"
     assert [g.name for g in after.catalog[:3]] == ["Borderlands 4", "Palworld", "Diablo IV"]
 
@@ -294,7 +294,7 @@ def test_the_friends_prompt_is_byte_identical_to_the_pre_catalog_prompt(
 def test_the_industry_step_appends_cleanly_after_the_catalog_step_production_has_today(
     tmp_path, before_path
 ):
-    # Production's config already took the 21 games, so the industry entry arrives alone,
+    # Production's config already had every game, so the industry entry arrived alone,
     # by the second awk line. That file has to load as the same bot as one that took the whole
     # catalog step at once.
     today = tmp_path / "config.today.yaml"
@@ -306,10 +306,10 @@ def test_the_industry_step_appends_cleanly_after_the_catalog_step_production_has
 
     before_industry = load_config(today)
     after_industry = load_config(with_industry)
-    assert [g.key for g in before_industry.catalog][-1] == "tarkov"
-    assert len(before_industry.catalog) == 21
+    assert [g.key for g in before_industry.catalog][-1] == "gta6"
+    assert len(before_industry.catalog) == 22
     assert after_industry.catalog[-1].key == "industry"
-    assert len(after_industry.catalog) == 22
+    assert len(after_industry.catalog) == 23
     assert after_industry.model_dump() == load_config(all_at_once).model_dump()
 
 
@@ -385,7 +385,9 @@ def test_the_friends_games_keep_every_source_name_but_the_fixtures_synthetic_wir
     # "Pocketpair and Gearbox Wire" is an example.com source the fixture invented to exercise
     # the two-topics case; production has no such feed. Anything else missing would reset that
     # source's health history (source_health is keyed by name), so it would be a real finding.
-    assert old - new <= {"Pocketpair and Gearbox Wire"}
+    # "r/Borderlands4" is the other one: Reddit retired its public RSS feeds on 2026-11-17,
+    # so the catalog no longer carries it, and its health history ending is the point.
+    assert old - new <= {"Pocketpair and Gearbox Wire", "r/Borderlands4"}
     assert {"2K Newsroom", "PC Gamer", "Eurogamer"} <= new
     # The new names are additions, never renames of the old ones.
     assert new - old, "expected the catalog to add sources for the friend's games"
@@ -406,20 +408,23 @@ def test_the_sources_the_catalog_adds_for_the_friends_games_are_named(before, af
 # --- 7: Reddit ---
 
 
-def test_r_borderlands4_is_still_codes_only_and_a_shift_source(before, after):
-    for cfg in (before, after):
-        game = next(g for g in cfg.catalog if g.key == "borderlands4")
-        reddit = [s for s in game.sources if s.name == "r/Borderlands4"]
-        assert len(reddit) == 1
-        assert "borderlands4" in cfg.shift.games
-        assert "r/Borderlands4" in cfg.codes_only_source_names()
+def test_r_borderlands4_leaves_with_the_catalog_step_and_bl4_stays_a_shift_game(before, after):
+    # The v2-shaped file on its own still lists the subreddit, codes-only by default, the way
+    # production's did until 2026-11-21.
+    game = next(g for g in before.catalog if g.key == "borderlands4")
+    assert len([s for s in game.sources if s.name == "r/Borderlands4"]) == 1
     assert before.codes_only_source_names() == {"r/Borderlands4"}
-    # The catalog step also brings mentalmars (a shift_table source, always codes-only).
-    assert after.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
+    # The catalog step no longer brings it (Reddit retired its feeds on 2026-11-17), and its
+    # catalog replaces the v2 list. mentalmars, a shift_table source, is always codes-only.
+    game = next(g for g in after.catalog if g.key == "borderlands4")
+    assert [s for s in game.sources if s.name == "r/Borderlands4"] == []
+    assert after.codes_only_source_names() == {"mentalmars"}
+    for cfg in (before, after):
+        assert "borderlands4" in cfg.shift.games
 
 
-def test_no_other_reddit_feed_comes_back(after):
+def test_no_reddit_feed_comes_back(after):
     names = [s.name for g in after.catalog for s in g.sources] + [
         s.name for s in after.shared_sources
     ]
-    assert [n for n in names if n.startswith("r/")] == ["r/Borderlands4"]
+    assert [n for n in names if n.startswith("r/")] == []

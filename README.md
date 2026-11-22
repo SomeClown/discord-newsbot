@@ -4,8 +4,8 @@ A Discord bot that reads the internet every morning so your server doesn't
 have to. Pick the games you follow from a catalog (Borderlands 4, Palworld,
 Diablo IV, Fortnite, Call of Duty, Marvel Rivals, VALORANT, Counter-Strike 2,
 Apex Legends, Rust, Destiny 2, Warframe, Final Fantasy XIV, Aniimo,
-WARDOGS, ARC Raiders, Valheim, SCUM, DayZ, Active Matter and Escape
-from Tarkov), and at the time you choose it posts a digest of the day's news for
+WARDOGS, ARC Raiders, Valheim, SCUM, DayZ, Active Matter, Escape from
+Tarkov and Grand Theft Auto VI), and at the time you choose it posts a digest of the day's news for
 each one, in the channel you pick. It can also announce new Borderlands SHiFT
 codes, and members can ask it for recent news or search it on demand.
 
@@ -21,9 +21,31 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** The bot is public, and production runs v3.3.1 (since 2026-10-24).
+**Status.** The bot is public, and production runs v3.4.3 (since 2026-10-29).
 
 ## What's new
+
+**v3.4.3 (2026-10-29), no more content-farm links.** Web search for a small game
+could return junk pages: a language model's rewrite of a Reddit thread on a
+website that has nothing to do with games, with the game's name in the title.
+They got through the name check and into stories. A web result is now dropped
+when its picture is borrowed from Reddit or Bing, which real press doesn't do.
+Stories already posted can't be taken back.
+
+**v3.4.2 (2026-10-29), web search stays on topic.** A web search for one game
+could come back with another game's news and file it under the first (a week of
+Borderlands 4 results had Modern Warfare 4 patch notes and Tarkov in it). A web
+result now has to name its game, an alias or its studio to be kept, so expect
+fewer, more relevant web-search headlines.
+
+**v3.4.1 (2026-10-29), no more old news dressed up as new.** An old article came
+through web search with a faked fresh date and landed in a digest as "upcoming".
+That site is now blocked (`web_search.exclude_domains`), and summaries are told
+today's date and each story's date so they can drop news that's weeks old.
+
+**v3.4.0 (2026-10-29), shorter links.** Digests, the Gaming industry post and
+`/news` show each source as the site's name (`pcgamer.com`) instead of the
+whole address, so posts read shorter on a phone. SHiFT alerts look the same.
 
 **v3.3.1 (2026-10-24), a security release.**
 
@@ -78,7 +100,7 @@ servers are comped, with `comped_guild_ids` in your config.
 Two documents cover this:
 
 - **[`docs/finding-sources.md`](docs/finding-sources.md)**: recipes for
-  finding Steam, Bluesky, subreddit, and press sources for your own
+  finding Steam, Bluesky and press sources for your own
   game, plus the aliasing lessons (some words match more than you'd think)
   that came out of doing this for the games above.
 - **[`docs/self-host.md`](docs/self-host.md)**: the actual setup guide:
@@ -98,9 +120,13 @@ that day posts nothing at all. A free server's looks something like this
 (illustrative only, not real scraped content):
 
 > **Borderlands 4**
-> • 🟢 OFFICIAL · Hotfix 5 now live — <https://example.com>
-> • Datamined patch notes point to a new Vault Hunter — <https://example.com>
-> • Mayhem 6 loot rates, explained by a very tired player — <https://example.com>
+> • 🟢 OFFICIAL · Hotfix 5 now live — [borderlands.com](<https://borderlands.com>)
+> • Datamined patch notes point to a new Vault Hunter — [pcgamer.com](<https://pcgamer.com>)
+> • Mayhem 6 loot rates, explained by a very tired player — [bsky.app](<https://bsky.app>)
+
+Each link shows the site's domain instead of the whole address (the full
+address is still behind it), so a line stays short on a phone. A host that
+isn't a plain name, like a raw IPv6 address, reads "link".
 
 Official items get the marker and go first, then press, then community, then
 newest. Nothing is labeled "rumor": a headline list makes no claim about
@@ -114,12 +140,12 @@ A comped server's digest has the AI-written stories instead:
 > 🟢 **OFFICIAL · Hotfix 5 now live**
 > Fixes a crash on the Vault of the Traveler boss fight and adjusts loot drop
 > rates on Mayhem 6+.
-> [Gearbox forums](https://example.com) · [Steam](https://example.com)
+> [borderlands.com](<https://borderlands.com>) · [store.steampowered.com](<https://store.steampowered.com>)
 >
 > 🟡 **REPORTED · Datamined patch notes point to a new Vault Hunter**
 > Several outlets are citing files pulled from the latest patch; nothing
 > official yet.
-> [PC Gamer](https://example.com) +2 more
+> [pcgamer.com](<https://pcgamer.com>) · +2 more
 
 Sorted official, then reported, then rumor, each labeled so nobody mistakes a
 leak for a patch note. A coverage caveat ("Brave search skipped: quota
@@ -299,8 +325,8 @@ take back:
 - **Who can trigger a ping.** Every new code still posts, but only a code
   seen from a source whose trust is in `shift.ping_trust` (default:
   `official`, `press`) makes its batch carry the server's ping. A
-  community-only code (a Reddit thread guessing at one, say) posts quietly.
-  (Reddit is only read to spot codes; see "Reddit is codes only" below.)
+  community-only code (a fan site's list, or someone on Bluesky guessing at
+  one) posts quietly.
 - **A second source can earn the ping.** If a community-only code is then seen
   by a second, independent source (a different source name, compared without
   regard to case) or an official or press one within 24 hours of its first
@@ -625,8 +651,7 @@ comped server following three games:
 - **Collection and SHiFT**: no Claude or Brave cost at all. The hourly pass
   makes one `GET` per RSS/Steam/Bluesky source, whichever servers follow them
   (these are requests to each source's own site, not to Discord's API) and, on
-  Bluesky, a login per pass. Reddit feeds are spaced 35 seconds apart, which
-  matters only if you configure several (the example has one).
+  Bluesky, a login per pass.
 
 ## Limitations and known issues
 
@@ -639,19 +664,15 @@ comped server following three games:
   comped server. The pick is the model's judgment, so it can include a story
   you'd have skipped; the prompt was checked against a real day's news before
   release, not against every day's.
-- **Reddit is codes only.** Reddit denied this bot's Data API access request
-  (2026-10-04) and its Responsible Builder Policy bars sharing Reddit content,
-  so the one subreddit in the example, r/Borderlands4, is read only to spot
-  SHiFT codes (`codes_only: true`). Its posts are never stored, so they can't
-  show up in a digest, a summary, `/news`, or the AI's input. Any source on
-  reddit.com is treated that way, and one for a game that isn't in
-  `shift.games` is skipped with a warning. A code alert can still link to the
-  post it came from.
-- **Reddit may block datacenter IPs.** The subreddit source was verified
-  from a residential connection; Reddit rate-limits aggressively even there,
-  and may reject requests outright from a hosting provider's IP range in
-  production. If it happens, it shows up in `/newsbot status` ("N of M sources
-  ok") and in the owner's alerts as a source health failure, not a crash.
+- **Reddit isn't a source any more.** Reddit switched off its public RSS
+  feeds in November 2026: every subreddit feed has answered 404 since
+  2026-11-17, and there's no replacement for a bot like this one (Reddit
+  denied its Data API request on 2026-10-04). The example used to read
+  r/Borderlands4 to spot SHiFT codes, and that source is gone from it. If
+  your own `config.yaml` still lists a reddit.com feed, it shows up as a
+  failing source in `/newsbot status` and the owner's report until you take
+  it out. The code that handled Reddit (taking turns, backing off, reading
+  for codes only) is still in the bot and does nothing without one.
 - **YouTube channel feeds are out, for now.** They're plain RSS reads
   (`youtube.com/feeds/videos.xml?channel_id=...`) with no official
   guarantee of stability, and in late September 2026 every one of them
@@ -680,10 +701,9 @@ comped server following three games:
   the example catalog a message holds about 4 codes where it used to hold
   about 18; a big drop just posts as more messages, and only the first one
   pings.
-- **SHiFT code alerts can miss or delay a code.** Reddit's `/top?t=day`
-  sort can take a while to surface a brand new post, so a code posted to a
-  subreddit first might not alert until it's climbed the day's top posts
-  (or shown up on an official feed instead). A code embedded only in an
+- **SHiFT code alerts can miss or delay a code.** With Reddit gone, a code
+  that turns up there first isn't seen until the community code list, a
+  Bluesky post or an official feed carries it. A code embedded only in an
   image (a screenshot, a stream overlay) is invisible to this; the
   matcher only reads text. Gearbox mostly posts codes on X, which isn't a
   source. A code split across an en dash or similar look-alike dash

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import UTC, date, datetime
 
 from newsbot.config import GameInfo
 from newsbot.pipeline.filter import TopicItem
@@ -42,6 +43,14 @@ and set update_of_headline to that prior story's exact headline text.
 - Items marked uncertain matched this topic only through a loosely related \
 entity, not the game's name; weigh them accordingly and feel free to leave \
 one out if it doesn't actually belong.
+- Each item has a published date (null when its source gave none), and today's date \
+is given above the items. Sources sometimes get their dates wrong, so also read the \
+item's own text: if it shows the item is old news (it calls something upcoming or new \
+whose date is weeks or months before today, or it carries a dateline weeks or months \
+before today), \
+set relevant to false for a story built only on such items. This is only about news \
+that is no longer news: a guide, a deal that's still running, or a code that hasn't \
+expired is welcome whatever its date.
 - Write headlines and summaries in plain, factual language. No speculation \
 beyond what an item states.
 """
@@ -92,6 +101,24 @@ def _dump(value: object) -> str:
     return json.dumps(value, indent=2).replace("<", "\\u003c")
 
 
+def _published_date(published: datetime | None) -> str | None:
+    """The item's UTC date as `2026-10-28`, or None when it has none or can't be converted.
+
+    A date at the very edge of the calendar (year 9999 with a western offset, year 1 with an
+    eastern one) overflows when moved to UTC. Brave's `page_age` can say such a thing and
+    normalize keeps future dates, so it goes to the model as unknown instead of costing the
+    whole game its summary.
+    """
+    if published is None:
+        return None
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=UTC)
+    try:
+        return published.astimezone(UTC).date().isoformat()
+    except OverflowError, ValueError:
+        return None
+
+
 def _item_payload(n: int, topic_item: TopicItem) -> dict:
     item = topic_item.item
     return {
@@ -101,6 +128,7 @@ def _item_payload(n: int, topic_item: TopicItem) -> dict:
         "excerpt": item.excerpt[:500],
         "source": item.source_name,
         "trust": item.trust,
+        "published": _published_date(item.published_at),
         "uncertain": topic_item.uncertain,
     }
 
@@ -112,6 +140,7 @@ def build_prompt(
     *,
     all_topics: Sequence[GameInfo] | None = None,
     subject: str = "video games",
+    today: date | None = None,
 ) -> tuple[str, str]:
     """Build the (system, user) prompt pair for one topic's summarize call.
 
@@ -129,12 +158,20 @@ def build_prompt(
     `subject` is what SYSTEM_PROMPT calls those things (normally
     `cfg.digest.subject`); defaults to "video games" so a caller that
     doesn't pass it gets this bot's original prompt, unchanged.
+
+    `today` is the UTC date the prompt is built on. When given, the user message
+    says so right under the topic line, so the model can tell "June 25" is behind
+    us. Left out, the user message has no date line (each item still carries its
+    own `published`).
     """
     system = SYSTEM_PROMPT.format(
         subject=subject, games=_format_games_list(all_topics or [topic], subject)
     )
 
-    lines = [f"Topic: {topic.name} (key: {topic.key})", ""]
+    lines = [f"Topic: {topic.name} (key: {topic.key})"]
+    if today is not None:
+        lines.append(f"Today's date: {today.isoformat()}")
+    lines.append("")
     if prior:
         # Prior headlines were written by the model from yesterday's scraped
         # text, so they're only one laundering step away from untrusted.

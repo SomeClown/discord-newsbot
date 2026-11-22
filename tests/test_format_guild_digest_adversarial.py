@@ -102,7 +102,7 @@ def test_a_hostile_title_renders_with_no_live_syntax_and_one_real_link(title):
     embed = render_headlines_embed(BL4, [item(title, url="https://example.com/real")])
     [line] = body(embed)
     text, _, link = line.rpartition(" — ")
-    assert link == "<https://example.com/real>"
+    assert link == "[example.com](<https://example.com/real>)"
     assert "@everyone" not in text.replace("@​everyone", "")
     assert "@here" not in text.replace("@​here", "")
     # The real assertions, stated plainly: after the trailing link, no scheme, mention or
@@ -132,7 +132,7 @@ def test_a_title_cannot_forge_the_more_line():
 def test_empty_and_degenerate_titles_still_render_a_bulleted_link(title):
     embed = render_headlines_embed(BL4, [item(title, url="https://example.com/x")])
     assert embed is not None
-    assert str(embed.description).endswith("<https://example.com/x>")
+    assert str(embed.description).endswith("[example.com](<https://example.com/x>)")
 
 
 # --- hostile URLs ---
@@ -183,8 +183,9 @@ def test_a_tricky_url_is_either_dropped_or_safely_wrapped(url):
         return
     [line] = body(embed)
     link = line.rpartition(" — ")[2]
-    assert link.startswith("<https://") and link.endswith(">")
-    inner = link[1:-1]
+    masked = re.fullmatch(r"\[[a-z0-9.\-]+\]\(<(https://[^>]*)>\)", link)
+    assert masked, link
+    inner = masked.group(1)
     assert not re.search(r"[\s<>\[\]`\"]", inner)
     assert "‮" not in inner
 
@@ -261,7 +262,7 @@ def _titled_with_total(total_units: int, *, astral: bool, n: int = 12):
     Twelve long-ish titles rather than a few giant ones: a line is capped (a title at 300
     units), so the padding has to fit under that cap on the last item.
     """
-    base = [item(f"headline {i:03d} " + "w" * 270, age_h=2.0 + i) for i in range(n - 1)]
+    base = [item(f"headline {i:03d} " + "w" * 250, age_h=2.0 + i) for i in range(n - 1)]
 
     def make(pad: int):
         if astral:
@@ -369,7 +370,9 @@ def test_a_long_title_is_cut_to_the_line_cap_and_a_long_url_line_is_dropped_and_
     rest = [item(f"normal {n}", age_h=2 + n) for n in range(3)]
     embed = render_headlines_embed(BL4, [long_title, long_url, *rest])
     first, *others = body(embed)
-    assert discord_len(first) < 500 and first.endswith("… — <https://example.com/ok>")
+    assert discord_len(first) < 500 and first.endswith(
+        "… — [example.com](<https://example.com/ok>)"
+    )
     assert shown_count(embed) == 4 and more_count(embed) == 0  # the long URL isn't "unshown"
     assert "fine title" not in str(embed.description)
     assert all("normal" in line for line in others)
@@ -378,7 +381,7 @@ def test_a_long_title_is_cut_to_the_line_cap_and_a_long_url_line_is_dropped_and_
 @pytest.mark.parametrize("space", ["\n", "\r\n", "\t", "\u2028", "\x85", "  "])
 def test_every_kind_of_whitespace_in_a_title_is_flattened_to_one_space(space):
     embed = render_headlines_embed(BL4, [item(f"one{space}two", url="https://example.com/x")])
-    assert body(embed) == ["• one two — <https://example.com/x>"]
+    assert body(embed) == ["• one two — [example.com](<https://example.com/x>)"]
 
 
 def test_embed_total_stays_under_discords_6000_even_with_a_full_description_and_footer():

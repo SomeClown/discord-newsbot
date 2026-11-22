@@ -19,6 +19,7 @@ import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal, Protocol
 
 import anthropic
@@ -407,17 +408,20 @@ async def summarize_topic(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     all_topics: Sequence[GameInfo] | None = None,
     subject: str = "video games",
+    today: date | None = None,
 ) -> TopicSummary:
     """Summarize one topic's items, with retry and a fallback on repeated failure.
 
     Builds the game prompt and hands it to `run_story_call`, which owns the
     retry and fallback rules.
 
-    `all_topics` and `subject` just pass through to `build_prompt` (see
+    `all_topics`, `subject` and `today` just pass through to `build_prompt` (see
     its docstring); the summaries job is the one real caller and always has
-    the followed games and `cfg.ai.subject` on hand to pass.
+    the followed games, `cfg.ai.subject` and the date on hand to pass.
     """
-    system, user = build_prompt(topic, items, prior, all_topics=all_topics, subject=subject)
+    system, user = build_prompt(
+        topic, items, prior, all_topics=all_topics, subject=subject, today=today
+    )
     return await run_story_call(llm, topic.key, system, user, items, prior, sleep=sleep)
 
 

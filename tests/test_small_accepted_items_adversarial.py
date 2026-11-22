@@ -52,6 +52,8 @@ ZWSP = "\u200b"
 ZWJ = "\u200d"
 FE0F = "\ufe0f"
 EM_DASH = "\u2014"
+# Since v3.4.0 a headline ends in the site's domain as a masked link, not a bare URL.
+LINK = f"[example.com](<{URL}>)"
 EN_DASH = "\u2013"
 BOLD_OFFICIAL = "".join(chr(0x1D400 + ord(c) - ord("A")) for c in "OFFICIAL")
 
@@ -99,8 +101,8 @@ def _headline(title, trust="community"):
 
 def _shown_title(title, trust="community"):
     line = _headline_line(_headline(title, trust))
-    assert line.startswith("\u2022 ") and line.endswith(f" {EM_DASH} <{URL}>")
-    return line[2 : -len(f" {EM_DASH} <{URL}>")]
+    assert line.startswith("\u2022 ") and line.endswith(f" {EM_DASH} {LINK}")
+    return line[2 : -len(f" {EM_DASH} {LINK}")]
 
 
 # --- 1. escape_list_start and the sites that use it ---
@@ -2281,7 +2283,7 @@ def test_the_fallback_never_shows_the_bots_emoji_next_to_a_label_word():
 
 def test_a_label_only_official_item_still_gets_its_one_real_marker():
     line = _headline_line(_headline("\U0001f7e2 OFFICIAL", "official"))
-    assert line == f"\u2022 \U0001f7e2 OFFICIAL \u00b7 OFFICIAL {EM_DASH} <{URL}>"
+    assert line == f"\u2022 \U0001f7e2 OFFICIAL \u00b7 OFFICIAL {EM_DASH} {LINK}"
 
 
 def test_without_bot_emoji_takes_the_riders_with_each_emoji_and_collapses_the_spaces():
@@ -2426,7 +2428,7 @@ def test_mid_line_any_run_of_spaces_and_blank_glyphs_before_the_dot_goes_with_th
 def test_a_look_alike_only_headline_shows_the_word_without_the_emoji():
     assert _title("\u2705 OFFICIAL") == "OFFICIAL"
     line = _headline_line(_headline("\u2705 OFFICIAL", "official"))
-    assert line == f"\u2022 \U0001f7e2 OFFICIAL \u00b7 OFFICIAL {EM_DASH} <{URL}>"
+    assert line == f"\u2022 \U0001f7e2 OFFICIAL \u00b7 OFFICIAL {EM_DASH} {LINK}"
     assert (
         _title("\u2705\u2705 \U0001f7e2 REPORTED \u00b7 \U0001f535 RUMOR")
         == "REPORTED \u00b7 RUMOR"

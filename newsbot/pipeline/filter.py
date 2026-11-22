@@ -46,13 +46,34 @@ class TopicMatcher:
             return "uncertain"
         return None
 
+    def match_fields(self, *fields: str | None) -> Literal["confident", "uncertain"] | None:
+        """The strongest `match` over each field on its own, never over the fields glued together.
+
+        A title that ends in "Borderlands" and an excerpt that opens with "4
+        reasons" are two sentences, not one game. Confident beats uncertain
+        beats nothing.
+        """
+        best = None
+        for field in fields:
+            result = self.match(field or "")
+            if result == "confident":
+                return result
+            best = best or result
+        return best
+
 
 def _terms_pattern(terms: list[str]) -> re.Pattern[str] | None:
     if not terms:
         return None
     # (?<!\w) / (?!\w) instead of \b, so a term that starts or ends with a
     # non-word character (an apostrophe, say) still gets proper boundaries.
-    alternation = "|".join(re.escape(term) for term in terms)
+    # A space in a configured name means "any run of whitespace": titles reach us
+    # unwashed, and a non-breaking space or a doubled one is still the game's name.
+    alternation = "|".join(
+        r"\s+".join(re.escape(word) for word in term.split()) for term in terms if term.split()
+    )
+    if not alternation:
+        return None
     return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
 
 
@@ -101,7 +122,9 @@ def filter_items(
     SPEC-DEV 3, is a confident match for a single named topic with no
     keyword check at all; a dedicated Steam feed's patch notes don't
     have to mention the game by name). An item with `topics=None` is
-    checked against every topic by keyword.
+    checked against every topic by keyword. An item with `needs_match` (web
+    search's) sits in between: it only considers its one topic, but that topic
+    is just the query that found it, so it gets the keyword check anyway.
 
     The cap ranks confident matches above uncertain ones, then trust, then
     recency, so a busy press feed's `uncertain` entity noise can't crowd a
@@ -113,7 +136,13 @@ def filter_items(
 
     for item in items:
         candidates = set(item.topics) & known_keys if item.topics else known_keys
-        dedicated_key = item.topics[0] if item.topics and len(item.topics) == 1 else None
+        # A search result's single topic is only the query that found it, so it
+        # gets no dedicated pass and has to name the game like anyone else.
+        dedicated_key = (
+            item.topics[0]
+            if item.topics and len(item.topics) == 1 and not item.needs_match
+            else None
+        )
 
         for topic_key in candidates:
             if topic_key == dedicated_key:
@@ -122,7 +151,7 @@ def filter_items(
                 )
                 continue
 
-            result = matchers[topic_key].match(f"{item.title} {item.excerpt}")
+            result = matchers[topic_key].match_fields(item.title, item.excerpt)
             if result is None:
                 continue
             grouped[topic_key].append(
