@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 from dated_prompt_old import date_prompts_like_v341
 from masked_old import mask_links_like_v340
+from terminal_look import give_old_format_the_marker_check
 from test_codes_only import CODE, PASS_AT, FakeFeed, World, raw
 from test_text_hardening_adversarial import _exec_base
 
@@ -80,6 +81,7 @@ def old():
     try:
         exec(compile(source, module.__file__, "exec"), module.__dict__)  # noqa: S102
         mask_links_like_v340(module)
+        give_old_format_the_marker_check(module)
         yield module
     finally:
         sys.modules.pop(name, None)
@@ -511,15 +513,11 @@ def _every_render(fmt, url):
     terminal_edit = fmt.render_alert_edit(
         alert.header, [_cand(url)], golden_prefix=False, details={}, now=NOW
     )
-    classic_edit = fmt.render_alert_edit(
-        CLASSIC_HEADER, [_cand(url)], golden_prefix=False, details={}, now=NOW
-    )
     (page,) = fmt.render_history_pages([_view(url)], timezone="America/Los_Angeles", now=NOW)
     return {
         "alert": alert.content,
         "roundup": roundup.content,
         "edit": terminal_edit,
-        "classic edit": classic_edit,
         "history": page.description,
     }
 

@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 from chip_check import ALLOWED_CHIPS, chips, fence_bodies
+from terminal_look import is_terminal_header
 from test_shift_edits import EditHarness, message_state
 from test_shift_fanout import CODE_A, CODE_B, V3, add_guild, item, seed
 from test_shift_fanout import NOW as FANOUT_NOW
@@ -673,7 +674,7 @@ def test_a_ping_stripped_terminal_header_edits_in_the_terminal_layout():
     row = _row(c.code, reward="3 Golden Keys", reward_from="mentalmars")
     [a] = render_code_alerts([c], ping=True, ping_mention=ROLE_20)
     stripped = a.header.removeprefix(a.ping_prefix)
-    assert terminal.is_terminal_header(stripped) and stripped != a.header
+    assert is_terminal_header(stripped) and stripped != a.header
     edited = render_alert_edit(stripped, [c], golden_prefix=False, details={c.code: row}, now=NOW)
     assert edited.startswith("`> new SHiFT code ▌`\n\n")
     assert "`reward` 3 Golden Keys · `via` mentalmars" in edited
@@ -754,7 +755,7 @@ def test_a_batch_has_one_first_header_continuations_after_it_and_a_ping_only_up_
         assert fence_bodies(a.content) == a.codes
         assert a.content.count("@everyone") == (1 if ping and a is alerts[0] and not mention else 0)
         assert a.golden_prefix is (mix == "mixed" and n > 1)
-        assert terminal.is_terminal_header(a.header)
+        assert is_terminal_header(a.header)
     expect_messages = {
         (1, False): 1,
         (2, False): 1,
@@ -949,33 +950,6 @@ async def test_v31_era_records_stay_not_due_for_each_kind_of_details(tmp_path, k
         await harness.run([])
     assert harness.editors.calls == []
     assert message_state(path) == stamps
-
-
-async def test_v31_records_that_do_change_are_edited_in_the_classic_layout_with_its_wording(
-    tmp_path,
-):
-    path = str(tmp_path / "newsbot.db")
-    with closing(connect(path)) as conn:
-        migrate(conn)
-    harness = EditHarness(path, load_config(V3), FANOUT_NOW)
-    seed(path)
-    add_guild(path, 1, ping="everyone")
-    posted = replace(
-        item(CODE_A),
-        details=ItemDetails(code=CODE_A, rank="official", category="permanent"),
-    )
-    await harness.run([posted])
-    with closing(connect(path)) as conn, conn:
-        conn.execute("UPDATE guild_alert_messages SET header = '@everyone **New SHiFT code**'")
-    from test_shift_edits import learn
-
-    learn(harness, CODE_A, "A better skin", at=FANOUT_NOW + timedelta(hours=1))
-    harness.clock = FANOUT_NOW + timedelta(hours=2)
-    await harness.run([])
-    [call] = harness.editors.calls
-    assert call.content.startswith("@everyone **New SHiFT code**\n\n")
-    assert "`" not in call.content.replace("```", ""), "no chip leaks into a v3.1 message"
-    assert "details via" in call.content
 
 
 def _current(code="A" * 29, **kwargs) -> CurrentCode:

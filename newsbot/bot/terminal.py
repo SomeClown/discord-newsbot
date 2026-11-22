@@ -22,8 +22,7 @@ This module imports nothing, on purpose, so anything can use it without a cycle.
 
 from __future__ import annotations
 
-# The cursor: a solid block (U+258C, left half block), one UTF-16 unit. It also doubles as
-# the layout marker for stored alert headers (see `is_terminal_header`).
+# The cursor: a solid block (U+258C, left half block), one UTF-16 unit.
 CURSOR = "▌"
 
 # The green from the PacketQueue site, as an embed stripe color.
@@ -90,15 +89,3 @@ def heading(word: str, *, continued: bool = False) -> str:
     Same rules as `label`: pass the group words above, never anything a stranger typed.
     """
     return f"`[{word} (continued)]`" if continued else f"`[{word}]`"
-
-
-def is_terminal_header(header: str) -> bool:
-    """Whether a stored alert header was written in the terminal look rather than v3.1's.
-
-    Every terminal header carries the cursor followed by the chip's closing backtick, and
-    no v3.1 header can: those are a closed set of fixed strings (plus a ping), none of
-    which has a block character in it. So the header says which layout its message was
-    packed for, and an edit can be rendered to match without a database column. Anything
-    that doesn't look like a terminal header, garbage included, counts as v3.1.
-    """
-    return f"{CURSOR}`" in header

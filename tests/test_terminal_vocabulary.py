@@ -1,8 +1,9 @@
-"""The terminal look's vocabulary (`newsbot.bot.terminal`): its helpers and the layout marker."""
+"""The terminal look's vocabulary (`newsbot.bot.terminal`), and the test-side header yardstick."""
 
 from __future__ import annotations
 
 import pytest
+from terminal_look import is_terminal_header
 
 from newsbot.bot import terminal
 
@@ -60,38 +61,31 @@ _BODIES = [
 @pytest.mark.parametrize("ping", _PINGS)
 @pytest.mark.parametrize("body", _BODIES)
 def test_every_new_header_shape_is_terminal(ping, body):
-    assert terminal.is_terminal_header(ping + terminal.prompt(body))
+    assert is_terminal_header(ping + terminal.prompt(body))
 
 
 @pytest.mark.parametrize("count", ["1 code", "7 codes"])
 def test_a_roundup_header_is_terminal(count):
     header = f"{terminal.prompt('SHiFT roundup')} {count} from Some Site · <https://example.com/x>"
-    assert terminal.is_terminal_header(header)
-    assert terminal.is_terminal_header(terminal.prompt("SHiFT roundup (continued)"))
+    assert is_terminal_header(header)
+    assert is_terminal_header(terminal.prompt("SHiFT roundup (continued)"))
 
 
-@pytest.mark.parametrize("ping", _PINGS)
-@pytest.mark.parametrize(
-    "header",
-    [
+def test_the_v31_headers_are_not_terminal():
+    # The yardstick in tests/terminal_look.py has to tell the old shapes from the new ones,
+    # or "every header we make is terminal" would pass on anything.
+    old = [
         "**New SHiFT code**",
         "**New SHiFT codes**",
         "**New Golden Key code**",
-        "**New Golden Key codes**",
-        "**[TEST] New SHiFT code**",
         "**[TEST] New Golden Key codes**",
-    ],
-)
-def test_every_v31_header_shape_is_not_terminal(ping, header):
-    assert not terminal.is_terminal_header(ping + header)
-
-
-def test_the_v31_continuation_and_roundup_headers_are_not_terminal():
-    assert not terminal.is_terminal_header("**(continued)**")
-    assert not terminal.is_terminal_header("**SHiFT codes from a roundup** · Some Site")
-    assert not terminal.is_terminal_header(
-        "**SHiFT codes from a roundup** · Some Site · <https://example.com/x>"
-    )
+        "**(continued)**",
+        "**SHiFT codes from a roundup** · Some Site",
+        "**SHiFT codes from a roundup** · Some Site · <https://example.com/x>",
+    ]
+    for header in old:
+        for ping in _PINGS:
+            assert not is_terminal_header(ping + header), ping + header
 
 
 @pytest.mark.parametrize(
@@ -104,7 +98,20 @@ def test_the_v31_continuation_and_roundup_headers_are_not_terminal():
         "`> x`",  # a chip with no cursor
         "> new SHiFT code ▌",  # a cursor with no backtick after it
         "`▌",  # a backtick *before* the cursor is not the marker
+        "▌ `",  # a space between the cursor and the backtick
+        "▌´",  # acute accent
+        "▌｀",  # fullwidth grave accent
+        "▌​`",  # zero-width space between
+        "▐`",  # right half block
+        "█`",  # full block
     ],
 )
 def test_garbage_is_not_terminal(header):
-    assert not terminal.is_terminal_header(header)
+    assert not is_terminal_header(header)
+
+
+def test_the_yardstick_is_a_plain_substring_rule():
+    assert is_terminal_header("x▌`y")
+    assert is_terminal_header("  `> new SHiFT code ▌`  ")
+    assert is_terminal_header("a" * 100_000 + "▌`")
+    assert not is_terminal_header("a" * 100_000)

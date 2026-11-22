@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 from dated_prompt_old import date_prompts_like_v341
 from masked_old import mask_links_like_v340
+from terminal_look import give_old_format_the_marker_check
 from test_codes_only import CODE, PASS_AT, PRODLIKE, FakeFeed, World, raw
 
 import newsbot.bot.format as fmt
@@ -106,7 +107,9 @@ def _exec_base(relpath: str, name: str, *, swap: dict[str, types.ModuleType] | N
 
 @pytest.fixture(scope="module")
 def old_format():
-    module = mask_links_like_v340(_exec_base("newsbot/bot/format.py", "_newsbot_format_v330_adv"))
+    module = give_old_format_the_marker_check(
+        mask_links_like_v340(_exec_base("newsbot/bot/format.py", "_newsbot_format_v330_adv"))
+    )
     yield module
     sys.modules.pop(module.__name__, None)
 
@@ -906,7 +909,6 @@ async def test_an_article_url_that_would_redirect_to_an_invite_is_kept(world):
 
 ARTICLE = "https://example.com/post"
 CODES = [f"{n:04d}A-AAAAA-AAAAA-AAAAA-AAAAA" for n in range(1, 60)]
-CLASSIC_HEADER = "@everyone **New SHiFT code**"
 ROLE = "<@&1234567890>"
 
 
@@ -967,12 +969,6 @@ def _every_render(module, url_for):
         out[f"edit terminal {n}"] = module.render_alert_edit(
             a.header, cands, golden_prefix=a.golden_prefix, details=details, now=NOW
         )
-    out["edit classic"] = module.render_alert_edit(
-        CLASSIC_HEADER, cands, golden_prefix=True, details=details, now=NOW
-    )
-    out["edit classic no details"] = module.render_alert_edit(
-        CLASSIC_HEADER, cands, golden_prefix=False, details={}, now=NOW
-    )
     views = [
         _view(url_for(i), CODES[i], status=s, from_roundup=i == 2)
         for i, s in enumerate(("posted", "expired", "posted"))
@@ -1086,7 +1082,9 @@ def test_ordinary_shift_output_is_byte_identical_to_v330(old_format, seed):
             assert [vars(a) for a in got] == [vars(a) for a in want]
             for a in got:
                 mine = [c for c in cands if c.code in a.codes]
-                for header in (a.header, CLASSIC_HEADER):
+                # v3.3.0 edited a v3.1 header in the v3.1 layout, which is gone; only today's
+                # header is a fair comparison.
+                for header in (a.header,):
                     try:
                         w = old.render_alert_edit(
                             header,

@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from chip_check import ALLOWED_CHIPS, chips, fence_bodies
+from terminal_look import is_terminal_header
 from test_shift_edits import EditHarness, learn, message_state
 from test_shift_fanout import CODE_A, V3, add_guild, item, seed
 from test_shift_fanout import NOW as FANOUT_NOW
@@ -139,7 +140,7 @@ def test_the_header_is_one_chip_with_the_cursor_inside():
     [alert] = render_code_alerts([_candidate()], ping=True)
     header_chips = chips(alert.header)
     assert header_chips == [f"> new SHiFT code {terminal.CURSOR}"]
-    assert terminal.is_terminal_header(alert.header)
+    assert is_terminal_header(alert.header)
 
 
 # --- the entry ---
@@ -449,7 +450,7 @@ def h(db_path, cfg):
 V31_HEADER = "@everyone **New SHiFT code**"
 
 
-async def test_v31_records_are_not_newly_due_and_are_edited_in_their_own_layout(h):
+async def test_v31_records_are_not_newly_due_and_are_edited_in_the_current_layout(h):
     add_guild(h.db_path, 1, ping="everyone")
     await h.run([item(CODE_A)])
     learn(h, CODE_A, "3 Golden Keys", at=FANOUT_NOW + timedelta(hours=1))
@@ -468,12 +469,12 @@ async def test_v31_records_are_not_newly_due_and_are_edited_in_their_own_layout(
     assert len(h.editors.calls) == 1
     assert message_state(h.db_path) == stamps
 
-    # A real change later is edited in the layout the message was packed for.
+    # A real change later is edited in today's layout; the old header goes back out as it was.
     learn(h, CODE_A, "5 Golden Keys", at=h.clock + timedelta(hours=1))
     h.clock += timedelta(hours=2)
     await h.run([])
     assert len(h.editors.calls) == 2
     content = h.editors.calls[-1].content
     assert content.startswith("@everyone **New SHiFT code**\n\n")
-    assert "5 Golden Keys · details via" in content
-    assert "`src`" not in content and "`reward`" not in content
+    assert "`reward` 5 Golden Keys" in content
+    assert "`src`" in content and "details via" not in content
