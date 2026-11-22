@@ -468,4 +468,44 @@ There's no way back in through Reddit: the Data API request was denied on 2026-1
 
 ### What the bot lost
 
-One of its three community sightings of SHiFT codes. The mentalmars tables and the Bluesky search are still two independent community sources, so a community code can still be confirmed and earn its ping, and the official feeds still ping on their own. A code that shows up on Reddit first now arrives when one of the others carries it. Replacement sources are being researched separately.
+One of its three community sightings of SHiFT codes. The mentalmars tables and the Bluesky search are still two independent community sources, so a community code can still be confirmed and earn its ping, and the official feeds still ping on their own. A code that shows up on Reddit first now arrives when one of the others carries it. Replacement sources were researched the same day; see the next section.
+
+## SHiFT code sources after Reddit (2026-11-21)
+
+The owner asked for replacements and mentioned the Facebook pages where he sees codes. Everything here was fetched from a home connection with a plain bot User-Agent; nothing was tested from the Droplet. Conclusion first: **nothing was added**, because the one usable candidate turned out to be a source the bot already reads by another route.
+
+### Facebook: no
+
+There's no login-free way to read a public page (page RSS answers 404, the Graph API answers 400 without a token). The sanctioned route, Page Public Content Access, needs App Review and business verification ([Meta's feature reference](https://developers.facebook.com/docs/features-reference/page-public-content-access)), and Meta's terms say "You may not access or collect data from our Products using automated means" ([its developer docs](https://developers.facebook.com/docs/development/terms-and-policies/automated-data-collection/)); `facebook.com/robots.txt` ends in `Disallow: /`. That's Reddit's terms problem again, so it isn't for a hobby bot.
+
+### The candidate: a Bluesky account that only posts codes
+
+`shift.jedillama.social` ("Gearbox SHiFT Codes", a community account on its own Bluesky server, about 1,000 followers; who runs it and where it gets codes isn't known). Feed: `https://bsky.app/profile/did:plc:sden5674t33reyexxna44ytg/rss`, which the `rss` reader takes as it is. It posts 3 to 14 codes a month, 93 of its last 100 naming Borderlands 4, and it carried two November codes mentalmars' table never listed.
+
+**Why it wasn't added.** The owner ran six recent codes through production's `code_sightings`:
+
+| Code | Sighted by (UTC) | The account posted |
+|---|---|---|
+| `3S6B3…` | Steam 11-16 18:24, mentalmars 19:24, Bluesky search 20:24 | 11-17 01:58 |
+| `S6RJJ…` | mentalmars 11-11 19:24, Bluesky search 22:24 | 11-11 21:36 |
+| `5HWB3…` | Bluesky search 11-05 13:24, nothing else | 11-05 12:33 |
+| `S6X33…` | Bluesky search 11-04 07:16, nothing else | 11-04 07:16 |
+| `CZKJJ…` | mentalmars and r/Borderlands4 11-02 19:16, Bluesky search 21:16 | 11-02 21:36 |
+| `J9R33…` | Bluesky search 11-01 05:16, mentalmars 10:16 | 11-01 05:02 |
+
+The "Borderlands 4" Bluesky search already picks this account's posts up on the next hourly pass, including the two codes mentalmars missed. So production has it in effect. Adding it under its own name would be worse than pointless: one post would be sighted under two source names, and a second name is what earns a community code its ping, so the account would confirm itself.
+
+Two things the table shows in passing. Reddit sighted one of the six codes, level with mentalmars and never alone, so losing it costs little on this evidence. And the two codes only the search saw posted unpinged and stayed that way, which is the second-source rule doing what it was built to do.
+
+If the Bluesky search ever goes away (it needs an app password), this feed is the fallback, as a replacement for the search and not alongside it. About 7 in 100 of its posts are for older games only, so it would want a "names Borderlands 4" check.
+
+### Ruled out, so nobody checks again
+
+- **shift.orcicorn.com:** doesn't connect; its last archived feed ends in 2023 and it never listed Borderlands 4.
+- **Other trackers and GitHub lists** (`ugoogalizer/autoshift-codes` and friends): copies of mentalmars by their own account, so not a second source. The autoshift JSON would do as a fallback if mentalmars' page ever blocked the Droplet; it would need a JSON reader.
+- **mentalmars' own Bluesky and Mastodon feeds:** the same origin as the table, so they'd let mentalmars confirm itself.
+- **Press lists:** GamesRadar's had all six codes, but its publisher's terms bar robots and scrapers; PC Gamer's, PCGamesN's and Insider Gaming's were months stale; several smaller sites answer with a challenge page even from home.
+- **Gearbox's SHiFT site:** no codes without a login, and 403 to a bot User-Agent. The official Borderlands Bluesky account has posted two codes since March.
+- **Discord:** following the official server's announcements would need the Message Content privileged intent, which has to be justified again at verification. An option, not a plan.
+- **X:** unchanged since the 2026-10-31 look.
+- **Not checked:** whether any of these answer the Droplet, and whether the two codes only the relay had actually redeem.
