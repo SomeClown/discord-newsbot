@@ -31,5 +31,5 @@ truststore==0.10.5
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzdata==2026.5
-tzlocal==5.4.4
+tzlocal==5.4.5
 yarl==1.25.1
