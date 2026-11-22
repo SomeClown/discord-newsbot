@@ -385,7 +385,9 @@ def test_the_friends_games_keep_every_source_name_but_the_fixtures_synthetic_wir
     # "Pocketpair and Gearbox Wire" is an example.com source the fixture invented to exercise
     # the two-topics case; production has no such feed. Anything else missing would reset that
     # source's health history (source_health is keyed by name), so it would be a real finding.
-    assert old - new <= {"Pocketpair and Gearbox Wire"}
+    # "r/Borderlands4" is the other one: Reddit retired its public RSS feeds on 2026-11-17,
+    # so the catalog no longer carries it, and its health history ending is the point.
+    assert old - new <= {"Pocketpair and Gearbox Wire", "r/Borderlands4"}
     assert {"2K Newsroom", "PC Gamer", "Eurogamer"} <= new
     # The new names are additions, never renames of the old ones.
     assert new - old, "expected the catalog to add sources for the friend's games"
@@ -406,20 +408,23 @@ def test_the_sources_the_catalog_adds_for_the_friends_games_are_named(before, af
 # --- 7: Reddit ---
 
 
-def test_r_borderlands4_is_still_codes_only_and_a_shift_source(before, after):
-    for cfg in (before, after):
-        game = next(g for g in cfg.catalog if g.key == "borderlands4")
-        reddit = [s for s in game.sources if s.name == "r/Borderlands4"]
-        assert len(reddit) == 1
-        assert "borderlands4" in cfg.shift.games
-        assert "r/Borderlands4" in cfg.codes_only_source_names()
+def test_r_borderlands4_leaves_with_the_catalog_step_and_bl4_stays_a_shift_game(before, after):
+    # The v2-shaped file on its own still lists the subreddit, codes-only by default, the way
+    # production's did until 2026-11-21.
+    game = next(g for g in before.catalog if g.key == "borderlands4")
+    assert len([s for s in game.sources if s.name == "r/Borderlands4"]) == 1
     assert before.codes_only_source_names() == {"r/Borderlands4"}
-    # The catalog step also brings mentalmars (a shift_table source, always codes-only).
-    assert after.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
+    # The catalog step no longer brings it (Reddit retired its feeds on 2026-11-17), and its
+    # catalog replaces the v2 list. mentalmars, a shift_table source, is always codes-only.
+    game = next(g for g in after.catalog if g.key == "borderlands4")
+    assert [s for s in game.sources if s.name == "r/Borderlands4"] == []
+    assert after.codes_only_source_names() == {"mentalmars"}
+    for cfg in (before, after):
+        assert "borderlands4" in cfg.shift.games
 
 
-def test_no_other_reddit_feed_comes_back(after):
+def test_no_reddit_feed_comes_back(after):
     names = [s.name for g in after.catalog for s in g.sources] + [
         s.name for s in after.shared_sources
     ]
-    assert [n for n in names if n.startswith("r/")] == ["r/Borderlands4"]
+    assert [n for n in names if n.startswith("r/")] == []

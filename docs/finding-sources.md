@@ -80,25 +80,18 @@ account's own RSS) needs `BLUESKY_HANDLE` and `BLUESKY_APP_PASSWORD` in
 HTML body, not even a JSON error, and the source is skipped with a coverage
 note rather than a health failure.
 
-## Subreddits: `/top/.rss?t=day`, not `/new/.rss`
+## Subreddits: not any more
 
-```
-https://www.reddit.com/r/YourSubreddit/top/.rss?t=day
-```
+Reddit switched off its public RSS feeds in November 2026. Every subreddit
+feed (`/top/.rss`, `/new/.rss`, `/.rss`, search feeds, all of them) has
+answered 404 since 2026-11-17, and the `.json` addresses answer 403. Reddit
+said there'd be no replacement outside its own moderator tools, and its Data
+API is closed to new requests. So there's no subreddit recipe here now; this
+section stays so nobody spends an evening rediscovering that.
 
-Use `/top/.rss?t=day`, not `/new/.rss`. `/new` returns only the 25 newest
-posts, and on a subreddit that gets help and bug-report threads all day, a
-once-a-day run would see whatever happened to post in the last hour rather
-than what people actually cared about. `/top` with `t=day` returns the day's
-25 highest-voted posts instead, which is a much better sample for a daily
-digest.
+One gotcha that outlived it:
 
-Two gotchas, both real and both outside this bot's control:
-
-- **Reddit rate-limits aggressively**, even from a residential connection.
-  Firing several subreddit feeds at once can produce a wall of 429s; spacing
-  requests out helps but doesn't eliminate it.
-- **Reddit (and some other sites, IGN among them) return 403 to datacenter
+- **Some sites (IGN among them) return 403 to datacenter
   IPs**, meaning a source that works fine from your laptop can fail once
   the bot is actually running on a cloud provider's box. If it happens,
   it shows up in `/newsbot status` as a source health failure, not a crash;
@@ -139,7 +132,7 @@ actually relevant. Two things worth checking before committing to one:
 - **Is it actually current?** A per-game tag feed on a press site
   (`site.com/tag/your-game/rss`) looks tempting but is often stale or full
   of old guides; check the newest entry's date before adding it.
-- **Does it 403 from where the bot actually runs?** See the Reddit/IGN note
+- **Does it 403 from where the bot actually runs?** See the IGN note
   above; a feed that works from your own connection isn't guaranteed to work
   from a Droplet.
 

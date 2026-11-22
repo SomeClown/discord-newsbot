@@ -4,7 +4,7 @@
 # the owner decisions at the bottom of that file. Copy this to config.yaml, swap the placeholder
 # Discord IDs for real ones, and you have a bot that starts up and actually
 # has something to say. The source list won't stay perfect forever (press
-# feeds die, subreddits get rate-limited, Blizzard will probably ship an
+# feeds die, whole sites switch theirs off, Blizzard will probably ship an
 # actual RSS feed the week after I stop checking for one), but it's a real
 # starting point, not a stub.
 #
@@ -85,17 +85,17 @@ owner_report:
 # servers follow them. Servers' digests are built from what's stored, so
 # nothing is fetched when a digest posts. Shortening the interval buys fresher
 # SHiFT codes and costs more requests to people who didn't ask for them.
-# Reddit is down to one feed (r/Borderlands4, codes only; see its entry), so
-# it's one request a pass. If you add more, the collector spaces Reddit feeds
-# 35 seconds apart and a 429 stops Reddit for the rest of that pass, and for
-# longer if Reddit says so (Retry-After); that's a skip, never a source
-# failure. The SHiFT games' subreddits go every pass, and any others rotate,
-# stalest first, about every reddit_rotation_hours.
+# There are no Reddit feeds here any more: Reddit switched off its public RSS
+# feeds in November 2026 (every subreddit feed has answered 404 since
+# 2026-11-17), and it had already turned down this bot's API request. The
+# collector still knows how to space Reddit requests out and take turns, and
+# reddit_rotation_hours is still read, but with no Reddit source it has
+# nothing to do. It stays so older configs keep loading.
 collection:
   interval_minutes: 60      # 15 to 1440
   lookback_hours: 24
   max_items_per_game: 60
-  reddit_rotation_hours: 3  # 1 to 24; 1 fetches every subreddit every pass
+  reddit_rotation_hours: 3  # 1 to 24; unused while there are no Reddit sources
 
 # What the summarizer prompt calls the things in the catalog ("the video
 # games Borderlands 4, Palworld and Diablo IV"). Any change here still needs
@@ -148,7 +148,7 @@ shift:
   # still show in /shift codes, but never with a ping.
   max_pings_per_day: 3
   # Which sources can make a code ping on its first post. A community-only
-  # code (a Reddit thread, a Bluesky search) posts unpinged. If a second,
+  # code (a fan site's table, a Bluesky search) posts unpinged. If a second,
   # independent source (a different source name; case doesn't matter) or an
   # official or press one sees it within 24 hours, each server that has
   # pinging on gets one follow-up ("> confirmed by a second source") with
@@ -283,21 +283,12 @@ catalog:
       # quiet: Palworld's account hasn't posted since June, and that's fine,
       # it'll just show "0 items" on the source health report.
       - {type: rss, name: "Borderlands Bluesky", url: "https://bsky.app/profile/did:plc:sxmjis6jypsib2k7rk6pjoau/rss", trust: official}
-      # The only Reddit feed, and it's here only to spot SHiFT codes. Reddit
-      # denied this bot's Data API access (2026-10-04, Responsible Builder
-      # Policy) and forbids sharing its content, so `codes_only: true` means
-      # the feed is read for codes and never stored: its posts can't reach a
-      # digest, a summary, /news or the AI. (Any Reddit feed is codes-only
-      # whether it says so or not, and one for a game that isn't in
-      # shift.games is skipped with a warning.) A code alert may still link
-      # back to the post it came from.
-      #
-      # /top/.rss?t=day, not /new/.rss: /new only returns the 25 newest posts,
-      # and an hourly look at a busy subreddit would see whatever happened to
-      # post in the last hour. Reddit rate-limits hard, so the collector
-      # spaces its requests out, and it might block the production box's IP
-      # outright; the source health report will show it, not a crash.
-      - {type: rss, name: "r/Borderlands4", url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", trust: community, codes_only: true}
+      # r/Borderlands4 used to sit here, read only to spot SHiFT codes. Reddit
+      # retired its public RSS feeds in November 2026: the feed's last good
+      # fetch from production was 2026-11-17 at 17:24 UTC, and it has answered
+      # 404 ever since, as has every other subreddit's. There's no replacement
+      # (the API request was denied on 2026-10-04), so it's gone, and codes now
+      # come from the table below, the Bluesky search and the official feeds.
       # A community page of Borderlands 4 SHiFT code tables (mentalmars). It's
       # read once an hour (asking "has it changed?" when the site lets it),
       # only for the codes and what they give (reward, kind, expiry), and
@@ -379,8 +370,8 @@ catalog:
     # Every Epic and Fortnite site (fortnite.com/news, epicgames.com,
     # fortniteinsider.com, fortnite.gg) answers with a Cloudflare challenge,
     # even from a home connection; there's no domain-verified Bluesky account,
-    # it isn't on Steam, and its subreddit is no longer a source (see
-    # r/Borderlands4 above). Epic's status page is in the shared sources below,
+    # it isn't on Steam, and Reddit has no feeds any more (see Borderlands 4
+    # above). Epic's status page is in the shared sources below,
     # restricted to Fortnite by keyword. Insider Gaming's tag feed got through
     # from the Droplet on 2026-10-23 (about 4 a week).
     sources:

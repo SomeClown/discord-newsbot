@@ -495,9 +495,29 @@ RSS = (
 )
 
 
-def example_world(monkeypatch):
+# The line the example carried until 2026-11-21. Reddit retired its public RSS feeds on
+# 2026-11-17 and the source left the example, but the collector's Reddit handling is still
+# in the bot, so these tests put the line back to keep it honest until that code goes too.
+OLD_SUBREDDIT_LINE = (
+    '      - {type: rss, name: "r/Borderlands4", '
+    'url: "https://www.reddit.com/r/Borderlands4/top/.rss?t=day", '
+    "trust: community, codes_only: true}\n"
+)
+BLUESKY_LINE_START = '      - {type: rss, name: "Borderlands Bluesky", '
+
+
+def example_world(monkeypatch, tmp_path=None):
+    """The example's config and its Reddit collectors; `tmp_path` puts the old subreddit back."""
     monkeypatch.setenv("BRAVE_API_KEY", "k")
-    cfg = load_config(EXAMPLE)
+    path = EXAMPLE
+    if tmp_path is not None:
+        lines = EXAMPLE.read_text().splitlines(keepends=True)
+        at = [i for i, line in enumerate(lines) if line.startswith(BLUESKY_LINE_START)]
+        assert len(at) == 1, "the Borderlands Bluesky line moved; this helper anchors on it"
+        lines.insert(at[0] + 1, OLD_SUBREDDIT_LINE)
+        path = tmp_path / "config.with-subreddit.yaml"
+        path.write_text("".join(lines))
+    cfg = load_config(path)
     reddit = [
         c
         for c in build_collection_collectors(
@@ -515,9 +535,19 @@ def example_world(monkeypatch):
     return cfg, reddit
 
 
-async def test_the_example_catalog_is_one_reddit_request_a_pass(monkeypatch, db_path, alerts):
+def test_the_example_catalog_has_no_reddit_collector(monkeypatch):
+    # Reddit retired its public RSS feeds (404 on every subreddit since 2026-11-17), so the
+    # example reads none, and mentalmars' tables are its only codes-only source.
     cfg, reddit = example_world(monkeypatch)
-    # v3.0.3: Reddit is r/Borderlands4 and nothing else, read only for SHiFT codes.
+    assert reddit == []
+    assert cfg.codes_only_source_names() == {"mentalmars"}
+
+
+async def test_a_config_with_one_subreddit_is_one_reddit_request_a_pass(
+    monkeypatch, db_path, alerts, tmp_path
+):
+    cfg, reddit = example_world(monkeypatch, tmp_path)
+    # The example as it stood from v3.0.3 to 2026-11-21: r/Borderlands4 and nothing else.
     assert [c.name for c in reddit] == ["r/Borderlands4"]
     # And mentalmars' SHiFT tables, which are codes-only too (not Reddit, so not in `reddit`).
     assert cfg.codes_only_source_names() == {"r/Borderlands4", "mentalmars"}
@@ -540,8 +570,10 @@ async def test_the_example_catalog_is_one_reddit_request_a_pass(monkeypatch, db_
     assert counts == [1, 1, 1]
 
 
-async def test_the_one_codes_only_subreddit_is_priority_with_no_comped_server(monkeypatch, db_path):
-    cfg, reddit = example_world(monkeypatch)
+async def test_the_one_codes_only_subreddit_is_priority_with_no_comped_server(
+    monkeypatch, db_path, tmp_path
+):
+    cfg, reddit = example_world(monkeypatch, tmp_path)
     # Borderlands 4 is a SHiFT game, so its subreddit is hourly whoever follows what.
     assert "borderlands4" in cfg.shift.games
     plan = plan_reddit(reddit, cfg, priority_games(cfg, db_path), {})

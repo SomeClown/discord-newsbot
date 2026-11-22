@@ -15,6 +15,10 @@ old tag.
 
 ## [Unreleased]
 
+### Removed
+
+- `r/Borderlands4` from the example config. Reddit switched off its public RSS feeds in November 2026: every subreddit feed has answered 404 since 2026-11-17, and there's no replacement for a bot like this one. If your `config.yaml` has a reddit.com source, take it out; until you do it's listed as a failing source in `/newsbot status` and the owner's report. SHiFT codes still come from the community code list, the Bluesky search and the official feeds, so a code that appears on Reddit first may now arrive later. The Reddit handling in the code (turn-taking, backoff, codes-only reading) is unchanged and idle.
+
 ### Added
 
 - Grand Theft Auto VI in the example catalog, after Escape from Tarkov (22 games, plus the industry entry). It's console only at launch, so there's no Steam news, and Rockstar's Newswire has no feed. Its own sources are the PlayStation Blog's and Xbox Wire's posts about it (marked official: the console makers' word, not Rockstar's) and four press tag feeds (Insider Gaming, Kotaku, Push Square, Pure Xbox). Three wide feeds join the shared sources for this game alone (GameSpot, IGN through Feedburner, RockstarINTEL), and the existing shared press feeds and web search cover it by name. "GTA 6" and "GTA VI" match it; bare "GTA" doesn't, so Grand Theft Auto V and GTA Online stories stay out. A bot that's already running gets it by adding the entry to its own `config.yaml` and restarting.

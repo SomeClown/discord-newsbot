@@ -100,7 +100,7 @@ servers are comped, with `comped_guild_ids` in your config.
 Two documents cover this:
 
 - **[`docs/finding-sources.md`](docs/finding-sources.md)**: recipes for
-  finding Steam, Bluesky, subreddit, and press sources for your own
+  finding Steam, Bluesky and press sources for your own
   game, plus the aliasing lessons (some words match more than you'd think)
   that came out of doing this for the games above.
 - **[`docs/self-host.md`](docs/self-host.md)**: the actual setup guide:
@@ -325,8 +325,8 @@ take back:
 - **Who can trigger a ping.** Every new code still posts, but only a code
   seen from a source whose trust is in `shift.ping_trust` (default:
   `official`, `press`) makes its batch carry the server's ping. A
-  community-only code (a Reddit thread guessing at one, say) posts quietly.
-  (Reddit is only read to spot codes; see "Reddit is codes only" below.)
+  community-only code (a fan site's list, or someone on Bluesky guessing at
+  one) posts quietly.
 - **A second source can earn the ping.** If a community-only code is then seen
   by a second, independent source (a different source name, compared without
   regard to case) or an official or press one within 24 hours of its first
@@ -651,8 +651,7 @@ comped server following three games:
 - **Collection and SHiFT**: no Claude or Brave cost at all. The hourly pass
   makes one `GET` per RSS/Steam/Bluesky source, whichever servers follow them
   (these are requests to each source's own site, not to Discord's API) and, on
-  Bluesky, a login per pass. Reddit feeds are spaced 35 seconds apart, which
-  matters only if you configure several (the example has one).
+  Bluesky, a login per pass.
 
 ## Limitations and known issues
 
@@ -665,19 +664,15 @@ comped server following three games:
   comped server. The pick is the model's judgment, so it can include a story
   you'd have skipped; the prompt was checked against a real day's news before
   release, not against every day's.
-- **Reddit is codes only.** Reddit denied this bot's Data API access request
-  (2026-10-04) and its Responsible Builder Policy bars sharing Reddit content,
-  so the one subreddit in the example, r/Borderlands4, is read only to spot
-  SHiFT codes (`codes_only: true`). Its posts are never stored, so they can't
-  show up in a digest, a summary, `/news`, or the AI's input. Any source on
-  reddit.com is treated that way, and one for a game that isn't in
-  `shift.games` is skipped with a warning. A code alert can still link to the
-  post it came from.
-- **Reddit may block datacenter IPs.** The subreddit source was verified
-  from a residential connection; Reddit rate-limits aggressively even there,
-  and may reject requests outright from a hosting provider's IP range in
-  production. If it happens, it shows up in `/newsbot status` ("N of M sources
-  ok") and in the owner's alerts as a source health failure, not a crash.
+- **Reddit isn't a source any more.** Reddit switched off its public RSS
+  feeds in November 2026: every subreddit feed has answered 404 since
+  2026-11-17, and there's no replacement for a bot like this one (Reddit
+  denied its Data API request on 2026-10-04). The example used to read
+  r/Borderlands4 to spot SHiFT codes, and that source is gone from it. If
+  your own `config.yaml` still lists a reddit.com feed, it shows up as a
+  failing source in `/newsbot status` and the owner's report until you take
+  it out. The code that handled Reddit (taking turns, backing off, reading
+  for codes only) is still in the bot and does nothing without one.
 - **YouTube channel feeds are out, for now.** They're plain RSS reads
   (`youtube.com/feeds/videos.xml?channel_id=...`) with no official
   guarantee of stability, and in late September 2026 every one of them
@@ -706,10 +701,9 @@ comped server following three games:
   the example catalog a message holds about 4 codes where it used to hold
   about 18; a big drop just posts as more messages, and only the first one
   pings.
-- **SHiFT code alerts can miss or delay a code.** Reddit's `/top?t=day`
-  sort can take a while to surface a brand new post, so a code posted to a
-  subreddit first might not alert until it's climbed the day's top posts
-  (or shown up on an official feed instead). A code embedded only in an
+- **SHiFT code alerts can miss or delay a code.** With Reddit gone, a code
+  that turns up there first isn't seen until the community code list, a
+  Bluesky post or an official feed carries it. A code embedded only in an
   image (a screenshot, a stream overlay) is invisible to this; the
   matcher only reads text. Gearbox mostly posts codes on X, which isn't a
   source. A code split across an en dash or similar look-alike dash
