@@ -251,7 +251,15 @@ _MARK_RETRY_DELAYS_S = (0.2, 0.5, 1.0)
 
 
 class MarkLostError(Exception):
-    """A message went out but the database stayed busy through every retry of recording it."""
+    """A message went out but the database stayed busy through every retry of recording it.
+
+    `partial` is what had landed *and been recorded* before the lost mark, as far as
+    whoever raised it could tell, so the turn's outcome doesn't forget it. The message
+    whose mark was lost isn't in it (its codes stay `pending`). Each layer fills in what
+    it knows and the layer above merges; `None` means nothing was recorded or nobody knew.
+    """
+
+    partial: GuildOutcome | None = None
 
 
 async def _record(deps: FanoutDeps, write: Callable[..., None], *args: object) -> None:
@@ -301,9 +309,11 @@ async def _post_batch(
     "may or may not have posted", which is true of the one that did and a gentle fib
     about the rest.
     """
-    posted = 0
+    # Counted after each mark is written, so what's returned is what the database holds. The
+    # list of failed codes is only here for the admin notice's text.
     failed_codes: list[str] = []
     failed_from_here = False
+    recorded_posted = recorded_failed = 0
     for alert in rendered:
         message_id: int | None = None
         stripped = False
@@ -326,20 +336,37 @@ async def _post_batch(
                 )
         if failed_from_here:
             failed_codes.extend(alert.codes)
-            await _record(deps, _mark_failed_sync, deps.db_path, guild_id, list(alert.codes))
+            try:
+                await _record(deps, _mark_failed_sync, deps.db_path, guild_id, list(alert.codes))
+            except MarkLostError as lost:
+                lost.partial = GuildOutcome(
+                    guild_id, posted=recorded_posted, failed=recorded_failed
+                )
+                raise
+            recorded_failed += len(alert.codes)
             continue
-        posted += len(alert.codes)
         message = record(alert, stripped) if record is not None else None
-        await _record(
-            deps, _mark_posted_sync, deps.db_path, guild_id, list(alert.codes), message_id, message
-        )
+        try:
+            await _record(
+                deps,
+                _mark_posted_sync,
+                deps.db_path,
+                guild_id,
+                list(alert.codes),
+                message_id,
+                message,
+            )
+        except MarkLostError as lost:
+            lost.partial = GuildOutcome(guild_id, posted=recorded_posted, failed=recorded_failed)
+            raise
+        recorded_posted += len(alert.codes)
     if failed_codes:
         await _safe_notify(
             notify,
             "newsbot: a SHiFT code alert couldn't be posted in your SHiFT channel; "
             "codes never posted: " + ", ".join(failed_codes),
         )
-    return posted, len(failed_codes)
+    return recorded_posted, recorded_failed
 
 
 def _mark_failed_sync(db_path: str, guild_id: int, codes: list[str]) -> None:
@@ -619,9 +646,22 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                     now=read_at,
                     reserve=reserve,
                 )
-            posted, failed = await _post_batch(
-                deps, guild_id, poster, rendered, notify, reasons, record
-            )
+            try:
+                posted, failed = await _post_batch(
+                    deps, guild_id, poster, rendered, notify, reasons, record
+                )
+            except MarkLostError as lost:
+                batch = lost.partial or GuildOutcome(guild_id)
+                lost.partial = GuildOutcome(
+                    guild_id,
+                    posted=batch.posted,
+                    failed=batch.failed,
+                    skipped=turn.expired,
+                    pinged=final_ping and batch.posted > 0,
+                    cap_reached=cap_reached,
+                    reasons=tuple(sorted(reasons)),
+                )
+                raise
             if cap_reached and deps.cfg.shift.max_pings_per_day > 0:
                 await _safe_notify(
                     notify,
@@ -656,9 +696,23 @@ async def _deliver_one(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
                     details=details,
                     now=read_at,
                 )
-            roundup_posted, roundup_failed = await _post_batch(
-                deps, guild_id, poster, rendered_roundup, notify, reasons
-            )
+            try:
+                roundup_posted, roundup_failed = await _post_batch(
+                    deps, guild_id, poster, rendered_roundup, notify, reasons
+                )
+            except MarkLostError as lost:
+                batch = lost.partial or GuildOutcome(guild_id)
+                lost.partial = GuildOutcome(
+                    guild_id,
+                    posted=posted,
+                    roundup_posted=batch.posted,
+                    failed=failed + batch.failed,
+                    skipped=turn.expired,
+                    pinged=final_ping,
+                    cap_reached=cap_reached,
+                    reasons=tuple(sorted(reasons)),
+                )
+                raise
             failed += roundup_failed
 
     if getattr(poster, "missing_ping_permission", False):
@@ -802,44 +856,85 @@ async def _deliver_followups(deps: FanoutDeps, guild_id: int) -> GuildOutcome:
     begin_batch = getattr(poster, "begin_batch", None)
     if begin_batch is not None:
         begin_batch()
-    posted = await _post_followups(deps, guild_id, poster, rendered)
-    return GuildOutcome(guild_id, followups_posted=posted)
+    posted, pinged, reasons = await _post_followups(deps, guild_id, poster, rendered)
+    return GuildOutcome(guild_id, followups_posted=posted, pinged=pinged, reasons=reasons)
 
 
 async def _post_followups(
     deps: FanoutDeps, guild_id: int, poster: CodeAlertPoster, rendered: list[RenderedAlert]
-) -> int:
-    """Post a claimed follow-up's messages in order; return how many codes landed.
+) -> tuple[int, bool, tuple[str, ...]]:
+    """Post a claimed follow-up's messages in order; return (codes landed, pinged, reasons).
+
+    A message pinged when it carried a ping that wasn't stripped on the way and it landed
+    and was recorded; only the first message of a burst carries one.
 
     The same rules as `_post_batch`, minus the notices. Each message's codes are marked
     `posted` with its own id the moment it lands. Once one fails for good, its codes and
     every later message's are marked `failed` without being sent: "(continued)" is
     literal. A mark that can't be written raises `MarkLostError`, which ends the batch on
-    the spot; the rows left unmarked stay `pending`, which is never sent again (nothing
-    double-sends) and which recovery fails once it's stale.
+    the spot (carrying what was recorded before it); the rows left unmarked stay `pending`,
+    which is never sent again (nothing double-sends) and which recovery fails once it's stale.
     """
     posted = 0
+    pinged = False
+    reasons: list[str] = []
     failed_from_here = False
     for alert in rendered:
         message_id: int | None = None
+        stripped = False
+
+        def _on_stripped() -> None:
+            nonlocal stripped
+            stripped = True
+
         if not failed_from_here:
-            message_id, error = await post_alert_with_retry(poster, deps.sleep, alert)
+            message_id, error = await post_alert_with_retry(
+                poster, deps.sleep, alert, on_ping_stripped=_on_stripped
+            )
             if error is not None:
                 failed_from_here = True
                 logger.error(
                     "guild SHiFT follow-up post failed",
                     extra={"guild_id": guild_id, "codes": alert.codes, "error": str(error)},
                 )
-        if failed_from_here:
+        try:
+            if failed_from_here:
+                await _record(
+                    deps,
+                    _followup_mark_sync,
+                    deps.db_path,
+                    guild_id,
+                    list(alert.codes),
+                    None,
+                    False,
+                )
+                continue
             await _record(
-                deps, _followup_mark_sync, deps.db_path, guild_id, list(alert.codes), None, False
+                deps,
+                _followup_mark_sync,
+                deps.db_path,
+                guild_id,
+                list(alert.codes),
+                message_id,
+                True,
             )
-            continue
-        await _record(
-            deps, _followup_mark_sync, deps.db_path, guild_id, list(alert.codes), message_id, True
-        )
+        except MarkLostError as lost:
+            lost.partial = GuildOutcome(guild_id, followups_posted=posted, pinged=pinged)
+            raise
         posted += len(alert.codes)
-    return posted
+        # The poster raises its flag when the bot's role can't deliver a ping (the message
+        # still posts, and Discord drops the notification). It's per turn (`begin_batch`)
+        # and only a message that asks for a ping can set it, which in a burst is the first.
+        no_permission = getattr(poster, "missing_ping_permission", False)
+        pinged = pinged or (
+            alert.ping and not stripped and bool(alert.ping_prefix) and not no_permission
+        )
+        # The same reason strings as the alert path, for a message that did land.
+        if alert.ping and stripped and "ping_stripped_after_ambiguous_failure" not in reasons:
+            reasons.append("ping_stripped_after_ambiguous_failure")
+        if alert.ping and no_permission and "no_permission" not in reasons:
+            reasons.append("no_permission")
+    return posted, pinged, tuple(sorted(reasons))
 
 
 def _followup_mark_sync(
@@ -924,12 +1019,23 @@ async def deliver_queued_codes(
                     extra={"servers_left": len(guild_ids) - i},
                 )
                 break
+            turn_so_far: GuildOutcome | None = None
             try:
                 outcome = await _deliver_one(deps, guild_id)
+                turn_so_far = outcome
                 if not deps.preview:
                     followup = await _deliver_followups(deps, guild_id)
-                    outcome = replace(outcome, followups_posted=followup.followups_posted)
-            except MarkLostError:
+                    outcome = replace(
+                        outcome,
+                        followups_posted=followup.followups_posted,
+                        pinged=outcome.pinged or followup.pinged,
+                        # Alert reasons first, then any follow-up reason not already there.
+                        reasons=(
+                            *outcome.reasons,
+                            *(r for r in followup.reasons if r not in outcome.reasons),
+                        ),
+                    )
+            except MarkLostError as lost:
                 # The message went out and the database never let us say so. What was
                 # claimed stays `pending` (never re-sent); recovery fails it once it's stale.
                 logger.error(
@@ -937,7 +1043,17 @@ async def deliver_queued_codes(
                     "(not re-sent) and the rest of this server's batch is not sent",
                     extra={"guild_id": guild_id},
                 )
-                outcomes.append(GuildOutcome(guild_id, error="database busy while recording"))
+                # Keep the counts for what did land and get recorded first: the alerts if
+                # `_deliver_one` finished (and the error came from the follow-ups), else
+                # whatever the failing batch could say.
+                partial = lost.partial or GuildOutcome(guild_id)
+                if turn_so_far is not None:
+                    partial = replace(
+                        turn_so_far,
+                        followups_posted=partial.followups_posted,
+                        pinged=turn_so_far.pinged or partial.pinged,
+                    )
+                outcomes.append(replace(partial, error="database busy while recording"))
                 continue
             except sqlite3.OperationalError:
                 # A busy database is the next pass's problem, not this server's.

@@ -175,7 +175,8 @@ def bulk_world(db_path, per_guild: dict[int, int], *, reward: str = "3 Golden Ke
                     "VALUES (?, ?, 'posted', ?, 0, 0, 0, 1, ?)",
                     (guild_id, code, message_id, posted),
                 )
-                # The stored header is v3.1's, so edits of these go through the classic layout.
+                # The stored header is v3.1's. Since v3.5.0 that changes nothing: every edit uses
+                # today's layout, and the header goes back out as stored.
                 conn.execute(
                     "INSERT INTO guild_alert_messages (guild_id, message_id, channel_id, header, "
                     "golden_prefix, posted_at, rendered_at) VALUES (?, ?, ?, ?, 0, ?, ?)",

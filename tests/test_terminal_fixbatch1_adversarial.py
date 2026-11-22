@@ -8,8 +8,9 @@ The batch changed three things in `format.py`, and each one gets leaned on here.
    matrix below crosses backticks (1 to 4), `||`, `~~`, `*` and `_` with every URL-shaped
    spelling I could think of (`https://`, `<x:/...>`, `steam://`, a bare `x:/`, a URL inside
    parentheses, two URLs in one string), puts the result into every scraped field one at a
-   time, and renders every message kind: alerts, terminal and classic edits, roundups,
-   follow-ups, `/shift codes`, `/shift history`, and the daily digest's two embeds.
+   time, and renders every message kind: alerts, terminal edits, edits under a stored v3.1
+   header, roundups, follow-ups, `/shift codes`, `/shift history`, and the daily digest's two
+   embeds.
    The checks are made by a small parser of my own (the same idea as `chip_check`, with more
    teeth): chips are a subset of the allowed ones, every fence holds exactly a code, no
    timestamp or link sits in a chip, and once the bot's own chips, fences, ping, live links and
@@ -123,8 +124,8 @@ def _markup_problems(text: str, *, n_codes: int | None, allow_chips: bool = True
     """Everything wrong with `text` as a Discord message; an empty list is a clean bill.
 
     `n_codes` is how many fences it should hold (each one exactly a code), or None for text
-    that has no fences at all (a digest). `allow_chips=False` is for the classic layout and
-    the digest, which have no chips: any backtick outside a fence is then a finding.
+    that has no fences at all (a digest). `allow_chips=False` is for the digest, which has no
+    chips: any backtick outside a fence is then a finding.
     """
     problems: list[str] = []
     found_chips = chips(text)
@@ -191,7 +192,7 @@ class Surface:
     where: str
     text: str
     n_codes: int | None
-    layout: str  # "look", "classic" or "page"
+    layout: str  # "look", "oldhead" (a stored v3.1 header, edited in today's look) or "page"
     block_lines: tuple[int, ...] = (4, 5)  # fence, details (maybe), src
 
 
@@ -251,10 +252,10 @@ def _surfaces(f: dict) -> list[Surface]:
                     now=NOW,
                 )
                 out.append(Surface(f"terminal edit {n}", edit, len(members), "look"))
-            classic = render_alert_edit(
+            old_header = render_alert_edit(
                 CLASSIC_HEADER, members, golden_prefix=True, details=details, now=NOW
             )
-            out.append(Surface(f"classic edit {n}", classic, len(members), "classic"))
+            out.append(Surface(f"v3.1-header edit {n}", old_header, len(members), "oldhead"))
 
     roundup_batch = [replace_src(c, src) for c in batch]
     for n, a in enumerate(render_roundup_alerts(roundup_batch, details=details, now=NOW)):
@@ -316,10 +317,12 @@ def _placements(text: str):
 
 
 def _check(surface: Surface) -> list[str]:
-    if surface.layout == "classic":
-        # The stored v3.1 header is bold on purpose and the edit keeps it as it went out.
+    if surface.layout == "oldhead":
+        # The stored v3.1 header is bold on purpose and the edit keeps it as it went out;
+        # everything after it is today's look and gets today's checks.
         body = surface.text.removeprefix(CLASSIC_HEADER)
-        return _markup_problems(body, n_codes=surface.n_codes, allow_chips=False)
+        problems = _markup_problems(body, n_codes=surface.n_codes)
+        return problems + _every_line_opens_with_a_chip(body)
     problems = _markup_problems(surface.text, n_codes=surface.n_codes)
     problems += _every_line_opens_with_a_chip(surface.text)
     return problems
@@ -558,7 +561,7 @@ def test_whitespace_in_a_reward_or_origin_renders_on_one_line_in_every_message_k
         for surface in _surfaces(args):
             problems = _check(surface)
             assert not problems, (field, surface.where, reward, problems, surface.text)
-            if surface.layout in ("look", "classic"):
+            if surface.layout in ("look", "oldhead"):
                 # An alert is a header, then one blank-line-separated block per code, each of
                 # them fence (3), details (0 or 1) and src (1; roundups and follow-ups have none).
                 blocks = surface.text.split("\n\n")
@@ -822,9 +825,9 @@ def test_pack_then_the_worst_edit_still_fits_with_every_link_under_the_new_escap
         assert not _markup_problems(edited, n_codes=len(members))
 
 
-def test_the_reserve_still_leaves_room_for_the_worst_edit_of_a_classic_header_too():
-    # A pre-3.2.0 message is edited in the classic layout; the new escaping must not push it
-    # over what the terminal-layout reserve set aside, because that is the bigger of the two.
+def test_the_reserve_still_leaves_room_for_the_worst_edit_of_a_v31_header_too():
+    # A header from before v3.2.0, if one turned up, is edited in today's layout like any
+    # other, so the reserve set aside for the terminal look has to cover it.
     names = [_linky("https://x.y/`", "a"), _linky("https://x.y/`", "b")]
     reserve = details_reserve(names)
     batch = [_cand(i, source_name=names[0], item_url=URL + "/" + "p" * 100) for i in range(20)]
@@ -1117,10 +1120,10 @@ def test_pack_then_the_worst_edit_still_fits_with_every_link_and_link_shaped_tex
         assert discord_len(edited) <= 2000
         assert edited.count(f" · <{URL}/") == len(members), "a link was shed"
         assert not _markup_problems(edited, n_codes=len(members))
-        classic = render_alert_edit(
+        old_header = render_alert_edit(
             CLASSIC_HEADER, members, golden_prefix=False, details=worst, now=NOW
         )
-        assert discord_len(classic) <= 2000
+        assert discord_len(old_header) <= 2000
 
 
 @pytest.mark.parametrize("limit", [300, 100, 50, 10, 4, 1])

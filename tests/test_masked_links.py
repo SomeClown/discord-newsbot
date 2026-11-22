@@ -692,12 +692,6 @@ def test_terminal_alert_is_unchanged():
     ]
 
 
-def test_classic_alert_block_is_unchanged():
-    assert fmt._classic_alert_block(_candidate(), golden_prefix=True) == (
-        "```\nAAAA1-AAAAA-AAAAA-AAAAA-AAAAA\n```\nGearbox · <https://example.com/post?id=1>"
-    )
-
-
 def test_followup_is_unchanged():
     out = render_followup_alerts([CODE_A, CODE_B], ping_mention="@everyone")
     assert [m.content for m in out] == [

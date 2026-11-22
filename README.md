@@ -21,9 +21,18 @@ each server sets itself up with slash commands, and the sources are fetched
 once an hour for everybody. If you'd rather run a copy of your own, that
 still works and is [documented](#run-your-own-copy) below.
 
-**Status.** The bot is public, and production runs v3.4.3 (since 2026-10-29).
+**Status.** The bot is public, and production runs v3.5.0 (since 2026-11-22).
 
 ## What's new
+
+**v3.5.0 (2026-11-22), housekeeping with a receipt.** The owner's daily report
+now says what Claude cost: the last 24 hours and the month so far. A feed or
+the model can no longer fake one of the bot's labels at the front of a headline
+by dressing it up in bold letters or look-alike characters, and a summary that
+starts with a number stops turning into a numbered list. Grand Theft Auto VI
+joins the example catalog. Two things leave: Reddit as a source, because Reddit
+switched off its public feeds in November, and the v3.1 alert layout, which was
+only kept for the two weeks an old alert could still be edited.
 
 **v3.4.3 (2026-10-29), no more content-farm links.** Web search for a small game
 could return junk pages: a language model's rewrite of a Reddit thread on a

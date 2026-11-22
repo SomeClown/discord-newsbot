@@ -15,20 +15,35 @@ old tag.
 
 ## [Unreleased]
 
-### Removed
+## [3.5.0] - 2026-11-22
 
-- `r/Borderlands4` from the example config. Reddit switched off its public RSS feeds in November 2026: every subreddit feed has answered 404 since 2026-11-17, and there's no replacement for a bot like this one. If your `config.yaml` has a reddit.com source, take it out; until you do it's listed as a failing source in `/newsbot status` and the owner's report. SHiFT codes still come from the community code list, the Bluesky search and the official feeds, so a code that appears on Reddit first may now arrive later. The Reddit handling in the code (turn-taking, backoff, codes-only reading) is unchanged and idle.
+The owner's daily report says what Claude cost, labels can't be faked at the front of a headline, Grand Theft Auto VI joins the example catalog, and two things leave: Reddit, which switched its feeds off, and the v3.1 alert layout, which had outlived its two weeks.
 
 ### Added
 
 - The owner's daily report has a second line with the Claude spend: the last 24 hours and the month so far, as an estimate (`Claude spend: about $0.04 in the last 24 hours, $0.62 so far in October (estimate)`). The month is the one in `owner_report.timezone`. It's always there; a copy with no comped servers shows `$0.00` twice. `/owner servers` counts the same month (and labels it that way), so the two agree around a month's end.
 - Grand Theft Auto VI in the example catalog, after Escape from Tarkov (22 games, plus the industry entry). It's console only at launch, so there's no Steam news, and Rockstar's Newswire has no feed. Its own sources are the PlayStation Blog's and Xbox Wire's posts about it (marked official: the console makers' word, not Rockstar's) and four press tag feeds (Insider Gaming, Kotaku, Push Square, Pure Xbox). Three wide feeds join the shared sources for this game alone (GameSpot, IGN through Feedburner, RockstarINTEL), and the existing shared press feeds and web search cover it by name. "GTA 6" and "GTA VI" match it; bare "GTA" doesn't, so Grand Theft Auto V and GTA Online stories stay out. A bot that's already running gets it by adding the entry to its own `config.yaml` and restarting.
 
+### Changed
+
+- The Claude SDK moves from 2.1.0 to 2.10.0. It still speaks API version `2026-10-21`, and the bot's requests are the same as before. Also updated: pydantic 2.14.3, httpx2 and httpcore2 2.16.0, certifi 2026.10.23, and a few smaller ones.
+
 ### Fixed
 
 - A summary that starts with a number ("2026. The year...") no longer shows as a numbered list in digests, on `/news` pages (comped servers) or in the lounge's daily quote.
 - Labels in disguise are stripped from AI text and from the headlines in a free server's lists. A leading copy of the bot's own labels is removed in any capitalization, in full-width or bold letters, behind look-alike emoji (other colored circles and squares, check marks, repeat arrows) and with any of `·`, `:`, `-`, `|`, `–` or `—` after it; the bot's exact markers ("🟢 OFFICIAL ·" and the rest) are removed anywhere in the line. A real title can lose a leading label word: "Update: Hotfix 1.0.3" shows as "Hotfix 1.0.3". A bare word ("Official patch notes") is left alone.
 - A very long feed title (megabytes) no longer slows down rendering a headline list.
+- The log line "SHiFT delivery for a guild" said `pinged: false` for a turn that sent only a "confirmed by a second source" follow-up, even when that follow-up pinged. It now says whether anything sent in the turn carried its ping. A follow-up whose ping was dropped, because the bot can't mention `@everyone` or the role, counts as not pinged, and the line's `unpinged_or_stripped_because` field says why.
+- When a SHiFT message was sent and the database was too busy to record it, the server's outcome for that pass reported the error and forgot everything that had already gone out. It now keeps those counts. What's sent and what's retried are unchanged: the message that couldn't be recorded is still never sent twice.
+
+### Removed
+
+- `r/Borderlands4` from the example config. Reddit switched off its public RSS feeds in November 2026: every subreddit feed has answered 404 since 2026-11-17, and there's no replacement for a bot like this one. If your `config.yaml` has a reddit.com source, take it out; until you do it's listed as a failing source in `/newsbot status` and the owner's report. SHiFT codes still come from the community code list, the Bluesky search and the official feeds, so a code that appears on Reddit first may now arrive later. The Reddit handling in the code (turn-taking, backoff, codes-only reading) is unchanged and idle.
+- The v3.1 alert layout. v3.2.0 kept it so alerts posted before the terminal look could be edited back into their old shape for the 14 days an alert stays editable, and that window closed on 2026-11-06. Every edit now uses the current layout. This only matters if you upgrade straight from 3.1.x or earlier: an alert from the last 14 days gets today's blocks under its old header, and if they don't fit the old message the edit drops its links, or is skipped and logged.
+
+**Upgrading**
+
+- If your `config.yaml` has a reddit.com source, take it out (see Removed). Otherwise nothing to do: no migration, and no config key changed. Rollback is `TAG=3.4.3`; a config with the Grand Theft Auto VI entry loads on 3.4.3 as it is.
 
 ## [3.4.3] - 2026-10-29
 
@@ -694,7 +709,8 @@ The first tagged release.
 - If you run from source, reinstall with `pip install -r requirements.txt`.
   If you run the published image, pin `TAG=1.1.0`.
 
-[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.3...HEAD
+[Unreleased]: https://github.com/SomeClown/discord-newsbot/compare/v3.5.0...HEAD
+[3.5.0]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.3...v3.5.0
 [3.4.3]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.2...v3.4.3
 [3.4.2]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.1...v3.4.2
 [3.4.1]: https://github.com/SomeClown/discord-newsbot/compare/v3.4.0...v3.4.1

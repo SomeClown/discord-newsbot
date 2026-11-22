@@ -19,12 +19,12 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from chip_check import ALLOWED_CHIPS, chips, fence_bodies
+from terminal_look import is_terminal_header
 from test_shift_delivery_details import BLUESKY, REDDIT, numbered, sighting, store_details
 from test_shift_delivery_details_adversarial import MANY, Rig, claim_elsewhere
 from test_shift_fanout import NOW as FANOUT_NOW
 from test_shift_fanout import V3, add_guild, item, rows, seed
 
-from newsbot.bot import terminal
 from newsbot.bot.format import (
     FOLLOWUP_MAX_CODES,
     _roundup_header,
@@ -362,5 +362,5 @@ def test_the_new_chips_are_in_the_allowed_set():
     assert CONTINUATION.strip("`") in ALLOWED_CHIPS
     assert FOLLOWUP_CHIP.strip("`") in ALLOWED_CHIPS
     assert FOLLOWUP_CONTINUATION.strip("`") in ALLOWED_CHIPS
-    assert terminal.is_terminal_header(CONTINUATION)
-    assert terminal.is_terminal_header(f"{ROUNDUP_CHIP} 1 code from Some Site")
+    assert is_terminal_header(CONTINUATION)
+    assert is_terminal_header(f"{ROUNDUP_CHIP} 1 code from Some Site")
